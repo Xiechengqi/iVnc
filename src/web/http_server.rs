@@ -4,11 +4,12 @@
 
 #![allow(dead_code)]
 
+use crate::web::embedded_assets::{get_embedded_file, get_index_html_with_port, has_embedded_assets};
 use crate::web::shared::SharedState;
 use axum::{
     body::Body,
     extract::State,
-    http::{header, StatusCode},
+    http::{header, StatusCode, Uri},
     response::Response,
     routing::get,
     Router,
@@ -38,18 +39,25 @@ pub async fn run_http_server_with_webrtc(
     session_manager: Option<Arc<SessionManager>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", port);
-    let static_root = std::env::var("SELKIES_WEB_ROOT")
-        .unwrap_or_else(|_| "web/selkies".to_string());
-    let cwd = std::env::current_dir().ok();
-    let index_path = PathBuf::from(&static_root).join("index.html");
-    info!(
-        "Serving web UI from {:?} (cwd: {:?})",
-        static_root, cwd
-    );
-    if !index_path.exists() {
-        info!("Web UI index not found at {:?}", index_path);
+
+    // Check for embedded assets first, then fall back to filesystem
+    let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
+
+    if use_embedded {
+        info!("Serving web UI from embedded assets");
+    } else {
+        let static_root = std::env::var("SELKIES_WEB_ROOT")
+            .unwrap_or_else(|_| "web/selkies".to_string());
+        let cwd = std::env::current_dir().ok();
+        let index_path = PathBuf::from(&static_root).join("index.html");
+        info!(
+            "Serving web UI from {:?} (cwd: {:?})",
+            static_root, cwd
+        );
+        if !index_path.exists() {
+            info!("Web UI index not found at {:?}", index_path);
+        }
     }
-    let static_service = ServeDir::new(&static_root).fallback(ServeFile::new(index_path));
 
     // Build router with WebRTC signaling endpoint if available
     let mut app = Router::new()
@@ -78,9 +86,18 @@ pub async fn run_http_server_with_webrtc(
         }));
     }
 
-    let app: Router<()> = app
-        .fallback_service(static_service)
-        .with_state(state);
+    // Set up fallback for static files
+    let app: Router<()> = if use_embedded {
+        app.fallback(embedded_fallback_handler)
+            .with_state(state)
+    } else {
+        let static_root = std::env::var("SELKIES_WEB_ROOT")
+            .unwrap_or_else(|_| "web/selkies".to_string());
+        let index_path = PathBuf::from(&static_root).join("index.html");
+        let static_service = ServeDir::new(&static_root).fallback(ServeFile::new(index_path));
+        app.fallback_service(static_service)
+            .with_state(state)
+    };
 
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on http://{}", addr);
@@ -107,29 +124,47 @@ pub async fn run_http_server_with_webrtc(
 /// Internal implementation of HTTP server
 async fn run_http_server_impl(port: u16, state: Arc<SharedState>) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", port);
-    let static_root = std::env::var("SELKIES_WEB_ROOT")
-        .unwrap_or_else(|_| "web/selkies".to_string());
-    let cwd = std::env::current_dir().ok();
-    let index_path = PathBuf::from(&static_root).join("index.html");
-    info!(
-        "Serving web UI from {:?} (cwd: {:?})",
-        static_root, cwd
-    );
-    if !index_path.exists() {
-        info!("Web UI index not found at {:?}", index_path);
-    }
-    let static_service = ServeDir::new(&static_root).fallback(ServeFile::new(index_path));
 
-    let app: Router<()> = Router::new()
+    // Check for embedded assets first, then fall back to filesystem
+    let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
+
+    if use_embedded {
+        info!("Serving web UI from embedded assets");
+    } else {
+        let static_root = std::env::var("SELKIES_WEB_ROOT")
+            .unwrap_or_else(|_| "web/selkies".to_string());
+        let cwd = std::env::current_dir().ok();
+        let index_path = PathBuf::from(&static_root).join("index.html");
+        info!(
+            "Serving web UI from {:?} (cwd: {:?})",
+            static_root, cwd
+        );
+        if !index_path.exists() {
+            info!("Web UI index not found at {:?}", index_path);
+        }
+    }
+
+    let app = Router::new()
         .route("/", get(index_handler))
         .route("/index.html", get(index_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
         .route("/ui-config", get(ui_config_handler))
-        .route("/ws-config", get(ws_config_handler))
-        .fallback_service(static_service)
-        .with_state(state);
+        .route("/ws-config", get(ws_config_handler));
+
+    // Set up fallback for static files
+    let app: Router<()> = if use_embedded {
+        app.fallback(embedded_fallback_handler)
+            .with_state(state)
+    } else {
+        let static_root = std::env::var("SELKIES_WEB_ROOT")
+            .unwrap_or_else(|_| "web/selkies".to_string());
+        let index_path = PathBuf::from(&static_root).join("index.html");
+        let static_service = ServeDir::new(&static_root).fallback(ServeFile::new(index_path));
+        app.fallback_service(static_service)
+            .with_state(state)
+    };
 
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on http://{}", addr);
@@ -224,6 +259,16 @@ async fn ws_config_handler(State(state): State<Arc<SharedState>>) -> String {
 }
 
 async fn index_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let ws_port = state.config.websocket.port;
+
+    // Check for embedded assets first, then fall back to filesystem
+    let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
+
+    if use_embedded {
+        return get_index_html_with_port(ws_port);
+    }
+
+    // Fallback to filesystem
     let static_root = std::env::var("SELKIES_WEB_ROOT")
         .unwrap_or_else(|_| "web/selkies".to_string());
     let index_path = PathBuf::from(&static_root).join("index.html");
@@ -231,7 +276,7 @@ async fn index_handler(State(state): State<Arc<SharedState>>) -> Response {
         Ok(data) => {
             let injected = match String::from_utf8(data) {
                 Ok(mut html) => {
-                    let port = state.config.websocket.port.to_string();
+                    let port = ws_port.to_string();
                     // Only replace the string literal placeholder, not the variable name
                     if html.contains("__SELKIES_INJECTED_PORT__") {
                         html = html.replace("__SELKIES_INJECTED_PORT__", &port);
@@ -252,4 +297,9 @@ async fn index_handler(State(state): State<Arc<SharedState>>) -> Response {
             .body(Body::from("index.html not found"))
             .unwrap(),
     }
+}
+
+/// Handler for serving embedded static files
+async fn embedded_fallback_handler(uri: Uri) -> Response {
+    get_embedded_file(uri.path())
 }
