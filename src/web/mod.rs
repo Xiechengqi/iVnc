@@ -6,4 +6,7 @@ pub mod shared;
 pub use shared::SharedState;
 
 pub mod http_server;
+#[cfg(feature = "webrtc-streaming")]
 pub use http_server::run_http_server_with_webrtc;
+#[cfg(not(feature = "webrtc-streaming"))]
+pub use http_server::run_http_server;
