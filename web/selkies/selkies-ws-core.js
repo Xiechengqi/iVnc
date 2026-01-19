@@ -583,6 +583,24 @@ body {
 .video-container.shared-user-mode #overlayInput {
   cursor: default !important;
 }
+.no-window-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #f5f5f5;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  color: #333;
+  font-family: system-ui, sans-serif;
+}
+.no-window-overlay.hidden { display: none; }
+.no-window-content { text-align: center; }
+.no-window-content h2 { font-size: 24px; margin-bottom: 10px; }
+.no-window-content p { font-size: 14px; color: #666; }
   `;
   document.head.appendChild(style);
 };
@@ -934,6 +952,13 @@ const initializeUI = () => {
   playButtonElement.textContent = 'Play Stream';
   videoContainer.appendChild(playButtonElement);
   playButtonElement.classList.add('hidden');
+
+  // No-window overlay (shown when no X11 windows are running)
+  const noWindowOverlay = document.createElement('div');
+  noWindowOverlay.className = 'no-window-overlay hidden';
+  noWindowOverlay.innerHTML = '<div class="no-window-content"><h2>等待应用启动</h2><p>当前没有应用在运行</p></div>';
+  videoContainer.appendChild(noWindowOverlay);
+
   statusDisplayElement.classList.remove('hidden');
   const sidebarDiv = document.createElement('div');
   sidebarDiv.id = 'dev-sidebar';
@@ -3776,6 +3801,16 @@ function handleDecodedFrame(frame) {
             if (systemMsg.action === 'reload') window.location.reload();
           } catch (e) {
             console.error('Error parsing system data:', e);
+          }
+        } else if (event.data.startsWith('window_state,')) {
+          try {
+            const data = JSON.parse(event.data.substring(13));
+            const overlay = document.querySelector('.no-window-overlay');
+            if (overlay) {
+              overlay.classList.toggle('hidden', data.has_windows);
+            }
+          } catch (e) {
+            console.error('Error parsing window_state:', e);
           }
         } else if (event.data === 'VIDEO_STARTED' && !isSharedMode) {
           isVideoPipelineActive = true;

@@ -494,6 +494,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut cursor_msg_count = 0u64;
             let mut first_message_sent = false;
             let mut cursor_override: Option<String> = None;
+            let mut window_check_counter: u32 = 0;
+            let mut last_has_windows: Option<bool> = None;
             info!("Cursor tracking: Starting cursor position polling loop");
             while cursor_running.load(Ordering::Relaxed) {
                 while let Ok(Some(event)) = conn.poll_for_event() {
@@ -611,6 +613,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+
+                // Window detection (check every 1 second: 50ms * 20 = 1000ms)
+                window_check_counter = window_check_counter.wrapping_add(1);
+                if window_check_counter % 20 == 0 {
+                    if let Ok(tree_cookie) = conn.query_tree(root) {
+                        if let Ok(tree) = tree_cookie.reply() {
+                            let has_windows = !tree.children.is_empty();
+                            // Only send message when state changes or on first check
+                            if last_has_windows != Some(has_windows) {
+                                last_has_windows = Some(has_windows);
+                                let payload = format!(r#"window_state,{{"has_windows":{}}}"#, has_windows);
+                                let _ = cursor_state.text_sender.send(payload);
+                                info!("Window state changed: has_windows={}", has_windows);
+                            }
+                        }
+                    }
+                }
+
                 std::thread::sleep(Duration::from_millis(50));
             }
         }

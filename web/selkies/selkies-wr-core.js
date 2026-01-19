@@ -129,6 +129,25 @@ function InitUI() {
 		border: 1px solid rgba(255, 255, 255, 0.3);
 		border-radius: 3px;
 		backdrop-filter: blur(5px);
+	}
+	.no-window-overlay {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		background: #f5f5f5;
+		display: flex;
+		justify-content: center;
+		align-items: center;
+		z-index: 1000;
+		color: #333;
+		font-family: system-ui, sans-serif;
+	}
+	.no-window-overlay.hidden { display: none; }
+	.no-window-content { text-align: center; }
+	.no-window-content h2 { font-size: 24px; margin-bottom: 10px; }
+	.no-window-content p { font-size: 14px; color: #666; }
 	`;
   document.head.appendChild(style);
 }
@@ -1052,6 +1071,13 @@ export default function webrtc() {
 
 			videoContainer.appendChild(videoElement);
 			videoContainer.appendChild(playButtonElement);
+
+			// No-window overlay (shown when no X11 windows are running)
+			const noWindowOverlay = document.createElement('div');
+			noWindowOverlay.className = 'no-window-overlay hidden';
+			noWindowOverlay.innerHTML = '<div class="no-window-content"><h2>等待应用启动</h2><p>当前没有应用在运行</p></div>';
+			videoContainer.appendChild(noWindowOverlay);
+
 			videoContainer.appendChild(statusDisplayElement);
 			videoContainer.appendChild(overlayInput);
 			appDiv.appendChild(videoContainer);
@@ -1215,6 +1241,27 @@ export default function webrtc() {
 					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10))webrtc.sendDataChannelMessage(`_f,${connectionStat.connectionFrameRate}`);
 					if (connectionStat.connectionLatency === parseInt(connectionStat.connectionLatency, 10)) webrtc.sendDataChannelMessage(`_l,${connectionStat.connectionLatency}`);
 				}, 5000)
+
+				// Connect to WebSocket server to receive window_state messages
+				const wsProtocol = (location.protocol === "https:" ? "wss://" : "ws://");
+				const wsPort = window.__SELKIES_WS_PORT__ || '8080';
+				const windowStateWs = new WebSocket(`${wsProtocol}${window.location.hostname}:${wsPort}`);
+				windowStateWs.onmessage = (event) => {
+					if (typeof event.data === 'string' && event.data.startsWith('window_state,')) {
+						try {
+							const data = JSON.parse(event.data.substring(13));
+							const overlay = document.querySelector('.no-window-overlay');
+							if (overlay) {
+								overlay.classList.toggle('hidden', data.has_windows);
+							}
+						} catch (e) {
+							console.error('Error parsing window_state:', e);
+						}
+					}
+				};
+				windowStateWs.onerror = (e) => {
+					console.warn('Window state WebSocket error:', e);
+				};
 			}
 
 			webrtc.ondatachannelclose = () => {
