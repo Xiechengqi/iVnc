@@ -338,7 +338,7 @@ impl VideoPipeline {
             if encoder.has_property("key-int-max", None) {
                 let _ = encoder.set_property("key-int-max", interval as i32);
             } else if encoder.has_property("gop-size", None) {
-                let _ = encoder.set_property("gop-size", interval as i32);
+                let _ = encoder.set_property("gop-size", interval);
             } else if encoder.has_property("keyframe-max-dist", None) {
                 let _ = encoder.set_property("keyframe-max-dist", interval as i32);
             } else if encoder.has_property("keyframe-period", None) {
