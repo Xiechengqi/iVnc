@@ -19,6 +19,7 @@ use log::{info, debug};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, RwLock};
 use std::sync::Mutex;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -79,6 +80,8 @@ pub struct WebRTCSession {
     pub video_codec: VideoCodec,
     /// Client address/identifier
     pub client_id: Option<String>,
+    /// Log first RTP packet sent
+    pub first_rtp_logged: Arc<AtomicBool>,
 }
 
 impl WebRTCSession {
@@ -102,6 +105,7 @@ impl WebRTCSession {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             video_codec,
             client_id: None,
+            first_rtp_logged: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -143,7 +147,11 @@ impl WebRTCSession {
 
     /// Write an RTP packet to the video track
     pub async fn write_rtp(&self, packet: &[u8]) -> Result<(), WebRTCError> {
-        self.video_writer.write_rtp(packet).await
+        let res = self.video_writer.write_rtp(packet).await;
+        if res.is_ok() && !self.first_rtp_logged.swap(true, Ordering::Relaxed) {
+            info!("Session {} sent first RTP packet ({} bytes)", self.id, packet.len());
+        }
+        res
     }
 
     /// Send a message through the input channel

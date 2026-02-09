@@ -6,7 +6,7 @@
 
 use super::WebRTCError;
 use crate::config::VideoCodec;
-use log::debug;
+use log::{debug, warn};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
@@ -85,7 +85,7 @@ impl VideoTrackWriter {
                 self.stats.record_dropped();
                 let count = self.error_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if count <= 5 || count % 1000 == 0 {
-                    debug!("RTP write error ({}): {}", count, e);
+                    warn!("RTP write error ({}): {}", count, e);
                 }
                 Err(WebRTCError::MediaError(format!("RTP write failed: {}", e)))
             }
