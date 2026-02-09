@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, RwLock};
 use std::sync::Mutex;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
+use webrtc::rtp_transceiver::rtp_transceiver_init::RTCRtpTransceiverInit;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::data_channel::RTCDataChannel;
@@ -246,9 +248,13 @@ impl SessionManager {
         // Create video track
         let video_track = self.pc_manager.create_video_track(self.config.video_codec)?;
 
-        // Add track to peer connection
-        peer_connection.add_track(video_track.clone()).await
-            .map_err(|e| WebRTCError::MediaError(format!("Failed to add video track: {}", e)))?;
+        // Add track to peer connection (sendonly)
+        let transceiver_init = RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            send_encodings: Vec::new(),
+        };
+        peer_connection.add_transceiver_from_track(video_track.clone(), Some(transceiver_init)).await
+            .map_err(|e| WebRTCError::MediaError(format!("Failed to add video transceiver: {}", e)))?;
 
         // Create session
         let session = Arc::new(WebRTCSession::new(
