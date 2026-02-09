@@ -296,7 +296,7 @@ impl SessionManager {
             })
         }));
 
-        // Data channel callback
+        // Data channel callback (handles channels created by the client)
         let input_tx = self.input_tx.clone();
         let session_for_dc = session.clone();
         let upload_handler_dc = upload_handler.clone();
@@ -334,6 +334,26 @@ impl SessionManager {
                 }
             })
         }));
+
+        // Create the primary input data channel from the server side so the
+        // browser receives ondatachannel and can attach handlers.
+        if let Ok(channel) = PeerConnectionManager::create_data_channel(
+            &session.peer_connection,
+            "input",
+        )
+        .await
+        {
+            session.set_input_channel(channel.clone()).await;
+            let input_handler = InputDataChannel::new(
+                channel,
+                self.input_tx.clone(),
+                upload_handler.clone(),
+                clipboard_handler.clone(),
+                runtime_settings.clone(),
+                shared_state.clone(),
+            );
+            input_handler.setup_handlers().await;
+        }
     }
 
     /// Get a session by ID
