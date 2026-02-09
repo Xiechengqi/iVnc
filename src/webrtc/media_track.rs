@@ -57,6 +57,7 @@ pub struct VideoTrackWriter {
     codec: VideoCodec,
     stats: Arc<RtpStats>,
     clock_rate: u32,
+    error_count: Arc<AtomicU64>,
 }
 
 impl VideoTrackWriter {
@@ -67,6 +68,7 @@ impl VideoTrackWriter {
             codec,
             stats: Arc::new(RtpStats::new()),
             clock_rate: 90000,  // Standard video clock rate
+            error_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -81,8 +83,10 @@ impl VideoTrackWriter {
             }
             Err(e) => {
                 self.stats.record_dropped();
-                // Don't log every dropped packet, just debug level
-                debug!("RTP write error: {}", e);
+                let count = self.error_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if count <= 5 || count % 1000 == 0 {
+                    debug!("RTP write error ({}): {}", count, e);
+                }
                 Err(WebRTCError::MediaError(format!("RTP write failed: {}", e)))
             }
         }

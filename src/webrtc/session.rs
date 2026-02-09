@@ -276,10 +276,12 @@ impl SessionManager {
         // Connection state change callback
         let session_id_clone = session_id.clone();
         let shared_state_cb = shared_state.clone();
+        let runtime_settings_cb = runtime_settings.clone();
         session.peer_connection.on_peer_connection_state_change(Box::new(move |state| {
             let session_id = session_id_clone.clone();
             let sessions = sessions.clone();
             let shared_state_cb = shared_state_cb.clone();
+            let runtime_settings_cb = runtime_settings_cb.clone();
 
             Box::pin(async move {
                 info!("Session {} connection state: {:?}", session_id, state);
@@ -287,6 +289,10 @@ impl SessionManager {
                 let sessions_read = sessions.read().await;
                 if let Some(session) = sessions_read.get(&session_id) {
                     session.set_state(SessionState::from(state)).await;
+
+                    if state == RTCPeerConnectionState::Connected {
+                        runtime_settings_cb.request_keyframe();
+                    }
 
                     // Clean up on failure/close
                     if state == RTCPeerConnectionState::Failed || state == RTCPeerConnectionState::Closed {
