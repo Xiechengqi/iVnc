@@ -23,6 +23,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
 use base64::Engine;
+use hmac::{Hmac, Mac};
+use serde_json::json;
+use sha1::Sha1;
 
 use crate::webrtc::SessionManager;
 
@@ -60,12 +63,14 @@ pub async fn run_http_server_with_webrtc(
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
-        .route("/ui-config", get(ui_config_handler));
+        .route("/ui-config", get(ui_config_handler))
+        .route("/ws-config", get(ws_config_handler))
+        .route("/turn", get(turn_config_handler));
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(manager) = session_manager {
         info!("Adding WebRTC signaling endpoint at /webrtc");
-        app = app.route("/webrtc", get({
+        let signaling_handler = {
             let state_clone = state.clone();
             move |ws: WebSocketUpgrade| {
                 let state = state_clone.clone();
@@ -76,7 +81,13 @@ pub async fn run_http_server_with_webrtc(
                     })
                 }
             }
-        }));
+        };
+        app = app
+            .route("/webrtc", get(signaling_handler))
+            .route("/webrtc/signaling", get(signaling_handler))
+            .route("/webrtc/signaling/", get(signaling_handler))
+            .route("/:app/signaling", get(signaling_handler))
+            .route("/:app/signaling/", get(signaling_handler));
     }
 
     // Set up fallback for static files
@@ -248,6 +259,31 @@ async fn ui_config_handler(State(state): State<Arc<SharedState>>) -> String {
     state.ui_config_json()
 }
 
+/// WebSocket configuration handler
+async fn ws_config_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let payload = json!({
+        "ws_port": state.config.http.port
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap()
+}
+
+/// TURN/STUN configuration handler for WebRTC
+async fn turn_config_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let ice_servers = build_ice_servers(&state.config.webrtc);
+    let payload = json!({
+        "iceServers": ice_servers
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap()
+}
+
 async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
     // Check for embedded assets first, then fall back to filesystem
     let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
@@ -279,4 +315,73 @@ async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
 /// Handler for serving embedded static files
 async fn embedded_fallback_handler(uri: Uri) -> Response {
     get_embedded_file(uri.path())
+}
+
+fn build_ice_servers(config: &crate::config::WebRTCConfig) -> Vec<crate::config::IceServerConfig> {
+    let mut servers = Vec::new();
+
+    let has_turn = !config.turn_host.is_empty()
+        || !config.turn_shared_secret.is_empty()
+        || !config.turn_username.is_empty()
+        || !config.turn_password.is_empty();
+    let has_stun = !config.stun_host.is_empty() && config.stun_port != 0;
+
+    if has_stun {
+        servers.push(crate::config::IceServerConfig {
+            urls: vec![format!("stun:{}:{}", config.stun_host, config.stun_port)],
+            username: None,
+            credential: None,
+        });
+    }
+
+    if has_turn && !config.turn_host.is_empty() {
+        let scheme = if config.turn_tls { "turns" } else { "turn" };
+        let transport = if config.turn_protocol.is_empty() {
+            "udp"
+        } else {
+            config.turn_protocol.as_str()
+        };
+        let url = format!(
+            "{}:{}:{}?transport={}",
+            scheme,
+            config.turn_host,
+            config.turn_port,
+            transport
+        );
+
+        let (username, credential) = if !config.turn_shared_secret.is_empty() {
+            let ttl_secs: u64 = 24 * 60 * 60;
+            let expiry = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() + ttl_secs)
+                .unwrap_or(ttl_secs);
+            let user = format!("{}:selkies", expiry);
+            let password = hmac_sha1_base64(&config.turn_shared_secret, &user);
+            (Some(user), Some(password))
+        } else if !config.turn_username.is_empty() && !config.turn_password.is_empty() {
+            (Some(config.turn_username.clone()), Some(config.turn_password.clone()))
+        } else {
+            (None, None)
+        };
+
+        servers.push(crate::config::IceServerConfig {
+            urls: vec![url],
+            username,
+            credential,
+        });
+    }
+
+    if servers.is_empty() {
+        return config.ice_servers.clone();
+    }
+
+    servers
+}
+
+fn hmac_sha1_base64(secret: &str, message: &str) -> String {
+    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
+        .unwrap_or_else(|_| Hmac::<Sha1>::new_from_slice(&[]).unwrap());
+    mac.update(message.as_bytes());
+    let result = mac.finalize().into_bytes();
+    base64::engine::general_purpose::STANDARD.encode(result)
 }
