@@ -321,7 +321,8 @@ impl PeerConnectionManager {
 
         let config = RTCDataChannelInit {
             ordered: Some(true),
-            max_retransmits: Some(0),  // Unreliable for low latency
+            // Use reliable data channel to avoid SCTP errors with some clients.
+            max_retransmits: None,
             ..Default::default()
         };
 
