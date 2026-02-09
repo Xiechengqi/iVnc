@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::signal;
 use tokio::task;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use x11rb::xcb_ffi::XCBConnection;
 use x11rb::connection::Connection;
@@ -207,6 +208,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         info!("WebRTC session manager created");
         Some(manager)
+    } else {
+        None
+    };
+
+    // Forward RTP packets from GStreamer broadcast to WebRTC sessions
+    let _rtp_forward_handle = if let Some(manager) = session_manager.clone() {
+        let mut rtp_rx = state.subscribe_rtp();
+        let mgr = manager.clone();
+        Some(task::spawn(async move {
+            loop {
+                match rtp_rx.recv().await {
+                    Ok(packet) => {
+                        mgr.broadcast_rtp(&packet).await;
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        }))
     } else {
         None
     };
