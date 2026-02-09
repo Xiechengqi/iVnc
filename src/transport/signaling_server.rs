@@ -13,6 +13,8 @@ use crate::web::SharedState;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use log::{info, warn, debug, error};
+use serde_json::Value;
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -59,12 +61,36 @@ pub async fn handle_signaling_connection(
 
     // Session ID for this connection
     let mut session_id: Option<String> = None;
+    let mut wire_format = WireFormat::Selkies;
 
     // Process incoming messages
     while let Some(result) = ws_receiver.next().await {
         match result {
             Ok(Message::Text(text)) => {
                 let text_str: &str = text.as_ref();
+
+                if let Some(reply) = handle_gstreamer_control_message(text_str, &mut wire_format) {
+                    let _ = tx.send(reply);
+                    continue;
+                }
+
+                if let Some(msg) = parse_gstreamer_json_message(text_str) {
+                    wire_format = WireFormat::GStreamer;
+                    if let Some(response) = handle_signaling_message(
+                        msg,
+                        &mut session_id,
+                        &state,
+                        &session_manager,
+                        &tx,
+                        wire_format,
+                    )
+                    .await
+                    {
+                        let _ = tx.send(response);
+                    }
+                    continue;
+                }
+
                 match SignalingParser::parse(text_str) {
                     Ok(msg) => {
                         if let Some(response) = handle_signaling_message(
@@ -73,7 +99,10 @@ pub async fn handle_signaling_connection(
                             &state,
                             &session_manager,
                             &tx,
-                        ).await {
+                            wire_format,
+                        )
+                        .await
+                        {
                             let _ = tx.send(response);
                         }
                     }
@@ -84,8 +113,8 @@ pub async fn handle_signaling_connection(
                             &e.to_string(),
                             session_id.clone(),
                         );
-                        if let Ok(json) = error.to_json() {
-                            let _ = tx.send(json);
+                        if let Some(msg) = format_signaling_message(&error, wire_format) {
+                            let _ = tx.send(msg);
                         }
                     }
                 }
@@ -127,6 +156,7 @@ async fn handle_signaling_message(
     state: &Arc<SharedState>,
     session_manager: &Arc<SessionManager>,
     tx: &mpsc::UnboundedSender<String>,
+    wire_format: WireFormat,
 ) -> Option<String> {
     match message {
         SignalingMessage::Offer { sdp, session_id: provided_session_id } => {
@@ -173,6 +203,7 @@ async fn handle_signaling_message(
                         let tx_clone = tx.clone();
                         let session_id_clone = session.id.clone();
                         let state_clone = state.clone();
+                        let format_clone = wire_format;
 
                         crate::webrtc::peer_connection::PeerConnectionManager::setup_ice_callback(
                             &session.peer_connection,
@@ -186,16 +217,16 @@ async fn handle_signaling_message(
                                         Some(0),
                                         session_id_clone.clone(),
                                     );
-                                    if let Ok(json) = msg.to_json() {
-                                        let _ = tx_clone.send(json);
+                                    if let Some(payload) = format_signaling_message(&msg, format_clone) {
+                                        let _ = tx_clone.send(payload);
                                     }
                                 } else {
                                     // ICE gathering complete
                                     let msg = SignalingMessage::IceComplete {
                                         session_id: session_id_clone.clone(),
                                     };
-                                    if let Ok(json) = msg.to_json() {
-                                        let _ = tx_clone.send(json);
+                                    if let Some(payload) = format_signaling_message(&msg, format_clone) {
+                                        let _ = tx_clone.send(payload);
                                     }
                                 }
                             },
@@ -203,16 +234,18 @@ async fn handle_signaling_message(
                     }
 
                     // Send ready notification
-                    let ready = SignalingMessage::ready(
-                        session.id.clone(),
-                        session_manager.config().video_codec.as_str(),
-                        "input",
-                    );
-                    if let Ok(json) = ready.to_json() {
-                        let _ = tx.send(json);
+                    if wire_format == WireFormat::Selkies {
+                        let ready = SignalingMessage::ready(
+                            session.id.clone(),
+                            session_manager.config().video_codec.as_str(),
+                            "input",
+                        );
+                        if let Some(payload) = format_signaling_message(&ready, wire_format) {
+                            let _ = tx.send(payload);
+                        }
                     }
 
-                    answer.to_json().ok()
+                    format_signaling_message(&answer, wire_format)
                 }
                 Err(e) => {
                     error!("Failed to handle offer: {}", e);
@@ -221,7 +254,7 @@ async fn handle_signaling_message(
                         &e.to_string(),
                         Some(session.id.clone()),
                     );
-                    error.to_json().ok()
+                    format_signaling_message(&error, wire_format)
                 }
             }
         }
@@ -256,7 +289,7 @@ async fn handle_signaling_message(
 
         SignalingMessage::Ping { timestamp } => {
             let pong = SignalingMessage::Pong { timestamp };
-            pong.to_json().ok()
+            format_signaling_message(&pong, wire_format)
         }
 
         SignalingMessage::Close { session_id: msg_session_id, reason } => {
@@ -271,6 +304,83 @@ async fn handle_signaling_message(
             debug!("Unhandled signaling message type");
             None
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireFormat {
+    Selkies,
+    GStreamer,
+}
+
+fn handle_gstreamer_control_message(text: &str, wire_format: &mut WireFormat) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.starts_with("HELLO") {
+        *wire_format = WireFormat::GStreamer;
+        return Some("HELLO".to_string());
+    }
+    if trimmed.starts_with("SESSION") {
+        *wire_format = WireFormat::GStreamer;
+        return Some("SESSION_OK".to_string());
+    }
+    None
+}
+
+fn parse_gstreamer_json_message(text: &str) -> Option<SignalingMessage> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    if let Some(sdp) = value.get("sdp") {
+        let sdp_obj = sdp.as_object()?;
+        let sdp_type = sdp_obj.get("type")?.as_str()?;
+        let sdp_text = sdp_obj.get("sdp")?.as_str()?;
+        if sdp_type == "offer" {
+            return Some(SignalingMessage::Offer {
+                sdp: sdp_text.to_string(),
+                session_id: None,
+            });
+        }
+        return None;
+    }
+    if let Some(ice) = value.get("ice") {
+        let ice_obj = ice.as_object()?;
+        let candidate = ice_obj.get("candidate")?.as_str()?.to_string();
+        let sdp_mid = ice_obj.get("sdpMid").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let sdp_mline_index = ice_obj.get("sdpMLineIndex").and_then(|v| v.as_u64()).map(|v| v as u16);
+        return Some(SignalingMessage::IceCandidate {
+            candidate,
+            sdp_mid,
+            sdp_mline_index,
+            session_id: String::new(),
+        });
+    }
+    None
+}
+
+fn format_signaling_message(message: &SignalingMessage, wire_format: WireFormat) -> Option<String> {
+    match wire_format {
+        WireFormat::Selkies => message.to_json().ok(),
+        WireFormat::GStreamer => match message {
+            SignalingMessage::Answer { sdp, .. } => {
+                Some(json!({ "sdp": { "type": "answer", "sdp": sdp } }).to_string())
+            }
+            SignalingMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index, .. } => {
+                let payload = json!({
+                    "ice": {
+                        "candidate": candidate,
+                        "sdpMid": sdp_mid,
+                        "sdpMLineIndex": sdp_mline_index
+                    }
+                });
+                Some(payload.to_string())
+            }
+            SignalingMessage::IceComplete { .. } => None,
+            SignalingMessage::Error { code, message, .. } => {
+                Some(format!("ERROR {}: {}", code, message))
+            }
+            SignalingMessage::Pong { timestamp } => {
+                Some(json!({ "pong": timestamp }).to_string())
+            }
+            _ => None,
+        },
     }
 }
 
