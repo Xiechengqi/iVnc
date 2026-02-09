@@ -71,7 +71,11 @@ if [ -z "$SKIP_WEB_BUILD" ]; then
         npm install
         npm run build
         mkdir -p dist
-        cp -f selkies-core.js selkies-wr-core.js selkies-ws-core.js dist/
+        for f in selkies-core.js selkies-wr-core.js selkies-ws-core.js; do
+            if [ -f "$f" ]; then
+                cp -f "$f" dist/
+            fi
+        done
         rm -rf dist/lib
         cp -a lib dist/lib
         popd >/dev/null
