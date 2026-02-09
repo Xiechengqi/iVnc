@@ -204,6 +204,8 @@ pub struct SessionManager {
     shared_state: Arc<SharedState>,
     /// Maximum concurrent sessions
     max_sessions: usize,
+    /// Enable data channels (input/file transfer)
+    data_channel_enabled: bool,
 }
 
 impl SessionManager {
@@ -215,6 +217,7 @@ impl SessionManager {
         runtime_settings: Arc<RuntimeSettings>,
         shared_state: Arc<SharedState>,
         max_sessions: usize,
+        data_channel_enabled: bool,
     ) -> Self {
         let pc_manager = PeerConnectionManager::new(config.clone());
 
@@ -227,6 +230,7 @@ impl SessionManager {
             runtime_settings,
             shared_state,
             max_sessions,
+            data_channel_enabled,
         }
     }
 
@@ -320,63 +324,67 @@ impl SessionManager {
             })
         }));
 
-        // Data channel callback (handles channels created by the client)
-        let input_tx = self.input_tx.clone();
-        let session_for_dc = session.clone();
-        let upload_handler_dc = upload_handler.clone();
-        let runtime_settings_dc = runtime_settings.clone();
-        let clipboard_dc = clipboard_handler.clone();
-        let shared_state_dc = shared_state.clone();
-        session.peer_connection.on_data_channel(Box::new(move |channel| {
-            let input_tx = input_tx.clone();
-            let session = session_for_dc.clone();
-            let upload_handler = upload_handler_dc.clone();
-            let runtime_settings = runtime_settings_dc.clone();
-            let clipboard = clipboard_dc.clone();
-            let shared_state = shared_state_dc.clone();
+        if self.data_channel_enabled {
+            // Data channel callback (handles channels created by the client)
+            let input_tx = self.input_tx.clone();
+            let session_for_dc = session.clone();
+            let upload_handler_dc = upload_handler.clone();
+            let runtime_settings_dc = runtime_settings.clone();
+            let clipboard_dc = clipboard_handler.clone();
+            let shared_state_dc = shared_state.clone();
+            session.peer_connection.on_data_channel(Box::new(move |channel| {
+                let input_tx = input_tx.clone();
+                let session = session_for_dc.clone();
+                let upload_handler = upload_handler_dc.clone();
+                let runtime_settings = runtime_settings_dc.clone();
+                let clipboard = clipboard_dc.clone();
+                let shared_state = shared_state_dc.clone();
 
-            Box::pin(async move {
-                let label = channel.label().to_string();
-                info!("Data channel opened: {}", label);
+                Box::pin(async move {
+                    let label = channel.label().to_string();
+                    info!("Data channel opened: {}", label);
 
-                if label == "input" || label.starts_with("input") {
-                    session.set_input_channel(channel.clone()).await;
+                    if label == "input" || label.starts_with("input") {
+                        session.set_input_channel(channel.clone()).await;
 
-                    // Set up input handler
-                    let input_handler = InputDataChannel::new(
-                        channel,
-                        input_tx,
-                        upload_handler.clone(),
-                        clipboard.clone(),
-                        runtime_settings.clone(),
-                        shared_state.clone(),
-                    );
-                    input_handler.setup_handlers().await;
-                } else if label == "data" {
-                    let aux_handler = AuxDataChannel::new(channel, upload_handler.clone());
-                    aux_handler.setup_handlers().await;
-                }
-            })
-        }));
+                        // Set up input handler
+                        let input_handler = InputDataChannel::new(
+                            channel,
+                            input_tx,
+                            upload_handler.clone(),
+                            clipboard.clone(),
+                            runtime_settings.clone(),
+                            shared_state.clone(),
+                        );
+                        input_handler.setup_handlers().await;
+                    } else if label == "data" {
+                        let aux_handler = AuxDataChannel::new(channel, upload_handler.clone());
+                        aux_handler.setup_handlers().await;
+                    }
+                })
+            }));
+        }
 
-        // Create the primary input data channel from the server side so the
-        // browser receives ondatachannel and can attach handlers.
-        if let Ok(channel) = PeerConnectionManager::create_data_channel(
-            &session.peer_connection,
-            "input",
-        )
-        .await
-        {
-            session.set_input_channel(channel.clone()).await;
-            let input_handler = InputDataChannel::new(
-                channel,
-                self.input_tx.clone(),
-                upload_handler.clone(),
-                clipboard_handler.clone(),
-                runtime_settings.clone(),
-                shared_state.clone(),
-            );
-            input_handler.setup_handlers().await;
+        if self.data_channel_enabled {
+            // Create the primary input data channel from the server side so the
+            // browser receives ondatachannel and can attach handlers.
+            if let Ok(channel) = PeerConnectionManager::create_data_channel(
+                &session.peer_connection,
+                "input",
+            )
+            .await
+            {
+                session.set_input_channel(channel.clone()).await;
+                let input_handler = InputDataChannel::new(
+                    channel,
+                    self.input_tx.clone(),
+                    upload_handler.clone(),
+                    clipboard_handler.clone(),
+                    runtime_settings.clone(),
+                    shared_state.clone(),
+                );
+                input_handler.setup_handlers().await;
+            }
         }
     }
 

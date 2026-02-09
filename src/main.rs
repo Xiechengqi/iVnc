@@ -200,6 +200,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create WebRTC session manager if enabled
     let session_manager = if config.webrtc.enabled {
         info!("Creating WebRTC session manager...");
+        let disable_data_channel = env::var("SELKIES_DISABLE_DATA_CHANNEL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if disable_data_channel {
+            warn!("WebRTC data channels disabled (SELKIES_DISABLE_DATA_CHANNEL)");
+        }
         let manager = Arc::new(SessionManager::new(
             config.webrtc.clone(),
             input_tx.clone(),
@@ -207,6 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             runtime_settings.clone(),
             state.clone(),
             10, // max 10 concurrent sessions
+            !disable_data_channel,
         ));
         info!("WebRTC session manager created");
         Some(manager)
