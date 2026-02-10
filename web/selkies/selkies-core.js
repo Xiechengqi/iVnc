@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import webrtc from "./selkies-wr-core.js?v=16";
+import webrtc from "./selkies-wr-core.js?v=20";
 
 const mode = webrtc();
 mode.initialize();

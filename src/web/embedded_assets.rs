@@ -54,7 +54,7 @@ fn cache_control_for_path(path: &str) -> &'static str {
     if path == "index.html" {
         "no-store, max-age=0"
     } else if path.ends_with(".js") || path.ends_with(".css") {
-        "public, max-age=31536000, immutable"
+        "no-cache, max-age=0"
     } else if path.ends_with(".woff2") || path.ends_with(".woff") || path.ends_with(".ttf") {
         "public, max-age=31536000, immutable"
     } else {

@@ -47,11 +47,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args = Args::parse();
 
-    // Initialize logging
-    env_logger::init_from_env(
-        env_logger::Env::default()
-            .filter_or("SELKIES_LOG", if args.verbose { "debug" } else { "info" })
-    );
+    // Initialize logging with noise filtering for third-party WebRTC crates
+    let log_level = if args.verbose { "debug" } else { "info" };
+    env_logger::Builder::new()
+        .parse_filters(&std::env::var("SELKIES_LOG").unwrap_or_else(|_| log_level.to_string()))
+        .filter_module("webrtc_ice", log::LevelFilter::Error)
+        .filter_module("webrtc_dtls", log::LevelFilter::Error)
+        .filter_module("webrtc_mdns", log::LevelFilter::Error)
+        .init();
 
     info!("selkies-core v{}", env!("CARGO_PKG_VERSION"));
     info!("Starting Selkies streaming core...");
@@ -94,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         x11_display_range: config.display.x11_display_range,
         x11_startup_timeout: config.display.x11_startup_timeout,
         x11_extra_args: config.display.x11_extra_args.clone(),
+        window_manager: config.display.window_manager.clone(),
         width: config.display.width,
         height: config.display.height,
     }) {
@@ -231,7 +235,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(packet) => {
                         mgr.broadcast_rtp(&packet).await;
                     }
-                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Lagged(n)) => {
+                        warn!("RTP forward: broadcast channel lagged, dropped {} packets", n);
+                        continue;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Forward text messages (cursor, clipboard, stats) to WebRTC sessions via data channel
+    let _text_forward_handle = if let Some(manager) = session_manager.clone() {
+        let mut text_rx = state.subscribe_text();
+        let mgr = manager.clone();
+        Some(task::spawn(async move {
+            loop {
+                match text_rx.recv().await {
+                    Ok(message) => {
+                        mgr.broadcast_text(&message).await;
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        warn!("Text forward: broadcast channel lagged, dropped {} messages", n);
+                        continue;
+                    }
                     Err(RecvError::Closed) => break,
                 }
             }
@@ -251,7 +280,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(task::spawn_blocking(move || {
             info!("Starting GStreamer pipeline...");
 
-            let pipeline = match gstreamer::VideoPipeline::new(pipeline_config) {
+            let mut pipeline = match gstreamer::VideoPipeline::new(pipeline_config.clone()) {
                 Ok(p) => {
                     info!("GStreamer pipeline created successfully");
                     p
@@ -273,6 +302,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pipeline.set_keyframe_interval(current_keyframe);
             info!("GStreamer pipeline started, streaming RTP packets...");
             let mut packet_count = 0u64;
+            // Keyframe cache: collect RTP packets belonging to the current IDR frame
+            let mut keyframe_packets: Vec<Vec<u8>> = Vec::new();
+            let mut collecting_keyframe = false;
+            // Track the RTP timestamp of the keyframe being collected
+            let mut keyframe_ts: u32 = 0;
 
             while gst_running.load(Ordering::Relaxed) {
                 // Check for keyframe request
@@ -292,11 +326,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pipeline.set_keyframe_interval(current_keyframe);
                 }
 
+                // Check for pending display resize
+                if let Some((w, h)) = gst_state.take_pending_resize() {
+                    info!("Display resize to {}x{} requested, stopping pipeline...", w, h);
+                    let _ = pipeline.stop();
+                    std::thread::sleep(Duration::from_millis(200));
+                    gst_state.apply_xrandr_resize(w, h);
+                    std::thread::sleep(Duration::from_millis(100));
+                    match gstreamer::VideoPipeline::new(pipeline_config.clone()) {
+                        Ok(new_p) => {
+                            pipeline = new_p;
+                            if let Err(e) = pipeline.start() {
+                                error!("Failed to restart pipeline: {}", e);
+                                break;
+                            }
+                            pipeline.set_bitrate(current_bitrate);
+                            pipeline.set_keyframe_interval(current_keyframe);
+                            keyframe_packets.clear();
+                            collecting_keyframe = false;
+                            info!("Pipeline rebuilt after resize to {}x{}", w, h);
+                        }
+                        Err(e) => {
+                            error!("Failed to rebuild pipeline: {}", e);
+                            break;
+                        }
+                    }
+                }
+
                 // Pull RTP packet from pipeline
                 if let Some(sample) = pipeline.try_pull_sample() {
                     if let Some(buffer) = sample.buffer() {
                         if let Ok(map) = buffer.map_readable() {
                             let packet = map.as_slice().to_vec();
+
+                            // Detect H264 keyframe packets and cache them
+                            if packet.len() >= 13 {
+                                let rtp_ts = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+                                let hdr_len = {
+                                    let cc = (packet[0] & 0x0F) as usize;
+                                    let mut l = 12 + cc * 4;
+                                    if (packet[0] & 0x10) != 0 && packet.len() >= l + 4 {
+                                        let ext = u16::from_be_bytes([packet[l+2], packet[l+3]]) as usize;
+                                        l += 4 + ext * 4;
+                                    }
+                                    l
+                                };
+                                if packet.len() > hdr_len {
+                                    let nal_byte = packet[hdr_len];
+                                    let nal_type = nal_byte & 0x1F;
+
+                                    // SPS(7), PPS(8), IDR(5), or STAP-A(24) start a keyframe
+                                    let is_kf_start = nal_type == 7 || nal_type == 8
+                                        || nal_type == 5 || nal_type == 24
+                                        || (nal_type == 28 && packet.len() > hdr_len + 1 && {
+                                            let fu_nal = packet[hdr_len + 1] & 0x1F;
+                                            let fu_s = (packet[hdr_len + 1] & 0x80) != 0;
+                                            fu_s && fu_nal == 5
+                                        });
+                                    if is_kf_start && !collecting_keyframe {
+                                        collecting_keyframe = true;
+                                        keyframe_ts = rtp_ts;
+                                        keyframe_packets.clear();
+                                    }
+                                    if collecting_keyframe {
+                                        if rtp_ts == keyframe_ts {
+                                            keyframe_packets.push(packet.clone());
+                                        } else {
+                                            // New timestamp = new frame, stop collecting
+                                            collecting_keyframe = false;
+                                            let cached = keyframe_packets.clone();
+                                            debug!("Cached keyframe: {} RTP packets, total {} bytes",
+                                                cached.len(), cached.iter().map(|p| p.len()).sum::<usize>());
+                                            gst_state.set_keyframe_cache(cached);
+                                        }
+                                    }
+                                }
+                            }
 
                             // Broadcast to all WebRTC sessions
                             gst_state.broadcast_rtp(packet);
@@ -551,8 +656,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     Err(e) => {
-                                        if !first_message_sent {
-                                            info!("Cursor tracking: Failed to get cursor image reply: {:?}", e);
+                                        if !first_message_sent || cursor_msg_count % 500 == 0 {
+                                            warn!("Cursor tracking: Failed to get cursor image reply: {:?}", e);
                                         }
                                     }
                                 }
