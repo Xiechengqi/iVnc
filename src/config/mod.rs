@@ -152,6 +152,10 @@ pub struct DisplayConfig {
     /// Extra arguments to pass to Xvfb
     #[serde(default)]
     pub x11_extra_args: Vec<String>,
+
+    /// Window manager to launch after X11 starts (e.g., "openbox", "fluxbox", "" to disable)
+    #[serde(default = "default_window_manager")]
+    pub window_manager: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +445,7 @@ impl Default for Config {
                 x11_display_range: [99, 199],
                 x11_startup_timeout: 10,
                 x11_extra_args: Vec::new(),
+                window_manager: "openbox".to_string(),
             },
             http: HttpConfig {
                 host: "0.0.0.0".to_string(),
@@ -632,4 +637,8 @@ fn default_x11_display_range() -> [u32; 2] {
 
 fn default_x11_startup_timeout() -> u64 {
     10
+}
+
+fn default_window_manager() -> String {
+    "openbox".to_string()
 }

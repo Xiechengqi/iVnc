@@ -28,6 +28,7 @@ pub struct DisplayManagerConfig {
     pub x11_extra_args: Vec<String>,
     pub width: u32,
     pub height: u32,
+    pub window_manager: String,
 }
 
 /// Display manager
@@ -140,6 +141,9 @@ impl DisplayManager {
             Duration::from_secs(config.x11_startup_timeout),
         )?;
 
+        // 5. Start window manager if configured
+        Self::start_window_manager(&config.window_manager, &display);
+
         Ok(ManagedDisplay::new(display, process, backend))
     }
 
@@ -189,5 +193,34 @@ impl DisplayManager {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    /// Start window manager on the given display
+    fn start_window_manager(wm: &str, display: &str) {
+        if wm.is_empty() {
+            debug!("Window manager not configured, skipping");
+            return;
+        }
+
+        if !Self::is_command_available(wm) {
+            warn!("Window manager '{}' not found in PATH, skipping", wm);
+            return;
+        }
+
+        info!("Starting window manager '{}' on display {}", wm, display);
+
+        match Command::new(wm)
+            .env("DISPLAY", display)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                info!("Window manager '{}' started (pid: {})", wm, child.id());
+            }
+            Err(e) => {
+                warn!("Failed to start window manager '{}': {}", wm, e);
+            }
+        }
     }
 }

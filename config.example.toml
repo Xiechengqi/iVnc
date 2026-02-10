@@ -12,6 +12,8 @@ display = ":0"
 width = 0
 # Display height (0 = auto-detect)
 height = 0
+# Window manager to launch when auto-creating X11 display ("openbox", "fluxbox", "" to disable)
+window_manager = "openbox"
 
 [http]
 # HTTP server port (for health checks and WebRTC signaling)
