@@ -12,6 +12,7 @@ use crate::config::{VideoCodec, HardwareEncoder, WebRTCConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use gstreamer_video as gst_video;
 use log::{info, warn, debug};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -155,8 +156,8 @@ impl VideoPipeline {
         let appsink = gst_app::AppSink::builder()
             .name("rtpsink")
             .sync(false)
-            .max_buffers(2)
-            .drop(true)
+            .max_buffers(0)
+            .drop(false)
             .build();
 
         // Add elements to pipeline
@@ -307,17 +308,18 @@ impl VideoPipeline {
 
     /// Request a keyframe (IDR)
     pub fn request_keyframe(&self) {
-        // Send force-keyunit event
-        let event = gst::event::CustomUpstream::builder(
-            gst::Structure::builder("GstForceKeyUnit")
-                .field("all-headers", true)
-                .build()
-        ).build();
-
-        if !self.appsink.send_event(event) {
-            warn!("Failed to send force-keyunit event");
+        if let Some(encoder) = self.pipeline.by_name("encoder") {
+            // send_event() on an element sends upstream events upstream through sink pads
+            let event = gst_video::UpstreamForceKeyUnitEvent::builder()
+                .all_headers(true)
+                .build();
+            if !encoder.send_event(event) {
+                warn!("Failed to send force-keyunit event to encoder");
+            } else {
+                info!("Sent force-keyunit event to encoder for IDR frame");
+            }
         } else {
-            debug!("Keyframe requested");
+            warn!("No encoder element found for keyframe request");
         }
     }
 
