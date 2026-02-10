@@ -95,6 +95,8 @@ pub struct InputInjector {
     mouse_y: i32,
     /// Input configuration
     config: InputConfig,
+    /// Current button mask
+    button_mask: u32,
     /// Keysym to keycode cache
     keysym_cache: HashMap<u32, u8>,
 }
@@ -153,6 +155,7 @@ impl InputInjector {
             mouse_x: 0,
             mouse_y: 0,
             config,
+            button_mask: 0,
             keysym_cache,
         })
     }
@@ -174,6 +177,37 @@ impl InputInjector {
             .warp_pointer(0u32, self.root, 0, 0, 0, 0, wx, wy)?;
 
         self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Update button mask and inject press/release events for changed buttons
+    fn update_button_mask(&mut self, new_mask: u32) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.config.enable_mouse {
+            return Ok(());
+        }
+        let old_mask = self.button_mask;
+        if old_mask == new_mask {
+            return Ok(());
+        }
+        // Check buttons 0-4 (left, middle, right, back, forward)
+        for i in 0..5u8 {
+            let bit = 1u32 << i;
+            let was_down = (old_mask & bit) != 0;
+            let is_down = (new_mask & bit) != 0;
+            if was_down != is_down {
+                // X11 buttons: 1=left, 2=middle, 3=right, 8=back, 9=forward
+                let x11_button = match i {
+                    0 => 1,
+                    1 => 2,
+                    2 => 3,
+                    3 => 8,
+                    4 => 9,
+                    _ => continue,
+                };
+                self.mouse_button(x11_button, is_down)?;
+            }
+        }
+        self.button_mask = new_mask;
         Ok(())
     }
 
@@ -299,7 +333,10 @@ impl InputInjector {
     /// Process a single event payload
     pub fn process_event(&mut self, event: InputEventData) -> Result<(), Box<dyn std::error::Error>> {
         match event.event_type {
-            InputEvent::MouseMove => self.mouse_move(event.mouse_x, event.mouse_y),
+            InputEvent::MouseMove => {
+                self.mouse_move(event.mouse_x, event.mouse_y)?;
+                self.update_button_mask(event.button_mask)
+            }
             InputEvent::MouseButton => self.mouse_button(event.mouse_button, event.button_pressed),
             InputEvent::MouseWheel => self.mouse_wheel(event.wheel_delta_x, event.wheel_delta_y),
             InputEvent::Keyboard => self.keyboard(event.keysym, event.key_pressed),
