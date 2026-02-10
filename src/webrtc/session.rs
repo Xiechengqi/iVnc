@@ -304,21 +304,27 @@ impl SessionManager {
             Box::pin(async move {
                 info!("Session {} connection state: {:?}", session_id, state);
 
-                let sessions_read = sessions.read().await;
-                if let Some(session) = sessions_read.get(&session_id) {
-                    session.set_state(SessionState::from(state)).await;
-
-                    if state == RTCPeerConnectionState::Connected {
+                if state == RTCPeerConnectionState::Connected {
+                    let sessions_read = sessions.read().await;
+                    if let Some(session) = sessions_read.get(&session_id) {
+                        session.set_state(SessionState::from(state)).await;
                         runtime_settings_cb.request_keyframe();
                     }
-
-                    // Clean up on failure/close
-                    if state == RTCPeerConnectionState::Failed || state == RTCPeerConnectionState::Closed {
-                        drop(sessions_read);
+                } else if state == RTCPeerConnectionState::Failed || state == RTCPeerConnectionState::Closed {
+                    // Spawn cleanup in a separate task to avoid RwLock deadlock
+                    let sessions = sessions.clone();
+                    let session_id = session_id.clone();
+                    let shared_state_cb = shared_state_cb.clone();
+                    tokio::spawn(async move {
                         let mut sessions_write = sessions.write().await;
                         sessions_write.remove(&session_id);
                         shared_state_cb.decrement_webrtc_sessions();
                         info!("Removed session {} due to state {:?}", session_id, state);
+                    });
+                } else {
+                    let sessions_read = sessions.read().await;
+                    if let Some(session) = sessions_read.get(&session_id) {
+                        session.set_state(SessionState::from(state)).await;
                     }
                 }
             })

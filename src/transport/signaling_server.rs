@@ -46,6 +46,7 @@ pub async fn handle_signaling_connection(
     state: Arc<SharedState>,
     session_manager: Arc<SessionManager>,
 ) {
+    info!("New signaling WebSocket connection established");
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Create a channel for sending messages
