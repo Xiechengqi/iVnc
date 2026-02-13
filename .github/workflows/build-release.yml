@@ -32,7 +32,7 @@ jobs:
         with:
           repository: Smithay/smithay
           ref: 3d3f9e359352d95cffd1e53287d57df427fcbd34
-          path: ../smithay
+          path: smithay
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -109,7 +109,7 @@ jobs:
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
             -v $(pwd):/workspace \
-            -v $(pwd)/../smithay:/smithay \
+            -v $(pwd)/smithay:/smithay \
             -v $(pwd)/output:/output \
             -v $(pwd)/build.sh:/build.sh \
             -e ARCH=${{ matrix.arch }} \
