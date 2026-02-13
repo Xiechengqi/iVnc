@@ -82,6 +82,8 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             libpulse-dev \
+            libopus-dev \
+            cmake \
             libwayland-dev \
             libpixman-1-dev \
             libinput-dev \
