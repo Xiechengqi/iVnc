@@ -176,6 +176,45 @@ pub fn run_audio_capture(
     Ok(())
 }
 
+/// Auto-detect the monitor source of the default PulseAudio sink.
+/// Monitor sources capture application audio output (what you hear),
+/// as opposed to microphone input.
+#[cfg(feature = "pulseaudio")]
+fn detect_pulse_monitor_source() -> Option<String> {
+    use std::process::Command;
+
+    // Ask PulseAudio for the default sink name
+    let sink_output = Command::new("pactl")
+        .args(["get-default-sink"])
+        .output()
+        .ok()?;
+    if !sink_output.status.success() {
+        // Fallback: list sources and pick the first .monitor
+        let src_output = Command::new("pactl")
+            .args(["list", "sources", "short"])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&src_output.stdout);
+        for line in stdout.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() >= 2 && fields[1].ends_with(".monitor") {
+                log::info!("Auto-detected audio monitor source: {}", fields[1]);
+                return Some(fields[1].to_string());
+            }
+        }
+        return None;
+    }
+
+    let default_sink = String::from_utf8_lossy(&sink_output.stdout).trim().to_string();
+    if default_sink.is_empty() {
+        return None;
+    }
+
+    let monitor = format!("{}.monitor", default_sink);
+    log::info!("Auto-detected audio monitor source: {} (from default sink: {})", monitor, default_sink);
+    Some(monitor)
+}
+
 #[cfg(feature = "pulseaudio")]
 pub fn run_audio_capture(
     config: AudioConfig,
@@ -200,9 +239,13 @@ pub fn run_audio_capture(
         channels: config.channels as u8,
     };
 
-    // Try monitor source of default sink first (captures application audio),
-    // then fall back to PULSE_SOURCE env var, then default source.
-    let source = std::env::var("PULSE_SOURCE").ok();
+    // Determine the audio source to capture from:
+    // 1. PULSE_SOURCE env var (explicit override)
+    // 2. Auto-detect: default sink's monitor source (captures application audio)
+    // 3. Fall back to PulseAudio default source
+    let source = std::env::var("PULSE_SOURCE").ok().or_else(|| {
+        detect_pulse_monitor_source()
+    });
     let source_ref = source.as_deref();
 
     let simple = Simple::new(
