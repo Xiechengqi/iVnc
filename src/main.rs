@@ -998,11 +998,11 @@ fn apply_cli_overrides(config: &mut Config, args: &Args) {
 }
 
 /// Write GTK3/GTK4 CSS to hide CSD headerbars for fullscreen/maximized windows.
-/// Dialog windows don't have Fullscreen state, so their headerbar stays visible.
+/// Dialog windows (including file choosers) are excluded to keep their controls visible.
 fn hide_gtk_titlebars() {
     let css = "\
-window.fullscreen headerbar,\n\
-window.maximized headerbar {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) headerbar,\n\
+window.maximized:not(.dialog):not(.messagedialog) headerbar {\n\
   min-height: 0;\n\
   padding: 0;\n\
   margin: 0 0 -100px 0;\n\
@@ -1011,15 +1011,15 @@ window.maximized headerbar {\n\
   box-shadow: none;\n\
   opacity: 0;\n\
 }\n\
-window.fullscreen headerbar *,\n\
-window.maximized headerbar * {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) headerbar *,\n\
+window.maximized:not(.dialog):not(.messagedialog) headerbar * {\n\
   min-height: 0;\n\
   min-width: 0;\n\
   padding: 0;\n\
   margin: 0;\n\
 }\n\
-window.fullscreen .titlebar,\n\
-window.maximized .titlebar {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) .titlebar,\n\
+window.maximized:not(.dialog):not(.messagedialog) .titlebar {\n\
   min-height: 0;\n\
   padding: 0;\n\
   margin: 0 0 -100px 0;\n\
@@ -1028,8 +1028,8 @@ window.maximized .titlebar {\n\
   box-shadow: none;\n\
   opacity: 0;\n\
 }\n\
-window.fullscreen .titlebar *,\n\
-window.maximized .titlebar * {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) .titlebar *,\n\
+window.maximized:not(.dialog):not(.messagedialog) .titlebar * {\n\
   min-height: 0;\n\
   min-width: 0;\n\
   padding: 0;\n\
@@ -1040,6 +1040,13 @@ window decoration {\n\
   padding: 0;\n\
   box-shadow: none;\n\
   border: none;\n\
+}\n\
+/* Ensure dialog action areas stay visible */\n\
+.dialog actionbar,\n\
+.messagedialog actionbar,\n\
+.dialog .dialog-action-area,\n\
+.messagedialog .dialog-action-area {\n\
+  min-height: 40px;\n\
 }\n";
 
     let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());

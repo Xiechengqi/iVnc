@@ -1191,7 +1191,7 @@ export default function webrtc() {
 			taskbar.id = 'taskbar';
 
 			// Pin button (first element in taskbar)
-			let taskbarPinned = getBoolParam('taskbar_pinned', false);
+			let taskbarPinned = getBoolParam('taskbar_pinned', true);
 			// SVG icons for pin states
 			// Unpinned: tilted pin (📌 style)
 			const pinSvgUnpinned = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><g transform="rotate(-45 12 12)"><path d="M12 17v5"/><path d="M9 11V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v7"/><path d="M5 15h14"/><path d="M9 11l-2 4h10l-2-4"/></g></svg>`;
