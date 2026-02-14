@@ -17,7 +17,6 @@ use smithay::{
         shm::{ShmHandler, ShmState},
     },
 };
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 
 use super::xdg_shell;
 
