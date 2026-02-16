@@ -321,7 +321,7 @@ export default function webrtc() {
 	var statWatchEnabled = false;
 	var webrtc = null;
 	var input = null;
-	let useCssScaling = false;
+	let useCssScaling = true;
 
 	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1; // 64KiB, excluding a byte for prefix
 
@@ -1756,7 +1756,7 @@ export default function webrtc() {
 			statWatchEnabled = false;
 			webrtc = null;
 			input = null;
-			useCssScaling = false;
+			useCssScaling = true;
 		}
 	}
 }

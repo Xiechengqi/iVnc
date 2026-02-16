@@ -2518,14 +2518,11 @@ export class Input {
     }
 
     getWindowResolution() {
-        // Use window.innerWidth/Height so the taskbar overlay doesn't shrink
-        // the server-side output resolution (body.offsetHeight excludes taskbar).
-        const bodyWidth = window.innerWidth;
-        const bodyHeight = window.innerHeight;
-        const ratio = window.devicePixelRatio || 1;
-        const offsetRatioWidth = bodyWidth * ratio;
-        const offsetRatioHeight = bodyHeight * ratio;
-        return [ Math.max(1, parseInt(offsetRatioWidth - offsetRatioWidth % 2)), Math.max(1, parseInt(offsetRatioHeight - offsetRatioHeight % 2)) ];
+        // Return CSS pixel dimensions (even-aligned).
+        // DPR scaling is handled by the caller (sendResolutionToServer / resetToWindowResolution).
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        return [ Math.max(1, w - w % 2), Math.max(1, h - h % 2) ];
     }
 
     resize() {
