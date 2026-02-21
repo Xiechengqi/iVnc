@@ -217,6 +217,48 @@ fn run(
         info!("Set XDG_RUNTIME_DIR={}", dir);
     }
 
+    // Clean up wayland sockets: kill non-ivnc processes occupying them
+    if let Ok(xdg_dir) = env::var("XDG_RUNTIME_DIR") {
+        for i in 0..3 {
+            let sock = format!("{}/wayland-{}", xdg_dir, i);
+            let lock = format!("{}.lock", sock);
+            if !std::path::Path::new(&sock).exists() {
+                continue;
+            }
+            if std::os::unix::net::UnixStream::connect(&sock).is_err() {
+                // Stale socket, just remove
+                std::fs::remove_file(&sock).ok();
+                std::fs::remove_file(&lock).ok();
+                continue;
+            }
+            // Socket is alive — find and kill the non-ivnc listener
+            if let Ok(output) = std::process::Command::new("fuser").arg(&sock).output() {
+                let pids_str = String::from_utf8_lossy(&output.stdout);
+                for token in pids_str.split_whitespace() {
+                    let pid: i32 = match token.trim().parse() {
+                        Ok(p) if p > 1 => p,
+                        _ => continue,
+                    };
+                    // Check if it's our own process
+                    if pid == std::process::id() as i32 {
+                        continue;
+                    }
+                    // Read process name
+                    let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
+                        .unwrap_or_default();
+                    if comm.trim() == "ivnc" {
+                        continue;
+                    }
+                    warn!("Killing non-ivnc process {} ({}) occupying {}", pid, comm.trim(), sock);
+                    unsafe { libc::kill(pid, libc::SIGKILL); }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                std::fs::remove_file(&sock).ok();
+                std::fs::remove_file(&lock).ok();
+            }
+        }
+    }
+
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let display: Display<Compositor> = Display::new()?;
     let mut comp = Compositor::new(&mut event_loop, display);

@@ -54,17 +54,10 @@ impl XdgShellHandler for Compositor {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let has_parent = surface.parent().is_some();
 
-        // Detect dialog: has explicit parent, same Wayland client, or the new
-        // window's process is a child/parent of an existing window's process
-        // (handles Chrome subprocess file choosers that are different clients).
-        let new_surface_id = surface.wl_surface().id();
-        let same_client_toplevel_exists = self.space.elements().any(|w| {
-            let existing_id = w.toplevel().unwrap().wl_surface().id();
-            existing_id.same_client_as(&new_surface_id)
-        });
-
-        let is_child_process = if !same_client_toplevel_exists {
-            // Check if new window's PID is a descendant of any existing window's PID
+        // Detect dialog: has explicit parent, or the new window's process is a
+        // child of an existing window's process (cross-process dialogs like
+        // Chrome file choosers).
+        let is_child_process = {
             let new_pid = surface.wl_surface().client()
                 .and_then(|c| c.get_credentials(&self.display_handle).ok())
                 .map(|c| c.pid);
@@ -74,7 +67,8 @@ impl XdgShellHandler for Compositor {
                         .and_then(|c| c.get_credentials(&self.display_handle).ok())
                         .map(|c| c.pid);
                     if let Some(ep) = existing_pid {
-                        is_descendant_of(new_pid, ep) || is_descendant_of(ep, new_pid)
+                        // Only check if new is descendant of existing (not reverse)
+                        new_pid != ep && is_descendant_of(new_pid, ep)
                     } else {
                         false
                     }
@@ -82,14 +76,12 @@ impl XdgShellHandler for Compositor {
             } else {
                 false
             }
-        } else {
-            false
         };
 
-        let is_dialog = has_parent || same_client_toplevel_exists || is_child_process;
+        let is_dialog = has_parent || is_child_process;
 
-        log::info!("new_toplevel: is_dialog={} (parent={}, same_client={}, child_proc={})",
-            is_dialog, has_parent, same_client_toplevel_exists, is_child_process);
+        log::info!("new_toplevel: is_dialog={} (parent={}, child_proc={})",
+            is_dialog, has_parent, is_child_process);
 
         let window = Window::new_wayland_window(surface.clone());
 
@@ -294,30 +286,11 @@ impl XdgShellHandler for Compositor {
         self.taskbar_dirty = true;
 
         let proto_id = surface.wl_surface().id().protocol_id();
-        let is_dialog = self.dialog_surfaces.remove(&proto_id);
+        self.dialog_surfaces.remove(&proto_id);
 
         // Remove only the destroyed surface from window registry (not siblings)
         let surf_id = surface.wl_surface().id();
         self.window_registry.retain(|wl| wl.id() != surf_id);
-
-        // Only kill the owning process if it's not a dialog and no other toplevels
-        // from the same client remain. Dialog processes (file choosers, etc.) may be
-        // child processes whose termination cascades to the parent app.
-        let has_sibling = self.space.elements().any(|w| {
-            let wl_id = w.toplevel().unwrap().wl_surface().id();
-            wl_id != surf_id && wl_id.same_client_as(&surf_id)
-        });
-        if !is_dialog && !has_sibling {
-            if let Some(client) = surface.wl_surface().client() {
-                if let Ok(creds) = client.get_credentials(&self.display_handle) {
-                    let pid = creds.pid;
-                    if pid > 1 {
-                        log::info!("Killing client process (pid={}) for destroyed toplevel", pid);
-                        unsafe { libc::kill(pid, libc::SIGTERM); }
-                    }
-                }
-            }
-        }
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {

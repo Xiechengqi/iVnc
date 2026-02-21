@@ -172,7 +172,7 @@ impl SharedState {
         }
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         match Command::new("sh")
-            .arg("-lc")
+            .arg("-c")
             .arg(cmd)
             .current_dir(home)
             .spawn()
