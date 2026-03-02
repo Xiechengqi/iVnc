@@ -35,6 +35,7 @@ use base64::Engine;
 use serde_json::json;
 
 use crate::webrtc::SessionManager;
+use crate::pake_apps::api::PakeState;
 
 /// Classify a TCP connection by its first bytes.
 fn classify_first_bytes(buf: &[u8]) -> ConnectionType {
@@ -91,6 +92,7 @@ pub async fn run_http_server_with_webrtc(
     state: Arc<SharedState>,
     session_manager: Option<Arc<SessionManager>>,
     enable_tls: bool,
+    pake_state: Option<Arc<PakeState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", port);
 
@@ -173,10 +175,16 @@ pub async fn run_http_server_with_webrtc(
         info!("MCP Streamable HTTP endpoint enabled at /mcp");
     }
 
+    // Pake apps management routes
+    if let Some(_pake) = &pake_state {
+        app = app.route("/console", get(console_handler));
+        info!("Pake apps console enabled at /console");
+    }
+
     // Set up fallback for static files
     let auth_state = state.clone();
     let metrics_state = state.clone(); // keep a copy for the accept loop (metrics)
-    let app: Router<()> = if use_embedded {
+    let mut app: Router<()> = if use_embedded {
         app.fallback(embedded_fallback_handler)
             .with_state(state)
     } else {
@@ -187,6 +195,11 @@ pub async fn run_http_server_with_webrtc(
         app.fallback_service(static_service)
             .with_state(state)
     };
+
+    // Merge pake routes after with_state (both are Router<()> now)
+    if let Some(ref pake) = pake_state {
+        app = app.merge(crate::pake_apps::api::router(pake.clone()));
+    }
 
     let app = app.layer(middleware::from_fn_with_state(auth_state, basic_auth_middleware));
 
@@ -603,5 +616,16 @@ async fn change_password_handler(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"ok":true}"#))
+        .unwrap()
+}
+
+/// Console page handler - serves the Pake apps management UI
+async fn console_handler() -> Response {
+    let html = include_str!("../../web/console/index.html");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store, max-age=0")
+        .body(Body::from(html))
         .unwrap()
 }

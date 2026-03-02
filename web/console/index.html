@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iVnc Console - Pake Apps</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}
+h1{font-size:1.4em;margin-bottom:16px;color:#a0c4ff}
+.toolbar{margin-bottom:16px}
+.btn{padding:6px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px;color:#fff}
+.btn-add{background:#4caf50}.btn-add:hover{background:#45a049}
+.btn-start{background:#2196f3}.btn-stop{background:#f44336}.btn-restart{background:#ff9800}
+.btn-clear{background:#9c27b0}.btn-delete{background:#b71c1c}
+.btn-edit{background:#607d8b}
+.btn-cancel{background:#666}.btn-save{background:#4caf50}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-sm{padding:3px 8px;font-size:12px}
+table{width:100%;border-collapse:collapse;background:#16213e;border-radius:6px;overflow:hidden}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #1a1a3e}
+th{background:#0f3460;font-size:13px;color:#a0c4ff}
+td{font-size:13px}
+.status{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-running{background:#4caf50}.status-stopped{background:#666}.status-crashed{background:#f44336}
+.modal-bg{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:10;align-items:center;justify-content:center}
+.modal-bg.show{display:flex}
+.modal{background:#16213e;border-radius:8px;padding:24px;width:400px;max-width:90%}
+.modal h2{font-size:1.1em;margin-bottom:16px;color:#a0c4ff}
+.form-group{margin-bottom:12px}
+.form-group label{display:block;font-size:12px;margin-bottom:4px;color:#aaa}
+.form-group input[type=text]{width:100%;padding:6px 10px;border:1px solid #333;border-radius:4px;background:#1a1a2e;color:#e0e0e0;font-size:13px}
+.form-group select{padding:6px 10px;border:1px solid #333;border-radius:4px;background:#1a1a2e;color:#e0e0e0;font-size:13px}
+.form-row{display:flex;gap:12px}
+.form-row .form-group{flex:1}
+.checkbox{display:flex;align-items:center;gap:6px;font-size:13px}
+.modal-actions{margin-top:16px;display:flex;gap:8px;justify-content:flex-end}
+.actions{display:flex;gap:4px;flex-wrap:wrap}
+.data-size{color:#888;font-size:12px}
+.empty{text-align:center;padding:40px;color:#666}
+.toast{position:fixed;bottom:20px;right:20px;padding:10px 16px;border-radius:4px;color:#fff;font-size:13px;z-index:20;opacity:0;transition:opacity .3s}
+.toast.show{opacity:1}
+.toast-ok{background:#4caf50}.toast-err{background:#f44336}
+.log-modal{width:700px}
+.log-content{background:#0a0a1a;border:1px solid #333;border-radius:4px;padding:10px;font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:400px;overflow-y:auto;color:#ccc}
+.btn-log{background:#00796b}
+</style>
+</head>
+<body>
+<h1>iVnc Console - Pake Apps</h1>
+<div class="toolbar"><button class="btn btn-add" onclick="showAdd()">+ 添加应用</button></div>
+<table>
+<thead><tr><th>名称</th><th>URL</th><th>模式</th><th>状态</th><th>数据</th><th>操作</th></tr></thead>
+<tbody id="app-list"><tr><td colspan="6" class="empty">加载中...</td></tr></tbody>
+</table>
+
+<div class="modal-bg" id="modal">
+<div class="modal">
+<h2 id="modal-title">添加应用</h2>
+<div class="form-group"><label>名称</label><input type="text" id="f-name"></div>
+<div class="form-group"><label>URL</label><input type="text" id="f-url" placeholder="https://"></div>
+<div class="form-row">
+<div class="form-group"><label>模式</label><select id="f-mode"><option value="native">Native</option><option value="webview">WebView</option></select></div>
+</div>
+<div class="form-row">
+<div class="form-group"><label class="checkbox"><input type="checkbox" id="f-autostart"> 开机自启</label></div>
+<div class="form-group"><label class="checkbox"><input type="checkbox" id="f-dark"> 暗色模式</label></div>
+</div>
+<div class="form-row" id="nav-row">
+<div class="form-group"><label class="checkbox"><input type="checkbox" id="f-nav"> 显示导航栏（仅 Native 模式）</label></div>
+</div>
+<div class="modal-actions">
+<button class="btn btn-cancel" onclick="hideModal()">取消</button>
+<button class="btn btn-save" id="modal-save" onclick="saveApp()">添加</button>
+</div>
+</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-bg" id="log-modal">
+<div class="modal log-modal">
+<h2 id="log-title">应用日志</h2>
+<div class="log-content" id="log-content">(loading...)</div>
+<div class="modal-actions"><button class="btn btn-cancel" onclick="hideLogModal()">关闭</button></div>
+</div>
+</div>
+
+<script>
+const API='/api/apps';
+let editId=null;
+
+async function load(){
+  try{
+    const r=await fetch(API);const d=await r.json();
+    const tb=document.getElementById('app-list');
+    if(!d.apps||!d.apps.length){tb.innerHTML='<tr><td colspan="6" class="empty">暂无应用，点击上方按钮添加</td></tr>';return}
+    tb.innerHTML=d.apps.map(a=>`<tr>
+      <td>${esc(a.name)}</td>
+      <td title="${esc(a.url)}">${esc(a.url.length>30?a.url.slice(0,30)+'...':a.url)}</td>
+      <td>${a.mode}</td>
+      <td><span class="status status-${a.status}"></span>${a.status}</td>
+      <td class="data-size">${a.data_size_human}</td>
+      <td class="actions">
+        ${a.status==='running'
+          ?`<button class="btn btn-stop btn-sm" onclick="act('${a.id}','stop')">停止</button>
+             <button class="btn btn-restart btn-sm" onclick="act('${a.id}','restart')">重启</button>`
+          :`<button class="btn btn-start btn-sm" onclick="act('${a.id}','start')">启动</button>`}
+        <button class="btn btn-edit btn-sm" onclick="showEdit('${a.id}')" ${a.status==='running'?'disabled title="请先停止应用再编辑"':''}>编辑</button>
+        <button class="btn btn-log btn-sm" onclick="showLogs('${a.id}','${esc(a.name)}')">日志</button>
+        <button class="btn btn-clear btn-sm" onclick="clearData('${a.id}','${esc(a.name)}')">清理</button>
+        <button class="btn btn-delete btn-sm" onclick="del('${a.id}','${esc(a.name)}')">删除</button>
+      </td></tr>`).join('');
+  }catch(e){toast('加载失败: '+e,'err')}
+}
+
+function showAdd(){
+  editId=null;
+  document.getElementById('modal-title').textContent='添加应用';
+  document.getElementById('modal-save').textContent='添加';
+  document.getElementById('f-name').value='';document.getElementById('f-name').disabled=false;
+  document.getElementById('f-url').value='';
+  document.getElementById('f-mode').value='native';
+  document.getElementById('f-autostart').checked=false;
+  document.getElementById('f-dark').checked=false;
+  document.getElementById('f-nav').checked=false;
+  updateNavVisibility();
+  document.getElementById('modal').classList.add('show');
+}
+
+async function showEdit(id){
+  try{
+    const r=await fetch(API+'/'+id);const a=await r.json();
+    editId=id;
+    document.getElementById('modal-title').textContent='编辑应用';
+    document.getElementById('modal-save').textContent='保存';
+    document.getElementById('f-name').value=a.name;document.getElementById('f-name').disabled=true;
+    document.getElementById('f-url').value=a.url;
+    document.getElementById('f-mode').value=a.mode;
+    document.getElementById('f-autostart').checked=a.autostart;
+    document.getElementById('f-dark').checked=a.dark_mode;
+    document.getElementById('f-nav').checked=a.show_nav||false;
+    updateNavVisibility();
+    document.getElementById('modal').classList.add('show');
+  }catch(e){toast('获取失败','err')}
+}
+
+function hideModal(){document.getElementById('modal').classList.remove('show')}
+
+async function saveApp(){
+  const body={
+    url:document.getElementById('f-url').value,
+    mode:document.getElementById('f-mode').value,
+    autostart:document.getElementById('f-autostart').checked,
+    dark_mode:document.getElementById('f-dark').checked,
+    show_nav:document.getElementById('f-nav').checked,
+  };
+  if(!editId)body.name=document.getElementById('f-name').value;
+  try{
+    const r=await fetch(editId?API+'/'+editId:API,{
+      method:editId?'PUT':'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const d=await r.json();
+    if(d.error){toast(d.error,'err');return}
+    hideModal();toast(editId?'已更新':'已添加','ok');load();
+  }catch(e){toast('操作失败','err')}
+}
+
+async function act(id,action){
+  try{
+    const r=await fetch(`${API}/${id}/${action}`,{method:'POST'});
+    const d=await r.json();
+    if(d.error){toast(d.error,'err');return}
+    toast(action==='start'?'已启动':action==='stop'?'已停止':'已重启','ok');load();
+  }catch(e){toast('操作失败','err')}
+}
+
+async function del(id,name){
+  if(!confirm(`确认删除应用 "${name}"？`))return;
+  try{
+    const r=await fetch(API+'/'+id,{method:'DELETE'});
+    const d=await r.json();
+    if(d.error){toast(d.error,'err');return}
+    toast('已删除','ok');load();
+  }catch(e){toast('删除失败','err')}
+}
+
+async function clearData(id,name){
+  if(!confirm(`确认清理 "${name}" 的缓存数据？\n将清除所有Cookie、LocalStorage和缓存。`))return;
+  try{
+    const r=await fetch(`${API}/${id}/clear-data`,{method:'POST'});
+    const d=await r.json();
+    if(d.error){toast(d.error,'err');return}
+    toast('已清理','ok');load();
+  }catch(e){toast('清理失败','err')}
+}
+
+function toast(msg,type){
+  const t=document.getElementById('toast');
+  t.textContent=msg;t.className='toast toast-'+type+' show';
+  setTimeout(()=>t.classList.remove('show'),2500);
+}
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+async function showLogs(id,name){
+  document.getElementById('log-title').textContent='日志: '+name;
+  document.getElementById('log-content').textContent='加载中...';
+  document.getElementById('log-modal').classList.add('show');
+  try{
+    const r=await fetch(`${API}/${id}/logs`);const d=await r.json();
+    document.getElementById('log-content').textContent=d.logs||'(空)';
+    const el=document.getElementById('log-content');
+    el.scrollTop=el.scrollHeight;
+  }catch(e){document.getElementById('log-content').textContent='加载失败: '+e}
+}
+function hideLogModal(){document.getElementById('log-modal').classList.remove('show')}
+
+function updateNavVisibility(){
+  const mode=document.getElementById('f-mode').value;
+  const navRow=document.getElementById('nav-row');
+  const navCheckbox=document.getElementById('f-nav');
+  if(mode==='webview'){
+    navRow.style.display='none';
+    navCheckbox.disabled=true;
+  }else{
+    navRow.style.display='flex';
+    navCheckbox.disabled=false;
+  }
+}
+
+// Add event listener for mode changes
+document.addEventListener('DOMContentLoaded',function(){
+  document.getElementById('f-mode').addEventListener('change',updateNavVisibility);
+});
+
+load();setInterval(load,5000);
+</script>
+</body>
+</html>

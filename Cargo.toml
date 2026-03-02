@@ -72,6 +72,22 @@ rcgen = { version = "0.13", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 
+# SQLite for Pake app management
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Standard directories
+dirs = "5"
+tokio-tungstenite = "0.24"
+
+# WebView support for Pake apps
+wry = { version = "0.47", features = ["linux-body", "protocol"] }
+tao = "0.30"  # Cross-platform windowing for wry
+gtk = "0.18"
+glib = "0.18"
+webkit2gtk = "2.0"
+lazy_static = "1.4"
+nix = { version = "0.29", features = ["signal"] }
+
 # MCP server (optional)
 rmcp = { version = "0.17", features = ["server", "transport-io", "transport-streamable-http-server"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }

@@ -14,6 +14,7 @@ pub mod web;
 pub mod compositor;
 pub mod gstreamer;
 pub mod webrtc;
+pub mod pake_apps;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 

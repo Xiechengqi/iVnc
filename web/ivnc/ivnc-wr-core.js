@@ -217,6 +217,8 @@ function InitUI() {
 	.taskbar-item {
 		display: inline-flex;
 		align-items: center;
+		display: flex;
+		align-items: center;
 		height: 28px;
 		padding: 0 12px;
 		margin: 0 2px;
@@ -245,7 +247,7 @@ function InitUI() {
 	}
 	.taskbar-close {
 		display: none;
-		margin-left: 6px;
+		margin-left: auto;
 		width: 14px;
 		height: 14px;
 		line-height: 12px;

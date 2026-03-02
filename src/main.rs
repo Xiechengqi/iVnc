@@ -15,6 +15,7 @@ mod web;
 mod compositor;
 mod gstreamer;
 mod webrtc;
+mod pake_apps;
 #[cfg(feature = "mcp")]
 mod mcp;
 
@@ -42,10 +43,30 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Look up a .desktop file whose StartupWMClass matches the given app_id,
 /// and return its Name= value. Returns None if no match found.
-fn resolve_display_name(app_id: &str) -> Option<String> {
+/// For Pake apps (ivnc-pake-*), extract the app name from the window title.
+fn resolve_display_name(app_id: &str, title: &str) -> Option<String> {
     if app_id.is_empty() {
         return None;
     }
+
+    // Special handling for Pake apps: extract name from window title
+    // Chrome window titles are typically: "Page Title - Google Chrome" or "Page Title - Chromium"
+    if app_id == "ivnc-pake-windowed" || app_id == "ivnc-pake-app" {
+        // Try to extract the page title before " - Google Chrome" or " - Chromium"
+        if let Some(pos) = title.rfind(" - ") {
+            let page_title = &title[..pos];
+            // Skip generic titles like "Untitled"
+            if !page_title.is_empty() && page_title != "Untitled" {
+                return Some(page_title.to_string());
+            }
+        }
+        // Fallback: return the full title if we can't parse it
+        if !title.is_empty() && title != "Untitled" {
+            return Some(title.to_string());
+        }
+        return None;
+    }
+
     let data_home = env::var("XDG_DATA_HOME")
         .ok()
         .map(std::path::PathBuf::from)
@@ -599,7 +620,7 @@ fn run(
                     "id": idx,
                     "title": title,
                     "app_id": app_id,
-                    "display_name": resolve_display_name(&app_id),
+                    "display_name": resolve_display_name(&app_id, &title),
                     "focused": is_focused,
                 }));
             }
@@ -1312,10 +1333,22 @@ async fn run_async_services(
         });
     }
 
+    // Pake apps manager
+    let pake_state = match crate::pake_apps::api::PakeState::new() {
+        Ok(ps) => {
+            info!("Pake apps manager initialized");
+            Some(std::sync::Arc::new(ps))
+        }
+        Err(e) => {
+            warn!("Failed to init Pake apps manager: {}", e);
+            None
+        }
+    };
+
     // HTTP server
     let port = config.http.port;
     info!("Starting HTTP server on port {}", port);
-    web::run_http_server_with_webrtc(port, shared.clone(), session_manager, config.http.tls)
+    web::run_http_server_with_webrtc(port, shared.clone(), session_manager, config.http.tls, pake_state)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("HTTP server error: {}", e).into()
