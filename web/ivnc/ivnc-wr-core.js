@@ -1235,6 +1235,22 @@ export default function webrtc() {
 
 	function uploadFileObject(file, pathToSend) {
 		return new Promise((resolve, reject) => {
+			// Start a heartbeat to prevent connection timeout during upload
+			const heartbeatInterval = setInterval(() => {
+				try {
+					if (webrtc && webrtc._send_channel && webrtc._send_channel.readyState === 'open') {
+						// Send a lightweight heartbeat message
+						webrtc.sendDataChannelMessage('pong');
+					}
+				} catch (err) {
+					console.warn('Heartbeat failed:', err);
+				}
+			}, 5000); // Send heartbeat every 5 seconds
+
+			const cleanup = () => {
+				clearInterval(heartbeatInterval);
+			};
+
 			window.postMessage({
 				type: 'fileUpload',
 				payload: {
@@ -1259,8 +1275,22 @@ export default function webrtc() {
 					const prefixedView = new Uint8Array(1 + e.target.result.byteLength);
 					prefixedView[0] = 0x01; // Data prefix for file chunk
 					prefixedView.set(new Uint8Array(e.target.result), 1);
-					webrtc.sendAuxChannelData(prefixedView.buffer);  // Using auxiliary data channel to send file data
-					offset += e.target.result.byteLength;
+
+					// Check if auxiliary channel is still open before sending
+					if (!webrtc._aux_channel || webrtc._aux_channel.readyState !== 'open') {
+						throw new Error('Auxiliary data channel closed during upload');
+					}
+
+				// Send data and check if it succeeded
+				const sendSuccess = webrtc.sendAuxChannelData(prefixedView.buffer);
+				if (!sendSuccess) {
+					// If send failed (buffer full), retry after a delay
+					console.warn(`[Upload] Send failed for ${pathToSend}, retrying chunk at offset ${offset}...`);
+					setTimeout(() => reader.readAsArrayBuffer(slice), 100);
+					return;
+				}
+
+				offset += e.target.result.byteLength;
 					const progress = file.size > 0 ? Math.round((offset / file.size) * 100) : 100;
 					window.postMessage({
 						type: 'fileUpload',
@@ -1280,22 +1310,41 @@ export default function webrtc() {
 					} else {
 						// Data channels work asynchronously due to their underlying implementation,
 						// so we need to wait for its buffer to drain before sending the end message.
-						await webrtc.awaitForAuxBufferToDrain();
-						webrtc.sendDataChannelMessage(`FILE_UPLOAD_END:${pathToSend}`);
-						window.postMessage({
-						type: 'fileUpload',
-						payload: {
-							status: 'end',
-							fileName: pathToSend,
-							fileSize: file.size
+						try {
+						console.log(`[Upload] All chunks sent for ${pathToSend}, waiting for buffer to drain...`);
+					console.log(`[Upload] Current buffer amount: ${webrtc._aux_channel ? webrtc._aux_channel.bufferedAmount : 'N/A'} bytes`);
+							await webrtc.awaitForAuxBufferToDrain(30000);
+						console.log(`[Upload] Buffer drained for ${pathToSend}, sending end message...`);
+							// Check if connection is still alive before sending end message
+							if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') {
+								throw new Error('Connection lost during upload');
+							}
+							webrtc.sendDataChannelMessage(`FILE_UPLOAD_END:${pathToSend}`);
+						console.log(`[Upload] End message sent for ${pathToSend}, posting success...`);
+							window.postMessage({
+							type: 'fileUpload',
+							payload: {
+								status: 'end',
+								fileName: pathToSend,
+								fileSize: file.size
+							}
+							}, window.location.origin);
+						console.log(`[Upload] Upload completed successfully for ${pathToSend}`);
+				cleanup();
+							resolve();
+						} catch (endError) {
+						console.error(`[Upload] Error completing upload for ${pathToSend}:`, endError);
+							const endErrorMsg = `Failed to complete upload of ${pathToSend}: ${endError.message || endError}`;
+							window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: endErrorMsg }}, window.location.origin);
+				cleanup();
+							reject(endError);
 						}
-						}, window.location.origin);
-						resolve();
 						}
 				} catch (error) {
 					const sendErrorMsg = `error during upload of ${pathToSend}: ${error.message || error}`;
 					window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: sendErrorMsg }}, window.location.origin);
 					webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${pathToSend}:send error`);
+			cleanup();
 					reject(error);
 				}
 			};
@@ -1303,6 +1352,7 @@ export default function webrtc() {
 				const generalReadError = `General file reader error for ${pathToSend}: ${e.target.error}`;
 				window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: generalReadError }}, window.location.origin);
 				webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${pathToSend}:General file reader error`)
+		cleanup();
 				reject(e.target.error);
 			};
 

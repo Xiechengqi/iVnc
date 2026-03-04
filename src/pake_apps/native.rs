@@ -92,7 +92,8 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
        .arg("--no-default-browser-check")
        .arg("--disable-features=MediaRouter")
        .arg("--disable-background-networking")
-       .arg("--disable-process-singleton");
+       .arg("--disable-process-singleton")
+       .arg("--disable-quic");
 
     // Only add CDP debugging for app mode (when show_nav is false)
     let debug_port = if !app.show_nav {

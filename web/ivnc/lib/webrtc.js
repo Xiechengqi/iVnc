@@ -752,19 +752,28 @@ export class WebRTCDemo {
 				return;
 			}
 
-			// Check the buffer status periodically
-			const check = () => {
-				if (this._aux_channel && this._aux_channel.bufferedAmount === 0) {
-					console.log("Auxiliary data channel buffer drained");
-					resolve();
-					return;
-				}
-				if (typeof timeoutMs === 'number' && (Date.now() - start) >= timeoutMs) {
-					reject(new Error("Timeout waiting for aux data channel buffer to drain"));
-					return;
-				}
-				setTimeout(check, pollInterval);
-			};
+		// Check the buffer status periodically
+		let lastLoggedAmount = -1;
+		const check = () => {
+			if (this._aux_channel && this._aux_channel.bufferedAmount === 0) {
+				console.log("Auxiliary data channel buffer drained");
+				resolve();
+				return;
+			}
+			// Log buffer amount every 5 seconds
+			const currentAmount = this._aux_channel ? this._aux_channel.bufferedAmount : 0;
+			const elapsed = Date.now() - start;
+			if (elapsed % 5000 < pollInterval && currentAmount !== lastLoggedAmount) {
+				console.log(`[Buffer] Still waiting... bufferedAmount: ${currentAmount} bytes, elapsed: ${Math.round(elapsed/1000)}s`);
+				lastLoggedAmount = currentAmount;
+			}
+			if (typeof timeoutMs === 'number' && elapsed >= timeoutMs) {
+				console.error(`[Buffer] Timeout after ${Math.round(elapsed/1000)}s, bufferedAmount: ${currentAmount} bytes`);
+				reject(new Error("Timeout waiting for aux data channel buffer to drain"));
+				return;
+			}
+			setTimeout(check, pollInterval);
+		};
 			check();
 		});
 	}
