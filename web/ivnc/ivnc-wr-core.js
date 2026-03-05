@@ -447,6 +447,125 @@ function InitUI() {
 	}
 	.pwd-msg.error { color: #e85959; }
 	.pwd-msg.ok { color: #5cb85c; }
+
+	/* Force update modal styles */
+	.update-overlay {
+		position: fixed;
+		inset: 0;
+		background: rgba(0,0,0,0.6);
+		z-index: 2000;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.update-dialog {
+		background: #1e1e1e;
+		border: 1px solid #444;
+		border-radius: 8px;
+		padding: 24px;
+		min-width: 400px;
+		max-width: 600px;
+		max-height: 80vh;
+		color: #eee;
+		font-family: system-ui, sans-serif;
+		display: flex;
+		flex-direction: column;
+	}
+	.update-dialog h3 {
+		margin: 0 0 16px;
+		font-size: 15px;
+		font-weight: 600;
+	}
+	.update-info {
+		margin-bottom: 16px;
+		font-size: 13px;
+	}
+	.update-info p {
+		margin: 8px 0;
+	}
+	.update-info strong {
+		color: #4c86e6;
+	}
+	.update-warning {
+		color: #f59e0b;
+		margin-top: 12px !important;
+	}
+	.update-ok-msg {
+		color: #10b981;
+	}
+	.update-error {
+		color: #ef4444;
+	}
+	.update-progress {
+		margin-bottom: 16px;
+	}
+	.progress-bar {
+		width: 100%;
+		height: 8px;
+		background: #2a2a2a;
+		border-radius: 4px;
+		overflow: hidden;
+		margin-bottom: 8px;
+	}
+	.progress-fill {
+		height: 100%;
+		background: #4c86e6;
+		transition: width 0.3s ease;
+	}
+	.progress-text {
+		font-size: 12px;
+		color: #999;
+		text-align: center;
+	}
+	.update-logs {
+		max-height: 300px;
+		overflow-y: auto;
+		background: #0a0a0a;
+		border: 1px solid #333;
+		border-radius: 4px;
+		padding: 12px;
+		margin-bottom: 16px;
+		font-family: 'Courier New', monospace;
+		font-size: 12px;
+	}
+	.log-entry {
+		margin-bottom: 4px;
+		line-height: 1.4;
+	}
+	.log-info { color: #94a3b8; }
+	.log-success { color: #10b981; }
+	.log-error { color: #ef4444; }
+	.log-progress { color: #60a5fa; }
+	.update-btns {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+	}
+	.update-dialog button {
+		padding: 6px 16px;
+		border: none;
+		border-radius: 4px;
+		font-size: 13px;
+		cursor: pointer;
+	}
+	.update-dialog button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.update-cancel {
+		background: #444;
+		color: #ccc;
+	}
+	.update-cancel:hover:not(:disabled) {
+		background: #555;
+	}
+	.update-ok {
+		background: #4c86e6;
+		color: #fff;
+	}
+	.update-ok:hover:not(:disabled) {
+		background: #5a94f0;
+	}
 	`;
   document.head.appendChild(style);
 }
@@ -530,6 +649,187 @@ function showChangePasswordModal() {
 		okBtn.disabled = false;
 		okBtn.textContent = '确定';
 	});
+}
+
+function showForceUpdateModal() {
+	// Remove existing modal if any
+	const existing = document.querySelector('.update-overlay');
+	if (existing) existing.remove();
+
+	const overlay = document.createElement('div');
+	overlay.className = 'update-overlay';
+
+	const dialog = document.createElement('div');
+	dialog.className = 'update-dialog';
+	dialog.innerHTML = `
+		<h3>强制更新</h3>
+		<div class="update-info" id="update-info">
+			<p>正在检查更新...</p>
+		</div>
+		<div class="update-progress" id="update-progress" style="display:none;">
+			<div class="progress-bar">
+				<div class="progress-fill" id="progress-fill"></div>
+			</div>
+			<div class="progress-text" id="progress-text">0%</div>
+		</div>
+		<div class="update-logs" id="update-logs" style="display:none;"></div>
+		<div class="update-btns" id="update-btns">
+			<button class="update-cancel" id="update-cancel">取消</button>
+			<button class="update-ok" id="update-ok" disabled>开始更新</button>
+		</div>
+	`;
+	overlay.appendChild(dialog);
+	document.body.appendChild(overlay);
+
+	const infoDiv = document.getElementById('update-info');
+	const progressDiv = document.getElementById('update-progress');
+	const logsDiv = document.getElementById('update-logs');
+	const progressFill = document.getElementById('progress-fill');
+	const progressText = document.getElementById('progress-text');
+	const btnsDiv = document.getElementById('update-btns');
+	const okBtn = document.getElementById('update-ok');
+	const cancelBtn = document.getElementById('update-cancel');
+
+	let isUpdating = false;
+
+	const close = () => {
+		if (!isUpdating) overlay.remove();
+	};
+	overlay.addEventListener('click', (e) => { if (e.target === overlay && !isUpdating) close(); });
+	cancelBtn.addEventListener('click', close);
+
+	// Check for updates
+	fetch('/api/version')
+		.then(resp => resp.json())
+		.then(data => {
+			if (data.has_update) {
+				infoDiv.innerHTML = `
+					<p>当前版本: <strong>${data.current}</strong></p>
+					<p>最新版本: <strong>${data.latest}</strong></p>
+					<p class="update-warning">⚠️ 更新过程中服务将短暂中断</p>
+				`;
+				okBtn.disabled = false;
+			} else {
+				infoDiv.innerHTML = `
+					<p>当前版本: <strong>${data.current}</strong></p>
+					<p class="update-ok-msg">✓ 已是最新版本</p>
+				`;
+				okBtn.textContent = '关闭';
+				okBtn.disabled = false;
+				okBtn.addEventListener('click', close);
+			}
+		})
+		.catch(err => {
+			infoDiv.innerHTML = `<p class="update-error">检查更新失败: ${err.message}</p>`;
+		});
+
+	okBtn.addEventListener('click', () => {
+		if (okBtn.textContent === '关闭') {
+			close();
+			return;
+		}
+
+		if (!confirm('确定要强制更新到最新版本吗？\n更新过程中服务将短暂中断。')) {
+			return;
+		}
+
+		isUpdating = true;
+		okBtn.disabled = true;
+		cancelBtn.disabled = true;
+		infoDiv.style.display = 'none';
+		progressDiv.style.display = 'block';
+		logsDiv.style.display = 'block';
+
+		// Connect to WebSocket
+		const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+		const wsUrl = `${wsProtocol}//${window.location.host}/api/upgrade/ws`;
+		const ws = new WebSocket(wsUrl);
+
+		ws.onmessage = (event) => {
+			try {
+				const entry = JSON.parse(event.data);
+				const logEntry = document.createElement('div');
+				logEntry.className = `log-entry log-${entry.level}`;
+				logEntry.textContent = `[${entry.step}/${entry.total_steps}] ${entry.message}`;
+				logsDiv.appendChild(logEntry);
+				logsDiv.scrollTop = logsDiv.scrollHeight;
+
+				const progress = Math.round((entry.step / entry.total_steps) * 100);
+				progressFill.style.width = progress + '%';
+				progressText.textContent = progress + '%';
+
+				if (entry.level === 'error') {
+					progressFill.style.backgroundColor = '#ef4444';
+					isUpdating = false;
+					cancelBtn.disabled = false;
+					cancelBtn.textContent = '关闭';
+				}
+			} catch (err) {
+				console.error('Failed to parse upgrade log:', err);
+			}
+		};
+
+		ws.onclose = () => {
+			const hasError = Array.from(logsDiv.querySelectorAll('.log-error')).length > 0;
+			if (!hasError) {
+				progressFill.style.backgroundColor = '#10b981';
+				const logEntry = document.createElement('div');
+				logEntry.className = 'log-entry log-success';
+				logEntry.textContent = '更新完成，等待服务重启...';
+				logsDiv.appendChild(logEntry);
+				logsDiv.scrollTop = logsDiv.scrollHeight;
+				waitForRestart();
+			} else {
+				isUpdating = false;
+				cancelBtn.disabled = false;
+				cancelBtn.textContent = '关闭';
+			}
+		};
+
+		ws.onerror = () => {
+			const logEntry = document.createElement('div');
+			logEntry.className = 'log-entry log-error';
+			logEntry.textContent = 'WebSocket 连接失败';
+			logsDiv.appendChild(logEntry);
+			progressFill.style.backgroundColor = '#ef4444';
+			isUpdating = false;
+			cancelBtn.disabled = false;
+			cancelBtn.textContent = '关闭';
+		};
+	});
+
+	function waitForRestart() {
+		let attempts = 0;
+		const maxAttempts = 30;
+		const checkInterval = setInterval(() => {
+			attempts++;
+			fetch('/health')
+				.then(resp => {
+					if (resp.ok) {
+						clearInterval(checkInterval);
+						const logEntry = document.createElement('div');
+						logEntry.className = 'log-entry log-success';
+						logEntry.textContent = '服务已恢复，即将刷新页面...';
+						logsDiv.appendChild(logEntry);
+						setTimeout(() => window.location.reload(), 1000);
+					}
+				})
+				.catch(() => {
+					// Still waiting
+				});
+
+			if (attempts >= maxAttempts) {
+				clearInterval(checkInterval);
+				const logEntry = document.createElement('div');
+				logEntry.className = 'log-entry log-error';
+				logEntry.textContent = '服务未恢复，请稍后手动刷新';
+				logsDiv.appendChild(logEntry);
+				isUpdating = false;
+				cancelBtn.disabled = false;
+				cancelBtn.textContent = '关闭';
+			}
+		}, 1000);
+	}
 }
 
 export default function webrtc() {
@@ -1794,6 +2094,19 @@ export default function webrtc() {
 				}
 			});
 			taskbar.appendChild(uploadBtn);
+
+			// Force update button
+			const updateSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>`;
+			const updateBtn = document.createElement('div');
+			updateBtn.className = 'taskbar-pin';
+			updateBtn.id = 'update-btn';
+			updateBtn.innerHTML = updateSvg;
+			updateBtn.title = '强制更新';
+			updateBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				showForceUpdateModal();
+			});
+			taskbar.appendChild(updateBtn);
 
 			const connIndicator = document.createElement('div');
 			connIndicator.className = 'taskbar-conn';
