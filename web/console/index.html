@@ -50,7 +50,7 @@ td{font-size:13px}
 <h1>iVnc Console - Apps</h1>
 <div class="toolbar"><button class="btn btn-add" onclick="showAdd()">+ 添加应用</button></div>
 <table>
-<thead><tr><th>名称</th><th>URL</th><th>模式</th><th>状态</th><th>数据</th><th>操作</th></tr></thead>
+<thead><tr><th>名称</th><th>类型</th><th>配置</th><th>状态</th><th>数据</th><th>操作</th></tr></thead>
 <tbody id="app-list"><tr><td colspan="6" class="empty">加载中...</td></tr></tbody>
 </table>
 
@@ -58,16 +58,25 @@ td{font-size:13px}
 <div class="modal">
 <h2 id="modal-title">添加应用</h2>
 <div class="form-group"><label>名称</label><input type="text" id="f-name"></div>
+<div class="form-group">
+<label>应用类型</label>
+<select id="f-app-type">
+<option value="webapp">网页APP</option>
+<option value="desktop">桌面APP</option>
+</select>
+</div>
+<div id="webapp-config">
 <div class="form-group"><label>URL</label><input type="text" id="f-url" placeholder="https://"></div>
 <div class="form-row">
 <div class="form-group"><label>模式</label><select id="f-mode"><option value="native">Native</option><option value="webview">WebView</option></select></div>
 </div>
-<div class="form-row">
-<div class="form-group"><label class="checkbox"><input type="checkbox" id="f-autostart"> 开机自启</label></div>
-<div class="form-group"><label class="checkbox"><input type="checkbox" id="f-dark"> 暗色模式</label></div>
-</div>
 <div class="form-row" id="nav-row">
 <div class="form-group"><label class="checkbox"><input type="checkbox" id="f-nav"> 显示导航栏（仅 Native 模式）</label></div>
+</div>
+</div>
+<div id="desktop-config" style="display:none">
+<div class="form-group"><label>启动命令</label><input type="text" id="f-exec" placeholder="/usr/bin/code --no-sandbox"><small>完整命令，包含路径和参数</small></div>
+<div class="form-group"><label>环境变量（可选）</label><textarea id="f-env" rows="3" placeholder="KEY1=value1&#10;KEY2=value2"></textarea><small>每行一个，格式：KEY=VALUE</small></div>
 </div>
 <div class="modal-actions">
 <button class="btn btn-cancel" onclick="hideModal()">取消</button>
@@ -95,10 +104,13 @@ async function load(){
     const r=await fetch(API);const d=await r.json();
     const tb=document.getElementById('app-list');
     if(!d.apps||!d.apps.length){tb.innerHTML='<tr><td colspan="6" class="empty">暂无应用，点击上方按钮添加</td></tr>';return}
-    tb.innerHTML=d.apps.map(a=>`<tr>
+    tb.innerHTML=d.apps.map(a=>{
+      const type=a.app_type==='desktop'?'桌面':'网页';
+      const config=a.app_type==='desktop'?esc(a.exec_command||''):esc((a.url||'').length>30?a.url.slice(0,30)+'...':a.url||'');
+      return `<tr>
       <td>${esc(a.name)}</td>
-      <td title="${esc(a.url)}">${esc(a.url.length>30?a.url.slice(0,30)+'...':a.url)}</td>
-      <td>${a.mode}</td>
+      <td>${type}</td>
+      <td title="${esc(a.app_type==='desktop'?a.exec_command||'':a.url||'')}">${config}</td>
       <td><span class="status status-${a.status}"></span>${a.status}</td>
       <td class="data-size">${a.data_size_human}</td>
       <td class="actions">
@@ -110,7 +122,8 @@ async function load(){
         <button class="btn btn-log btn-sm" onclick="showLogs('${a.id}','${esc(a.name)}')">日志</button>
         <button class="btn btn-clear btn-sm" onclick="clearData('${a.id}','${esc(a.name)}')">清理</button>
         <button class="btn btn-delete btn-sm" onclick="del('${a.id}','${esc(a.name)}')">删除</button>
-      </td></tr>`).join('');
+      </td></tr>`;
+    }).join('');
   }catch(e){toast('加载失败: '+e,'err')}
 }
 
@@ -119,13 +132,28 @@ function showAdd(){
   document.getElementById('modal-title').textContent='添加应用';
   document.getElementById('modal-save').textContent='添加';
   document.getElementById('f-name').value='';document.getElementById('f-name').disabled=false;
+  document.getElementById('f-app-type').value='webapp';
   document.getElementById('f-url').value='';
   document.getElementById('f-mode').value='native';
-  document.getElementById('f-autostart').checked=false;
-  document.getElementById('f-dark').checked=false;
   document.getElementById('f-nav').checked=false;
+  document.getElementById('f-exec').value='';
+  document.getElementById('f-env').value='';
+  updateAppTypeVisibility();
   updateNavVisibility();
   document.getElementById('modal').classList.add('show');
+}
+
+function updateAppTypeVisibility(){
+  const type=document.getElementById('f-app-type').value;
+  const webappConfig=document.getElementById('webapp-config');
+  const desktopConfig=document.getElementById('desktop-config');
+  if(type==='desktop'){
+    webappConfig.style.display='none';
+    desktopConfig.style.display='block';
+  }else{
+    webappConfig.style.display='block';
+    desktopConfig.style.display='none';
+  }
 }
 
 async function showEdit(id){
@@ -135,11 +163,18 @@ async function showEdit(id){
     document.getElementById('modal-title').textContent='编辑应用';
     document.getElementById('modal-save').textContent='保存';
     document.getElementById('f-name').value=a.name;document.getElementById('f-name').disabled=true;
-    document.getElementById('f-url').value=a.url;
-    document.getElementById('f-mode').value=a.mode;
-    document.getElementById('f-autostart').checked=a.autostart;
-    document.getElementById('f-dark').checked=a.dark_mode;
-    document.getElementById('f-nav').checked=a.show_nav||false;
+    document.getElementById('f-app-type').value=a.app_type||'webapp';
+    document.getElementById('f-app-type').disabled=true;
+    if(a.app_type==='desktop'){
+      document.getElementById('f-exec').value=a.exec_command||'';
+      const envStr=a.env_vars?Object.entries(a.env_vars).map(([k,v])=>`${k}=${v}`).join('\n'):'';
+      document.getElementById('f-env').value=envStr;
+    }else{
+      document.getElementById('f-url').value=a.url||'';
+      document.getElementById('f-mode').value=a.mode||'native';
+      document.getElementById('f-nav').checked=a.show_nav||false;
+    }
+    updateAppTypeVisibility();
     updateNavVisibility();
     document.getElementById('modal').classList.add('show');
   }catch(e){toast('获取失败','err')}
@@ -148,14 +183,31 @@ async function showEdit(id){
 function hideModal(){document.getElementById('modal').classList.remove('show')}
 
 async function saveApp(){
-  const body={
-    url:document.getElementById('f-url').value,
-    mode:document.getElementById('f-mode').value,
-    autostart:document.getElementById('f-autostart').checked,
-    dark_mode:document.getElementById('f-dark').checked,
-    show_nav:document.getElementById('f-nav').checked,
-  };
+  const appType=document.getElementById('f-app-type').value;
+  const body={app_type:appType};
   if(!editId)body.name=document.getElementById('f-name').value;
+
+  if(appType==='desktop'){
+    body.exec_command=document.getElementById('f-exec').value;
+    const envText=document.getElementById('f-env').value.trim();
+    if(envText){
+      const envVars={};
+      envText.split('\n').forEach(line=>{
+        const idx=line.indexOf('=');
+        if(idx>0){
+          const k=line.substring(0,idx).trim();
+          const v=line.substring(idx+1).trim();
+          if(k)envVars[k]=v;
+        }
+      });
+      body.env_vars=envVars;
+    }
+  }else{
+    body.url=document.getElementById('f-url').value;
+    body.mode=document.getElementById('f-mode').value;
+    body.show_nav=document.getElementById('f-nav').checked;
+  }
+
   try{
     const r=await fetch(editId?API+'/'+editId:API,{
       method:editId?'PUT':'POST',
@@ -231,8 +283,9 @@ function updateNavVisibility(){
   }
 }
 
-// Add event listener for mode changes
+// Add event listeners
 document.addEventListener('DOMContentLoaded',function(){
+  document.getElementById('f-app-type').addEventListener('change',updateAppTypeVisibility);
   document.getElementById('f-mode').addEventListener('change',updateNavVisibility);
 });
 

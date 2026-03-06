@@ -134,9 +134,10 @@ impl WebViewInstance {
         };
 
         // Build WebView using GTK-specific API
-        info!("Building WebView with URL: {}", app.url);
+        let url = app.url.as_ref().ok_or("WebApp must have url")?;
+        info!("Building WebView with URL: {}", url);
         let webview = WebViewBuilder::new()
-            .with_url(&app.url)
+            .with_url(url)
             .with_initialization_script(&init_script)
             .with_ipc_handler(ipc_handler)
             .build_gtk(&container)
@@ -191,22 +192,8 @@ fn get_log_path(app_id: &str) -> PathBuf {
 
 /// Generate initialization script for WebView with console logging via IPC
 #[allow(dead_code)]
-fn get_init_script_with_logging(app: &PakeApp, _log_file: Arc<Mutex<File>>) -> String {
-    let dark_mode_script = if app.dark_mode {
-        r#"
-        const style = document.createElement('style');
-        style.textContent = ':root { color-scheme: dark; }';
-        if (document.head) {
-            document.head.appendChild(style);
-        } else {
-            document.addEventListener('DOMContentLoaded', () => {
-                document.head.appendChild(style);
-            });
-        }
-        "#
-    } else {
-        ""
-    };
+fn get_init_script_with_logging(_app: &PakeApp, _log_file: Arc<Mutex<File>>) -> String {
+    let dark_mode_script = "";
 
     format!(
         r#"
@@ -271,25 +258,6 @@ fn get_init_script_with_logging(app: &PakeApp, _log_file: Arc<Mutex<File>>) -> S
 
 /// Generate initialization script for WebView
 #[allow(dead_code)]
-fn get_init_script(app: &PakeApp) -> String {
-    if app.dark_mode {
-        r#"
-        // Dark mode support
-        (function() {
-            const style = document.createElement('style');
-            style.textContent = `
-                :root { color-scheme: dark; }
-            `;
-            if (document.head) {
-                document.head.appendChild(style);
-            } else {
-                document.addEventListener('DOMContentLoaded', () => {
-                    document.head.appendChild(style);
-                });
-            }
-        })();
-        "#.to_string()
-    } else {
-        String::new()
-    }
+fn get_init_script(_app: &PakeApp) -> String {
+    String::new()
 }

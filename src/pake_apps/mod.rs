@@ -9,7 +9,6 @@ pub mod native;
 pub mod webview;
 pub mod webview_manager_process;
 pub mod datadir;
-pub mod autostart;
 pub mod api;
 pub mod state_recovery;
 

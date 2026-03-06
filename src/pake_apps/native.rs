@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
 use std::fs;
 use log::info;
-use super::app::{PakeApp, AppMode};
+use super::app::{PakeApp, AppMode, AppType};
 use super::datadir;
 
 /// Detect Chrome/Chromium binary path on Linux
@@ -38,9 +38,15 @@ pub fn log_path(app_id: &str) -> std::path::PathBuf {
 
 /// Build the launch command for a Pake app
 pub fn build_command(app: &PakeApp) -> Result<Command, String> {
-    match app.mode {
-        AppMode::Native => build_native_command(app),
-        AppMode::Webview => build_webview_command(app),
+    match app.app_type {
+        AppType::DesktopApp => build_desktop_command(app),
+        AppType::WebApp => {
+            match app.mode {
+                Some(AppMode::Native) => build_native_command(app),
+                Some(AppMode::Webview) => build_webview_command(app),
+                None => Err("WebApp must have a mode".to_string()),
+            }
+        }
     }
 }
 
@@ -56,6 +62,8 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
     let chrome = find_chrome().ok_or("Chrome/Chromium not found")?;
     let data = datadir::ensure_data_dir(app)?;
 
+    let url = app.url.as_ref().ok_or("WebApp must have url")?;
+
     // Log environment info
     let wayland = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "(not set)".into());
     let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "(not set)".into());
@@ -63,7 +71,7 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
 
     info!("Pake app '{}' launch info:", app.name);
     info!("  Chrome: {}", chrome);
-    info!("  URL: {}", app.url);
+    info!("  URL: {}", url);
     info!("  Data dir: {}", data.display());
     info!("  Show nav: {}", app.show_nav);
     info!("  WAYLAND_DISPLAY={}", wayland);
@@ -76,13 +84,13 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
     if app.show_nav {
         // Normal browser mode with full UI (address bar, toolbar, etc.)
         // Don't use --app or --new-window, just pass the URL
-        cmd.arg(&app.url);
+        cmd.arg(url);
         // Use a special WM_CLASS to identify windows that should not be fullscreened
         cmd.arg("--class=ivnc-pake-windowed");
         info!("  -> Using browser mode (with full navigation UI)");
     } else {
         // App mode without navigation bar
-        cmd.arg(format!("--app={}", app.url));
+        cmd.arg(format!("--app={}", url));
         cmd.arg("--class=ivnc-pake-app");
         info!("  -> Using app mode (no navigation bar)");
     }
@@ -157,6 +165,38 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
 fn build_webview_command(app: &PakeApp) -> Result<Command, String> {
     // For webview mode, we also use Chrome in app mode for now.
     build_native_command(app)
+}
+
+fn build_desktop_command(app: &PakeApp) -> Result<Command, String> {
+    let exec_cmd = app.exec_command.as_ref()
+        .ok_or("DesktopApp must have exec_command")?;
+
+    info!("Desktop app '{}' launch info:", app.name);
+    info!("  Command: {}", exec_cmd);
+
+    // Use shell to execute command (supports arguments and pipes)
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(exec_cmd);
+
+    // Set environment variables
+    if let Some(env_vars) = &app.env_vars {
+        for (key, value) in env_vars {
+            cmd.env(key, value);
+            info!("  Env: {}={}", key, value);
+        }
+    }
+
+    // Redirect stdout/stderr to log file
+    let log_file = log_path(&app.id);
+    info!("  Log file: {}", log_file.display());
+    let stdout_file = fs::File::create(&log_file)
+        .map_err(|e| format!("Failed to create log file: {}", e))?;
+    let stderr_file = stdout_file.try_clone()
+        .map_err(|e| format!("Failed to clone log file: {}", e))?;
+    cmd.stdout(Stdio::from(stdout_file));
+    cmd.stderr(Stdio::from(stderr_file));
+
+    Ok(cmd)
 }
 
 /// CDP-based nav button injection.

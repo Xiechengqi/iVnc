@@ -11,8 +11,9 @@ pub fn data_dir(app: &PakeApp) -> PathBuf {
         .join(&app.id);
 
     base.join(match app.mode {
-        AppMode::Native => "chrome",
-        AppMode::Webview => "webview",
+        Some(AppMode::Native) => "chrome",
+        Some(AppMode::Webview) => "webview",
+        None => "desktop",
     })
 }
 

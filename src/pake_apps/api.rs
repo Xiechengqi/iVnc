@@ -8,14 +8,14 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use super::app::{PakeApp, AppMode, AppStatus};
+use super::app::{PakeApp, AppMode, AppType, AppStatus};
 use super::store::AppStore;
 use super::process::ProcessManager;
 use super::WebViewManager;
 use super::datadir;
-use super::autostart;
 use super::native;
 use super::state_recovery::AppRunningState;
+use std::collections::HashMap;
 
 pub struct PakeState {
     pub store: Arc<AppStore>,
@@ -43,8 +43,8 @@ impl PakeState {
         let running_ids: Vec<String> = apps.iter()
             .filter(|app| {
                 let status = match app.mode {
-                    AppMode::Native => self.process.status(&app.id),
-                    AppMode::Webview => self.webview.lock().unwrap().status(&app.id),
+                    Some(AppMode::Native) | None => self.process.status(&app.id),
+                    Some(AppMode::Webview) => self.webview.lock().unwrap().status(&app.id),
                 };
                 matches!(status, AppStatus::Running)
             })
@@ -84,8 +84,8 @@ impl PakeState {
                 Ok(app) => {
                     log::info!("Restoring app: {} ({})", app.name, app_id);
                     let result = match app.mode {
-                        AppMode::Native => self.process.start(&app).map(|_| ()),
-                        AppMode::Webview => {
+                        Some(AppMode::Native) | None => self.process.start(&app).map(|_| ()),
+                        Some(AppMode::Webview) => {
                             self.webview.lock().unwrap().start(&app)
                         }
                     };
@@ -136,20 +136,30 @@ fn err_response(status: StatusCode, msg: &str) -> Response {
 }
 
 fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> serde_json::Value {
-    json!({
+    let mut obj = json!({
         "id": app.id,
         "name": app.name,
-        "url": app.url,
-        "mode": app.mode,
-        "dark_mode": app.dark_mode,
-        "autostart": app.autostart,
-        "show_nav": app.show_nav,
+        "app_type": app.app_type.as_str(),
         "status": status,
         "pid": pid,
         "data_size_bytes": data_bytes,
         "data_size_human": datadir::size_human(data_bytes),
         "created_at": app.created_at,
-    })
+    });
+
+    match app.app_type {
+        AppType::WebApp => {
+            obj["url"] = json!(app.url);
+            obj["mode"] = json!(app.mode.map(|m| m.as_str()));
+            obj["show_nav"] = json!(app.show_nav);
+        }
+        AppType::DesktopApp => {
+            obj["exec_command"] = json!(app.exec_command);
+            obj["env_vars"] = json!(app.env_vars);
+        }
+    }
+
+    obj
 }
 
 async fn list_apps(State(state): State<Arc<PakeState>>) -> Response {
@@ -157,14 +167,20 @@ async fn list_apps(State(state): State<Arc<PakeState>>) -> Response {
         Ok(apps) => {
             let items: Vec<_> = apps.iter().map(|app| {
                 let (st, pid) = match app.mode {
-                    AppMode::Native => {
+                    Some(AppMode::Native) => {
                         let status = state.process.status(&app.id);
                         let pid = state.process.pid(&app.id);
                         (status, pid)
                     }
-                    AppMode::Webview => {
+                    Some(AppMode::Webview) => {
                         let status = state.webview.lock().unwrap().status(&app.id);
                         (status, None)
+                    }
+                    None => {
+                        // DesktopApp uses process manager
+                        let status = state.process.status(&app.id);
+                        let pid = state.process.pid(&app.id);
+                        (status, pid)
                     }
                 };
                 let size = datadir::dir_size(&datadir::data_dir(app));
@@ -184,31 +200,49 @@ async fn add_app(
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => return err_response(StatusCode::BAD_REQUEST, "missing name"),
     };
-    let url = match body.get("url").and_then(|v| v.as_str()) {
-        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
-        _ => return err_response(StatusCode::BAD_REQUEST, "missing url"),
-    };
-    let mode = match body.get("mode").and_then(|v| v.as_str()) {
-        Some(m) => AppMode::from_str(m).unwrap_or(AppMode::Native),
-        None => AppMode::Native,
+
+    let app_type_str = body.get("app_type").and_then(|v| v.as_str()).unwrap_or("webapp");
+    let app_type = AppType::from_str(app_type_str).unwrap_or(AppType::WebApp);
+
+    let (url, mode, show_nav, exec_command, env_vars) = match app_type {
+        AppType::WebApp => {
+            let url = match body.get("url").and_then(|v| v.as_str()) {
+                Some(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
+                _ => return err_response(StatusCode::BAD_REQUEST, "missing url for webapp"),
+            };
+            let mode = body.get("mode").and_then(|v| v.as_str())
+                .and_then(AppMode::from_str)
+                .or(Some(AppMode::Native));
+            let show_nav = body.get("show_nav").and_then(|v| v.as_bool()).unwrap_or(false);
+            (url, mode, show_nav, None, None)
+        }
+        AppType::DesktopApp => {
+            let exec_command = match body.get("exec_command").and_then(|v| v.as_str()) {
+                Some(e) if !e.trim().is_empty() => Some(e.trim().to_string()),
+                _ => return err_response(StatusCode::BAD_REQUEST, "missing exec_command for desktop app"),
+            };
+            let env_vars = body.get("env_vars").and_then(|v| v.as_object())
+                .map(|obj| obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<HashMap<String, String>>());
+            (None, None, false, exec_command, env_vars)
+        }
     };
 
     let app = PakeApp {
         id: uuid::Uuid::new_v4().to_string(),
         name,
+        app_type,
         url,
         mode,
-        dark_mode: body.get("dark_mode").and_then(|v| v.as_bool()).unwrap_or(false),
-        autostart: body.get("autostart").and_then(|v| v.as_bool()).unwrap_or(false),
-        show_nav: body.get("show_nav").and_then(|v| v.as_bool()).unwrap_or(false),
+        show_nav,
+        exec_command,
+        env_vars,
         created_at: chrono_now(),
     };
 
     if let Err(e) = state.store.add(&app) {
         return err_response(StatusCode::CONFLICT, &e);
-    }
-    if app.autostart {
-        let _ = autostart::set(&app);
     }
     json_response(StatusCode::CREATED, json!({"ok": true, "app": app}))
 }
@@ -217,14 +251,19 @@ async fn get_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) ->
     match state.store.get(&id) {
         Ok(app) => {
             let (st, pid) = match app.mode {
-                AppMode::Native => {
+                Some(AppMode::Native) => {
                     let status = state.process.status(&app.id);
                     let pid = state.process.pid(&app.id);
                     (status, pid)
                 }
-                AppMode::Webview => {
+                Some(AppMode::Webview) => {
                     let status = state.webview.lock().unwrap().status(&app.id);
                     (status, None)
+                }
+                None => {
+                    let status = state.process.status(&app.id);
+                    let pid = state.process.pid(&app.id);
+                    (status, pid)
                 }
             };
             let size = datadir::dir_size(&datadir::data_dir(&app));
@@ -239,29 +278,37 @@ async fn update_app(
     Path(id): Path<String>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
-    let existing = match state.store.get(&id) {
+    let mut app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
 
-    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or(&existing.url).to_string();
-    let mode = body.get("mode").and_then(|v| v.as_str())
-        .and_then(AppMode::from_str).unwrap_or(existing.mode);
-    let dark_mode = body.get("dark_mode").and_then(|v| v.as_bool()).unwrap_or(existing.dark_mode);
-    let auto = body.get("autostart").and_then(|v| v.as_bool()).unwrap_or(existing.autostart);
-    let show_nav = body.get("show_nav").and_then(|v| v.as_bool()).unwrap_or(existing.show_nav);
-
-    if let Err(e) = state.store.update(&id, &url, mode, dark_mode, auto, show_nav) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    match app.app_type {
+        AppType::WebApp => {
+            if let Some(url_str) = body.get("url").and_then(|v| v.as_str()) {
+                app.url = Some(url_str.to_string());
+            }
+            if let Some(mode_str) = body.get("mode").and_then(|v| v.as_str()) {
+                app.mode = AppMode::from_str(mode_str);
+            }
+            if let Some(show_nav) = body.get("show_nav").and_then(|v| v.as_bool()) {
+                app.show_nav = show_nav;
+            }
+        }
+        AppType::DesktopApp => {
+            if let Some(exec) = body.get("exec_command").and_then(|v| v.as_str()) {
+                app.exec_command = Some(exec.to_string());
+            }
+            if let Some(env_obj) = body.get("env_vars").and_then(|v| v.as_object()) {
+                app.env_vars = Some(env_obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect());
+            }
+        }
     }
-    if auto {
-        let updated = PakeApp {
-            id: existing.id, name: existing.name, url, mode, dark_mode, autostart: auto, show_nav,
-            created_at: existing.created_at,
-        };
-        let _ = autostart::set(&updated);
-    } else {
-        let _ = autostart::remove(&id);
+
+    if let Err(e) = state.store.update(&app) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
     json_response(StatusCode::OK, json!({"ok": true}))
 }
@@ -269,7 +316,6 @@ async fn update_app(
 async fn delete_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
     let _ = state.process.stop(&id);
     let _ = state.webview.lock().unwrap().stop(&id);
-    let _ = autostart::remove(&id);
     // Clean up data directory before removing from store
     if let Ok(app) = state.store.get(&id) {
         let data_dir = datadir::data_dir(&app).parent().map(|p| p.to_path_buf())
@@ -289,13 +335,13 @@ async fn start_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) 
     };
 
     match app.mode {
-        AppMode::Native => {
+        Some(AppMode::Native) | None => {
             match state.process.start(&app) {
                 Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
                 Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
             }
         }
-        AppMode::Webview => {
+        Some(AppMode::Webview) => {
             match state.webview.lock().unwrap().start(&app) {
                 Ok(()) => json_response(StatusCode::OK, json!({"ok": true, "mode": "webview"})),
                 Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -311,8 +357,8 @@ async fn stop_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -
     };
 
     let result = match app.mode {
-        AppMode::Native => state.process.stop(&id),
-        AppMode::Webview => state.webview.lock().unwrap().stop(&id),
+        Some(AppMode::Native) | None => state.process.stop(&id),
+        Some(AppMode::Webview) => state.webview.lock().unwrap().stop(&id),
     };
 
     match result {
@@ -328,13 +374,13 @@ async fn restart_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>
     };
 
     match app.mode {
-        AppMode::Native => {
+        Some(AppMode::Native) | None => {
             match state.process.restart(&app) {
                 Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
                 Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
             }
         }
-        AppMode::Webview => {
+        Some(AppMode::Webview) => {
             match state.webview.lock().unwrap().restart(&app) {
                 Ok(()) => json_response(StatusCode::OK, json!({"ok": true, "mode": "webview"})),
                 Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -364,8 +410,8 @@ async fn clear_data(State(state): State<Arc<PakeState>>, Path(id): Path<String>)
     };
     // Stop app before clearing data
     match app.mode {
-        AppMode::Native => { let _ = state.process.stop(&id); }
-        AppMode::Webview => { let _ = state.webview.lock().unwrap().stop(&id); }
+        Some(AppMode::Native) | None => { let _ = state.process.stop(&id); }
+        Some(AppMode::Webview) => { let _ = state.webview.lock().unwrap().stop(&id); }
     }
     match datadir::clear(&app) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),

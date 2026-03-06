@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use super::app::{PakeApp, AppMode};
+use super::app::{PakeApp, AppMode, AppType};
 
 pub struct AppStore {
     conn: Mutex<Connection>,
@@ -21,20 +21,23 @@ impl AppStore {
             "CREATE TABLE IF NOT EXISTS apps (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
-                url TEXT NOT NULL,
-                mode TEXT NOT NULL,
+                url TEXT,
+                mode TEXT,
                 dark_mode INTEGER DEFAULT 0,
                 autostart INTEGER DEFAULT 0,
                 show_nav INTEGER DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                app_type TEXT DEFAULT 'webapp',
+                exec_command TEXT,
+                env_vars TEXT
             );"
         ).map_err(|e| format!("Failed to init db: {}", e))?;
 
-        // Migration: Add show_nav column if it doesn't exist
-        let _ = conn.execute(
-            "ALTER TABLE apps ADD COLUMN show_nav INTEGER DEFAULT 0",
-            [],
-        );
+        // Migrations
+        let _ = conn.execute("ALTER TABLE apps ADD COLUMN show_nav INTEGER DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE apps ADD COLUMN app_type TEXT DEFAULT 'webapp'", []);
+        let _ = conn.execute("ALTER TABLE apps ADD COLUMN exec_command TEXT", []);
+        let _ = conn.execute("ALTER TABLE apps ADD COLUMN env_vars TEXT", []);
 
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -48,12 +51,20 @@ impl AppStore {
 
     pub fn add(&self, app: &PakeApp) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
+
+        let url = app.url.as_deref().unwrap_or("");
+        let mode = app.mode.map(|m| m.as_str()).unwrap_or("");
+        let exec_command = app.exec_command.as_deref().unwrap_or("");
+        let env_vars_json = app.env_vars.as_ref()
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_default();
+
         conn.execute(
-            "INSERT INTO apps (id, name, url, mode, dark_mode, autostart, show_nav, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO apps (id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                app.id, app.name, app.url, app.mode.as_str(),
-                app.dark_mode as i32, app.autostart as i32, app.show_nav as i32, app.created_at,
+                app.id, app.name, app.app_type.as_str(), url, mode,
+                app.show_nav as i32, exec_command, env_vars_json, app.created_at,
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -65,14 +76,22 @@ impl AppStore {
         Ok(())
     }
 
-    pub fn update(&self, id: &str, url: &str, mode: AppMode, dark_mode: bool, autostart: bool, show_nav: bool) -> Result<(), String> {
+    pub fn update(&self, app: &PakeApp) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
+
+        let url = app.url.as_deref().unwrap_or("");
+        let mode = app.mode.map(|m| m.as_str()).unwrap_or("");
+        let exec_command = app.exec_command.as_deref().unwrap_or("");
+        let env_vars_json = app.env_vars.as_ref()
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_default();
+
         let changed = conn.execute(
-            "UPDATE apps SET url=?1, mode=?2, dark_mode=?3, autostart=?4, show_nav=?5 WHERE id=?6",
-            params![url, mode.as_str(), dark_mode as i32, autostart as i32, show_nav as i32, id],
+            "UPDATE apps SET app_type=?1, url=?2, mode=?3, show_nav=?4, exec_command=?5, env_vars=?6 WHERE id=?7",
+            params![app.app_type.as_str(), url, mode, app.show_nav as i32, exec_command, env_vars_json, app.id],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
-            return Err(format!("App '{}' not found", id));
+            return Err(format!("App '{}' not found", app.id));
         }
         Ok(())
     }
@@ -90,7 +109,7 @@ impl AppStore {
     pub fn get(&self, id: &str) -> Result<PakeApp, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, url, mode, dark_mode, autostart, show_nav, created_at FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).map_err(|e| format!("App not found: {}", e))
@@ -99,7 +118,7 @@ impl AppStore {
     pub fn list(&self) -> Result<Vec<PakeApp>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, mode, dark_mode, autostart, show_nav, created_at FROM apps ORDER BY created_at"
+            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt.query_map([], |row| Ok(Self::row_to_app(row)))
@@ -110,16 +129,28 @@ impl AppStore {
     }
 
     fn row_to_app(row: &rusqlite::Row) -> PakeApp {
-        let mode_str: String = row.get(3).unwrap_or_default();
+        let app_type_str: String = row.get(2).unwrap_or_else(|_| "webapp".to_string());
+        let app_type = AppType::from_str(&app_type_str).unwrap_or(AppType::WebApp);
+
+        let url: Option<String> = row.get(3).ok().filter(|s: &String| !s.is_empty());
+        let mode_str: Option<String> = row.get(4).ok().filter(|s: &String| !s.is_empty());
+        let mode = mode_str.and_then(|s| AppMode::from_str(&s));
+        let show_nav = row.get::<_, i32>(5).unwrap_or(0) != 0;
+
+        let exec_command: Option<String> = row.get(6).ok().filter(|s: &String| !s.is_empty());
+        let env_vars_json: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
+        let env_vars = env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
+
         PakeApp {
             id: row.get(0).unwrap_or_default(),
             name: row.get(1).unwrap_or_default(),
-            url: row.get(2).unwrap_or_default(),
-            mode: AppMode::from_str(&mode_str).unwrap_or(AppMode::Webview),
-            dark_mode: row.get::<_, i32>(4).unwrap_or(0) != 0,
-            autostart: row.get::<_, i32>(5).unwrap_or(0) != 0,
-            show_nav: row.get::<_, i32>(6).unwrap_or(0) != 0,
-            created_at: row.get(7).unwrap_or_default(),
+            app_type,
+            url,
+            mode,
+            show_nav,
+            exec_command,
+            env_vars,
+            created_at: row.get(8).unwrap_or_default(),
         }
     }
 }

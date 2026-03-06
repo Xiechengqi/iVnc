@@ -246,11 +246,11 @@ fn spawn_webview_process(app: &PakeApp, webview_binary: &str) -> Result<(std::pr
 
     info!("Spawning WebView: {} -> {} (WAYLAND_DISPLAY={})", app_symlink.display(), abs_webview_binary.display(), wayland_display);
 
+    let url = app.url.as_deref().unwrap_or("");
     let child = Command::new(&app_symlink)
         .env("IVNC_APP_ID", &app.id)
         .env("IVNC_APP_NAME", &app.name)
-        .env("IVNC_APP_URL", &app.url)
-        .env("IVNC_DARK_MODE", if app.dark_mode { "true" } else { "false" })
+        .env("IVNC_APP_URL", url)
         .env("IVNC_LOG_FILE", log_file_path.to_str().unwrap())
         .env("IVNC_DATA_DIR", data_dir.to_str().unwrap())
         .env("WAYLAND_DISPLAY", wayland_display)
