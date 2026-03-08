@@ -129,7 +129,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/version", get(get_version_handler))
         .route("/api/upgrade/ws", get(upgrade_ws_handler))
         .route("/api/connections", get(connections_handler))
-        .route("/api/connections/:id/disconnect", post(disconnect_handler))
+        .route("/api/connections/{id}/disconnect", post(disconnect_handler))
         ;
 
     // Add WebRTC signaling endpoint if session manager is provided
