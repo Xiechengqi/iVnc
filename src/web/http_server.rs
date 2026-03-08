@@ -128,6 +128,8 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/change-password", post(change_password_handler))
         .route("/api/version", get(get_version_handler))
         .route("/api/upgrade/ws", get(upgrade_ws_handler))
+        .route("/api/connections", get(connections_handler))
+        .route("/api/connections/:id/disconnect", post(disconnect_handler))
         ;
 
     // Add WebRTC signaling endpoint if session manager is provided
@@ -552,6 +554,32 @@ async fn ws_config_handler(State(state): State<Arc<SharedState>>) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(payload.to_string()))
     .unwrap()
+}
+
+/// Connections handler - returns all active connections
+async fn connections_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let json = state.get_connections_json();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json))
+        .unwrap()
+}
+
+/// Disconnect handler - disconnects a specific connection
+/// Note: Currently only removes from tracking list. The actual WebRTC session
+/// continues until it closes naturally. Full session termination would require
+/// storing session handles and implementing graceful shutdown.
+async fn disconnect_handler(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    state.remove_connection(&id);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"success":true}"#))
+        .unwrap()
 }
 
 async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {

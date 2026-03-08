@@ -15,9 +15,19 @@ use log::{info, warn};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+
+/// Connection information for a WebRTC session
+#[derive(Clone, Debug)]
+pub struct ConnectionInfo {
+    pub id: String,
+    pub peer_ip: String,
+    pub connected_at: i64,
+    pub connection_type: String,
+}
 
 
 /// Shared state for the application
@@ -110,6 +120,9 @@ pub struct SharedState {
 
     /// Cached latest taskbar JSON for MCP list_windows tool
     pub last_taskbar_json: Arc<Mutex<Option<String>>>,
+
+    /// Active WebRTC connections
+    pub connections: Arc<Mutex<HashMap<String, ConnectionInfo>>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -172,6 +185,7 @@ impl SharedState {
             #[cfg(feature = "mcp")]
             frame_capture_rx: Arc::new(Mutex::new(frame_capture_rx)),
             last_taskbar_json: Arc::new(Mutex::new(None)),
+            connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -538,6 +552,44 @@ impl SharedState {
             stats.ice_candidates_total,
             stats.ice_candidates_tcp
         )
+    }
+
+    /// Add a new connection
+    pub fn add_connection(&self, id: String, peer_ip: String) {
+        let conn = ConnectionInfo {
+            id: id.clone(),
+            peer_ip,
+            connected_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            connection_type: "tcp".to_string(),
+        };
+        self.connections.lock().unwrap().insert(id, conn);
+    }
+
+    /// Remove a connection
+    pub fn remove_connection(&self, id: &str) {
+        self.connections.lock().unwrap().remove(id);
+    }
+
+    /// Get all connections as JSON
+    pub fn get_connections_json(&self) -> String {
+        let conns = self.connections.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let items: Vec<String> = conns.values().map(|c| {
+            let duration = now - c.connected_at;
+            format!(
+                r#"{{"id":"{}","peer_ip":"{}","connected_at":{},"connection_type":"{}","duration_seconds":{}}}"#,
+                c.id, c.peer_ip, c.connected_at, c.connection_type, duration
+            )
+        }).collect();
+
+        format!(r#"{{"connections":[{}]}}"#, items.join(","))
     }
 }
 

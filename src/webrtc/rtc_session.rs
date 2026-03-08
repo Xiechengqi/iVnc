@@ -409,6 +409,7 @@ pub async fn drive_session(
     }
 
     info!("Session {} drive loop ended", session_id);
+    shared_state.remove_connection(&session_id);
     shared_state.decrement_webrtc_sessions();
 }
 

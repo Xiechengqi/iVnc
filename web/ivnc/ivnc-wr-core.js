@@ -566,6 +566,64 @@ function InitUI() {
 	.update-ok:hover:not(:disabled) {
 		background: #5a94f0;
 	}
+	.connect-page {
+		position: fixed;
+		inset: 0;
+		background: #1a1a2e;
+		color: #fff;
+		padding: 20px;
+		overflow-y: auto;
+		z-index: 3000;
+	}
+	.connect-header {
+		display: flex;
+		align-items: center;
+		margin-bottom: 20px;
+		font-size: 20px;
+		font-weight: 600;
+	}
+	.connect-back {
+		margin-right: 12px;
+		cursor: pointer;
+		font-size: 24px;
+	}
+	.connection-list {
+		max-width: 800px;
+	}
+	.connection-item {
+		background: rgba(255,255,255,0.05);
+		border-radius: 8px;
+		padding: 16px;
+		margin-bottom: 12px;
+	}
+	.conn-ip {
+		font-size: 16px;
+		font-weight: 600;
+		color: #4c86e6;
+		margin-bottom: 8px;
+		font-family: monospace;
+	}
+	.conn-info {
+		font-size: 12px;
+		color: rgba(255,255,255,0.7);
+		margin-bottom: 6px;
+		display: flex;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+	.disconnect-btn {
+		background: #f44336;
+		color: #fff;
+		border: none;
+		padding: 6px 12px;
+		border-radius: 4px;
+		cursor: pointer;
+		font-size: 12px;
+		margin-top: 8px;
+	}
+	.disconnect-btn:hover {
+		background: #d32f2f;
+	}
 	`;
   document.head.appendChild(style);
 }
@@ -2083,6 +2141,12 @@ export default function webrtc() {
 			connIndicator.id = 'conn-indicator';
 			connIndicator.textContent = '—';
 			connIndicator.title = '连接模式';
+			connIndicator.style.cursor = 'pointer';
+			connIndicator.style.pointerEvents = 'auto';
+			connIndicator.addEventListener('click', (e) => {
+				e.stopPropagation();
+				window.location.hash = '#/connect';
+			});
 			taskbar.appendChild(connIndicator);
 
 			document.body.appendChild(taskbarTrigger);
@@ -2612,4 +2676,93 @@ export default function webrtc() {
 			useCssScaling = true;
 		}
 	}
+
+	// Connection management page
+	function initRouter() {
+		window.addEventListener('hashchange', handleRoute);
+		handleRoute();
+	}
+
+	function handleRoute() {
+		const hash = window.location.hash;
+		if (hash === '#/connect') {
+			showConnectPage();
+		} else {
+			hideConnectPage();
+		}
+	}
+
+	function showConnectPage() {
+		let page = document.getElementById('connect-page');
+		if (!page) {
+			page = document.createElement('div');
+			page.id = 'connect-page';
+			page.className = 'connect-page';
+			document.body.appendChild(page);
+		}
+		page.style.display = 'block';
+		loadConnections();
+	}
+
+	function hideConnectPage() {
+		const page = document.getElementById('connect-page');
+		if (page) page.style.display = 'none';
+	}
+
+	async function loadConnections() {
+		try {
+			const resp = await fetch('/api/connections');
+			const data = await resp.json();
+			renderConnections(data.connections);
+		} catch (err) {
+			console.error('Failed to load connections:', err);
+		}
+	}
+
+	function renderConnections(connections) {
+		const page = document.getElementById('connect-page');
+		if (!page) return;
+
+		const now = Math.floor(Date.now() / 1000);
+		const items = connections.map(c => {
+			const duration = now - c.connected_at;
+			const hours = Math.floor(duration / 3600);
+			const minutes = Math.floor((duration % 3600) / 60);
+			const durationText = hours > 0 ? `${hours}小时${minutes}分钟` : `${minutes}分钟`;
+			const connTime = new Date(c.connected_at * 1000).toLocaleString('zh-CN');
+
+			return `
+				<div class="connection-item">
+					<div class="conn-ip">${c.peer_ip}</div>
+					<div class="conn-info">
+						<span>连接时间: ${connTime}</span>
+						<span>持续: ${durationText}</span>
+						<span>类型: ${c.connection_type.toUpperCase()}</span>
+					</div>
+					<button class="disconnect-btn" onclick="disconnectConnection('${c.id}')">断开连接</button>
+				</div>
+			`;
+		}).join('');
+
+		page.innerHTML = `
+			<div class="connect-header">
+				<span class="connect-back" onclick="window.location.hash=''">←</span>
+				<span>连接管理</span>
+			</div>
+			<div style="margin-bottom:12px;color:rgba(255,255,255,0.7);">当前连接数: ${connections.length}</div>
+			<div class="connection-list">${items || '<div style="color:rgba(255,255,255,0.5);">暂无连接</div>'}</div>
+		`;
+	}
+
+	window.disconnectConnection = async function(id) {
+		if (!confirm('确定要断开此连接吗？')) return;
+		try {
+			await fetch(`/api/connections/${id}/disconnect`, { method: 'POST' });
+			loadConnections();
+		} catch (err) {
+			console.error('Failed to disconnect:', err);
+		}
+	};
+
+	initRouter();
 }

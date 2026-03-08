@@ -295,6 +295,9 @@ impl SessionManager {
 
         info!("Session {} matched TCP connection from {}", session_id, peer_addr);
 
+        // Track connection
+        self.shared_state.add_connection(session_id.clone(), peer_addr.ip().to_string());
+
         // Feed the first deframed packet (and any extra buffered packets) into str0m
         for (idx, pkt) in frames.iter().enumerate() {
             let recv = str0m::net::Receive {
@@ -323,6 +326,7 @@ impl SessionManager {
         // handshake times out behind TCP proxies because responses sit queued
         // in str0m until the tokio task is scheduled.
         if let Err(err) = drain_initial_outputs(&mut session, &mut tcp_stream).await {
+            self.shared_state.remove_connection(&session_id);
             self.shared_state.decrement_webrtc_sessions();
             return Err(err);
         }
