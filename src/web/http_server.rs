@@ -120,6 +120,7 @@ pub async fn run_http_server_with_webrtc(
     let mut app = Router::new()
         .route("/", get(index_handler))
         .route("/index.html", get(index_handler))
+        .route("/connect", get(index_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
