@@ -861,6 +861,13 @@ function showForceUpdateModal() {
 }
 
 export default function webrtc() {
+	// Check if this is the connection management page
+	if (window.location.pathname === '/connect') {
+		InitUI();
+		initConnectionPage();
+		return;
+	}
+
 	let appName;
 	let videoBitRate = 8000;
 	let videoFramerate = 60;
@@ -2678,6 +2685,15 @@ export default function webrtc() {
 	}
 
 	// Connection management page
+	function initConnectionPage() {
+		const page = document.createElement('div');
+		page.id = 'connect-page';
+		page.className = 'connect-page';
+		document.body.appendChild(page);
+		loadConnections();
+		setInterval(loadConnections, 3000);
+	}
+
 	function initRouter() {
 		handleRoute();
 	}
