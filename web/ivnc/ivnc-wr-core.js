@@ -2145,7 +2145,7 @@ export default function webrtc() {
 			connIndicator.style.pointerEvents = 'auto';
 			connIndicator.addEventListener('click', (e) => {
 				e.stopPropagation();
-				window.location.hash = '#/connect';
+				window.open('/connect', '_blank');
 			});
 			taskbar.appendChild(connIndicator);
 
@@ -2679,20 +2679,21 @@ export default function webrtc() {
 
 	// Connection management page
 	function initRouter() {
-		window.addEventListener('hashchange', handleRoute);
 		handleRoute();
 	}
 
 	function handleRoute() {
-		const hash = window.location.hash;
-		if (hash === '#/connect') {
+		const path = window.location.pathname;
+		if (path === '/connect') {
 			showConnectPage();
-		} else {
-			hideConnectPage();
 		}
 	}
 
 	function showConnectPage() {
+		// Hide VNC interface if it exists
+		const app = document.getElementById('app');
+		if (app) app.style.display = 'none';
+
 		let page = document.getElementById('connect-page');
 		if (!page) {
 			page = document.createElement('div');
@@ -2702,11 +2703,6 @@ export default function webrtc() {
 		}
 		page.style.display = 'block';
 		loadConnections();
-	}
-
-	function hideConnectPage() {
-		const page = document.getElementById('connect-page');
-		if (page) page.style.display = 'none';
 	}
 
 	async function loadConnections() {
@@ -2746,7 +2742,7 @@ export default function webrtc() {
 
 		page.innerHTML = `
 			<div class="connect-header">
-				<span class="connect-back" onclick="window.location.hash=''">←</span>
+				<span class="connect-back" onclick="window.close()">←</span>
 				<span>连接管理</span>
 			</div>
 			<div style="margin-bottom:12px;color:rgba(255,255,255,0.7);">当前连接数: ${connections.length}</div>
