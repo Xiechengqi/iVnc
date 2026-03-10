@@ -21,12 +21,13 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
 /// Connection information for a WebRTC session
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ConnectionInfo {
     pub id: String,
     pub peer_ip: String,
     pub connected_at: i64,
     pub connection_type: String,
+    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 
@@ -555,7 +556,7 @@ impl SharedState {
     }
 
     /// Add a new connection
-    pub fn add_connection(&self, id: String, peer_ip: String) {
+    pub fn add_connection(&self, id: String, peer_ip: String, shutdown_tx: tokio::sync::oneshot::Sender<()>) {
         let conn = ConnectionInfo {
             id: id.clone(),
             peer_ip,
@@ -564,6 +565,7 @@ impl SharedState {
                 .unwrap()
                 .as_secs() as i64,
             connection_type: "tcp".to_string(),
+            shutdown_tx: Some(shutdown_tx),
         };
         self.connections.lock().unwrap().insert(id, conn);
     }

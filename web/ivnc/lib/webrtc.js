@@ -552,6 +552,10 @@ export class WebRTCDemo {
 				if (msg.data.override) cursorData.override = msg.data.override;
 				this.oncursorchange(cursorData);
 			}
+		} else if (msg.type === 'force_disconnect') {
+			// Server is forcing disconnect - prevent auto-reconnect
+			window.__FORCE_DISCONNECTED__ = true;
+			this._setStatus("您已被管理员断开连接");
 		} else if (msg.type === 'system') {
 			if (msg.data !== null && msg.data.action !== undefined) {
 				if (msg.data.action !== 'bitrate') {

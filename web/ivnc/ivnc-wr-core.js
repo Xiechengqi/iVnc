@@ -861,6 +861,71 @@ function showForceUpdateModal() {
 }
 
 export default function webrtc() {
+	// Connection page functions (must be defined before early return)
+	function initConnectionPage() {
+		const page = document.createElement('div');
+		page.id = 'connect-page';
+		page.className = 'connect-page';
+		document.body.appendChild(page);
+		loadConnections();
+		setInterval(loadConnections, 3000);
+	}
+
+	async function loadConnections() {
+		try {
+			const resp = await fetch('/api/connections');
+			const data = await resp.json();
+			renderConnections(data.connections);
+		} catch (err) {
+			console.error('Failed to load connections:', err);
+		}
+	}
+
+	function renderConnections(connections) {
+		const page = document.getElementById('connect-page');
+		if (!page) return;
+
+		const now = Math.floor(Date.now() / 1000);
+		const items = connections.map(c => {
+			const duration = now - c.connected_at;
+			const hours = Math.floor(duration / 3600);
+			const minutes = Math.floor((duration % 3600) / 60);
+			const durationText = hours > 0 ? `${hours}小时${minutes}分钟` : `${minutes}分钟`;
+			const connTime = new Date(c.connected_at * 1000).toLocaleString('zh-CN');
+
+			return `
+				<div class="connection-item">
+					<div class="conn-ip">${c.peer_ip}</div>
+					<div class="conn-info">
+						<span>连接时间: ${connTime}</span>
+						<span>持续: ${durationText}</span>
+						<span>类型: ${c.connection_type.toUpperCase()}</span>
+					</div>
+					<button class="disconnect-btn" onclick="disconnectConnection('${c.id}')">断开连接</button>
+				</div>
+			`;
+		}).join('');
+
+		page.innerHTML = `
+			<div class="connect-header">
+				<span class="connect-back" onclick="window.close()">←</span>
+				<span>连接管理</span>
+			</div>
+			<div style="margin-bottom:12px;color:rgba(255,255,255,0.7);">当前连接数: ${connections.length}</div>
+			<div class="connection-list">${items || '<div style="color:rgba(255,255,255,0.5);">暂无连接</div>'}</div>
+		`;
+	}
+
+	window.disconnectConnection = async function(id) {
+		if (!confirm('确定要断开此连接吗？')) return;
+		try {
+			await fetch(`/api/connections/${id}/disconnect`, { method: 'POST' });
+			loadConnections();
+		} catch (err) {
+			console.error('Failed to disconnect:', err);
+		}
+	};
+
 	// Check if this is the connection management page
 	if (window.location.pathname === '/connect') {
 		InitUI();
@@ -2685,96 +2750,5 @@ export default function webrtc() {
 	}
 
 	// Connection management page
-	function initConnectionPage() {
-		const page = document.createElement('div');
-		page.id = 'connect-page';
-		page.className = 'connect-page';
-		document.body.appendChild(page);
-		loadConnections();
-		setInterval(loadConnections, 3000);
-	}
-
-	function initRouter() {
-		handleRoute();
-	}
-
-	function handleRoute() {
-		const path = window.location.pathname;
-		if (path === '/connect') {
-			showConnectPage();
-		}
-	}
-
-	function showConnectPage() {
-		// Hide VNC interface if it exists
-		const app = document.getElementById('app');
-		if (app) app.style.display = 'none';
-
-		let page = document.getElementById('connect-page');
-		if (!page) {
-			page = document.createElement('div');
-			page.id = 'connect-page';
-			page.className = 'connect-page';
-			document.body.appendChild(page);
-		}
-		page.style.display = 'block';
-		loadConnections();
-	}
-
-	async function loadConnections() {
-		try {
-			const resp = await fetch('/api/connections');
-			const data = await resp.json();
-			renderConnections(data.connections);
-		} catch (err) {
-			console.error('Failed to load connections:', err);
-		}
-	}
-
-	function renderConnections(connections) {
-		const page = document.getElementById('connect-page');
-		if (!page) return;
-
-		const now = Math.floor(Date.now() / 1000);
-		const items = connections.map(c => {
-			const duration = now - c.connected_at;
-			const hours = Math.floor(duration / 3600);
-			const minutes = Math.floor((duration % 3600) / 60);
-			const durationText = hours > 0 ? `${hours}小时${minutes}分钟` : `${minutes}分钟`;
-			const connTime = new Date(c.connected_at * 1000).toLocaleString('zh-CN');
-
-			return `
-				<div class="connection-item">
-					<div class="conn-ip">${c.peer_ip}</div>
-					<div class="conn-info">
-						<span>连接时间: ${connTime}</span>
-						<span>持续: ${durationText}</span>
-						<span>类型: ${c.connection_type.toUpperCase()}</span>
-					</div>
-					<button class="disconnect-btn" onclick="disconnectConnection('${c.id}')">断开连接</button>
-				</div>
-			`;
-		}).join('');
-
-		page.innerHTML = `
-			<div class="connect-header">
-				<span class="connect-back" onclick="window.close()">←</span>
-				<span>连接管理</span>
-			</div>
-			<div style="margin-bottom:12px;color:rgba(255,255,255,0.7);">当前连接数: ${connections.length}</div>
-			<div class="connection-list">${items || '<div style="color:rgba(255,255,255,0.5);">暂无连接</div>'}</div>
-		`;
-	}
-
-	window.disconnectConnection = async function(id) {
-		if (!confirm('确定要断开此连接吗？')) return;
-		try {
-			await fetch(`/api/connections/${id}/disconnect`, { method: 'POST' });
-			loadConnections();
-		} catch (err) {
-			console.error('Failed to disconnect:', err);
-		}
-	};
-
 	initRouter();
 }

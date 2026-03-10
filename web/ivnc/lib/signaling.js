@@ -294,6 +294,16 @@ export class WebRTCDemoSignaling {
         this._stopKeepalive();
         if (this.state !== 'connecting') {
             this.state = 'disconnected';
+
+            // Check if this is a forced disconnect from server
+            if (window.__FORCE_DISCONNECTED__) {
+                this._setError("您已被管理员断开连接，请刷新页面重新连接");
+                if (this.ondisconnect !== null) {
+                    this.ondisconnect(false); // Don't reconnect
+                }
+                return;
+            }
+
             this._setError("Server closed connection.");
             if (this.ondisconnect !== null) {
                 if (event.code === 1000 || event.code === 1001) {

@@ -217,6 +217,7 @@ pub async fn drive_session(
     clipboard: Arc<Mutex<ClipboardReceiver>>,
     runtime_settings: Arc<RuntimeSettings>,
     initial_buffer: Vec<u8>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let session_id = session.id.clone();
     info!("Session {} drive loop started (peer: {})", session_id, peer_addr);
@@ -273,6 +274,12 @@ pub async fn drive_session(
 
         tokio::select! {
             biased;
+
+            // Shutdown signal from disconnect handler
+            _ = &mut shutdown_rx => {
+                info!("Session {} received shutdown signal", session_id);
+                break;
+            }
 
             // TCP data from browser (highest priority — STUN consent checks,
             // DTLS, SCTP/DataChannel messages MUST be processed promptly or

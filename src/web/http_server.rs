@@ -568,14 +568,26 @@ async fn connections_handler(State(state): State<Arc<SharedState>>) -> Response 
 }
 
 /// Disconnect handler - disconnects a specific connection
-/// Note: Currently only removes from tracking list. The actual WebRTC session
-/// continues until it closes naturally. Full session termination would require
-/// storing session handles and implementing graceful shutdown.
 async fn disconnect_handler(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    state.remove_connection(&id);
+    // Send force disconnect notification to client before closing
+    state.send_text(format!("force_disconnect,{}", id));
+
+    // Wait briefly for message to be sent
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Get the connection and send shutdown signal
+    let shutdown_tx = {
+        let mut conns = state.connections.lock().unwrap();
+        conns.remove(&id).and_then(|conn| conn.shutdown_tx)
+    };
+
+    if let Some(tx) = shutdown_tx {
+        let _ = tx.send(());
+    }
+
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")

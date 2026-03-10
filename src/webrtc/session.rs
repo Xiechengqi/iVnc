@@ -295,8 +295,11 @@ impl SessionManager {
 
         info!("Session {} matched TCP connection from {}", session_id, peer_addr);
 
+        // Create shutdown channel for connection management
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
         // Track connection
-        self.shared_state.add_connection(session_id.clone(), peer_addr.ip().to_string());
+        self.shared_state.add_connection(session_id.clone(), peer_addr.ip().to_string(), shutdown_tx);
 
         // Feed the first deframed packet (and any extra buffered packets) into str0m
         for (idx, pkt) in frames.iter().enumerate() {
@@ -355,6 +358,7 @@ impl SessionManager {
                 clipboard,
                 runtime_settings,
                 initial_buffer,
+                shutdown_rx,
             ).await;
         });
 
