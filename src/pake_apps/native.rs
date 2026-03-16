@@ -101,7 +101,7 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
        .arg("--disable-features=MediaRouter")
        .arg("--disable-background-networking")
        .arg("--disable-process-singleton")
-       .arg("--disable-quic");
+       .arg("--proxy-server=socks5://127.0.0.1:1080");
 
     // Only add CDP debugging for app mode (when show_nav is false)
     let debug_port = if !app.show_nav {
