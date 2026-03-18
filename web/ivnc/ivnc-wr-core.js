@@ -1965,22 +1965,14 @@ export default function webrtc() {
 
 				var connEl = document.getElementById('conn-indicator');
 					if (connEl) {
-						var ct = stats.general.connectionType;
-						if (ct === 'relay') {
-							connEl.textContent = 'RELAY';
-							connEl.style.color = '#f0a020';
-						} else if (ct === 'host') {
-							connEl.textContent = (lastSessionCount === null) ? 'TCP' : String(lastSessionCount);
+						if (lastSessionCount && lastSessionCount > 0) {
+							connEl.textContent = String(lastSessionCount);
+							connEl.style.display = 'block';
 							connEl.style.color = '#4caf50';
-						} else if (ct && ct !== 'NA' && ct !== 'unknown') {
-							connEl.textContent = ct.toUpperCase();
-							connEl.style.color = '#4caf50';
+							connEl.title = '连接数: ' + lastSessionCount;
 						} else {
-							connEl.textContent = '—';
-							connEl.style.color = 'rgba(255, 255, 255, 0.5)';
+							connEl.style.display = 'none';
 						}
-						var countLabel = (lastSessionCount === null) ? '—' : String(lastSessionCount);
-						connEl.title = '连接模式: ' + (ct || 'unknown') + '  连接数: ' + countLabel;
 					}
 
 				connectionStat.connectionBytesReceived = (stats.general.bytesReceived * 1e-6).toFixed(2) + " MBytes";
