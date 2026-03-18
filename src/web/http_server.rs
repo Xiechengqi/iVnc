@@ -630,6 +630,7 @@ async fn ipv4_handler(State(state): State<Arc<SharedState>>) -> Response {
 async fn fetch_ipv4() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .user_agent("curl/7.68.0")
         .build()?;
     let ip = client.get("https://ipv4.im")
         .send()
