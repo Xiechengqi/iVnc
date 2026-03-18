@@ -598,16 +598,17 @@ function InitUI() {
 	}
 	.ipv4-display {
 		position: fixed;
-		bottom: 8px;
-		right: 120px;
-		background: rgba(0,0,0,0.5);
-		color: rgba(255,255,255,0.9);
-		padding: 4px 8px;
+		bottom: 10px;
+		right: 50px;
+		background: rgba(0,0,0,0.7);
+		color: rgba(255,255,255,0.95);
+		padding: 5px 10px;
 		border-radius: 4px;
-		font-size: 11px;
-		z-index: 100;
+		font-size: 12px;
+		z-index: 9999;
 		display: none;
 		cursor: pointer;
+		font-family: monospace;
 	}
 	.conn-ip {
 		font-size: 16px;
