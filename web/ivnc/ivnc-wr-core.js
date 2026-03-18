@@ -597,19 +597,18 @@ function InitUI() {
 		margin-bottom: 12px;
 	}
 	.ipv4-display {
-		position: fixed;
-		bottom: 7px;
-		right: 50px;
-		background: rgba(30, 30, 30, 0.85);
-		backdrop-filter: blur(8px);
-		color: #888;
+		display: inline-flex;
+		align-items: center;
+		margin-left: auto;
+		margin-right: 10px;
 		padding: 5px 10px;
 		border-radius: 4px;
+		background: rgba(255, 255, 255, 0.08);
+		color: #888;
 		font-size: 12px;
-		z-index: 9999;
-		display: none;
 		cursor: pointer;
 		font-family: monospace;
+		flex-shrink: 0;
 	}
 	.conn-ip {
 		font-size: 16px;
@@ -641,21 +640,21 @@ function InitUI() {
 	}
 	`;
   document.head.appendChild(style);
-
-  // Create IPv4 display element
-  const ipv4El = document.createElement('div');
-  ipv4El.className = 'ipv4-display';
-  ipv4El.textContent = 'IP: --';
-  document.body.appendChild(ipv4El);
-  window._ipv4Element = ipv4El;
 }
 
 function updateIPv4Display(ip) {
-	const el = window._ipv4Element;
-	if (!el) return;
+	let el = window._ipv4Element;
+	if (!el) {
+		const taskbar = document.querySelector('.taskbar');
+		if (!taskbar) return;
+		el = document.createElement('div');
+		el.className = 'ipv4-display';
+		taskbar.appendChild(el);
+		window._ipv4Element = el;
+	}
 	if (ip && ip !== '--' && ip !== 'null') {
 		el.textContent = ip;
-		el.style.display = 'block';
+		el.style.display = 'inline-flex';
 		el.onclick = () => window.open(`https://ping.pe/${ip}`, '_blank');
 		window._currentIPv4 = ip;
 		console.log('[IPv4] Display updated:', ip);
