@@ -651,11 +651,12 @@ function InitUI() {
 function updateIPv4Display(ip) {
 	const el = window._ipv4Element;
 	if (!el) return;
-	if (ip && ip !== '--') {
+	if (ip && ip !== '--' && ip !== 'null') {
 		el.textContent = `IP: ${ip}`;
 		el.style.display = 'block';
 		el.onclick = () => window.open(`https://ping.pe/${ip}`, '_blank');
 		window._currentIPv4 = ip;
+		console.log('[IPv4] Display updated:', ip);
 	} else {
 		el.style.display = 'none';
 	}
@@ -664,10 +665,15 @@ function updateIPv4Display(ip) {
 async function fetchInitialIPv4() {
 	try {
 		const resp = await fetch('/api/ipv4');
+		if (!resp.ok) {
+			console.warn('[IPv4] API returned:', resp.status);
+			return;
+		}
 		const data = await resp.json();
+		console.log('[IPv4] API response:', data);
 		if (data.ipv4) updateIPv4Display(data.ipv4);
 	} catch (e) {
-		console.warn('Failed to fetch initial IPv4:', e);
+		console.warn('[IPv4] Failed to fetch:', e);
 	}
 }
 
