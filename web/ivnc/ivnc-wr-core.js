@@ -596,6 +596,19 @@ function InitUI() {
 		padding: 16px;
 		margin-bottom: 12px;
 	}
+	.ipv4-display {
+		position: fixed;
+		bottom: 8px;
+		right: 120px;
+		background: rgba(0,0,0,0.5);
+		color: rgba(255,255,255,0.9);
+		padding: 4px 8px;
+		border-radius: 4px;
+		font-size: 11px;
+		z-index: 100;
+		display: none;
+		cursor: pointer;
+	}
 	.conn-ip {
 		font-size: 16px;
 		font-weight: 600;
@@ -626,6 +639,36 @@ function InitUI() {
 	}
 	`;
   document.head.appendChild(style);
+
+  // Create IPv4 display element
+  const ipv4El = document.createElement('div');
+  ipv4El.className = 'ipv4-display';
+  ipv4El.textContent = 'IP: --';
+  document.body.appendChild(ipv4El);
+  window._ipv4Element = ipv4El;
+}
+
+function updateIPv4Display(ip) {
+	const el = window._ipv4Element;
+	if (!el) return;
+	if (ip && ip !== '--') {
+		el.textContent = `IP: ${ip}`;
+		el.style.display = 'block';
+		el.onclick = () => window.open(`https://ping.pe/${ip}`, '_blank');
+		window._currentIPv4 = ip;
+	} else {
+		el.style.display = 'none';
+	}
+}
+
+async function fetchInitialIPv4() {
+	try {
+		const resp = await fetch('/api/ipv4');
+		const data = await resp.json();
+		if (data.ipv4) updateIPv4Display(data.ipv4);
+	} catch (e) {
+		console.warn('Failed to fetch initial IPv4:', e);
+	}
 }
 
 function showChangePasswordModal() {
@@ -2404,6 +2447,7 @@ export default function webrtc() {
 				// Bind input handlers.
 				input.attach();
 				loadLastSessionSettings();
+				fetchInitialIPv4();
 				sendClientPersistedSettings();
 
 				// Restore IME mode from localStorage

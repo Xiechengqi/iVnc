@@ -131,6 +131,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/upgrade/ws", get(upgrade_ws_handler))
         .route("/api/connections", get(connections_handler))
         .route("/api/connections/{id}/disconnect", post(disconnect_handler))
+        .route("/api/ipv4", get(ipv4_handler))
         ;
 
     // Add WebRTC signaling endpoint if session manager is provided
@@ -231,6 +232,25 @@ pub async fn run_http_server_with_webrtc(
     if session_manager.is_some() {
         info!("Same-port ICE-TCP multiplexing enabled on :{}", port);
     }
+
+    // Start IPv4 fetching task
+    let ipv4_state = metrics_state.clone();
+    tokio::spawn(async move {
+        let mut last_ip = String::new();
+        loop {
+            match fetch_ipv4().await {
+                Ok(ip) if ip != last_ip => {
+                    *ipv4_state.ipv4_address.write().await = ip.clone();
+                    ipv4_state.send_text(format!("ipv4,{}", ip));
+                    info!("IPv4 address updated: {}", ip);
+                    last_ip = ip;
+                }
+                Err(e) => debug!("Failed to fetch IPv4: {}", e),
+                _ => {}
+            }
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        }
+    });
 
     // Accept loop with first-byte protocol splitting
     loop {
@@ -593,6 +613,32 @@ async fn disconnect_handler(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"success":true}"#))
         .unwrap()
+}
+
+/// IPv4 handler - returns current IPv4 address
+async fn ipv4_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let ip = state.ipv4_address.read().await.clone();
+    let json = json!({"ipv4": if ip.is_empty() { None } else { Some(ip) }}).to_string();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json))
+        .unwrap()
+}
+
+/// Fetch IPv4 address from ipv4.im
+async fn fetch_ipv4() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let ip = client.get("https://ipv4.im")
+        .send()
+        .await?
+        .text()
+        .await?
+        .trim()
+        .to_string();
+    Ok(ip)
 }
 
 async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {

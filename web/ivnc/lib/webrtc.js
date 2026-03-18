@@ -539,6 +539,10 @@ export class WebRTCDemo {
 			} else {
 				if (msg.data !== null) this.clipboardcontent.push(msg.data.content);
 			}
+		} else if (msg.type === 'ipv4') {
+			if (msg.data !== null && typeof window.updateIPv4Display === 'function') {
+				window.updateIPv4Display(msg.data);
+			}
 		} else if (msg.type === 'cursor') {
 			if (this.oncursorchange !== null && msg.data !== null) {
 				let cursorData = {

@@ -124,6 +124,9 @@ pub struct SharedState {
 
     /// Active WebRTC connections
     pub connections: Arc<Mutex<HashMap<String, ConnectionInfo>>>,
+
+    /// Current IPv4 address
+    pub ipv4_address: Arc<RwLock<String>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -187,6 +190,7 @@ impl SharedState {
             frame_capture_rx: Arc::new(Mutex::new(frame_capture_rx)),
             last_taskbar_json: Arc::new(Mutex::new(None)),
             connections: Arc::new(Mutex::new(HashMap::new())),
+            ipv4_address: Arc::new(RwLock::new(String::new())),
         }
     }
 
