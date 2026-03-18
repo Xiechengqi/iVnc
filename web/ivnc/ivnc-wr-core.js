@@ -598,9 +598,10 @@ function InitUI() {
 	}
 	.ipv4-display {
 		position: fixed;
-		bottom: 10px;
+		bottom: 7px;
 		right: 50px;
-		background: rgba(0,0,0,0.7);
+		background: rgba(30, 30, 30, 0.85);
+		backdrop-filter: blur(8px);
 		color: rgba(255,255,255,0.95);
 		padding: 5px 10px;
 		border-radius: 4px;
@@ -653,7 +654,7 @@ function updateIPv4Display(ip) {
 	const el = window._ipv4Element;
 	if (!el) return;
 	if (ip && ip !== '--' && ip !== 'null') {
-		el.textContent = `IP: ${ip}`;
+		el.textContent = ip;
 		el.style.display = 'block';
 		el.onclick = () => window.open(`https://ping.pe/${ip}`, '_blank');
 		window._currentIPv4 = ip;
