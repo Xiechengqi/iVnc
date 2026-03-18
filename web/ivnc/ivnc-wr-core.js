@@ -602,7 +602,7 @@ function InitUI() {
 		right: 50px;
 		background: rgba(30, 30, 30, 0.85);
 		backdrop-filter: blur(8px);
-		color: rgba(255,255,255,0.95);
+		color: #888;
 		padding: 5px 10px;
 		border-radius: 4px;
 		font-size: 12px;
