@@ -599,8 +599,7 @@ function InitUI() {
 	.ipv4-display {
 		display: inline-flex;
 		align-items: center;
-		margin-left: auto;
-		margin-right: 10px;
+		margin-right: 4px;
 		padding: 5px 10px;
 		border-radius: 4px;
 		background: rgba(255, 255, 255, 0.08);
@@ -645,11 +644,11 @@ function InitUI() {
 function updateIPv4Display(ip) {
 	let el = window._ipv4Element;
 	if (!el) {
-		const taskbar = document.querySelector('.taskbar');
-		if (!taskbar) return;
+		const connEl = document.getElementById('conn-indicator');
+		if (!connEl || !connEl.parentNode) return;
 		el = document.createElement('div');
 		el.className = 'ipv4-display';
-		taskbar.appendChild(el);
+		connEl.parentNode.insertBefore(el, connEl);
 		window._ipv4Element = el;
 	}
 	if (ip && ip !== '--' && ip !== 'null') {
