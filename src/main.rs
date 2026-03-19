@@ -19,7 +19,7 @@ mod pake_apps;
 #[cfg(feature = "mcp")]
 mod mcp;
 
-use args::Args;
+use args::{Cli, Command, RunArgs};
 use base64::Engine;
 use clap::Parser;
 use ::gstreamer as gst;
@@ -195,7 +195,19 @@ fn ensure_pulseaudio() {
 fn main() {
     check_runtime_deps();
 
-    let args = Args::parse();
+    let cli = Cli::parse();
+
+    // Handle `ivnc env` subcommand early (no compositor needed)
+    if let Some(Command::Env) = &cli.command {
+        handle_env_command();
+        return;
+    }
+
+    // Extract RunArgs: from `ivnc run ...` or bare `ivnc ...`
+    let args = match cli.command {
+        Some(Command::Run(a)) => a,
+        _ => cli.run_args,
+    };
 
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::new()
@@ -251,7 +263,7 @@ fn run(
     width: u32,
     height: u32,
     #[cfg_attr(not(feature = "mcp"), allow(unused))]
-    args: &Args,
+    args: &RunArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let running = Arc::new(AtomicBool::new(true));
 
@@ -266,6 +278,9 @@ fn run(
     if env::var("XDG_RUNTIME_DIR").is_err() {
         let dir = format!("/run/user/{}", unsafe { libc::getuid() });
         std::fs::create_dir_all(&dir).ok();
+        // XDG spec requires 0700 permissions on runtime dir
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         env::set_var("XDG_RUNTIME_DIR", &dir);
         info!("Set XDG_RUNTIME_DIR={}", dir);
     }
@@ -302,8 +317,14 @@ fn run(
                     if comm.trim() == "ivnc" {
                         continue;
                     }
-                    warn!("Killing non-ivnc process {} ({}) occupying {}", pid, comm.trim(), sock);
-                    unsafe { libc::kill(pid, libc::SIGKILL); }
+                    warn!("Terminating non-ivnc process {} ({}) occupying {}", pid, comm.trim(), sock);
+                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    std::thread::sleep(Duration::from_millis(500));
+                    // If still alive after SIGTERM, force kill
+                    if unsafe { libc::kill(pid, 0) } == 0 {
+                        warn!("Process {} did not exit after SIGTERM, sending SIGKILL", pid);
+                        unsafe { libc::kill(pid, libc::SIGKILL); }
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(200));
                 std::fs::remove_file(&sock).ok();
@@ -337,6 +358,7 @@ fn run(
     // Set up GTK CSS to hide headerbars on fullscreen windows only.
     // Dialogs are excluded so their controls (Open/Cancel buttons) stay visible.
     setup_gtk_css_env();
+    write_env_file();
     info!("Wayland socket: {:?}", socket_name);
 
     // GStreamer pipeline
@@ -791,6 +813,8 @@ fn run(
     running.store(false, Ordering::SeqCst);
     let _ = pipeline.stop();
     tokio_rt.shutdown_timeout(Duration::from_secs(3));
+    cleanup_env_file();
+    cleanup_wayland_socket(&socket_name);
     info!("ivnc stopped");
     Ok(())
 }
@@ -1371,7 +1395,7 @@ async fn run_async_services(
     Ok(())
 }
 
-fn apply_cli_overrides(config: &mut Config, args: &Args) {
+fn apply_cli_overrides(config: &mut Config, args: &RunArgs) {
     config.display.width = args.width;
     config.display.height = args.height;
 
@@ -1470,4 +1494,68 @@ window.fullscreen:not(.dialog):not(.messagedialog) .titlebar * {\n\
     // GTK_CSS tells GTK to load this CSS file in addition to the theme's CSS.
     env::set_var("GTK_CSS", &css_path);
     info!("Set GTK_CSS={}", css_path);
+}
+
+/// Returns the path to the iVnc env file: `$XDG_RUNTIME_DIR/ivnc/env`
+fn env_file_path() -> String {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
+    format!("{}/ivnc/env", runtime_dir)
+}
+
+/// Handle `ivnc env` subcommand: print export statements for the running instance.
+fn handle_env_command() {
+    let path = env_file_path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            for line in content.lines() {
+                if !line.is_empty() {
+                    println!("export {}", line);
+                }
+            }
+        }
+        Err(_) => {
+            eprintln!("iVnc is not running (env file not found: {})", path);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Write environment variables to `$XDG_RUNTIME_DIR/ivnc/env` for external process discovery.
+fn write_env_file() {
+    let path = env_file_path();
+    let wayland_display = env::var("WAYLAND_DISPLAY").unwrap_or_default();
+    let runtime_dir = env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
+    let content = format!(
+        "WAYLAND_DISPLAY={}\nXDG_RUNTIME_DIR={}\nGDK_BACKEND=wayland\n",
+        wayland_display, runtime_dir
+    );
+    match std::fs::write(&path, &content) {
+        Ok(_) => info!("Wrote env file to {}", path),
+        Err(e) => warn!("Failed to write env file {}: {}", path, e),
+    }
+}
+
+/// Remove the env file on shutdown.
+fn cleanup_env_file() {
+    let path = env_file_path();
+    if std::fs::remove_file(&path).is_ok() {
+        info!("Removed env file {}", path);
+    }
+}
+
+/// Remove the Wayland socket and lock file on shutdown.
+fn cleanup_wayland_socket(socket_name: &std::ffi::OsStr) {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
+    let name = socket_name.to_string_lossy();
+    let sock = format!("{}/{}", runtime_dir, name);
+    let lock = format!("{}.lock", sock);
+    if std::fs::remove_file(&sock).is_ok() {
+        info!("Removed socket {}", sock);
+    }
+    if std::fs::remove_file(&lock).is_ok() {
+        info!("Removed lock {}", lock);
+    }
 }

@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::config;
@@ -8,7 +8,25 @@ use crate::config;
 #[command(author = "iVnc Team")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "iVnc streaming core", long_about = None)]
-pub struct Args {
+#[command(args_conflicts_with_subcommands = true)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    #[command(flatten)]
+    pub run_args: RunArgs,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Start the compositor (default when no subcommand given)
+    Run(RunArgs),
+    /// Print environment variables for connecting to a running iVnc instance
+    Env,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct RunArgs {
     /// Configuration file path
     #[arg(short, long, default_value = "/etc/ivnc.toml")]
     pub config: PathBuf,
@@ -83,7 +101,7 @@ pub struct Args {
     pub mcp_stdio: bool,
 }
 
-impl Args {
+impl RunArgs {
     pub fn load_config(&self) -> Result<config::Config, Box<dyn std::error::Error>> {
         config::Config::load(&self.config)
     }
