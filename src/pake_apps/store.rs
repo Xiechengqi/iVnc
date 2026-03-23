@@ -111,7 +111,7 @@ impl AppStore {
     pub fn get(&self, id: &str) -> Result<PakeApp, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at, remote_debugging_port FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).map_err(|e| format!("App not found: {}", e))
@@ -120,7 +120,7 @@ impl AppStore {
     pub fn list(&self) -> Result<Vec<PakeApp>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at FROM apps ORDER BY created_at"
+            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at, remote_debugging_port FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt.query_map([], |row| Ok(Self::row_to_app(row)))
