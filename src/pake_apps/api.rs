@@ -296,6 +296,7 @@ async fn update_app(
             if let Some(show_nav) = body.get("show_nav").and_then(|v| v.as_bool()) {
                 app.show_nav = show_nav;
             }
+            app.remote_debugging_port = body.get("remote_debugging_port").and_then(|v| v.as_u64()).map(|p| p as u16);
         }
         AppType::DesktopApp => {
             if let Some(exec) = body.get("exec_command").and_then(|v| v.as_str()) {
