@@ -204,7 +204,7 @@ async fn add_app(
     let app_type_str = body.get("app_type").and_then(|v| v.as_str()).unwrap_or("webapp");
     let app_type = AppType::from_str(app_type_str).unwrap_or(AppType::WebApp);
 
-    let (url, mode, show_nav, exec_command, env_vars) = match app_type {
+    let (url, mode, show_nav, remote_debugging_port, exec_command, env_vars) = match app_type {
         AppType::WebApp => {
             let url = match body.get("url").and_then(|v| v.as_str()) {
                 Some(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
@@ -214,7 +214,8 @@ async fn add_app(
                 .and_then(AppMode::from_str)
                 .or(Some(AppMode::Native));
             let show_nav = body.get("show_nav").and_then(|v| v.as_bool()).unwrap_or(false);
-            (url, mode, show_nav, None, None)
+            let remote_debugging_port = body.get("remote_debugging_port").and_then(|v| v.as_u64()).map(|p| p as u16);
+            (url, mode, show_nav, remote_debugging_port, None, None)
         }
         AppType::DesktopApp => {
             let exec_command = match body.get("exec_command").and_then(|v| v.as_str()) {
@@ -225,7 +226,7 @@ async fn add_app(
                 .map(|obj| obj.iter()
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect::<HashMap<String, String>>());
-            (None, None, false, exec_command, env_vars)
+            (None, None, false, None, exec_command, env_vars)
         }
     };
 
@@ -236,6 +237,7 @@ async fn add_app(
         url,
         mode,
         show_nav,
+        remote_debugging_port,
         exec_command,
         env_vars,
         created_at: chrono_now(),

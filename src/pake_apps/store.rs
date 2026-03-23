@@ -38,6 +38,7 @@ impl AppStore {
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN app_type TEXT DEFAULT 'webapp'", []);
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN exec_command TEXT", []);
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN env_vars TEXT", []);
+        let _ = conn.execute("ALTER TABLE apps ADD COLUMN remote_debugging_port INTEGER", []);
 
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -60,11 +61,12 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO apps (id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at, remote_debugging_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 app.id, app.name, app.app_type.as_str(), url, mode,
                 app.show_nav as i32, exec_command, env_vars_json, app.created_at,
+                app.remote_debugging_port,
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -87,8 +89,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = conn.execute(
-            "UPDATE apps SET app_type=?1, url=?2, mode=?3, show_nav=?4, exec_command=?5, env_vars=?6 WHERE id=?7",
-            params![app.app_type.as_str(), url, mode, app.show_nav as i32, exec_command, env_vars_json, app.id],
+            "UPDATE apps SET app_type=?1, url=?2, mode=?3, show_nav=?4, exec_command=?5, env_vars=?6, remote_debugging_port=?7 WHERE id=?8",
+            params![app.app_type.as_str(), url, mode, app.show_nav as i32, exec_command, env_vars_json, app.remote_debugging_port, app.id],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", app.id));
@@ -140,6 +142,7 @@ impl AppStore {
         let exec_command: Option<String> = row.get(6).ok().filter(|s: &String| !s.is_empty());
         let env_vars_json: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
         let env_vars = env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
+        let remote_debugging_port: Option<u16> = row.get(9).ok();
 
         PakeApp {
             id: row.get(0).unwrap_or_default(),
@@ -148,6 +151,7 @@ impl AppStore {
             url,
             mode,
             show_nav,
+            remote_debugging_port,
             exec_command,
             env_vars,
             created_at: row.get(8).unwrap_or_default(),
