@@ -103,14 +103,18 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
        .arg("--disable-process-singleton")
        .arg("--proxy-server=socks5://127.0.0.1:1080");
 
-    // Only add CDP debugging for app mode (when show_nav is false)
-    let debug_port = if !app.show_nav {
+    // Add CDP debugging based on configuration
+    let debug_port = if let Some(port) = app.remote_debugging_port {
+        info!("  CDP debug port: {} (configured)", port);
+        cmd.arg(format!("--remote-debugging-port={}", port));
+        Some(port)
+    } else if !app.show_nav {
         let port = alloc_debug_port();
-        info!("  CDP debug port: {}", port);
+        info!("  CDP debug port: {} (auto-allocated)", port);
         cmd.arg(format!("--remote-debugging-port={}", port));
         Some(port)
     } else {
-        info!("  CDP injection disabled (native nav bar present)");
+        info!("  CDP debugging disabled");
         None
     };
 

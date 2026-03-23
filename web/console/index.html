@@ -73,6 +73,9 @@ td{font-size:13px}
 <div class="form-row" id="nav-row">
 <div class="form-group"><label class="checkbox"><input type="checkbox" id="f-nav"> 显示导航栏（仅 Native 模式）</label></div>
 </div>
+<div class="form-row" id="debug-port-row">
+<div class="form-group"><label>Remote Debugging Port（可选）</label><input type="number" id="f-debug-port" placeholder="留空则不开启" min="1024" max="65535"><small style="color:#888;font-size:11px;display:block;margin-top:2px">用于 CDP 调试，留空则不开启远程调试</small></div>
+</div>
 </div>
 <div id="desktop-config" style="display:none">
 <div class="form-group"><label>启动命令</label><input type="text" id="f-exec" placeholder="/usr/bin/code --no-sandbox"><small>完整命令，包含路径和参数</small></div>
@@ -136,6 +139,7 @@ function showAdd(){
   document.getElementById('f-url').value='';
   document.getElementById('f-mode').value='native';
   document.getElementById('f-nav').checked=false;
+  document.getElementById('f-debug-port').value='';
   document.getElementById('f-exec').value='';
   document.getElementById('f-env').value='';
   updateAppTypeVisibility();
@@ -173,6 +177,7 @@ async function showEdit(id){
       document.getElementById('f-url').value=a.url||'';
       document.getElementById('f-mode').value=a.mode||'native';
       document.getElementById('f-nav').checked=a.show_nav||false;
+      document.getElementById('f-debug-port').value=a.remote_debugging_port||'';
     }
     updateAppTypeVisibility();
     updateNavVisibility();
@@ -206,6 +211,8 @@ async function saveApp(){
     body.url=document.getElementById('f-url').value;
     body.mode=document.getElementById('f-mode').value;
     body.show_nav=document.getElementById('f-nav').checked;
+    const debugPort=document.getElementById('f-debug-port').value;
+    if(debugPort)body.remote_debugging_port=parseInt(debugPort);
   }
 
   try{
@@ -273,12 +280,15 @@ function hideLogModal(){document.getElementById('log-modal').classList.remove('s
 function updateNavVisibility(){
   const mode=document.getElementById('f-mode').value;
   const navRow=document.getElementById('nav-row');
+  const debugPortRow=document.getElementById('debug-port-row');
   const navCheckbox=document.getElementById('f-nav');
   if(mode==='webview'){
     navRow.style.display='none';
+    debugPortRow.style.display='none';
     navCheckbox.disabled=true;
   }else{
     navRow.style.display='flex';
+    debugPortRow.style.display='flex';
     navCheckbox.disabled=false;
   }
 }

@@ -67,6 +67,8 @@ pub struct PakeApp {
     pub url: Option<String>,
     pub mode: Option<AppMode>,
     pub show_nav: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_debugging_port: Option<u16>,
 
     // DesktopApp fields
     pub exec_command: Option<String>,
