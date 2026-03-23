@@ -212,7 +212,7 @@ async function saveApp(){
     body.mode=document.getElementById('f-mode').value;
     body.show_nav=document.getElementById('f-nav').checked;
     const debugPort=document.getElementById('f-debug-port').value;
-    if(debugPort)body.remote_debugging_port=parseInt(debugPort);
+    body.remote_debugging_port=debugPort?parseInt(debugPort):null;
   }
 
   try{
