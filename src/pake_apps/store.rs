@@ -142,7 +142,8 @@ impl AppStore {
         let exec_command: Option<String> = row.get(6).ok().filter(|s: &String| !s.is_empty());
         let env_vars_json: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
         let env_vars = env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
-        let remote_debugging_port: Option<u16> = row.get(9).ok();
+        let remote_debugging_port: Option<u16> = row.get::<_, Option<i32>>(9)
+            .unwrap_or(None).map(|p| p as u16);
 
         PakeApp {
             id: row.get(0).unwrap_or_default(),

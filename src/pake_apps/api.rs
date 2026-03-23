@@ -152,6 +152,7 @@ fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> s
             obj["url"] = json!(app.url);
             obj["mode"] = json!(app.mode.map(|m| m.as_str()));
             obj["show_nav"] = json!(app.show_nav);
+            obj["remote_debugging_port"] = json!(app.remote_debugging_port);
         }
         AppType::DesktopApp => {
             obj["exec_command"] = json!(app.exec_command);
