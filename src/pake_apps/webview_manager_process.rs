@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::process::{Child, Command};
-use log::{info, warn};
-use super::app::{PakeApp, AppStatus};
+use super::app::{AppStatus, PakeApp};
 use super::datadir;
+use log::{info, warn};
+use std::collections::{HashMap, HashSet};
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 
 /// Process information for a WebView instance
 struct WebViewProcess {
@@ -29,7 +29,9 @@ impl WebViewManager {
             .and_then(|p| p.parent().map(|p| p.join("ivnc-webview")))
             .and_then(|p| {
                 if p.exists() {
-                    p.canonicalize().ok().and_then(|cp| cp.to_str().map(String::from))
+                    p.canonicalize()
+                        .ok()
+                        .and_then(|cp| cp.to_str().map(String::from))
                 } else {
                     None
                 }
@@ -83,20 +85,28 @@ impl WebViewManager {
                 };
 
                 for (app_id, _app_name) in crashed {
-                    info!("Watchdog: webview app {} exited unexpectedly, restarting", app_id);
+                    info!(
+                        "Watchdog: webview app {} exited unexpectedly, restarting",
+                        app_id
+                    );
                     if let Ok(app) = store.get(&app_id) {
                         let mgr_ref = processes.clone();
                         let binary = webview_binary.clone();
                         match spawn_webview_process(&app, &binary) {
                             Ok((child, pid)) => {
                                 info!("Watchdog: restarted webview '{}' (pid={})", app.name, pid);
-                                mgr_ref.lock().unwrap().insert(app_id, WebViewProcess {
-                                    app_name: app.name.clone(),
-                                    child,
-                                    pid,
-                                });
+                                mgr_ref.lock().unwrap().insert(
+                                    app_id,
+                                    WebViewProcess {
+                                        app_name: app.name.clone(),
+                                        child,
+                                        pid,
+                                    },
+                                );
                             }
-                            Err(e) => warn!("Watchdog: failed to restart webview {}: {}", app_id, e),
+                            Err(e) => {
+                                warn!("Watchdog: failed to restart webview {}: {}", app_id, e)
+                            }
                         }
                     }
                 }
@@ -106,7 +116,10 @@ impl WebViewManager {
 
     /// Start a WebView for the given app as a separate process
     pub fn start(&mut self, app: &PakeApp) -> Result<(), String> {
-        info!("Starting WebView process for app: {} ({})", app.name, app.id);
+        info!(
+            "Starting WebView process for app: {} ({})",
+            app.name, app.id
+        );
 
         {
             let processes = self.processes.lock().unwrap();
@@ -120,11 +133,14 @@ impl WebViewManager {
 
         let (child, pid) = spawn_webview_process(app, &self.webview_binary)?;
 
-        self.processes.lock().unwrap().insert(app.id.clone(), WebViewProcess {
-            app_name: app.name.clone(),
-            child,
-            pid,
-        });
+        self.processes.lock().unwrap().insert(
+            app.id.clone(),
+            WebViewProcess {
+                app_name: app.name.clone(),
+                child,
+                pid,
+            },
+        );
 
         Ok(())
     }
@@ -134,7 +150,10 @@ impl WebViewManager {
         info!("Stopping WebView process for app: {}", app_id);
 
         // Mark as user-stopped so watchdog won't restart it
-        self.stopped_by_user.lock().unwrap().insert(app_id.to_string());
+        self.stopped_by_user
+            .lock()
+            .unwrap()
+            .insert(app_id.to_string());
 
         let mut processes = self.processes.lock().unwrap();
         if let Some(mut process) = processes.remove(app_id) {
@@ -161,10 +180,7 @@ impl WebViewManager {
         let processes = self.processes.lock().unwrap();
         if let Some(process) = processes.get(app_id) {
             // Check if process is still alive
-            match nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(process.pid as i32),
-                None
-            ) {
+            match nix::sys::signal::kill(nix::unistd::Pid::from_raw(process.pid as i32), None) {
                 Ok(_) => AppStatus::Running,
                 Err(_) => AppStatus::Crashed,
             }
@@ -207,43 +223,63 @@ fn get_log_path(app_id: &str) -> std::path::PathBuf {
 }
 
 /// Spawn a webview process for the given app, returns (Child, pid)
-fn spawn_webview_process(app: &PakeApp, webview_binary: &str) -> Result<(std::process::Child, u32), String> {
+fn spawn_webview_process(
+    app: &PakeApp,
+    webview_binary: &str,
+) -> Result<(std::process::Child, u32), String> {
     // Check if webview binary exists
     if !std::path::Path::new(webview_binary).exists() {
         return Err(format!("WebView binary not found: {}", webview_binary));
     }
 
     let data_dir = datadir::data_dir(app);
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| format!("Failed to create data dir: {}", e))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
 
     let log_file_path = get_log_path(&app.id);
     let log_dir = log_file_path.parent().ok_or("Invalid log path")?;
-    std::fs::create_dir_all(log_dir)
-        .map_err(|e| format!("Failed to create log dir: {}", e))?;
+    std::fs::create_dir_all(log_dir).map_err(|e| format!("Failed to create log dir: {}", e))?;
 
-    let wayland_display = std::env::var("WAYLAND_DISPLAY")
-        .unwrap_or_else(|_| "wayland-1".to_string());
+    let wayland_display =
+        std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string());
 
     let webview_path = std::path::Path::new(webview_binary);
     let webview_dir = webview_path.parent().ok_or("Invalid webview binary path")?;
 
-    let safe_app_name = app.name
+    let safe_app_name = app
+        .name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
 
     let app_symlink = webview_dir.join(&safe_app_name);
     let _ = std::fs::remove_file(&app_symlink);
 
     // Use absolute path for symlink target
-    let abs_webview_binary = webview_path.canonicalize()
+    let abs_webview_binary = webview_path
+        .canonicalize()
         .unwrap_or_else(|_| webview_path.to_path_buf());
 
-    std::os::unix::fs::symlink(&abs_webview_binary, &app_symlink)
-        .map_err(|e| format!("Failed to create symlink {} -> {}: {}", app_symlink.display(), abs_webview_binary.display(), e))?;
+    std::os::unix::fs::symlink(&abs_webview_binary, &app_symlink).map_err(|e| {
+        format!(
+            "Failed to create symlink {} -> {}: {}",
+            app_symlink.display(),
+            abs_webview_binary.display(),
+            e
+        )
+    })?;
 
-    info!("Spawning WebView: {} -> {} (WAYLAND_DISPLAY={})", app_symlink.display(), abs_webview_binary.display(), wayland_display);
+    info!(
+        "Spawning WebView: {} -> {} (WAYLAND_DISPLAY={})",
+        app_symlink.display(),
+        abs_webview_binary.display(),
+        wayland_display
+    );
 
     let url = app.url.as_deref().unwrap_or("");
     let child = Command::new(&app_symlink)
@@ -254,10 +290,20 @@ fn spawn_webview_process(app: &PakeApp, webview_binary: &str) -> Result<(std::pr
         .env("IVNC_DATA_DIR", data_dir.to_str().unwrap())
         .env("WAYLAND_DISPLAY", wayland_display)
         .env("GDK_BACKEND", "wayland")
-        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
+        .env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        )
         .spawn()
-        .map_err(|e| format!("Failed to spawn WebView process {}: {} (binary: {}, symlink exists: {})",
-            app_symlink.display(), e, abs_webview_binary.display(), app_symlink.exists()))?;
+        .map_err(|e| {
+            format!(
+                "Failed to spawn WebView process {}: {} (binary: {}, symlink exists: {})",
+                app_symlink.display(),
+                e,
+                abs_webview_binary.display(),
+                app_symlink.exists()
+            )
+        })?;
 
     let pid = child.id();
     info!("WebView process started with PID: {}", pid);

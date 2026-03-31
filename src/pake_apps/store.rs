@@ -1,7 +1,7 @@
-use rusqlite::{Connection, params};
+use super::app::{AppMode, AppType, PakeApp};
+use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use super::app::{PakeApp, AppMode, AppType};
 
 pub struct AppStore {
     conn: Mutex<Connection>,
@@ -14,8 +14,8 @@ impl AppStore {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        let conn = Connection::open(&db_path)
-            .map_err(|e| format!("Failed to open apps.db: {}", e))?;
+        let conn =
+            Connection::open(&db_path).map_err(|e| format!("Failed to open apps.db: {}", e))?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS apps (
@@ -30,18 +30,27 @@ impl AppStore {
                 app_type TEXT DEFAULT 'webapp',
                 exec_command TEXT,
                 env_vars TEXT
-            );"
-        ).map_err(|e| format!("Failed to init db: {}", e))?;
+            );",
+        )
+        .map_err(|e| format!("Failed to init db: {}", e))?;
 
         // Migrations
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN show_nav INTEGER DEFAULT 0", []);
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN app_type TEXT DEFAULT 'webapp'", []);
+        let _ = conn.execute(
+            "ALTER TABLE apps ADD COLUMN app_type TEXT DEFAULT 'webapp'",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN exec_command TEXT", []);
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN env_vars TEXT", []);
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN remote_debugging_port INTEGER", []);
+        let _ = conn.execute(
+            "ALTER TABLE apps ADD COLUMN remote_debugging_port INTEGER",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN proxy_server TEXT", []);
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn db_path() -> PathBuf {
@@ -57,7 +66,9 @@ impl AppStore {
         let url = app.url.as_deref().unwrap_or("");
         let mode = app.mode.map(|m| m.as_str()).unwrap_or("");
         let exec_command = app.exec_command.as_deref().unwrap_or("");
-        let env_vars_json = app.env_vars.as_ref()
+        let env_vars_json = app
+            .env_vars
+            .as_ref()
             .and_then(|v| serde_json::to_string(v).ok())
             .unwrap_or_default();
 
@@ -85,7 +96,9 @@ impl AppStore {
         let url = app.url.as_deref().unwrap_or("");
         let mode = app.mode.map(|m| m.as_str()).unwrap_or("");
         let exec_command = app.exec_command.as_deref().unwrap_or("");
-        let env_vars_json = app.env_vars.as_ref()
+        let env_vars_json = app
+            .env_vars
+            .as_ref()
             .and_then(|v| serde_json::to_string(v).ok())
             .unwrap_or_default();
 
@@ -101,7 +114,8 @@ impl AppStore {
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
-        let changed = conn.execute("DELETE FROM apps WHERE id=?1", params![id])
+        let changed = conn
+            .execute("DELETE FROM apps WHERE id=?1", params![id])
             .map_err(|e| format!("Failed to delete app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", id));
@@ -124,7 +138,8 @@ impl AppStore {
             "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
-        let apps = stmt.query_map([], |row| Ok(Self::row_to_app(row)))
+        let apps = stmt
+            .query_map([], |row| Ok(Self::row_to_app(row)))
             .map_err(|e| format!("Failed to query apps: {}", e))?
             .filter_map(|r| r.ok())
             .collect();
@@ -143,8 +158,10 @@ impl AppStore {
         let exec_command: Option<String> = row.get(6).ok().filter(|s: &String| !s.is_empty());
         let env_vars_json: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
         let env_vars = env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
-        let remote_debugging_port: Option<u16> = row.get::<_, Option<i32>>(9)
-            .unwrap_or(None).map(|p| p as u16);
+        let remote_debugging_port: Option<u16> = row
+            .get::<_, Option<i32>>(9)
+            .unwrap_or(None)
+            .map(|p| p as u16);
         let proxy_server: Option<String> = row.get(10).ok().filter(|s: &String| !s.is_empty());
 
         PakeApp {

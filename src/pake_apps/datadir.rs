@@ -1,14 +1,12 @@
-use std::path::PathBuf;
+use super::app::{AppMode, PakeApp};
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
-use super::app::{PakeApp, AppMode};
+use std::path::PathBuf;
 
 pub fn data_dir(app: &PakeApp) -> PathBuf {
     // Use /tmp for Chromium data dir because snap-packaged Chromium
     // has confinement that prevents writing to /root/.config
-    let base = PathBuf::from("/tmp")
-        .join("ivnc-pake-apps")
-        .join(&app.id);
+    let base = PathBuf::from("/tmp").join("ivnc-pake-apps").join(&app.id);
 
     base.join(match app.mode {
         Some(AppMode::Native) => "chrome",
@@ -24,7 +22,9 @@ pub fn ensure_data_dir(app: &PakeApp) -> Result<PathBuf, String> {
     builder.recursive(true);
     // Use 0o755: rwxr-xr-x (owner rwx, others rx) - Chrome needs write for SingletonLock
     builder.mode(0o755);
-    builder.create(&dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
+    builder
+        .create(&dir)
+        .map_err(|e| format!("Failed to create data dir: {}", e))?;
 
     // Also ensure parent directories are writable
     if let Some(parent) = dir.parent() {
@@ -43,14 +43,17 @@ pub fn dir_size(path: &PathBuf) -> u64 {
     }
     std::fs::read_dir(path)
         .map(|entries| {
-            entries.filter_map(|e| e.ok()).map(|e| {
-                let p = e.path();
-                if p.is_file() {
-                    e.metadata().map(|m| m.len()).unwrap_or(0)
-                } else {
-                    dir_size(&p)
-                }
-            }).sum()
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let p = e.path();
+                    if p.is_file() {
+                        e.metadata().map(|m| m.len()).unwrap_or(0)
+                    } else {
+                        dir_size(&p)
+                    }
+                })
+                .sum()
         })
         .unwrap_or(0)
 }
@@ -58,11 +61,9 @@ pub fn dir_size(path: &PathBuf) -> u64 {
 pub fn clear(app: &PakeApp) -> Result<(), String> {
     let dir = data_dir(app);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir)
-            .map_err(|e| format!("Failed to clear data: {}", e))?;
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to clear data: {}", e))?;
     }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to recreate dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to recreate dir: {}", e))?;
     Ok(())
 }
 

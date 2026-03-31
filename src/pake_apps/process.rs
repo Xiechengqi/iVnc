@@ -1,9 +1,9 @@
+use super::app::{AppStatus, PakeApp};
+use super::native;
+use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
-use log::{info, warn};
-use super::app::{PakeApp, AppStatus};
-use super::native;
 
 struct RunningApp {
     child: Child,
@@ -64,20 +64,20 @@ impl ProcessManager {
                     info!("Watchdog: app {} exited unexpectedly, restarting", app_id);
                     if let Ok(app) = store.get(&app_id) {
                         match native::build_command(&app) {
-                            Ok(mut cmd) => {
-                                match cmd.spawn() {
-                                    Ok(child) => {
-                                        let pid = child.id();
-                                        info!("Watchdog: restarted app '{}' (pid={})", app.name, pid);
-                                        processes.lock().unwrap().insert(
-                                            app_id,
-                                            RunningApp { child, pid },
-                                        );
-                                    }
-                                    Err(e) => warn!("Watchdog: failed to restart {}: {}", app_id, e),
+                            Ok(mut cmd) => match cmd.spawn() {
+                                Ok(child) => {
+                                    let pid = child.id();
+                                    info!("Watchdog: restarted app '{}' (pid={})", app.name, pid);
+                                    processes
+                                        .lock()
+                                        .unwrap()
+                                        .insert(app_id, RunningApp { child, pid });
                                 }
+                                Err(e) => warn!("Watchdog: failed to restart {}: {}", app_id, e),
+                            },
+                            Err(e) => {
+                                warn!("Watchdog: failed to build command for {}: {}", app_id, e)
                             }
-                            Err(e) => warn!("Watchdog: failed to build command for {}: {}", app_id, e),
                         }
                     }
                 }
@@ -98,13 +98,19 @@ impl ProcessManager {
         let pid = child.id();
         info!("Started Pake app '{}' (pid={})", app.name, pid);
 
-        self.processes.lock().unwrap().insert(app.id.clone(), RunningApp { child, pid });
+        self.processes
+            .lock()
+            .unwrap()
+            .insert(app.id.clone(), RunningApp { child, pid });
         Ok(pid)
     }
 
     pub fn stop(&self, app_id: &str) -> Result<(), String> {
         // Mark as user-stopped so watchdog won't restart it
-        self.stopped_by_user.lock().unwrap().insert(app_id.to_string());
+        self.stopped_by_user
+            .lock()
+            .unwrap()
+            .insert(app_id.to_string());
 
         let mut procs = self.processes.lock().unwrap();
         if let Some(mut running) = procs.remove(app_id) {
@@ -151,5 +157,4 @@ impl ProcessManager {
     fn is_running(&self, app_id: &str) -> bool {
         self.status(app_id) == AppStatus::Running
     }
-
 }

@@ -1,8 +1,8 @@
-use std::process::{Command, Stdio};
-use std::fs;
-use log::info;
-use super::app::{PakeApp, AppMode, AppType};
+use super::app::{AppMode, AppType, PakeApp};
 use super::datadir;
+use log::info;
+use std::fs;
+use std::process::{Command, Stdio};
 
 /// Detect Chrome/Chromium binary path on Linux
 pub fn find_chrome() -> Option<String> {
@@ -40,13 +40,11 @@ pub fn log_path(app_id: &str) -> std::path::PathBuf {
 pub fn build_command(app: &PakeApp) -> Result<Command, String> {
     match app.app_type {
         AppType::DesktopApp => build_desktop_command(app),
-        AppType::WebApp => {
-            match app.mode {
-                Some(AppMode::Native) => build_native_command(app),
-                Some(AppMode::Webview) => build_webview_command(app),
-                None => Err("WebApp must have a mode".to_string()),
-            }
-        }
+        AppType::WebApp => match app.mode {
+            Some(AppMode::Native) => build_native_command(app),
+            Some(AppMode::Webview) => build_webview_command(app),
+            None => Err("WebApp must have a mode".to_string()),
+        },
     }
 }
 
@@ -96,14 +94,17 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
     }
 
     cmd.arg(format!("--user-data-dir={}", data.display()))
-       .arg("--no-first-run")
-       .arg("--no-default-browser-check")
-       .arg("--disable-features=MediaRouter")
-       .arg("--disable-background-networking")
-       .arg("--disable-process-singleton");
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-features=MediaRouter")
+        .arg("--disable-background-networking")
+        .arg("--disable-process-singleton");
 
     // Add proxy server if configured (default: socks5://127.0.0.1:1080)
-    let proxy = app.proxy_server.as_deref().unwrap_or("socks5://127.0.0.1:1080");
+    let proxy = app
+        .proxy_server
+        .as_deref()
+        .unwrap_or("socks5://127.0.0.1:1080");
     cmd.arg(format!("--proxy-server={}", proxy));
     info!("  Proxy: {}", proxy);
 
@@ -155,9 +156,10 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
     // Redirect stdout/stderr to log file
     let log_file = log_path(&app.id);
     info!("  Log file: {}", log_file.display());
-    let stdout_file = fs::File::create(&log_file)
-        .map_err(|e| format!("Failed to create log file: {}", e))?;
-    let stderr_file = stdout_file.try_clone()
+    let stdout_file =
+        fs::File::create(&log_file).map_err(|e| format!("Failed to create log file: {}", e))?;
+    let stderr_file = stdout_file
+        .try_clone()
         .map_err(|e| format!("Failed to clone log file: {}", e))?;
     cmd.stdout(Stdio::from(stdout_file));
     cmd.stderr(Stdio::from(stderr_file));
@@ -176,7 +178,9 @@ fn build_webview_command(app: &PakeApp) -> Result<Command, String> {
 }
 
 fn build_desktop_command(app: &PakeApp) -> Result<Command, String> {
-    let exec_cmd = app.exec_command.as_ref()
+    let exec_cmd = app
+        .exec_command
+        .as_ref()
         .ok_or("DesktopApp must have exec_command")?;
 
     info!("Desktop app '{}' launch info:", app.name);
@@ -197,9 +201,10 @@ fn build_desktop_command(app: &PakeApp) -> Result<Command, String> {
     // Redirect stdout/stderr to log file
     let log_file = log_path(&app.id);
     info!("  Log file: {}", log_file.display());
-    let stdout_file = fs::File::create(&log_file)
-        .map_err(|e| format!("Failed to create log file: {}", e))?;
-    let stderr_file = stdout_file.try_clone()
+    let stdout_file =
+        fs::File::create(&log_file).map_err(|e| format!("Failed to create log file: {}", e))?;
+    let stderr_file = stdout_file
+        .try_clone()
         .map_err(|e| format!("Failed to clone log file: {}", e))?;
     cmd.stdout(Stdio::from(stdout_file));
     cmd.stderr(Stdio::from(stderr_file));
@@ -210,15 +215,16 @@ fn build_desktop_command(app: &PakeApp) -> Result<Command, String> {
 /// CDP-based nav button injection.
 /// Waits for Chrome to start, then injects nav buttons into every page via Runtime.evaluate.
 async fn cdp_inject_nav(port: u16) {
+    use futures::SinkExt;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
-    use futures::SinkExt;
 
     let nav_js = include_str!("../../extension/nav.js");
     let nav_css = include_str!("../../extension/nav.css");
 
     // Inject CSS via JS
-    let inject_script = format!(r#"
+    let inject_script = format!(
+        r#"
 (function() {{
     if (document.getElementById('pake-nav')) return;
     var style = document.createElement('style');

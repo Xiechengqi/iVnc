@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppRunningState {
@@ -33,8 +33,7 @@ impl AppRunningState {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
-        std::fs::write(&path, json)
-            .map_err(|e| format!("Failed to write state file: {}", e))?;
+        std::fs::write(&path, json).map_err(|e| format!("Failed to write state file: {}", e))?;
 
         log::info!("Saved running apps state: {:?}", self.app_ids);
         Ok(())
