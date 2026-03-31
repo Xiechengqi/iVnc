@@ -1,49 +1,99 @@
 const API = '/api/apps';
 let editId = null;
+let lastDataHash = '';
+
+// Helper for XSS safe escaping
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+// Generate a simple hash of the data to avoid flicker
+function getHash(data) {
+    return JSON.stringify(data.apps.map(a => ({ id: a.id, status: a.status, size: a.data_size_human })));
+}
 
 async function load() {
     try {
         const r = await fetch(API);
         const d = await r.json();
+        
+        const currentHash = getHash(d);
+        if (currentHash === lastDataHash) return; // Skip update if no change
+        lastDataHash = currentHash;
+
         const tb = document.getElementById('app-list');
         if (!d.apps || !d.apps.length) {
             tb.innerHTML = '<tr><td colspan="6" class="empty">暂无应用，点击上方按钮添加</td></tr>';
             return;
         }
-        tb.innerHTML = d.apps.map(a => {
+
+        const fragment = document.createDocumentFragment();
+        d.apps.forEach(a => {
+            const tr = document.createElement('tr');
             const type = a.app_type === 'desktop' ? '桌面' : '网页';
-            const config = a.app_type === 'desktop' ? esc(a.exec_command || '') : esc((a.url || '').length > 30 ? a.url.slice(0, 30) + '...' : a.url || '');
-            return `<tr>
-      <td><strong>${esc(a.name)}</strong></td>
-      <td><span class="badge">${type}</span></td>
-      <td title="${esc(a.app_type === 'desktop' ? a.exec_command || '' : a.url || '')}">${config}</td>
-      <td>
-        <div class="status-wrapper">
-          <span class="status status-${a.status}"></span>
-          <span>${a.status}</span>
-        </div>
-      </td>
-      <td class="data-size">${a.data_size_human}</td>
-      <td class="actions">
-        ${a.status === 'running'
-                    ? `<button class="btn btn-stop btn-sm" onclick="act('${a.id}','stop')">停止</button>
-             <button class="btn btn-restart btn-sm" onclick="act('${a.id}','restart')">重启</button>`
-                    : `<button class="btn btn-start btn-sm" onclick="act('${a.id}','start')">启动</button>`}
-        <button class="btn btn-edit btn-sm" onclick="showEdit('${a.id}')" ${a.status === 'running' ? 'disabled title="请先停止应用再编辑"' : ''}>编辑</button>
-        <button class="btn btn-log btn-sm" onclick="showLogs('${a.id}','${esc(a.name)}')">日志</button>
-        <button class="btn btn-clear btn-sm" onclick="clearData('${a.id}','${esc(a.name)}')">清理</button>
-        <button class="btn btn-delete btn-sm" onclick="del('${a.id}','${esc(a.name)}')">删除</button>
-      </td></tr>`;
-        }).join('');
-    } catch (e) { toast('加载失败: ' + e, 'err'); }
+            const configStr = a.app_type === 'desktop' ? (a.exec_command || '') : (a.url || '');
+            const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
+            
+            tr.innerHTML = `
+                <td><strong>${esc(a.name)}</strong></td>
+                <td><span class="badge">${type}</span></td>
+                <td title="${esc(configStr)}">${esc(configShort)}</td>
+                <td>
+                    <div class="status-wrapper">
+                        <span class="status status-${a.status}"></span>
+                        <span>${a.status}</span>
+                    </div>
+                </td>
+                <td class="data-size">${a.data_size_human}</td>
+                <td class="actions"></td>
+            `;
+
+            const actionsCell = tr.querySelector('.actions');
+            
+            if (a.status === 'running') {
+                const stopBtn = createBtn('停止', 'btn-stop btn-sm', () => act(a.id, 'stop'));
+                const restartBtn = createBtn('重启', 'btn-restart btn-sm', () => act(a.id, 'restart'));
+                actionsCell.append(stopBtn, restartBtn);
+            } else {
+                const startBtn = createBtn('启动', 'btn-start btn-sm', () => act(a.id, 'start'));
+                actionsCell.append(startBtn);
+            }
+
+            const editBtn = createBtn('编辑', 'btn-edit btn-sm', () => showEdit(a.id));
+            if (a.status === 'running') {
+                editBtn.disabled = true;
+                editBtn.title = '请先停止应用再编辑';
+            }
+            
+            const logBtn = createBtn('日志', 'btn-log btn-sm', () => showLogs(a.id, a.name));
+            const clearBtn = createBtn('清理', 'btn-clear btn-sm', () => clearData(a.id, a.name));
+            const delBtn = createBtn('删除', 'btn-delete btn-sm', () => del(a.id, a.name));
+            
+            actionsCell.append(editBtn, logBtn, clearBtn, delBtn);
+            fragment.appendChild(tr);
+        });
+
+        tb.innerHTML = '';
+        tb.appendChild(fragment);
+    } catch (e) { console.error('Load failed:', e); }
 }
 
-window.showAdd = function() {
+function createBtn(text, cls, onClick) {
+    const b = document.createElement('button');
+    b.className = 'btn ' + cls;
+    b.textContent = text;
+    b.addEventListener('click', onClick);
+    return b;
+}
+
+function showAdd() {
     editId = null;
-    document.getElementById('modal-title').textContent = '添加应用';
-    document.getElementById('modal-save').textContent = '添加';
-    document.getElementById('f-name').value = ''; document.getElementById('f-name').disabled = false;
+    const modal = document.getElementById('modal');
+    modal.querySelector('#modal-title').textContent = '添加应用';
+    modal.querySelector('#modal-save').textContent = '添加';
+    
+    document.getElementById('f-name').value = ''; 
+    document.getElementById('f-name').disabled = false;
     document.getElementById('f-app-type').value = 'webapp';
+    document.getElementById('f-app-type').disabled = false;
     document.getElementById('f-url').value = '';
     document.getElementById('f-mode').value = 'native';
     document.getElementById('f-nav').checked = false;
@@ -51,33 +101,26 @@ window.showAdd = function() {
     document.getElementById('f-proxy-server').value = '';
     document.getElementById('f-exec').value = '';
     document.getElementById('f-env').value = '';
+    
     updateAppTypeVisibility();
     updateNavVisibility();
-    document.getElementById('modal').classList.add('show');
-};
-
-function updateAppTypeVisibility() {
-    const type = document.getElementById('f-app-type').value;
-    const webappConfig = document.getElementById('webapp-config');
-    const desktopConfig = document.getElementById('desktop-config');
-    if (type === 'desktop') {
-        webappConfig.style.display = 'none';
-        desktopConfig.style.display = 'block';
-    } else {
-        webappConfig.style.display = 'block';
-        desktopConfig.style.display = 'none';
-    }
+    modal.classList.add('show');
 }
 
-window.showEdit = async function(id) {
+async function showEdit(id) {
     try {
-        const r = await fetch(API + '/' + id); const a = await r.json();
+        const r = await fetch(API + '/' + id); 
+        const a = await r.json();
         editId = id;
-        document.getElementById('modal-title').textContent = '编辑应用';
-        document.getElementById('modal-save').textContent = '保存';
-        document.getElementById('f-name').value = a.name; document.getElementById('f-name').disabled = true;
+        const modal = document.getElementById('modal');
+        modal.querySelector('#modal-title').textContent = '编辑应用';
+        modal.querySelector('#modal-save').textContent = '保存';
+        
+        document.getElementById('f-name').value = a.name; 
+        document.getElementById('f-name').disabled = true;
         document.getElementById('f-app-type').value = a.app_type || 'webapp';
         document.getElementById('f-app-type').disabled = true;
+        
         if (a.app_type === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
             const envStr = a.env_vars ? Object.entries(a.env_vars).map(([k, v]) => `${k}=${v}`).join('\n') : '';
@@ -91,19 +134,33 @@ window.showEdit = async function(id) {
         }
         updateAppTypeVisibility();
         updateNavVisibility();
-        document.getElementById('modal').classList.add('show');
-    } catch (e) { toast('获取失败', 'err'); }
-};
+        modal.classList.add('show');
+    } catch (e) { toast('获取失败: ' + e, 'err'); }
+}
 
-window.hideModal = function() { document.getElementById('modal').classList.remove('show'); };
+function hideModal() { 
+    document.getElementById('modal').classList.remove('show'); 
+}
 
-window.saveApp = async function() {
+function validateUrl(url) {
+    if (!url) return false;
+    try { new URL(url); return true; } catch { return false; }
+}
+
+async function saveApp() {
+    const btn = document.getElementById('modal-save');
     const appType = document.getElementById('f-app-type').value;
     const body = { app_type: appType };
-    if (!editId) body.name = document.getElementById('f-name').value;
+    
+    if (!editId) {
+        body.name = document.getElementById('f-name').value.trim();
+        if (!body.name) return toast('请输入应用名称', 'err');
+    }
 
     if (appType === 'desktop') {
-        body.exec_command = document.getElementById('f-exec').value;
+        body.exec_command = document.getElementById('f-exec').value.trim();
+        if (!body.exec_command) return toast('请输入启动命令', 'err');
+        
         const envText = document.getElementById('f-env').value.trim();
         if (envText) {
             const envVars = {};
@@ -118,7 +175,9 @@ window.saveApp = async function() {
             body.env_vars = envVars;
         }
     } else {
-        body.url = document.getElementById('f-url').value;
+        body.url = document.getElementById('f-url').value.trim();
+        if (!validateUrl(body.url)) return toast('请输入有效的 URL', 'err');
+        
         body.mode = document.getElementById('f-mode').value;
         body.show_nav = document.getElementById('f-nav').checked;
         const debugPort = document.getElementById('f-debug-port').value;
@@ -126,6 +185,10 @@ window.saveApp = async function() {
         const proxyServer = document.getElementById('f-proxy-server').value.trim();
         body.proxy_server = proxyServer || null;
     }
+
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = '保存中...';
 
     try {
         const r = await fetch(editId ? API + '/' + editId : API, {
@@ -135,82 +198,103 @@ window.saveApp = async function() {
         });
         const d = await r.json();
         if (d.error) { toast(d.error, 'err'); return; }
-        window.hideModal(); toast(editId ? '已更新' : '已添加', 'ok'); load();
-    } catch (e) { toast('操作失败', 'err'); }
-};
+        hideModal(); 
+        toast(editId ? '已更新' : '已添加', 'ok'); 
+        load();
+    } catch (e) { toast('操作失败: ' + e, 'err'); } 
+    finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
 
-window.act = async function(id, action) {
+async function act(id, action) {
     try {
         const r = await fetch(`${API}/${id}/${action}`, { method: 'POST' });
         const d = await r.json();
         if (d.error) { toast(d.error, 'err'); return; }
-        toast(action === 'start' ? '已启动' : action === 'stop' ? '已停止' : '已重启', 'ok'); load();
+        toast(action === 'start' ? '已启动' : action === 'stop' ? '已停止' : '已重启', 'ok'); 
+        load();
     } catch (e) { toast('操作失败', 'err'); }
-};
+}
 
-window.del = async function(id, name) {
+async function del(id, name) {
     if (!confirm(`确认删除应用 "${name}"？`)) return;
     try {
         const r = await fetch(API + '/' + id, { method: 'DELETE' });
         const d = await r.json();
         if (d.error) { toast(d.error, 'err'); return; }
-        toast('已删除', 'ok'); load();
+        toast('已删除', 'ok'); 
+        load();
     } catch (e) { toast('删除失败', 'err'); }
-};
+}
 
-window.clearData = async function(id, name) {
+async function clearData(id, name) {
     if (!confirm(`确认清理 "${name}" 的缓存数据？\n将清除所有Cookie、LocalStorage和缓存。`)) return;
     try {
         const r = await fetch(`${API}/${id}/clear-data`, { method: 'POST' });
         const d = await r.json();
         if (d.error) { toast(d.error, 'err'); return; }
-        toast('已清理', 'ok'); load();
+        toast('已清理', 'ok'); 
+        load();
     } catch (e) { toast('清理失败', 'err'); }
-};
+}
 
 function toast(msg, type) {
     const t = document.getElementById('toast');
-    t.textContent = msg; t.className = 'toast toast-' + type + ' show';
+    t.textContent = msg; 
+    t.className = 'toast show toast-' + type;
     setTimeout(() => t.classList.remove('show'), 2500);
 }
 
-function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
-
-window.showLogs = async function(id, name) {
-    document.getElementById('log-title').textContent = '日志: ' + name;
-    document.getElementById('log-content').textContent = '加载中...';
-    document.getElementById('log-modal').classList.add('show');
+async function showLogs(id, name) {
+    const modal = document.getElementById('log-modal');
+    modal.querySelector('#log-title').textContent = '日志: ' + name;
+    const content = document.getElementById('log-content');
+    content.textContent = '加载中...';
+    modal.classList.add('show');
     try {
-        const r = await fetch(`${API}/${id}/logs`); const d = await r.json();
-        document.getElementById('log-content').textContent = d.logs || '(空)';
-        const el = document.getElementById('log-content');
-        el.scrollTop = el.scrollHeight;
-    } catch (e) { document.getElementById('log-content').textContent = '加载失败: ' + e; }
-};
-window.hideLogModal = function() { document.getElementById('log-modal').classList.remove('show'); };
+        const r = await fetch(`${API}/${id}/logs`); 
+        const d = await r.json();
+        content.textContent = d.logs || '(空)';
+        content.scrollTop = content.scrollHeight;
+    } catch (e) { content.textContent = '加载失败: ' + e; }
+}
+
+function hideLogModal() { 
+    document.getElementById('log-modal').classList.remove('show'); 
+}
+
+function updateAppTypeVisibility() {
+    const type = document.getElementById('f-app-type').value;
+    document.getElementById('webapp-config').style.display = type === 'desktop' ? 'none' : 'block';
+    document.getElementById('desktop-config').style.display = type === 'desktop' ? 'block' : 'none';
+}
 
 function updateNavVisibility() {
     const mode = document.getElementById('f-mode').value;
-    const navRow = document.getElementById('nav-row');
-    const debugPortRow = document.getElementById('debug-port-row');
-    const proxyServerRow = document.getElementById('proxy-server-row');
-    const navCheckbox = document.getElementById('f-nav');
-    if (mode === 'webview') {
-        navRow.style.display = 'none';
-        debugPortRow.style.display = 'none';
-        proxyServerRow.style.display = 'none';
-        navCheckbox.disabled = true;
-    } else {
-        navRow.style.display = 'flex';
-        debugPortRow.style.display = 'flex';
-        proxyServerRow.style.display = 'flex';
-        navCheckbox.disabled = false;
-    }
+    const isWebView = mode === 'webview';
+    document.getElementById('nav-row').style.display = isWebView ? 'none' : 'flex';
+    document.getElementById('advanced-settings-group').style.display = isWebView ? 'none' : 'block';
+    document.getElementById('f-nav').disabled = isWebView;
 }
 
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', () => {
+    // Event listeners for static elements
+    document.querySelector('.btn-add').addEventListener('click', showAdd);
     document.getElementById('f-app-type').addEventListener('change', updateAppTypeVisibility);
     document.getElementById('f-mode').addEventListener('change', updateNavVisibility);
+    
+    // Modal close buttons
+    document.querySelectorAll('.btn-cancel').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            if (e.target.closest('#log-modal')) hideLogModal();
+            else hideModal();
+        });
+    });
+
+    document.getElementById('modal-save').addEventListener('click', saveApp);
+
     load();
     setInterval(load, 5000);
 });

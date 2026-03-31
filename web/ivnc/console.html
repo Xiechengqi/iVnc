@@ -47,12 +47,12 @@
             </div>
             
             <div id="webapp-config">
-                <div class="form-group">
-                    <label>URL</label>
-                    <input type="text" id="f-url" placeholder="https://">
-                </div>
-                <div class="form-row" style="display:flex; gap:12px;">
-                    <div class="form-group" style="flex:1;">
+                <div class="form-row">
+                    <div class="form-group" style="flex: 2;">
+                        <label>URL</label>
+                        <input type="text" id="f-url" placeholder="https://">
+                    </div>
+                    <div class="form-group">
                         <label>模式</label>
                         <select id="f-mode">
                             <option value="native">Native</option>
@@ -60,18 +60,25 @@
                         </select>
                     </div>
                 </div>
+
                 <div class="form-group" id="nav-row" style="display:flex; align-items:center; gap:8px;">
-                    <input type="checkbox" id="f-nav" style="width:auto;">
-                    <label for="f-nav" style="margin-bottom:0;">显示导航栏（仅 Native 模式）</label>
+                    <input type="checkbox" id="f-nav" style="width:auto; margin:0;">
+                    <label for="f-nav" style="margin:0; font-weight: 500;">显示导航栏（仅 Native 模式）</label>
                 </div>
-                <div class="form-group" id="debug-port-row">
-                    <label>Remote Debugging Port（可选）</label>
-                    <input type="number" id="f-debug-port" placeholder="留空则不开启" min="1024" max="65535">
-                </div>
-                <div class="form-group" id="proxy-server-row">
-                    <label>Proxy Server（可选）</label>
-                    <input type="text" id="f-proxy-server" placeholder="socks5://127.0.0.1:1080">
-                    <small style="color:#888;font-size:11px;display:block;margin-top:2px">留空使用默认值 socks5://127.0.0.1:1080</small>
+
+                <div id="advanced-settings-group">
+                    <div class="advanced-title">高级配置</div>
+                    <div class="form-row">
+                        <div class="form-group" id="debug-port-row">
+                            <label>Debugging Port</label>
+                            <input type="number" id="f-debug-port" placeholder="可选" min="1024" max="65535">
+                        </div>
+                        <div class="form-group" id="proxy-server-row">
+                            <label>Proxy Server</label>
+                            <input type="text" id="f-proxy-server" placeholder="socks5://127.0.0.1:1080">
+                        </div>
+                    </div>
+                    <small class="help-text" id="proxy-help">留空使用默认值 socks5://127.0.0.1:1080</small>
                 </div>
             </div>
 
@@ -101,7 +108,7 @@
             <h2 id="log-title">应用日志</h2>
             <div class="log-content" id="log-content">(loading...)</div>
             <div class="modal-actions">
-                <button class="btn btn-cancel" onclick="hideLogModal()">关闭</button>
+                <button class="btn btn-cancel">关闭</button>
             </div>
         </div>
     </div>
@@ -109,3 +116,4 @@
     <script type="module" src="./console.js"></script>
 </body>
 </html>
+tml>
