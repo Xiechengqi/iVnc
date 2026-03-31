@@ -711,14 +711,32 @@ async fn change_password_handler(
 }
 
 /// Console page handler - serves the Pake apps management UI
-async fn console_handler() -> Response {
-    let html = include_str!("../../web/console/index.html");
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "no-store, max-age=0")
-        .body(Body::from(html))
-        .unwrap()
+async fn console_handler(State(_state): State<Arc<SharedState>>) -> Response {
+    // Check for embedded assets first, then fall back to filesystem
+    let use_embedded = has_embedded_assets() && std::env::var("IVNC_WEB_ROOT").is_err();
+
+    if use_embedded {
+        return get_embedded_file("console.html");
+    }
+
+    // Fallback to filesystem
+    let static_root = std::env::var("IVNC_WEB_ROOT")
+        .unwrap_or_else(|_| "web/ivnc".to_string());
+    let path = PathBuf::from(&static_root).join("console.html");
+    match tokio::fs::read(&path).await {
+        Ok(data) => {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-store, max-age=0")
+                .body(Body::from(data))
+                .unwrap()
+        }
+        Err(_) => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("console.html not found"))
+            .unwrap(),
+    }
 }
 
 // ============================================================================

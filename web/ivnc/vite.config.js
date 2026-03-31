@@ -19,9 +19,12 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: './index.html',
+        console: './console.html',
       },
       output: {
-        entryFileNames: 'ivnc-core.js'
+        entryFileNames: (chunkInfo) => {
+          return chunkInfo.name === 'main' ? 'ivnc-core.js' : '[name].js';
+        }
       }
     }
   },

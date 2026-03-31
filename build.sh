@@ -44,16 +44,14 @@ echo "Done."
 
 # ── 2. Build frontend ────────────────────────────────────────
 echo "=== Building frontend ==="
-mkdir -p "$DIST_DIR/lib"
-cp "$WEB_DIR/index.html" "$DIST_DIR/"
-cp "$WEB_DIR/ivnc-core.js" "$DIST_DIR/"
-cp "$WEB_DIR/ivnc-wr-core.js" "$DIST_DIR/"
-cp "$WEB_DIR"/lib/*.js "$DIST_DIR/lib/"
-cp "$WEB_DIR/manifest.json" "$DIST_DIR/"
-cp "$WEB_DIR/sw.js" "$DIST_DIR/"
-cp -r "$WEB_DIR/icons" "$DIST_DIR/icons"
-echo "Frontend -> $DIST_DIR"
+cd "$WEB_DIR"
+if [ ! -d "node_modules" ]; then
+    npm install
+fi
+npm run build
+echo "Frontend build completed in $DIST_DIR"
 ls -R "$DIST_DIR"
+cd "$ROOT"
 
 # ── 3. Build backend ─────────────────────────────────────────
 CARGO_ARGS=()
