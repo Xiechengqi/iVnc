@@ -20,10 +20,11 @@ export default defineConfig({
       input: {
         main: './index.html',
         console: './console.html',
+        'ivnc-core': './ivnc-core.js',
       },
       output: {
         entryFileNames: (chunkInfo) => {
-          return chunkInfo.name === 'main' ? 'ivnc-core.js' : '[name].js';
+          return chunkInfo.name === 'ivnc-core' ? 'ivnc-core.js' : '[name].js';
         }
       }
     }
