@@ -69,6 +69,8 @@ pub struct PakeApp {
     pub show_nav: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_debugging_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_server: Option<String>,
 
     // DesktopApp fields
     pub exec_command: Option<String>,

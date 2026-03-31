@@ -48,6 +48,7 @@ window.showAdd = function() {
     document.getElementById('f-mode').value = 'native';
     document.getElementById('f-nav').checked = false;
     document.getElementById('f-debug-port').value = '';
+    document.getElementById('f-proxy-server').value = '';
     document.getElementById('f-exec').value = '';
     document.getElementById('f-env').value = '';
     updateAppTypeVisibility();
@@ -86,6 +87,7 @@ window.showEdit = async function(id) {
             document.getElementById('f-mode').value = a.mode || 'native';
             document.getElementById('f-nav').checked = a.show_nav || false;
             document.getElementById('f-debug-port').value = a.remote_debugging_port || '';
+            document.getElementById('f-proxy-server').value = a.proxy_server || '';
         }
         updateAppTypeVisibility();
         updateNavVisibility();
@@ -121,6 +123,8 @@ window.saveApp = async function() {
         body.show_nav = document.getElementById('f-nav').checked;
         const debugPort = document.getElementById('f-debug-port').value;
         body.remote_debugging_port = debugPort ? parseInt(debugPort) : null;
+        const proxyServer = document.getElementById('f-proxy-server').value.trim();
+        body.proxy_server = proxyServer || null;
     }
 
     try {
@@ -189,14 +193,17 @@ function updateNavVisibility() {
     const mode = document.getElementById('f-mode').value;
     const navRow = document.getElementById('nav-row');
     const debugPortRow = document.getElementById('debug-port-row');
+    const proxyServerRow = document.getElementById('proxy-server-row');
     const navCheckbox = document.getElementById('f-nav');
     if (mode === 'webview') {
         navRow.style.display = 'none';
         debugPortRow.style.display = 'none';
+        proxyServerRow.style.display = 'none';
         navCheckbox.disabled = true;
     } else {
         navRow.style.display = 'flex';
         debugPortRow.style.display = 'flex';
+        proxyServerRow.style.display = 'flex';
         navCheckbox.disabled = false;
     }
 }

@@ -100,8 +100,12 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
        .arg("--no-default-browser-check")
        .arg("--disable-features=MediaRouter")
        .arg("--disable-background-networking")
-       .arg("--disable-process-singleton")
-       .arg("--proxy-server=socks5://127.0.0.1:1080");
+       .arg("--disable-process-singleton");
+
+    // Add proxy server if configured (default: socks5://127.0.0.1:1080)
+    let proxy = app.proxy_server.as_deref().unwrap_or("socks5://127.0.0.1:1080");
+    cmd.arg(format!("--proxy-server={}", proxy));
+    info!("  Proxy: {}", proxy);
 
     // Add CDP debugging based on configuration
     let debug_port = if let Some(port) = app.remote_debugging_port {
