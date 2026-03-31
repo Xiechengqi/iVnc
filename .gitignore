@@ -9,8 +9,8 @@ ivnc-linux-amd64
 *.swo
 
 # Local configuration
+/config.toml
 config/*.toml
-!config/ivnc.example.toml
 
 # Runtime files
 *.pid
