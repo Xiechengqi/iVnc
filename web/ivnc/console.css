@@ -23,10 +23,16 @@ body {
   line-height: 1.5;
 }
 
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
 h1 {
   font-size: 1.5rem;
   font-weight: 700;
-  margin-bottom: 24px;
   color: var(--text-main);
   display: flex;
   align-items: center;
@@ -34,9 +40,8 @@ h1 {
 }
 
 .toolbar {
-  margin-bottom: 20px;
   display: flex;
-  justify-content: flex-end;
+  gap: 12px;
 }
 
 .btn {

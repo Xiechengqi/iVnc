@@ -7,9 +7,11 @@
     <link rel="stylesheet" href="./console.css">
 </head>
 <body>
-    <h1>iVnc 控制台</h1>
-    <div class="toolbar">
-        <button class="btn btn-add" onclick="showAdd()">+ 添加应用</button>
+    <div class="page-header">
+        <h1>iVnc 控制台</h1>
+        <div class="toolbar">
+            <button class="btn btn-add">+ 添加应用</button>
+        </div>
     </div>
     
     <div class="card">
@@ -94,8 +96,8 @@
             </div>
 
             <div class="modal-actions">
-                <button class="btn btn-cancel" onclick="hideModal()">取消</button>
-                <button class="btn btn-save" id="modal-save" onclick="saveApp()">保存</button>
+                <button class="btn btn-cancel">取消</button>
+                <button class="btn btn-save" id="modal-save">保存</button>
             </div>
         </div>
     </div>
@@ -116,4 +118,3 @@
     <script type="module" src="./console.js"></script>
 </body>
 </html>
-tml>
