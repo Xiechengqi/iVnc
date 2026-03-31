@@ -14,7 +14,6 @@ use std::fmt;
 
 /// GStreamer-related errors
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum GstError {
     /// GStreamer initialization failed
     InitFailed(String),
@@ -26,8 +25,6 @@ pub enum GstError {
     LinkFailed(String),
     /// State change failed
     StateChangeFailed(String),
-    /// Feature not enabled
-    FeatureDisabled,
 }
 
 impl fmt::Display for GstError {
@@ -38,21 +35,8 @@ impl fmt::Display for GstError {
             GstError::EncoderNotFound(msg) => write!(f, "Encoder not found: {}", msg),
             GstError::LinkFailed(msg) => write!(f, "Element linking failed: {}", msg),
             GstError::StateChangeFailed(msg) => write!(f, "State change failed: {}", msg),
-            GstError::FeatureDisabled => write!(f, "WebRTC streaming feature is not enabled"),
         }
     }
 }
 
 impl Error for GstError {}
-
-/// Initialize GStreamer subsystem
-#[allow(dead_code)]
-pub fn init() -> Result<(), GstError> {
-    gstreamer::init().map_err(|e| GstError::InitFailed(e.to_string()))
-}
-
-/// Check if GStreamer is available and properly initialized
-#[allow(dead_code)]
-pub fn is_available() -> bool {
-    gstreamer::init().is_ok()
-}

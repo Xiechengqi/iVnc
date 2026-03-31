@@ -6,7 +6,6 @@ pub mod app;
 pub mod store;
 pub mod process;
 pub mod native;
-pub mod webview;
 pub mod webview_manager_process;
 pub mod datadir;
 pub mod api;

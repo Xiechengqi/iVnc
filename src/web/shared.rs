@@ -2,8 +2,6 @@
 //!
 //! Manages shared configuration and WebRTC sessions.
 
-#![allow(dead_code)]
-
 use crate::config::Config;
 use crate::config::ui::UiConfig;
 use crate::audio::AudioPacket;
@@ -535,28 +533,6 @@ impl SharedState {
     /// Get video codec from WebRTC config
     pub fn video_codec(&self) -> crate::config::VideoCodec {
         self.config.webrtc.video_codec
-    }
-
-    /// Build extended stats JSON payload including WebRTC info
-    #[allow(dead_code)]
-    pub fn extended_stats_json(&self) -> String {
-        let stats = self.stats.lock().unwrap().clone();
-        let webrtc_sessions = self.webrtc_sessions();
-
-        format!(
-            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"webrtc_sessions":{},"ice_candidates_total":{},"ice_candidates_tcp":{}}}"#,
-            stats.fps,
-            stats.bandwidth,
-            stats.latency_ms,
-            stats.client_latency_ms,
-            stats.client_fps,
-            self.connection_count(),
-            stats.cpu_percent,
-            stats.mem_used,
-            webrtc_sessions,
-            stats.ice_candidates_total,
-            stats.ice_candidates_tcp
-        )
     }
 
     /// Add a new connection

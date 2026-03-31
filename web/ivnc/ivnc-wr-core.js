@@ -1440,23 +1440,6 @@ export default function webrtc() {
 				window.isManualResolutionMode = true;
 				break;
 			case "setUseCssScaling":
-				// TODO: fix issues with hiDPI especially from andriod clients
-				// useCssScaling = message.value;
-				// setBoolParam('useCssScaling', useCssScaling);
-				// console.log(`Set useCssScaling to ${useCssScaling} and persisted.`);
-
-				// input.updateCssScaling();
-				// updateVideoImageRendering();
-				// if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
-				//     sendResolutionToServer(manualWidth, manualHeight);
-				//     applyManualStyle(manualWidth, manualHeight, scaleLocal);
-				// } else {
-				//     const currentWindowRes = input.getWindowResolution()
-				//     const autoWidth = roundDownToEven(currentWindowRes[0]);
-				//     const autoHeight = roundDownToEven(currentWindowRes[1]);
-				//     sendResolutionToServer(autoWidth, autoHeight);
-				//     resetToWindowResolution(autoWidth, autoHeight)
-				// }
 				console.warn("Skipping cssScaling since hidpi needs to be implemented")
 				break;
 			case "clipboardUpdateFromUI":

@@ -152,13 +152,4 @@ impl ProcessManager {
         self.status(app_id) == AppStatus::Running
     }
 
-    #[allow(dead_code)]
-    pub fn stop_all(&self) {
-        let mut procs = self.processes.lock().unwrap();
-        for (id, mut running) in procs.drain() {
-            warn!("Stopping Pake app {} (pid={})", id, running.pid);
-            let _ = running.child.kill();
-            let _ = running.child.wait();
-        }
-    }
 }

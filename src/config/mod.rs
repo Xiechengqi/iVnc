@@ -26,25 +26,6 @@ impl VideoCodec {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn mime_type(&self) -> &'static str {
-        match self {
-            VideoCodec::H264 => "video/H264",
-            VideoCodec::VP8 => "video/VP8",
-            VideoCodec::VP9 => "video/VP9",
-            VideoCodec::AV1 => "video/AV1",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn rtp_payload_type(&self) -> u8 {
-        match self {
-            VideoCodec::H264 => 96,
-            VideoCodec::VP8 => 97,
-            VideoCodec::VP9 => 98,
-            VideoCodec::AV1 => 99,
-        }
-    }
 }
 
 /// Hardware encoder selection
@@ -57,19 +38,6 @@ pub enum HardwareEncoder {
     Vaapi,   // Intel VA-API
     Nvenc,   // NVIDIA NVENC
     Qsv,     // Intel Quick Sync
-}
-
-impl HardwareEncoder {
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            HardwareEncoder::Auto => "auto",
-            HardwareEncoder::Software => "software",
-            HardwareEncoder::Vaapi => "vaapi",
-            HardwareEncoder::Nvenc => "nvenc",
-            HardwareEncoder::Qsv => "qsv",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

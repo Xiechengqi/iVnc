@@ -43,12 +43,6 @@ pub fn has_embedded_assets() -> bool {
     WebAssets::get("index.html").is_some()
 }
 
-/// List all embedded files (for debugging)
-#[allow(dead_code)]
-pub fn list_embedded_files() -> Vec<String> {
-    WebAssets::iter().map(|s| s.to_string()).collect()
-}
-
 /// Determine cache control header based on file type
 fn cache_control_for_path(path: &str) -> &'static str {
     if path == "index.html" {

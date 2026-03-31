@@ -174,7 +174,6 @@ impl WebViewManager {
     }
 
     /// Get PID of a WebView process
-    #[allow(dead_code)]
     pub fn pid(&self, app_id: &str) -> Option<u32> {
         let processes = self.processes.lock().unwrap();
         processes.get(app_id).map(|p| p.pid)

@@ -51,11 +51,6 @@ impl FileUploadHandler {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn from_config(config: &Config) -> Self {
-        Self::new(FileUploadSettings::from_config(config))
-    }
-
     pub fn handle_control_message(&mut self, message: &str) -> bool {
         if message.starts_with("FILE_UPLOAD_START:") {
             if !self.is_upload_allowed() {

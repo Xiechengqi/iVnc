@@ -30,22 +30,12 @@ impl RuntimeSettings {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn target_fps(&self) -> u32 {
-        self.target_fps.load(Ordering::Relaxed)
-    }
-
     pub fn binary_clipboard_enabled(&self) -> bool {
         self.binary_clipboard_enabled.load(Ordering::Relaxed)
     }
 
     pub fn video_bitrate_kbps(&self) -> u32 {
         self.video_bitrate_kbps.load(Ordering::Relaxed)
-    }
-
-    #[allow(dead_code)]
-    pub fn audio_bitrate(&self) -> u32 {
-        self.audio_bitrate.load(Ordering::Relaxed)
     }
 
     pub fn keyframe_interval(&self) -> u32 {
@@ -79,20 +69,6 @@ impl RuntimeSettings {
 
     pub fn request_keyframe(&self) {
         self.keyframe_request.store(true, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub fn take_audio_bitrate_update(&self) -> Option<u32> {
-        if self.audio_bitrate_dirty.swap(false, Ordering::Relaxed) {
-            Some(self.audio_bitrate())
-        } else {
-            None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn audio_bitrate_dirty(&self) -> bool {
-        self.audio_bitrate_dirty.load(Ordering::Relaxed)
     }
 
     pub fn handle_simple_message(&self, message: &str) -> bool {
