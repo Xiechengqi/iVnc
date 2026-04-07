@@ -98,7 +98,7 @@ function showAdd() {
     document.getElementById('f-mode').value = 'native';
     document.getElementById('f-nav').checked = false;
     document.getElementById('f-debug-port').value = '';
-    document.getElementById('f-proxy-server').value = '';
+    document.getElementById('f-proxy-server').value = 'socks5://127.0.0.1:1080';
     document.getElementById('f-exec').value = '';
     document.getElementById('f-env').value = '';
     
