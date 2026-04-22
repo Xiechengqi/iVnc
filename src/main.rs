@@ -3,39 +3,39 @@
 //! Wayland compositor + WebRTC streaming using smithay and GStreamer.
 
 mod args;
-mod config;
 mod audio;
-mod file_upload;
 mod clipboard;
-mod system_clipboard;
-mod runtime_settings;
-mod transport;
-mod input;
-mod web;
 mod compositor;
+mod config;
+mod file_upload;
 mod gstreamer;
-mod webrtc;
-mod pake_apps;
+mod input;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod pake_apps;
+mod runtime_settings;
+mod system_clipboard;
+mod transport;
+mod web;
+mod webrtc;
 
+use ::gstreamer as gst;
 use args::{Cli, Command, RunArgs};
+use audio::{run_audio_capture, AudioConfig as RuntimeAudioConfig};
 use base64::Engine;
 use clap::Parser;
-use ::gstreamer as gst;
-use config::Config;
-use audio::{run_audio_capture, AudioConfig as RuntimeAudioConfig};
 use compositor::{Compositor, HeadlessBackend};
+use config::Config;
+use gstreamer::PipelineConfig;
 use input::{InputEvent, InputEventData};
-use log::{info, error, warn};
+use log::{error, info, warn};
 use smithay::reexports::wayland_server::Resource;
 use std::env;
 use std::io::Read;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use gstreamer::PipelineConfig;
 use webrtc::SessionManager;
 
 #[global_allocator]
@@ -70,7 +70,11 @@ fn resolve_display_name(app_id: &str, title: &str) -> Option<String> {
     let data_home = env::var("XDG_DATA_HOME")
         .ok()
         .map(std::path::PathBuf::from)
-        .or_else(|| env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+        .or_else(|| {
+            env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        })?;
     let apps_dir = data_home.join("applications");
     let entries = std::fs::read_dir(&apps_dir).ok()?;
     for entry in entries.flatten() {
@@ -116,7 +120,9 @@ fn check_runtime_deps() {
         if handle.is_null() {
             missing.push((soname, pkg));
         } else {
-            unsafe { libc::dlclose(handle); }
+            unsafe {
+                libc::dlclose(handle);
+            }
         }
     }
 
@@ -171,9 +177,7 @@ fn ensure_pulseaudio() {
     use std::process::Command;
 
     // Check if already running
-    let status = Command::new("pulseaudio")
-        .arg("--check")
-        .status();
+    let status = Command::new("pulseaudio").arg("--check").status();
     if let Ok(s) = status {
         if s.success() {
             info!("PulseAudio already running");
@@ -238,17 +242,31 @@ fn main() {
     let width = config.display.width;
     let height = config.display.height;
     info!("Display: {}x{}", width, height);
-    info!("Codec: {:?}, Bitrate: {} kbps", config.webrtc.video_codec, config.webrtc.video_bitrate);
+    info!(
+        "Codec: {:?}, Bitrate: {} kbps",
+        config.webrtc.video_codec, config.webrtc.video_bitrate
+    );
 
     let runtime_settings = Arc::new(runtime_settings::RuntimeSettings::new(&config));
     let (input_tx, input_rx) = mpsc::unbounded_channel::<InputEventData>();
     let ui_config = config::ui::UiConfig::from_env(&config);
 
     let shared_state = Arc::new(web::SharedState::new(
-        config.clone(), ui_config, input_tx.clone(), runtime_settings.clone(),
+        config.clone(),
+        ui_config,
+        input_tx.clone(),
+        runtime_settings.clone(),
     ));
 
-    if let Err(e) = run(config, shared_state, runtime_settings, input_rx, width, height, &args) {
+    if let Err(e) = run(
+        config,
+        shared_state,
+        runtime_settings,
+        input_rx,
+        width,
+        height,
+        &args,
+    ) {
         eprintln!("Fatal error: {}", e);
         error!("Fatal error: {}", e);
         std::process::exit(1);
@@ -262,8 +280,7 @@ fn run(
     mut input_rx: mpsc::UnboundedReceiver<InputEventData>,
     width: u32,
     height: u32,
-    #[cfg_attr(not(feature = "mcp"), allow(unused))]
-    args: &RunArgs,
+    #[cfg_attr(not(feature = "mcp"), allow(unused))] args: &RunArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let running = Arc::new(AtomicBool::new(true));
 
@@ -312,18 +329,30 @@ fn run(
                         continue;
                     }
                     // Read process name
-                    let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
-                        .unwrap_or_default();
+                    let comm =
+                        std::fs::read_to_string(format!("/proc/{}/comm", pid)).unwrap_or_default();
                     if comm.trim() == "ivnc" {
                         continue;
                     }
-                    warn!("Terminating non-ivnc process {} ({}) occupying {}", pid, comm.trim(), sock);
-                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    warn!(
+                        "Terminating non-ivnc process {} ({}) occupying {}",
+                        pid,
+                        comm.trim(),
+                        sock
+                    );
+                    unsafe {
+                        libc::kill(pid, libc::SIGTERM);
+                    }
                     std::thread::sleep(Duration::from_millis(500));
                     // If still alive after SIGTERM, force kill
                     if unsafe { libc::kill(pid, 0) } == 0 {
-                        warn!("Process {} did not exit after SIGTERM, sending SIGKILL", pid);
-                        unsafe { libc::kill(pid, libc::SIGKILL); }
+                        warn!(
+                            "Process {} did not exit after SIGTERM, sending SIGKILL",
+                            pid
+                        );
+                        unsafe {
+                            libc::kill(pid, libc::SIGKILL);
+                        }
                     }
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -338,7 +367,9 @@ fn run(
     let mut comp = Compositor::new(&mut event_loop, display);
 
     let mut backend = HeadlessBackend::new(width, height)?;
-    let _output_global = backend.output().create_global::<Compositor>(&comp.display_handle);
+    let _output_global = backend
+        .output()
+        .create_global::<Compositor>(&comp.display_handle);
     comp.space.map_output(backend.output(), (0, 0));
 
     let socket_name = comp.socket_name.clone();
@@ -363,7 +394,8 @@ fn run(
 
     // GStreamer pipeline
     let pipeline_config = PipelineConfig {
-        width, height,
+        width,
+        height,
         framerate: config.encoding.target_fps,
         codec: config.webrtc.video_codec,
         bitrate: config.webrtc.video_bitrate,
@@ -373,7 +405,10 @@ fn run(
     };
     let mut pipeline = gstreamer::VideoPipeline::new(pipeline_config)?;
     pipeline.start()?;
-    info!("GStreamer pipeline started (encoder: {})", pipeline.encoder_name());
+    info!(
+        "GStreamer pipeline started (encoder: {})",
+        pipeline.encoder_name()
+    );
 
     // Tokio runtime for async services
     let tokio_rt = tokio::runtime::Runtime::new()?;
@@ -403,8 +438,10 @@ fn run(
 
     // Audio capture thread
     if config.audio.enabled {
-        info!("Starting audio capture thread (rate={} ch={} bitrate={})",
-            config.audio.sample_rate, config.audio.channels, config.audio.bitrate);
+        info!(
+            "Starting audio capture thread (rate={} ch={} bitrate={})",
+            config.audio.sample_rate, config.audio.channels, config.audio.bitrate
+        );
         let r = running.clone();
         let ac = config.audio.clone();
         let (audio_tx, mut audio_rx) = mpsc::unbounded_channel();
@@ -414,16 +451,20 @@ fn run(
                 st.broadcast_audio(pkt);
             }
         });
-        std::thread::Builder::new().name("audio-capture".into()).spawn(move || {
-            info!("Audio capture thread started");
-            let rt_audio = RuntimeAudioConfig {
-                sample_rate: ac.sample_rate, channels: ac.channels, bitrate: ac.bitrate,
-            };
-            match run_audio_capture(rt_audio, audio_tx, r) {
-                Ok(()) => info!("Audio capture thread exited normally"),
-                Err(e) => warn!("Audio capture ended with error: {}", e),
-            }
-        })?;
+        std::thread::Builder::new()
+            .name("audio-capture".into())
+            .spawn(move || {
+                info!("Audio capture thread started");
+                let rt_audio = RuntimeAudioConfig {
+                    sample_rate: ac.sample_rate,
+                    channels: ac.channels,
+                    bitrate: ac.bitrate,
+                };
+                match run_audio_capture(rt_audio, audio_tx, r) {
+                    Ok(()) => info!("Audio capture thread exited normally"),
+                    Err(e) => warn!("Audio capture ended with error: {}", e),
+                }
+            })?;
     } else {
         info!("Audio capture disabled in config");
     }
@@ -467,8 +508,8 @@ fn run(
         // call request_data_device_client_selection because smithay hadn't updated
         // the seat's selection yet. Now after dispatch() it's safe to request.
         if let Some(mime) = comp.clipboard_pending_mime.take() {
-            use std::os::fd::{AsRawFd, FromRawFd};
             use smithay::wayland::selection::data_device::request_data_device_client_selection;
+            use std::os::fd::{AsRawFd, FromRawFd};
 
             let mut fds = [0i32; 2];
             if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
@@ -481,8 +522,13 @@ fn run(
                         libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
                     }
                 }
-                info!("Deferred clipboard: requesting client data for mime={}", mime);
-                if request_data_device_client_selection::<Compositor>(&comp.seat, mime, write_fd).is_ok() {
+                info!(
+                    "Deferred clipboard: requesting client data for mime={}",
+                    mime
+                );
+                if request_data_device_client_selection::<Compositor>(&comp.seat, mime, write_fd)
+                    .is_ok()
+                {
                     comp.clipboard_read_fd = Some(read_fd);
                     // Flush immediately so the client receives the fd and can write data
                     comp.display_handle.flush_clients().ok();
@@ -507,14 +553,20 @@ fn run(
                         let dh = comp.display_handle.clone();
                         let seat = comp.seat.clone();
                         set_data_device_selection(
-                            &dh, &seat,
-                            vec!["text/plain;charset=utf-8".into(), "text/plain".into(), "UTF8_STRING".into()],
+                            &dh,
+                            &seat,
+                            vec![
+                                "text/plain;charset=utf-8".into(),
+                                "text/plain".into(),
+                                "UTF8_STRING".into(),
+                            ],
                             (),
                         );
                         // Suppress client clipboard re-assertions for a short window.
                         // The focused client (e.g. Chromium) will re-assert its own
                         // wl_data_source with stale content in response to our selection change.
-                        comp.clipboard_suppress_until = Some(Instant::now() + Duration::from_millis(500));
+                        comp.clipboard_suppress_until =
+                            Some(Instant::now() + Duration::from_millis(500));
                         info!("Clipboard from browser: {} bytes", text.len());
                     }
                 }
@@ -546,7 +598,8 @@ fn run(
                         // EOF — client closed write end, data is complete
                         if !clipboard_pipe_buf.is_empty() {
                             if let Ok(text) = String::from_utf8(clipboard_pipe_buf.clone()) {
-                                let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(&text);
                                 let msg = format!("clipboard,{}", encoded);
                                 info!("Clipboard from remote app: {} bytes", text.len());
                                 shared_state.send_text(msg);
@@ -590,7 +643,10 @@ fn run(
         // Detect window changes and request keyframe so browsers can decode the new content
         let cur_window_count = comp.space.elements().count();
         if cur_window_count != prev_window_count {
-            info!("Window count changed: {} -> {}", prev_window_count, cur_window_count);
+            info!(
+                "Window count changed: {} -> {}",
+                prev_window_count, cur_window_count
+            );
             prev_window_count = cur_window_count;
             backend.reset_damage();
             pipeline.request_keyframe();
@@ -611,30 +667,35 @@ fn run(
         // Broadcast taskbar window list to frontend when dirty
         if comp.taskbar_dirty {
             comp.taskbar_dirty = false;
-            let focused_wl = comp.seat.get_keyboard()
-                .and_then(|kb| kb.current_focus());
+            let focused_wl = comp.seat.get_keyboard().and_then(|kb| kb.current_focus());
             let mut windows_json = Vec::new();
             for (idx, wl_surface) in comp.window_registry.iter().enumerate() {
                 // Skip if window not in space anymore (being destroyed)
-                if comp.space.elements()
+                if comp
+                    .space
+                    .elements()
                     .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
-                    .is_none() {
+                    .is_none()
+                {
                     continue;
                 };
-                let is_focused = focused_wl.as_ref()
+                let is_focused = focused_wl
+                    .as_ref()
                     .map(|f| f.id() == wl_surface.id())
                     .unwrap_or(false);
-                let (title, app_id) = smithay::wayland::compositor::with_states(wl_surface, |states| {
-                    let data = states.data_map
-                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                        .unwrap()
-                        .lock()
-                        .unwrap();
-                    (
-                        data.title.clone().unwrap_or_default(),
-                        data.app_id.clone().unwrap_or_default(),
-                    )
-                });
+                let (title, app_id) =
+                    smithay::wayland::compositor::with_states(wl_surface, |states| {
+                        let data = states
+                            .data_map
+                            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                            .unwrap()
+                            .lock()
+                            .unwrap();
+                        (
+                            data.title.clone().unwrap_or_default(),
+                            data.app_id.clone().unwrap_or_default(),
+                        )
+                    });
                 if is_focused {
                     comp.focused_surface_id = Some(idx as u32);
                 }
@@ -682,7 +743,8 @@ fn run(
                 info!("Rebuilding GStreamer pipeline for {}x{}", w, h);
                 let _ = pipeline.stop();
                 let new_config = PipelineConfig {
-                    width: w, height: h,
+                    width: w,
+                    height: h,
                     framerate: config.encoding.target_fps,
                     codec: config.webrtc.video_codec,
                     bitrate: config.webrtc.video_bitrate,
@@ -743,7 +805,10 @@ fn run(
                     byte_count += pixels.len() as u64;
                 }
                 None => {
-                    warn!("render_frame returned None (windows={})", comp.space.elements().count());
+                    warn!(
+                        "render_frame returned None (windows={})",
+                        comp.space.elements().count()
+                    );
                 }
             }
         }
@@ -794,13 +859,9 @@ fn run(
                 stats.total_frames += frame_count;
                 stats.total_bytes += byte_count;
             }
-            shared_state.send_text(
-                format!("stats,{}", shared_state.stats_json()),
-            );
+            shared_state.send_text(format!("stats,{}", shared_state.stats_json()));
             // Re-broadcast cursor state so newly connected sessions get it
-            shared_state.send_text(
-                format!("cursor,{{\"override\":\"{}\"}}", prev_cursor_name),
-            );
+            shared_state.send_text(format!("cursor,{{\"override\":\"{}\"}}", prev_cursor_name));
             render_frames = 0;
             frame_count = 0;
             byte_count = 0;
@@ -838,7 +899,10 @@ fn drain_input_events(
         match ev.event_type {
             InputEvent::MouseMove => {
                 let (mut x, mut y) = if ev.text == "relative" {
-                    (prev_cursor_pos.0 + ev.mouse_x as f64, prev_cursor_pos.1 + ev.mouse_y as f64)
+                    (
+                        prev_cursor_pos.0 + ev.mouse_x as f64,
+                        prev_cursor_pos.1 + ev.mouse_y as f64,
+                    )
                 } else {
                     (ev.mouse_x as f64, ev.mouse_y as f64)
                 };
@@ -850,8 +914,13 @@ fn drain_input_events(
                 let under = state.surface_under(pos);
                 let ptr = state.seat.get_pointer().unwrap();
                 ptr.motion(
-                    state, under.clone(),
-                    &smithay::input::pointer::MotionEvent { location: pos, serial, time },
+                    state,
+                    under.clone(),
+                    &smithay::input::pointer::MotionEvent {
+                        location: pos,
+                        serial,
+                        time,
+                    },
                 );
                 ptr.frame(state);
 
@@ -876,7 +945,10 @@ fn drain_input_events(
                 // encoded in the mask, not as separate b,button,pressed messages.
                 let new_mask = ev.button_mask;
                 if new_mask != *prev_button_mask {
-                    info!("ButtonMask changed: {} -> {} at ({},{})", *prev_button_mask, new_mask, ev.mouse_x, ev.mouse_y);
+                    info!(
+                        "ButtonMask changed: {} -> {} at ({},{})",
+                        *prev_button_mask, new_mask, ev.mouse_x, ev.mouse_y
+                    );
                     let changed = new_mask ^ *prev_button_mask;
                     for bit in 0..5u8 {
                         if changed & (1 << bit) != 0 {
@@ -909,9 +981,9 @@ fn drain_input_events(
                 // Release all modifier keys to clear stuck state
                 let keyboard = state.seat.get_keyboard().unwrap();
                 let modifier_keycodes: &[u32] = &[
-                    50, 62,   // Shift L/R
-                    37, 105,  // Control L/R
-                    64, 108,  // Alt L/R
+                    50, 62, // Shift L/R
+                    37, 105, // Control L/R
+                    64, 108, // Alt L/R
                     133, 134, // Super L/R
                 ];
                 for &kc in modifier_keycodes {
@@ -920,7 +992,8 @@ fn drain_input_events(
                         state,
                         smithay::input::keyboard::Keycode::from(kc),
                         smithay::backend::input::KeyState::Released,
-                        s, time,
+                        s,
+                        time,
                         |_, _, _| smithay::input::keyboard::FilterResult::Forward,
                     );
                 }
@@ -936,7 +1009,9 @@ fn drain_input_events(
                 let target_idx = ev.window_id as usize;
                 let wl_surface = state.window_registry.get(target_idx).cloned();
                 if let Some(wl_surface) = wl_surface {
-                    let window = state.space.elements()
+                    let window = state
+                        .space
+                        .elements()
                         .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
                         .cloned();
                     if let Some(window) = window {
@@ -954,7 +1029,9 @@ fn drain_input_events(
                 let target_idx = ev.window_id as usize;
                 let wl_surface = state.window_registry.get(target_idx).cloned();
                 if let Some(wl_surface) = wl_surface {
-                    let window = state.space.elements()
+                    let window = state
+                        .space
+                        .elements()
                         .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
                         .cloned();
                     if let Some(window) = window {
@@ -962,11 +1039,17 @@ fn drain_input_events(
                         info!("WindowClose: sent close to window index {}", target_idx);
                         // After close, focus the last window in registry
                         // (the most recently created one that isn't being closed)
-                        let last_surface = state.window_registry.iter().enumerate().rev()
+                        let last_surface = state
+                            .window_registry
+                            .iter()
+                            .enumerate()
+                            .rev()
                             .find(|(i, _)| *i != target_idx)
                             .map(|(i, s)| (i, s.clone()));
                         if let Some((idx, wl_s)) = last_surface {
-                            let next_win = state.space.elements()
+                            let next_win = state
+                                .space
+                                .elements()
                                 .find(|w| w.toplevel().unwrap().wl_surface() == &wl_s)
                                 .cloned();
                             if let Some(next_win) = next_win {
@@ -985,7 +1068,12 @@ fn drain_input_events(
     }
 }
 
-fn inject_button(state: &mut Compositor, ev: &InputEventData, serial: smithay::utils::Serial, time: u32) {
+fn inject_button(
+    state: &mut Compositor,
+    ev: &InputEventData,
+    serial: smithay::utils::Serial,
+    time: u32,
+) {
     let button = match ev.mouse_button {
         0 => 0x110u32,
         1 => 0x112,
@@ -1003,7 +1091,8 @@ fn inject_button(state: &mut Compositor, ev: &InputEventData, serial: smithay::u
     // because Chromium routes keyboard events based on which wl_surface has keyboard focus.
     // Using a subsurface would cause Chromium to ignore key events entirely.
     if ev.button_pressed {
-        let pos: smithay::utils::Point<f64, smithay::utils::Logical> = (ev.mouse_x as f64, ev.mouse_y as f64).into();
+        let pos: smithay::utils::Point<f64, smithay::utils::Logical> =
+            (ev.mouse_x as f64, ev.mouse_y as f64).into();
         if let Some((window, _)) = state.space.element_under(pos) {
             if let Some(toplevel) = window.toplevel() {
                 let wl_surface = toplevel.wl_surface().clone();
@@ -1016,7 +1105,12 @@ fn inject_button(state: &mut Compositor, ev: &InputEventData, serial: smithay::u
     let ptr = state.seat.get_pointer().unwrap();
     ptr.button(
         state,
-        &smithay::input::pointer::ButtonEvent { button, state: btn_state, serial, time },
+        &smithay::input::pointer::ButtonEvent {
+            button,
+            state: btn_state,
+            serial,
+            time,
+        },
     );
     ptr.frame(state);
 }
@@ -1036,7 +1130,12 @@ fn inject_scroll(state: &mut Compositor, ev: &InputEventData, time: u32) {
     ptr.frame(state);
 }
 
-fn inject_key(state: &mut Compositor, ev: &InputEventData, serial: smithay::utils::Serial, time: u32) {
+fn inject_key(
+    state: &mut Compositor,
+    ev: &InputEventData,
+    serial: smithay::utils::Serial,
+    time: u32,
+) {
     use smithay::input::keyboard::{FilterResult, Keycode};
     let keyboard = state.seat.get_keyboard().unwrap();
     let key_state = if ev.key_pressed {
@@ -1055,9 +1154,16 @@ fn inject_key(state: &mut Compositor, ev: &InputEventData, serial: smithay::util
         }
     };
     let has_focus = keyboard.current_focus().is_some();
-    info!("inject_key: keysym=0x{:x} keycode={} pressed={} has_focus={}", ev.keysym, keycode, ev.key_pressed, has_focus);
+    info!(
+        "inject_key: keysym=0x{:x} keycode={} pressed={} has_focus={}",
+        ev.keysym, keycode, ev.key_pressed, has_focus
+    );
     keyboard.input::<(), _>(
-        state, Keycode::from(keycode), key_state, serial, time,
+        state,
+        Keycode::from(keycode),
+        key_state,
+        serial,
+        time,
         |_, _, _| FilterResult::Forward,
     );
 }
@@ -1084,7 +1190,10 @@ fn inject_text(state: &mut Compositor, ev: &InputEventData) {
         info!("Injected text via text_input protocol: {:?}", ev.text);
     } else {
         // Fallback: set compositor-side clipboard selection, then simulate Ctrl+Shift+V
-        info!("No text_input client, using clipboard paste for: {:?}", ev.text);
+        info!(
+            "No text_input client, using clipboard paste for: {:?}",
+            ev.text
+        );
         use smithay::wayland::selection::data_device::set_data_device_selection;
 
         state.pending_paste = Some(ev.text.clone());
@@ -1093,35 +1202,75 @@ fn inject_text(state: &mut Compositor, ev: &InputEventData) {
         set_data_device_selection(
             &dh,
             &seat,
-            vec!["text/plain;charset=utf-8".into(), "text/plain".into(), "UTF8_STRING".into()],
+            vec![
+                "text/plain;charset=utf-8".into(),
+                "text/plain".into(),
+                "UTF8_STRING".into(),
+            ],
             (),
         );
 
         // Simulate Ctrl+Shift+V (terminal paste shortcut).
         // Use known evdev keycodes directly to avoid keysym mapping gaps.
         let keyboard = state.seat.get_keyboard().unwrap();
-        let ctrl_code: u32 = 37;  // Control_L
+        let ctrl_code: u32 = 37; // Control_L
         let shift_code: u32 = 50; // Shift_L
-        let v_code: u32 = 55;     // v
+        let v_code: u32 = 55; // v
 
         let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(state, smithay::input::keyboard::Keycode::from(ctrl_code),
-            smithay::backend::input::KeyState::Pressed, s, 0, |_, _, _| smithay::input::keyboard::FilterResult::Forward);
+        keyboard.input::<(), _>(
+            state,
+            smithay::input::keyboard::Keycode::from(ctrl_code),
+            smithay::backend::input::KeyState::Pressed,
+            s,
+            0,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
         let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(state, smithay::input::keyboard::Keycode::from(shift_code),
-            smithay::backend::input::KeyState::Pressed, s, 0, |_, _, _| smithay::input::keyboard::FilterResult::Forward);
+        keyboard.input::<(), _>(
+            state,
+            smithay::input::keyboard::Keycode::from(shift_code),
+            smithay::backend::input::KeyState::Pressed,
+            s,
+            0,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
         let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(state, smithay::input::keyboard::Keycode::from(v_code),
-            smithay::backend::input::KeyState::Pressed, s, 0, |_, _, _| smithay::input::keyboard::FilterResult::Forward);
+        keyboard.input::<(), _>(
+            state,
+            smithay::input::keyboard::Keycode::from(v_code),
+            smithay::backend::input::KeyState::Pressed,
+            s,
+            0,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
         let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(state, smithay::input::keyboard::Keycode::from(v_code),
-            smithay::backend::input::KeyState::Released, s, 0, |_, _, _| smithay::input::keyboard::FilterResult::Forward);
+        keyboard.input::<(), _>(
+            state,
+            smithay::input::keyboard::Keycode::from(v_code),
+            smithay::backend::input::KeyState::Released,
+            s,
+            0,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
         let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(state, smithay::input::keyboard::Keycode::from(shift_code),
-            smithay::backend::input::KeyState::Released, s, 0, |_, _, _| smithay::input::keyboard::FilterResult::Forward);
+        keyboard.input::<(), _>(
+            state,
+            smithay::input::keyboard::Keycode::from(shift_code),
+            smithay::backend::input::KeyState::Released,
+            s,
+            0,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
         let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(state, smithay::input::keyboard::Keycode::from(ctrl_code),
-            smithay::backend::input::KeyState::Released, s, 0, |_, _, _| smithay::input::keyboard::FilterResult::Forward);
+        keyboard.input::<(), _>(
+            state,
+            smithay::input::keyboard::Keycode::from(ctrl_code),
+            smithay::backend::input::KeyState::Released,
+            s,
+            0,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
     }
 }
 
@@ -1129,50 +1278,100 @@ fn inject_text(state: &mut Compositor, ev: &InputEventData) {
 fn keysym_to_keycode(keysym: u32) -> Option<u32> {
     match keysym {
         // Letters (a-z / A-Z)
-        0x61 | 0x41 => 38, 0x62 | 0x42 => 56, 0x63 | 0x43 => 54,
-        0x64 | 0x44 => 40, 0x65 | 0x45 => 26, 0x66 | 0x46 => 41,
-        0x67 | 0x47 => 42, 0x68 | 0x48 => 43, 0x69 | 0x49 => 31,
-        0x6a | 0x4a => 44, 0x6b | 0x4b => 45, 0x6c | 0x4c => 46,
-        0x6d | 0x4d => 58, 0x6e | 0x4e => 57, 0x6f | 0x4f => 32,
-        0x70 | 0x50 => 33, 0x71 | 0x51 => 24, 0x72 | 0x52 => 27,
-        0x73 | 0x53 => 39, 0x74 | 0x54 => 28, 0x75 | 0x55 => 30,
-        0x76 | 0x56 => 55, 0x77 | 0x57 => 25, 0x78 | 0x58 => 53,
-        0x79 | 0x59 => 29, 0x7a | 0x5a => 52,
+        0x61 | 0x41 => 38,
+        0x62 | 0x42 => 56,
+        0x63 | 0x43 => 54,
+        0x64 | 0x44 => 40,
+        0x65 | 0x45 => 26,
+        0x66 | 0x46 => 41,
+        0x67 | 0x47 => 42,
+        0x68 | 0x48 => 43,
+        0x69 | 0x49 => 31,
+        0x6a | 0x4a => 44,
+        0x6b | 0x4b => 45,
+        0x6c | 0x4c => 46,
+        0x6d | 0x4d => 58,
+        0x6e | 0x4e => 57,
+        0x6f | 0x4f => 32,
+        0x70 | 0x50 => 33,
+        0x71 | 0x51 => 24,
+        0x72 | 0x52 => 27,
+        0x73 | 0x53 => 39,
+        0x74 | 0x54 => 28,
+        0x75 | 0x55 => 30,
+        0x76 | 0x56 => 55,
+        0x77 | 0x57 => 25,
+        0x78 | 0x58 => 53,
+        0x79 | 0x59 => 29,
+        0x7a | 0x5a => 52,
         // Digits 0-9 and shifted symbols on same keys
-        0x30 | 0x29 => 19, 0x31 | 0x21 => 10, 0x32 | 0x40 => 11,
-        0x33 | 0x23 => 12, 0x34 | 0x24 => 13, 0x35 | 0x25 => 14,
-        0x36 | 0x5e => 15, 0x37 | 0x26 => 16, 0x38 | 0x2a => 17,
+        0x30 | 0x29 => 19,
+        0x31 | 0x21 => 10,
+        0x32 | 0x40 => 11,
+        0x33 | 0x23 => 12,
+        0x34 | 0x24 => 13,
+        0x35 | 0x25 => 14,
+        0x36 | 0x5e => 15,
+        0x37 | 0x26 => 16,
+        0x38 | 0x2a => 17,
         0x39 | 0x28 => 18,
         // Function keys F1-F12
-        0xffbe => 67, 0xffbf => 68, 0xffc0 => 69, 0xffc1 => 70,
-        0xffc2 => 71, 0xffc3 => 72, 0xffc4 => 73, 0xffc5 => 74,
-        0xffc6 => 75, 0xffc7 => 76, 0xffc8 => 95, 0xffc9 => 96,
+        0xffbe => 67,
+        0xffbf => 68,
+        0xffc0 => 69,
+        0xffc1 => 70,
+        0xffc2 => 71,
+        0xffc3 => 72,
+        0xffc4 => 73,
+        0xffc5 => 74,
+        0xffc6 => 75,
+        0xffc7 => 76,
+        0xffc8 => 95,
+        0xffc9 => 96,
         // Modifiers
-        0xffe1 => 50, 0xffe2 => 62,   // Shift L/R
-        0xffe3 => 37, 0xffe4 => 105,  // Control L/R
-        0xffe9 => 64, 0xffea => 108,  // Alt L/R
-        0xffeb => 133, 0xffec => 134, // Super L/R
-        0xffe5 => 66,                 // Caps_Lock
+        0xffe1 => 50,
+        0xffe2 => 62, // Shift L/R
+        0xffe3 => 37,
+        0xffe4 => 105, // Control L/R
+        0xffe9 => 64,
+        0xffea => 108, // Alt L/R
+        0xffeb => 133,
+        0xffec => 134, // Super L/R
+        0xffe5 => 66,  // Caps_Lock
         // Navigation
-        0xff0d => 36, 0xff1b => 9, 0xff08 => 22, 0xff09 => 23,
-        0x20 => 65, 0xffff => 119, 0xff63 => 118,
-        0xff50 => 110, 0xff57 => 115, 0xff55 => 112, 0xff56 => 117,
+        0xff0d => 36,
+        0xff1b => 9,
+        0xff08 => 22,
+        0xff09 => 23,
+        0x20 => 65,
+        0xffff => 119,
+        0xff63 => 118,
+        0xff50 => 110,
+        0xff57 => 115,
+        0xff55 => 112,
+        0xff56 => 117,
         // Arrows
-        0xff51 => 113, 0xff52 => 111, 0xff53 => 114, 0xff54 => 116,
+        0xff51 => 113,
+        0xff52 => 111,
+        0xff53 => 114,
+        0xff54 => 116,
         // Symbols (key and shifted variant grouped)
-        0x2d | 0x5f => 20,  // minus / underscore
-        0x3d | 0x2b => 21,  // equal / plus
-        0x5b | 0x7b => 34,  // bracketleft / braceleft
-        0x5d | 0x7d => 35,  // bracketright / braceright
-        0x5c | 0x7c => 51,  // backslash / bar
-        0x3b | 0x3a => 47,  // semicolon / colon
-        0x27 | 0x22 => 48,  // apostrophe / quotedbl
-        0x60 | 0x7e => 49,  // grave / tilde
-        0x2c | 0x3c => 59,  // comma / less
-        0x2e | 0x3e => 60,  // period / greater
-        0x2f | 0x3f => 61,  // slash / question
+        0x2d | 0x5f => 20, // minus / underscore
+        0x3d | 0x2b => 21, // equal / plus
+        0x5b | 0x7b => 34, // bracketleft / braceleft
+        0x5d | 0x7d => 35, // bracketright / braceright
+        0x5c | 0x7c => 51, // backslash / bar
+        0x3b | 0x3a => 47, // semicolon / colon
+        0x27 | 0x22 => 48, // apostrophe / quotedbl
+        0x60 | 0x7e => 49, // grave / tilde
+        0x2c | 0x3c => 59, // comma / less
+        0x2e | 0x3e => 60, // period / greater
+        0x2f | 0x3f => 61, // slash / question
         // Misc
-        0xff13 => 127, 0xff14 => 78, 0xff61 => 107, 0xff7f => 77,
+        0xff13 => 127,
+        0xff14 => 78,
+        0xff61 => 107,
+        0xff7f => 77,
         _ => {
             log::debug!("Unknown keysym 0x{:x}, no keycode mapping", keysym);
             return None;
@@ -1184,7 +1383,9 @@ fn keysym_to_keycode(keysym: u32) -> Option<u32> {
 /// Check if an RTP packet contains an H.264 keyframe NAL unit.
 fn is_h264_keyframe_packet(data: &[u8]) -> bool {
     let hdr_len = webrtc::media_track::rtp_util::header_length(data).unwrap_or(12);
-    if data.len() <= hdr_len { return false; }
+    if data.len() <= hdr_len {
+        return false;
+    }
     let nal_type = data[hdr_len] & 0x1F;
     match nal_type {
         5 | 7 | 8 => true,
@@ -1268,16 +1469,22 @@ fn flush_frame(
             let marker = data.len() >= 2 && (data[1] & 0x80) != 0;
             if marker {
                 shared.set_keyframe_cache(keyframe_buf.clone());
-                log::info!("Cached keyframe: {} pkts, {} bytes",
+                log::info!(
+                    "Cached keyframe: {} pkts, {} bytes",
                     keyframe_buf.len(),
-                    keyframe_buf.iter().map(|p| p.len()).sum::<usize>());
+                    keyframe_buf.iter().map(|p| p.len()).sum::<usize>()
+                );
                 *in_keyframe = false;
             }
         }
 
         *rtp_count += 1;
         if *rtp_count <= 3 || *rtp_count % 500 == 0 {
-            log::info!("broadcast_rtp #{} receivers={}", *rtp_count, shared.rtp_receiver_count());
+            log::info!(
+                "broadcast_rtp #{} receivers={}",
+                *rtp_count,
+                shared.rtp_receiver_count()
+            );
         }
         shared.broadcast_rtp(data);
     }
@@ -1313,9 +1520,11 @@ async fn run_async_services(
     let session_manager = if config.webrtc.enabled {
         // Resolve a routable IP for the ICE-TCP candidate.
         // 0.0.0.0 is not valid in SDP — the browser needs an actual address.
-        let bind_ip: std::net::IpAddr = config.http.host.parse().unwrap_or(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        );
+        let bind_ip: std::net::IpAddr = config
+            .http
+            .host
+            .parse()
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         let candidate_ip = if bind_ip.is_unspecified() {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         } else {
@@ -1344,10 +1553,11 @@ async fn run_async_services(
         let mcp_server = mcp::McpServer::new(shared.clone());
         let transport = rmcp::transport::io::stdio();
         use rmcp::ServiceExt;
-        let service = mcp_server.serve(transport).await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+        let service = mcp_server.serve(transport).await.map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
                 format!("MCP stdio error: {}", e).into()
-            })?;
+            },
+        )?;
         tokio::spawn(async move {
             if let Err(e) = service.waiting().await {
                 log::error!("MCP stdio session ended with error: {}", e);
@@ -1386,11 +1596,17 @@ async fn run_async_services(
     // HTTP server
     let port = config.http.port;
     info!("Starting HTTP server on port {}", port);
-    web::run_http_server_with_webrtc(port, shared.clone(), session_manager, config.http.tls, pake_state)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("HTTP server error: {}", e).into()
-        })?;
+    web::run_http_server_with_webrtc(
+        port,
+        shared.clone(),
+        session_manager,
+        config.http.tls,
+        pake_state,
+    )
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+        format!("HTTP server error: {}", e).into()
+    })?;
 
     Ok(())
 }

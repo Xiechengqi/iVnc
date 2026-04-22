@@ -3,8 +3,8 @@
 use smithay::{
     delegate_xdg_shell,
     desktop::{
-        find_popup_root_surface, get_popup_toplevel_coords, PopupKind, PopupManager, Space, Window,
-        PopupKeyboardGrab, PopupPointerGrab, PopupUngrabStrategy,
+        find_popup_root_surface, get_popup_toplevel_coords, PopupKeyboardGrab, PopupKind,
+        PopupManager, PopupPointerGrab, PopupUngrabStrategy, Space, Window,
     },
     input::{
         pointer::{Focus, GrabStartData as PointerGrabStartData},
@@ -36,11 +36,21 @@ use crate::compositor::{
 fn is_descendant_of(child: i32, ancestor: i32) -> bool {
     let mut pid = child;
     for _ in 0..32 {
-        if pid <= 1 { return false; }
-        if pid == ancestor { return true; }
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else { return false };
+        if pid <= 1 {
+            return false;
+        }
+        if pid == ancestor {
+            return true;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
+            return false;
+        };
         // Field 4 in /proc/PID/stat is PPID
-        let ppid: i32 = stat.split_whitespace().nth(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let ppid: i32 = stat
+            .split_whitespace()
+            .nth(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         pid = ppid;
     }
     false
@@ -61,14 +71,20 @@ impl XdgShellHandler for Compositor {
         // 3. Same PID already has a window in the space (same-process secondary
         //    windows like file chooser dialogs in GTK/Qt/Electron apps)
         let (is_child_process, is_same_pid) = {
-            let new_pid = surface.wl_surface().client()
+            let new_pid = surface
+                .wl_surface()
+                .client()
                 .and_then(|c| c.get_credentials(&self.display_handle).ok())
                 .map(|c| c.pid);
             if let Some(new_pid) = new_pid {
                 let mut child = false;
                 let mut same = false;
                 for w in self.space.elements() {
-                    let existing_pid = w.toplevel().unwrap().wl_surface().client()
+                    let existing_pid = w
+                        .toplevel()
+                        .unwrap()
+                        .wl_surface()
+                        .client()
                         .and_then(|c| c.get_credentials(&self.display_handle).ok())
                         .map(|c| c.pid);
                     if let Some(ep) = existing_pid {
@@ -87,13 +103,21 @@ impl XdgShellHandler for Compositor {
 
         let is_dialog = has_parent || is_child_process || is_same_pid;
 
-        log::info!("new_toplevel: is_dialog={} (parent={}, child_proc={}, same_pid={})",
-            is_dialog, has_parent, is_child_process, is_same_pid);
+        log::info!(
+            "new_toplevel: is_dialog={} (parent={}, child_proc={}, same_pid={})",
+            is_dialog,
+            has_parent,
+            is_child_process,
+            is_same_pid
+        );
 
         let window = Window::new_wayland_window(surface.clone());
 
         // Extract output geometry before mutably borrowing space
-        let output_geo = self.space.outputs().next()
+        let output_geo = self
+            .space
+            .outputs()
+            .next()
             .and_then(|o| self.space.output_geometry(o));
 
         self.space.map_element(window, (0, 0), false);
@@ -108,7 +132,8 @@ impl XdgShellHandler for Compositor {
                     .get::<XdgToplevelSurfaceData>()
                     .and_then(|data| data.lock().ok())
                     .and_then(|data| data.app_id.clone())
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
 
             let should_fullscreen = app_id != "ivnc-pake-windowed";
 
@@ -128,13 +153,17 @@ impl XdgShellHandler for Compositor {
                     });
                     surface.send_pending_configure();
                 }
-                log::info!("new_toplevel: windowed Pake app detected (app_id={}), not setting fullscreen", app_id);
+                log::info!(
+                    "new_toplevel: windowed Pake app detected (app_id={}), not setting fullscreen",
+                    app_id
+                );
             }
         }
 
         // Remember which surfaces are dialogs (for commit handler centering)
         if is_dialog {
-            self.dialog_surfaces.insert(surface.wl_surface().id().protocol_id());
+            self.dialog_surfaces
+                .insert(surface.wl_surface().id().protocol_id());
         }
 
         // Auto-focus the new window so it receives keyboard input
@@ -182,7 +211,12 @@ impl XdgShellHandler for Compositor {
         let _ = self.popups.track_popup(PopupKind::Xdg(surface));
     }
 
-    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
         surface.with_pending_state(|state| {
             let geometry = positioner.get_geometry();
             state.geometry = geometry;
@@ -268,7 +302,9 @@ impl XdgShellHandler for Compositor {
         });
         surface.send_pending_configure();
 
-        let window = self.space.elements()
+        let window = self
+            .space
+            .elements()
             .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
             .cloned();
         if let Some(window) = window {
@@ -301,7 +337,9 @@ impl XdgShellHandler for Compositor {
         });
         surface.send_pending_configure();
 
-        let window = self.space.elements()
+        let window = self
+            .space
+            .elements()
             .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
             .cloned();
         if let Some(window) = window {
@@ -319,7 +357,9 @@ impl XdgShellHandler for Compositor {
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
-        let window = self.space.elements()
+        let window = self
+            .space
+            .elements()
             .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
             .cloned();
         if let Some(window) = window {
@@ -369,9 +409,8 @@ impl XdgShellHandler for Compositor {
             if let Some(pointer) = seat.get_pointer() {
                 if pointer.is_grabbed()
                     && !(pointer.has_grab(serial)
-                        || pointer.has_grab(
-                            grab.previous_serial().unwrap_or_else(|| grab.serial()),
-                        ))
+                        || pointer
+                            .has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
                 {
                     grab.ungrab(PopupUngrabStrategy::All);
                     return;
@@ -402,7 +441,12 @@ fn check_grab(
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: &WlSurface, taskbar_dirty: &mut bool) {
+pub fn handle_commit(
+    popups: &mut PopupManager,
+    space: &Space<Window>,
+    surface: &WlSurface,
+    taskbar_dirty: &mut bool,
+) {
     if let Some(window) = space
         .elements()
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)
@@ -423,7 +467,10 @@ pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: 
 
         // If this is a windowed Pake app (show_nav=true), unfullscreen it to preserve the browser toolbar
         if app_id == "ivnc-pake-windowed" && title_changed {
-            log::info!("handle_commit: detected windowed Pake app, unfullscreening (app_id={})", app_id);
+            log::info!(
+                "handle_commit: detected windowed Pake app, unfullscreening (app_id={})",
+                app_id
+            );
             let toplevel = window.toplevel().unwrap();
             toplevel.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Fullscreen);

@@ -103,18 +103,12 @@ impl UiConfig {
             config.encoding.max_fps.max(1),
         );
 
-        let (manual_resolution, width, height) = env_manual_resolution(
-            config.display.width,
-            config.display.height,
-        );
+        let (manual_resolution, width, height) =
+            env_manual_resolution(config.display.width, config.display.height);
 
         let audio_enabled = env_bool("IVNC_AUDIO_ENABLED", config.audio.enabled);
-        let audio_bitrate = env_range_u32(
-            "IVNC_AUDIO_BITRATE",
-            config.audio.bitrate,
-            64_000,
-            320_000,
-        );
+        let audio_bitrate =
+            env_range_u32("IVNC_AUDIO_BITRATE", config.audio.bitrate, 64_000, 320_000);
 
         let mouse = env_bool("IVNC_MOUSE_ENABLED", config.input.enable_mouse);
         let keyboard = env_bool("IVNC_KEYBOARD_ENABLED", config.input.enable_keyboard);
@@ -124,10 +118,7 @@ impl UiConfig {
         UiConfig {
             version: "1".to_string(),
             ui,
-            video: UiVideo {
-                encoder,
-                framerate,
-            },
+            video: UiVideo { encoder, framerate },
             screen: UiScreen {
                 manual_resolution,
                 width,
@@ -137,10 +128,7 @@ impl UiConfig {
                 enabled: audio_enabled,
                 bitrate: audio_bitrate,
             },
-            input: UiInput {
-                mouse,
-                keyboard,
-            },
+            input: UiInput { mouse, keyboard },
             clipboard: UiToggle {
                 enabled: clipboard_enabled.value,
             },
@@ -241,7 +229,10 @@ fn env_encoder(key: &str) -> UiEnum {
     }
 }
 
-fn env_manual_resolution(default_width: u32, default_height: u32) -> (UiBool, UiValueU32, UiValueU32) {
+fn env_manual_resolution(
+    default_width: u32,
+    default_height: u32,
+) -> (UiBool, UiValueU32, UiValueU32) {
     let mut enabled = false;
     let mut locked = false;
     let mut width = default_width;
@@ -273,8 +264,7 @@ fn env_manual_resolution(default_width: u32, default_height: u32) -> (UiBool, Ui
             "true" | "1" => {
                 enabled = true;
                 locked = true;
-                if env::var("IVNC_MANUAL_WIDTH").is_err()
-                    && env::var("IVNC_MANUAL_HEIGHT").is_err()
+                if env::var("IVNC_MANUAL_WIDTH").is_err() && env::var("IVNC_MANUAL_HEIGHT").is_err()
                 {
                     width = 1024;
                     height = 768;

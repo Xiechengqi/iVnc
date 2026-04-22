@@ -4,11 +4,10 @@ use crate::compositor::Compositor;
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
-        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent,
-        GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
-        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
-        GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab,
-        PointerInnerHandle, RelativeMotionEvent,
+        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
+        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
+        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
+        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -57,7 +56,10 @@ impl ResizeSurfaceGrab {
     ) -> Self {
         let initial_rect = initial_window_rect;
         ResizeSurfaceState::with(window.toplevel().unwrap().wl_surface(), |state| {
-            *state = ResizeSurfaceState::Resizing { edges, initial_rect };
+            *state = ResizeSurfaceState::Resizing {
+                edges,
+                initial_rect,
+            };
         });
         Self {
             start_data,
@@ -84,11 +86,15 @@ impl PointerGrab<Compositor> for ResizeSurfaceGrab {
         let mut new_h = self.initial_rect.size.h;
 
         if self.edges.intersects(ResizeEdge::LEFT | ResizeEdge::RIGHT) {
-            if self.edges.intersects(ResizeEdge::LEFT) { delta.x = -delta.x; }
+            if self.edges.intersects(ResizeEdge::LEFT) {
+                delta.x = -delta.x;
+            }
             new_w = (self.initial_rect.size.w as f64 + delta.x) as i32;
         }
         if self.edges.intersects(ResizeEdge::TOP | ResizeEdge::BOTTOM) {
-            if self.edges.intersects(ResizeEdge::TOP) { delta.y = -delta.y; }
+            if self.edges.intersects(ResizeEdge::TOP) {
+                delta.y = -delta.y;
+            }
             new_h = (self.initial_rect.size.h as f64 + delta.y) as i32;
         }
 
@@ -101,13 +107,19 @@ impl PointerGrab<Compositor> for ResizeSurfaceGrab {
 
         let min_w = min_size.w.max(1);
         let min_h = min_size.h.max(1);
-        let max_w = if max_size.w == 0 { i32::MAX } else { max_size.w };
-        let max_h = if max_size.h == 0 { i32::MAX } else { max_size.h };
+        let max_w = if max_size.w == 0 {
+            i32::MAX
+        } else {
+            max_size.w
+        };
+        let max_h = if max_size.h == 0 {
+            i32::MAX
+        } else {
+            max_size.h
+        };
 
-        self.last_window_size = Size::from((
-            new_w.max(min_w).min(max_w),
-            new_h.max(min_h).min(max_h),
-        ));
+        self.last_window_size =
+            Size::from((new_w.max(min_w).min(max_w), new_h.max(min_h).min(max_h)));
 
         let xdg = self.window.toplevel().unwrap();
         xdg.with_pending_state(|state| {
@@ -118,12 +130,19 @@ impl PointerGrab<Compositor> for ResizeSurfaceGrab {
     }
 
     fn relative_motion(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
-        focus: Option<(WlSurface, Point<f64, Logical>)>, event: &RelativeMotionEvent,
-    ) { handle.relative_motion(data, focus, event); }
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        focus: Option<(WlSurface, Point<f64, Logical>)>,
+        event: &RelativeMotionEvent,
+    ) {
+        handle.relative_motion(data, focus, event);
+    }
 
     fn button(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &ButtonEvent,
     ) {
         handle.button(data, event);
@@ -145,22 +164,85 @@ impl PointerGrab<Compositor> for ResizeSurfaceGrab {
         }
     }
 
-    fn axis(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, details: AxisFrame) {
+    fn axis(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        details: AxisFrame,
+    ) {
         handle.axis(data, details)
     }
     fn frame(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>) {
         handle.frame(data);
     }
-    fn gesture_swipe_begin(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GestureSwipeBeginEvent) { handle.gesture_swipe_begin(data, event) }
-    fn gesture_swipe_update(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GestureSwipeUpdateEvent) { handle.gesture_swipe_update(data, event) }
-    fn gesture_swipe_end(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GestureSwipeEndEvent) { handle.gesture_swipe_end(data, event) }
-    fn gesture_pinch_begin(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GesturePinchBeginEvent) { handle.gesture_pinch_begin(data, event) }
-    fn gesture_pinch_update(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GesturePinchUpdateEvent) { handle.gesture_pinch_update(data, event) }
-    fn gesture_pinch_end(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GesturePinchEndEvent) { handle.gesture_pinch_end(data, event) }
-    fn gesture_hold_begin(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GestureHoldBeginEvent) { handle.gesture_hold_begin(data, event) }
-    fn gesture_hold_end(&mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>, event: &GestureHoldEndEvent) { handle.gesture_hold_end(data, event) }
+    fn gesture_swipe_begin(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GestureSwipeBeginEvent,
+    ) {
+        handle.gesture_swipe_begin(data, event)
+    }
+    fn gesture_swipe_update(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GestureSwipeUpdateEvent,
+    ) {
+        handle.gesture_swipe_update(data, event)
+    }
+    fn gesture_swipe_end(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GestureSwipeEndEvent,
+    ) {
+        handle.gesture_swipe_end(data, event)
+    }
+    fn gesture_pinch_begin(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GesturePinchBeginEvent,
+    ) {
+        handle.gesture_pinch_begin(data, event)
+    }
+    fn gesture_pinch_update(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GesturePinchUpdateEvent,
+    ) {
+        handle.gesture_pinch_update(data, event)
+    }
+    fn gesture_pinch_end(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GesturePinchEndEvent,
+    ) {
+        handle.gesture_pinch_end(data, event)
+    }
+    fn gesture_hold_begin(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GestureHoldBeginEvent,
+    ) {
+        handle.gesture_hold_begin(data, event)
+    }
+    fn gesture_hold_end(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &GestureHoldEndEvent,
+    ) {
+        handle.gesture_hold_end(data, event)
+    }
 
-    fn start_data(&self) -> &PointerGrabStartData<Compositor> { &self.start_data }
+    fn start_data(&self) -> &PointerGrabStartData<Compositor> {
+        &self.start_data
+    }
     fn unset(&mut self, _data: &mut Compositor) {}
 }
 
@@ -192,8 +274,14 @@ impl ResizeSurfaceState {
 
     fn commit(&mut self) -> Option<(ResizeEdge, Rectangle<i32, Logical>)> {
         match *self {
-            Self::Resizing { edges, initial_rect } => Some((edges, initial_rect)),
-            Self::WaitingForLastCommit { edges, initial_rect } => {
+            Self::Resizing {
+                edges,
+                initial_rect,
+            } => Some((edges, initial_rect)),
+            Self::WaitingForLastCommit {
+                edges,
+                initial_rect,
+            } => {
                 *self = Self::Idle;
                 Some((edges, initial_rect))
             }
@@ -215,17 +303,19 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
     let new_loc: Point<Option<i32>, Logical> = ResizeSurfaceState::with(surface, |state| {
         state
             .commit()
-            .and_then(|(edges, initial_rect): (ResizeEdge, Rectangle<i32, Logical>)| {
-                edges.intersects(ResizeEdge::TOP_LEFT).then(|| {
-                    let new_x = edges
-                        .intersects(ResizeEdge::LEFT)
-                        .then_some(initial_rect.loc.x + (initial_rect.size.w - geometry.size.w));
-                    let new_y = edges
-                        .intersects(ResizeEdge::TOP)
-                        .then_some(initial_rect.loc.y + (initial_rect.size.h - geometry.size.h));
-                    (new_x, new_y).into()
-                })
-            })
+            .and_then(
+                |(edges, initial_rect): (ResizeEdge, Rectangle<i32, Logical>)| {
+                    edges.intersects(ResizeEdge::TOP_LEFT).then(|| {
+                        let new_x = edges.intersects(ResizeEdge::LEFT).then_some(
+                            initial_rect.loc.x + (initial_rect.size.w - geometry.size.w),
+                        );
+                        let new_y = edges.intersects(ResizeEdge::TOP).then_some(
+                            initial_rect.loc.y + (initial_rect.size.h - geometry.size.h),
+                        );
+                        (new_x, new_y).into()
+                    })
+                },
+            )
             .unwrap_or_default()
     });
 

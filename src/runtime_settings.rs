@@ -106,8 +106,12 @@ impl RuntimeSettings {
             self.set_target_fps(fps as u32);
         }
 
-        if let Some(enabled) = value.get("enable_binary_clipboard").and_then(|v| v.as_bool()) {
-            self.binary_clipboard_enabled.store(enabled, Ordering::Relaxed);
+        if let Some(enabled) = value
+            .get("enable_binary_clipboard")
+            .and_then(|v| v.as_bool())
+        {
+            self.binary_clipboard_enabled
+                .store(enabled, Ordering::Relaxed);
         }
 
         if let Some(bitrate) = value.get("video_bitrate").and_then(|v| v.as_u64()) {

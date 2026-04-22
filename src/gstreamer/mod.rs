@@ -3,11 +3,10 @@
 //! This module provides GStreamer-based video pipeline using appsrc
 //! for encoding compositor frames to H.264/VP8/VP9 for WebRTC streaming.
 
-pub mod pipeline;
 pub mod encoder;
+pub mod pipeline;
 
-pub use pipeline::{VideoPipeline, PipelineConfig};
-
+pub use pipeline::{PipelineConfig, VideoPipeline};
 
 use std::error::Error;
 use std::fmt;

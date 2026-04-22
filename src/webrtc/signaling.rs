@@ -20,10 +20,7 @@ pub enum SignalingMessage {
     },
 
     /// SDP Answer from server
-    Answer {
-        sdp: String,
-        session_id: String,
-    },
+    Answer { sdp: String, session_id: String },
 
     /// ICE Candidate
     IceCandidate {
@@ -36,9 +33,7 @@ pub enum SignalingMessage {
     },
 
     /// ICE gathering complete (empty candidate)
-    IceComplete {
-        session_id: String,
-    },
+    IceComplete { session_id: String },
 
     /// Session ready notification
     Ready {
@@ -57,19 +52,13 @@ pub enum SignalingMessage {
     },
 
     /// Ping/keepalive
-    Ping {
-        timestamp: u64,
-    },
+    Ping { timestamp: u64 },
 
     /// Pong response
-    Pong {
-        timestamp: u64,
-    },
+    Pong { timestamp: u64 },
 
     /// Request keyframe
-    KeyframeRequest {
-        session_id: String,
-    },
+    KeyframeRequest { session_id: String },
 
     /// Bitrate change request
     BitrateRequest {
@@ -198,7 +187,10 @@ impl SignalingParser {
             return Self::parse_legacy(text);
         }
 
-        Err(WebRTCError::SdpError(format!("Unknown message format: {}", &text[..text.len().min(50)])))
+        Err(WebRTCError::SdpError(format!(
+            "Unknown message format: {}",
+            &text[..text.len().min(50)]
+        )))
     }
 
     /// Parse legacy comma-separated format
@@ -206,7 +198,9 @@ impl SignalingParser {
         let parts: Vec<&str> = text.splitn(4, ',').collect();
 
         if parts.len() < 2 {
-            return Err(WebRTCError::SdpError("Invalid legacy message format".to_string()));
+            return Err(WebRTCError::SdpError(
+                "Invalid legacy message format".to_string(),
+            ));
         }
 
         match parts[1] {
@@ -222,7 +216,9 @@ impl SignalingParser {
 
             "answer" => {
                 if parts.len() < 4 {
-                    return Err(WebRTCError::SdpError("Missing SDP or session_id in answer".to_string()));
+                    return Err(WebRTCError::SdpError(
+                        "Missing SDP or session_id in answer".to_string(),
+                    ));
                 }
                 Ok(SignalingMessage::Answer {
                     sdp: parts[2].to_string(),
@@ -232,7 +228,9 @@ impl SignalingParser {
 
             "ice" => {
                 if parts.len() < 4 {
-                    return Err(WebRTCError::SdpError("Missing ICE candidate data".to_string()));
+                    return Err(WebRTCError::SdpError(
+                        "Missing ICE candidate data".to_string(),
+                    ));
                 }
                 Ok(SignalingMessage::IceCandidate {
                     candidate: parts[2].to_string(),
@@ -244,7 +242,9 @@ impl SignalingParser {
 
             "keyframe" => {
                 if parts.len() < 3 {
-                    return Err(WebRTCError::SdpError("Missing session_id in keyframe request".to_string()));
+                    return Err(WebRTCError::SdpError(
+                        "Missing session_id in keyframe request".to_string(),
+                    ));
                 }
                 Ok(SignalingMessage::KeyframeRequest {
                     session_id: parts[2].to_string(),
@@ -253,7 +253,9 @@ impl SignalingParser {
 
             "close" => {
                 if parts.len() < 3 {
-                    return Err(WebRTCError::SdpError("Missing session_id in close".to_string()));
+                    return Err(WebRTCError::SdpError(
+                        "Missing session_id in close".to_string(),
+                    ));
                 }
                 Ok(SignalingMessage::Close {
                     session_id: parts[2].to_string(),
@@ -261,7 +263,10 @@ impl SignalingParser {
                 })
             }
 
-            cmd => Err(WebRTCError::SdpError(format!("Unknown legacy command: {}", cmd))),
+            cmd => Err(WebRTCError::SdpError(format!(
+                "Unknown legacy command: {}",
+                cmd
+            ))),
         }
     }
 
@@ -306,7 +311,11 @@ mod tests {
 
     #[test]
     fn test_error_message() {
-        let msg = SignalingMessage::error("INVALID_SDP", "SDP parsing failed", Some("sess1".to_string()));
+        let msg = SignalingMessage::error(
+            "INVALID_SDP",
+            "SDP parsing failed",
+            Some("sess1".to_string()),
+        );
         let json = msg.to_json().unwrap();
         assert!(json.contains("error"));
         assert!(json.contains("INVALID_SDP"));

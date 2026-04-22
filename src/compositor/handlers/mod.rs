@@ -83,8 +83,17 @@ delegate_seat!(Compositor);
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
 
-    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
-        log::info!("new_selection called: ty={:?}, has_source={}", ty, source.is_some());
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        log::info!(
+            "new_selection called: ty={:?}, has_source={}",
+            ty,
+            source.is_some()
+        );
         if ty != SelectionTarget::Clipboard {
             return;
         }
@@ -109,9 +118,9 @@ impl SelectionHandler for Compositor {
 
         let mime_types = source.mime_types();
         log::info!("new_selection: mime_types={:?}", mime_types);
-        let text_mime = mime_types.iter().find(|m| {
-            m.contains("text/plain") || m.contains("UTF8_STRING") || m.contains("utf8")
-        });
+        let text_mime = mime_types
+            .iter()
+            .find(|m| m.contains("text/plain") || m.contains("UTF8_STRING") || m.contains("utf8"));
         let mime = match text_mime {
             Some(m) => m.clone(),
             None => {
@@ -136,9 +145,16 @@ impl SelectionHandler for Compositor {
         _seat: Seat<Self>,
         _user_data: &Self::SelectionUserData,
     ) {
-        log::info!("send_selection called: mime={}, has_pending_paste={}", mime_type, self.pending_paste.is_some());
+        log::info!(
+            "send_selection called: mime={}, has_pending_paste={}",
+            mime_type,
+            self.pending_paste.is_some()
+        );
         if let Some(ref text) = self.pending_paste {
-            if mime_type.contains("text") || mime_type.contains("string") || mime_type.contains("utf8") {
+            if mime_type.contains("text")
+                || mime_type.contains("string")
+                || mime_type.contains("utf8")
+            {
                 let mut file = std::fs::File::from(fd);
                 let _ = file.write_all(text.as_bytes());
             }

@@ -11,9 +11,7 @@ use crate::web::SharedState;
 
 /// Request a frame capture from the compositor main loop.
 /// Returns (width, height, xrgb8888_pixels).
-pub async fn capture_frame(
-    state: &Arc<SharedState>,
-) -> Result<(u32, u32, Vec<u8>), String> {
+pub async fn capture_frame(state: &Arc<SharedState>) -> Result<(u32, u32, Vec<u8>), String> {
     let (tx, rx) = oneshot::channel();
     state
         .frame_capture_tx
@@ -45,8 +43,8 @@ pub fn xrgb_to_jpeg_base64(
         rgb_buf.push(pixel[0]); // B
     }
 
-    let img: RgbImage = ImageBuffer::from_raw(width, height, rgb_buf)
-        .ok_or("failed to create image buffer")?;
+    let img: RgbImage =
+        ImageBuffer::from_raw(width, height, rgb_buf).ok_or("failed to create image buffer")?;
 
     // First attempt at original resolution
     let jpeg = encode_jpeg(&img, quality)?;
@@ -59,12 +57,8 @@ pub fn xrgb_to_jpeg_base64(
     let new_w = ((width as f64 * scale) as u32).max(1);
     let new_h = ((height as f64 * scale) as u32).max(1);
 
-    let resized = image::imageops::resize(
-        &img,
-        new_w,
-        new_h,
-        image::imageops::FilterType::Triangle,
-    );
+    let resized =
+        image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Triangle);
     let jpeg = encode_jpeg(&resized, quality.min(75))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&jpeg))
 }

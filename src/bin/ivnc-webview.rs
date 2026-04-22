@@ -1,3 +1,4 @@
+use gtk::prelude::*;
 /// Standalone WebView process for Pake applications
 /// This binary is launched by iVnc's WebViewManager to run each WebView app in isolation
 use std::env;
@@ -7,10 +8,9 @@ use std::sync::{Arc, Mutex};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::unix::EventLoopBuilderExtUnix;
-use tao::window::WindowBuilder;
 use tao::platform::unix::WindowExtUnix;
+use tao::window::WindowBuilder;
 use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
-use gtk::prelude::*;
 
 fn main() {
     env_logger::init();
@@ -23,13 +23,20 @@ fn main() {
     let log_file_path = env::var("IVNC_LOG_FILE").expect("IVNC_LOG_FILE not set");
     let data_dir = env::var("IVNC_DATA_DIR").expect("IVNC_DATA_DIR not set");
 
-    log::info!("Starting WebView process for app '{}' ({})", app_name, app_id);
+    log::info!(
+        "Starting WebView process for app '{}' ({})",
+        app_name,
+        app_id
+    );
     log::info!("URL: {}", app_url);
     log::info!("Data dir: {}", data_dir);
 
     // Set WebKitGTK data directory
     std::env::set_var("WEBKIT_DISK_CACHE_DIR", format!("{}/cache", data_dir));
-    std::env::set_var("WEBKIT_LOCALSTORAGE_DIR", format!("{}/localstorage", data_dir));
+    std::env::set_var(
+        "WEBKIT_LOCALSTORAGE_DIR",
+        format!("{}/localstorage", data_dir),
+    );
     std::env::set_var("WEBKIT_INDEXEDDB_DIR", format!("{}/indexeddb", data_dir));
 
     // Create log file
@@ -38,13 +45,11 @@ fn main() {
             .create(true)
             .append(true)
             .open(&log_file_path)
-            .expect("Failed to create log file")
+            .expect("Failed to create log file"),
     ));
 
     // Create event loop
-    let event_loop = EventLoopBuilder::new()
-        .with_any_thread(true)
-        .build();
+    let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
 
     // Create window with app_id set
     let window = WindowBuilder::new()
@@ -69,8 +74,7 @@ fn main() {
 
     // Create GTK container (WebView fills entire window; nav buttons injected via JS)
     let container = {
-        let vbox = window.default_vbox()
-            .expect("Failed to get GTK vbox");
+        let vbox = window.default_vbox().expect("Failed to get GTK vbox");
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         vbox.pack_start(&container, true, true, 0);
         container.show_all();

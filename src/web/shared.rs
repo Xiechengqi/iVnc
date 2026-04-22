@@ -2,21 +2,21 @@
 //!
 //! Manages shared configuration and WebRTC sessions.
 
-use crate::config::Config;
-use crate::config::ui::UiConfig;
 use crate::audio::AudioPacket;
-use xxhash_rust::xxh64::xxh64;
+use crate::config::ui::UiConfig;
+use crate::config::Config;
 use crate::input::InputEventData;
 use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
 use log::{info, warn};
+use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use xxhash_rust::xxh64::xxh64;
 
 /// Connection information for a WebRTC session
 #[derive(Debug)]
@@ -27,7 +27,6 @@ pub struct ConnectionInfo {
     pub connection_type: String,
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
-
 
 /// Shared state for the application
 #[derive(Clone)]
@@ -115,7 +114,8 @@ pub struct SharedState {
     #[cfg(feature = "mcp")]
     pub frame_capture_tx: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<(u32, u32, Vec<u8>)>>,
     #[cfg(feature = "mcp")]
-    pub frame_capture_rx: Arc<Mutex<mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<(u32, u32, Vec<u8>)>>>>,
+    pub frame_capture_rx:
+        Arc<Mutex<mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<(u32, u32, Vec<u8>)>>>>,
 
     /// Cached latest taskbar JSON for MCP list_windows tool
     pub last_taskbar_json: Arc<Mutex<Option<String>>>,
@@ -342,7 +342,6 @@ impl SharedState {
         stats.latency_ms = latency_ms;
     }
 
-
     /// Update client-reported latency metric (ms)
     pub fn update_client_latency(&self, latency_ms: u64) {
         let mut stats = self.stats.lock().unwrap();
@@ -483,7 +482,10 @@ impl SharedState {
 
     /// Get a clone of the cached keyframe packets
     pub fn get_keyframe_cache(&self) -> Vec<Vec<u8>> {
-        self.keyframe_cache.lock().map(|c| c.clone()).unwrap_or_default()
+        self.keyframe_cache
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
     }
 
     /// Subscribe to RTP packets
@@ -536,7 +538,12 @@ impl SharedState {
     }
 
     /// Add a new connection
-    pub fn add_connection(&self, id: String, peer_ip: String, shutdown_tx: tokio::sync::oneshot::Sender<()>) {
+    pub fn add_connection(
+        &self,
+        id: String,
+        peer_ip: String,
+        shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    ) {
         let conn = ConnectionInfo {
             id: id.clone(),
             peer_ip,

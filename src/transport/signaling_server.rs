@@ -9,14 +9,14 @@
 
 #![allow(dead_code)]
 
-use crate::webrtc::{SignalingMessage, SessionManager};
-use crate::webrtc::signaling::SignalingParser;
 use crate::web::SharedState;
+use crate::webrtc::signaling::SignalingParser;
+use crate::webrtc::{SessionManager, SignalingMessage};
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use log::{info, warn, debug, error};
-use serde_json::Value;
+use log::{debug, error, info, warn};
 use serde_json::json;
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -48,7 +48,10 @@ pub async fn handle_signaling_connection(
     session_manager: Arc<SessionManager>,
     client_host: Option<String>,
 ) {
-    info!("New signaling WebSocket connection established (host: {:?})", client_host);
+    info!(
+        "New signaling WebSocket connection established (host: {:?})",
+        client_host
+    );
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Create a channel for sending messages
@@ -88,7 +91,9 @@ pub async fn handle_signaling_connection(
                         &tx,
                         wire_format,
                         client_host.as_deref(),
-                    ).await {
+                    )
+                    .await
+                    {
                         let _ = tx.send(response);
                     }
                     continue;
@@ -104,7 +109,9 @@ pub async fn handle_signaling_connection(
                             &tx,
                             wire_format,
                             client_host.as_deref(),
-                        ).await {
+                        )
+                        .await
+                        {
                             let _ = tx.send(response);
                         }
                     }
@@ -147,7 +154,10 @@ pub async fn handle_signaling_connection(
         session_manager.remove_pending_session(sid).await;
     }
 
-    info!("Signaling connection handler finished (session: {:?})", session_id);
+    info!(
+        "Signaling connection handler finished (session: {:?})",
+        session_id
+    );
 }
 
 /// Handle a single signaling message.
@@ -167,9 +177,15 @@ async fn handle_signaling_message(
     client_host: Option<&str>,
 ) -> Option<String> {
     match message {
-        SignalingMessage::Offer { sdp, session_id: provided_session_id } => {
+        SignalingMessage::Offer {
+            sdp,
+            session_id: provided_session_id,
+        } => {
             // Create session and accept offer in one step
-            match session_manager.create_session_with_offer(&sdp, client_host).await {
+            match session_manager
+                .create_session_with_offer(&sdp, client_host)
+                .await
+            {
                 Ok((sid, answer_sdp)) => {
                     *session_id = Some(sid.clone());
                     info!("Session {} created with SDP answer", sid);
@@ -211,30 +227,49 @@ async fn handle_signaling_message(
             }
         }
 
-        SignalingMessage::Answer { sdp: _, session_id: _msg_session_id } => {
+        SignalingMessage::Answer {
+            sdp: _,
+            session_id: _msg_session_id,
+        } => {
             // str0m ICE-lite server doesn't process answers from the browser
             // (we already generated the answer). Log and ignore.
             debug!("Ignoring SDP answer from browser (ICE-lite server)");
             None
         }
 
-        SignalingMessage::IceCandidate { candidate, sdp_mid: _, sdp_mline_index: _, session_id: _ } => {
+        SignalingMessage::IceCandidate {
+            candidate,
+            sdp_mid: _,
+            sdp_mline_index: _,
+            session_id: _,
+        } => {
             // With ICE-lite, we don't need remote candidates from the browser.
             // The browser will connect to our TCP passive candidate directly.
-            debug!("Received browser ICE candidate (ignored in ICE-lite mode): {}", &candidate[..candidate.len().min(80)]);
+            debug!(
+                "Received browser ICE candidate (ignored in ICE-lite mode): {}",
+                &candidate[..candidate.len().min(80)]
+            );
             None
         }
 
-        SignalingMessage::KeyframeRequest { session_id: msg_session_id } => {
+        SignalingMessage::KeyframeRequest {
+            session_id: msg_session_id,
+        } => {
             let target = session_id.as_deref().unwrap_or(&msg_session_id);
             debug!("Keyframe requested for session {}", target);
             state.runtime_settings.request_keyframe();
             None
         }
 
-        SignalingMessage::BitrateRequest { session_id: msg_session_id, bitrate_kbps } => {
+        SignalingMessage::BitrateRequest {
+            session_id: msg_session_id,
+            bitrate_kbps,
+        } => {
             let target = session_id.as_deref().unwrap_or(&msg_session_id);
-            debug!("Bitrate change requested for session {}: {} kbps", target, bitrate_kbps);
+            debug!(
+                "Bitrate change requested for session {}: {} kbps",
+                target, bitrate_kbps
+            );
             state.runtime_settings.set_video_bitrate_kbps(bitrate_kbps);
             None
         }
@@ -244,7 +279,10 @@ async fn handle_signaling_message(
             format_signaling_message(&pong, wire_format)
         }
 
-        SignalingMessage::Close { session_id: msg_session_id, reason } => {
+        SignalingMessage::Close {
+            session_id: msg_session_id,
+            reason,
+        } => {
             let target = session_id.clone().unwrap_or(msg_session_id);
             info!("Session close requested: {} (reason: {:?})", target, reason);
             session_manager.remove_pending_session(&target).await;
@@ -301,8 +339,14 @@ fn parse_gstreamer_json_message(text: &str) -> Option<SignalingMessage> {
     if let Some(ice) = value.get("ice") {
         let ice_obj = ice.as_object()?;
         let candidate = ice_obj.get("candidate")?.as_str()?.to_string();
-        let sdp_mid = ice_obj.get("sdpMid").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let sdp_mline_index = ice_obj.get("sdpMLineIndex").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let sdp_mid = ice_obj
+            .get("sdpMid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let sdp_mline_index = ice_obj
+            .get("sdpMLineIndex")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
         return Some(SignalingMessage::IceCandidate {
             candidate,
             sdp_mid,
@@ -323,7 +367,12 @@ fn format_signaling_message(message: &SignalingMessage, wire_format: WireFormat)
             SignalingMessage::Answer { sdp, .. } => {
                 Some(json!({ "sdp": { "type": "answer", "sdp": sdp } }).to_string())
             }
-            SignalingMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index, .. } => {
+            SignalingMessage::IceCandidate {
+                candidate,
+                sdp_mid,
+                sdp_mline_index,
+                ..
+            } => {
                 let payload = json!({
                     "ice": {
                         "candidate": candidate,
@@ -337,9 +386,7 @@ fn format_signaling_message(message: &SignalingMessage, wire_format: WireFormat)
             SignalingMessage::Error { code, message, .. } => {
                 Some(format!("ERROR {}: {}", code, message))
             }
-            SignalingMessage::Pong { timestamp } => {
-                Some(json!({ "pong": timestamp }).to_string())
-            }
+            SignalingMessage::Pong { timestamp } => Some(json!({ "pong": timestamp }).to_string()),
             _ => None,
         },
     }

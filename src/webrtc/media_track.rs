@@ -20,7 +20,9 @@ pub mod rtp_util {
         if packet.len() < 8 {
             return None;
         }
-        Some(u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]))
+        Some(u32::from_be_bytes([
+            packet[4], packet[5], packet[6], packet[7],
+        ]))
     }
 
     /// Extract SSRC from RTP packet
@@ -28,7 +30,9 @@ pub mod rtp_util {
         if packet.len() < 12 {
             return None;
         }
-        Some(u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]))
+        Some(u32::from_be_bytes([
+            packet[8], packet[9], packet[10], packet[11],
+        ]))
     }
 
     /// Extract payload type from RTP packet
@@ -87,11 +91,11 @@ mod tests {
     fn test_rtp_parsing() {
         // Minimal RTP packet: V=2, P=0, X=0, CC=0, M=1, PT=96
         let packet = [
-            0x80, 0xE0,  // V=2, P=0, X=0, CC=0, M=1, PT=96
-            0x00, 0x01,  // Sequence number = 1
-            0x00, 0x00, 0x00, 0x00,  // Timestamp = 0
-            0x12, 0x34, 0x56, 0x78,  // SSRC
-            0x00, 0x01, 0x02,  // Payload
+            0x80, 0xE0, // V=2, P=0, X=0, CC=0, M=1, PT=96
+            0x00, 0x01, // Sequence number = 1
+            0x00, 0x00, 0x00, 0x00, // Timestamp = 0
+            0x12, 0x34, 0x56, 0x78, // SSRC
+            0x00, 0x01, 0x02, // Payload
         ];
 
         assert_eq!(get_sequence(&packet), Some(1));

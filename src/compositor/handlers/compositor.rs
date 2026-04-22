@@ -48,7 +48,12 @@ impl CompositorHandler for Compositor {
             }
         };
 
-        xdg_shell::handle_commit(&mut self.popups, &self.space, surface, &mut self.taskbar_dirty);
+        xdg_shell::handle_commit(
+            &mut self.popups,
+            &self.space,
+            surface,
+            &mut self.taskbar_dirty,
+        );
         resize_grab::handle_commit(&mut self.space, surface);
 
         let surface_id = surface.id().protocol_id();
@@ -66,7 +71,10 @@ impl CompositorHandler for Compositor {
             });
 
         if let Some((window, geo, bbox, is_dialog)) = window_info {
-            let output_size = self.space.outputs().next()
+            let output_size = self
+                .space
+                .outputs()
+                .next()
                 .and_then(|o| self.space.output_geometry(o))
                 .map(|g| g.size);
 
@@ -75,9 +83,13 @@ impl CompositorHandler for Compositor {
                 if !self.titlebar_adjusted.contains(&surface_id) || is_dialog {
                     log::info!(
                         "commit: sid={} dialog={} geo={:?} bbox={:?} loc={:?} output={}x{}",
-                        surface_id, is_dialog, geo, bbox,
+                        surface_id,
+                        is_dialog,
+                        geo,
+                        bbox,
                         self.space.element_location(&window),
-                        out_size.w, out_size.h
+                        out_size.w,
+                        out_size.h
                     );
                 }
                 if is_dialog {
@@ -96,7 +108,14 @@ impl CompositorHandler for Compositor {
                             if new_w != geo.size.w || new_h != geo.size.h {
                                 log::info!(
                                     "Dialog shrink: geo={}x{} bbox={}x{} csd={}x{} -> {}x{}",
-                                    geo.size.w, geo.size.h, bw, bh, csd_w, csd_h, new_w, new_h
+                                    geo.size.w,
+                                    geo.size.h,
+                                    bw,
+                                    bh,
+                                    csd_w,
+                                    csd_h,
+                                    new_w,
+                                    new_h
                                 );
                                 let toplevel = window.toplevel().unwrap();
                                 toplevel.with_pending_state(|state| {

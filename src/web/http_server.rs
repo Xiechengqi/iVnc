@@ -20,8 +20,11 @@ use axum::{
     Router,
 };
 
+use base64::Engine;
 use hyper_util::rt::TokioIo;
-use log::{info, warn, debug};
+use log::{debug, info, warn};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,12 +34,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
-use base64::Engine;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 
-use crate::webrtc::SessionManager;
 use crate::pake_apps::api::PakeState;
+use crate::webrtc::SessionManager;
 
 /// Classify a TCP connection by its first bytes.
 fn classify_first_bytes(buf: &[u8]) -> ConnectionType {
@@ -103,14 +103,10 @@ pub async fn run_http_server_with_webrtc(
     if use_embedded {
         info!("Serving web UI from embedded assets");
     } else {
-        let static_root = std::env::var("IVNC_WEB_ROOT")
-            .unwrap_or_else(|_| "web/ivnc".to_string());
+        let static_root = std::env::var("IVNC_WEB_ROOT").unwrap_or_else(|_| "web/ivnc".to_string());
         let cwd = std::env::current_dir().ok();
         let index_path = PathBuf::from(&static_root).join("index.html");
-        info!(
-            "Serving web UI from {:?} (cwd: {:?})",
-            static_root, cwd
-        );
+        info!("Serving web UI from {:?} (cwd: {:?})", static_root, cwd);
         if !index_path.exists() {
             info!("Web UI index not found at {:?}", index_path);
         }
@@ -131,26 +127,24 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/upgrade/ws", get(upgrade_ws_handler))
         .route("/api/connections", get(connections_handler))
         .route("/api/connections/{id}/disconnect", post(disconnect_handler))
-        .route("/api/ipv4", get(ipv4_handler))
-        ;
+        .route("/api/ipv4", get(ipv4_handler));
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(ref manager) = session_manager {
         info!("Adding WebRTC signaling endpoint at /webrtc");
         let state_clone = state.clone();
         let manager_clone = manager.clone();
-        let signaling_handler = move |
-            headers: axum::http::HeaderMap,
-            ws: WebSocketUpgrade,
-        | {
+        let signaling_handler = move |headers: axum::http::HeaderMap, ws: WebSocketUpgrade| {
             let state = state_clone.clone();
             let manager = manager_clone.clone();
-            let host_str = headers.get(axum::http::header::HOST)
+            let host_str = headers
+                .get(axum::http::header::HOST)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
             async move {
                 ws.on_upgrade(move |socket| async move {
-                    crate::transport::handle_signaling_connection(socket, state, manager, host_str).await;
+                    crate::transport::handle_signaling_connection(socket, state, manager, host_str)
+                        .await;
                 })
             }
         };
@@ -192,15 +186,12 @@ pub async fn run_http_server_with_webrtc(
     let auth_state = state.clone();
     let metrics_state = state.clone(); // keep a copy for the accept loop (metrics)
     let mut app: Router<()> = if use_embedded {
-        app.fallback(embedded_fallback_handler)
-            .with_state(state)
+        app.fallback(embedded_fallback_handler).with_state(state)
     } else {
-        let static_root = std::env::var("IVNC_WEB_ROOT")
-            .unwrap_or_else(|_| "web/ivnc".to_string());
+        let static_root = std::env::var("IVNC_WEB_ROOT").unwrap_or_else(|_| "web/ivnc".to_string());
         let index_path = PathBuf::from(&static_root).join("index.html");
         let static_service = ServeDir::new(&static_root).fallback(ServeFile::new(index_path));
-        app.fallback_service(static_service)
-            .with_state(state)
+        app.fallback_service(static_service).with_state(state)
     };
 
     // Merge pake routes after with_state (both are Router<()> now)
@@ -208,7 +199,10 @@ pub async fn run_http_server_with_webrtc(
         app = app.merge(crate::pake_apps::api::router(pake.clone()));
     }
 
-    let app = app.layer(middleware::from_fn_with_state(auth_state, basic_auth_middleware));
+    let app = app.layer(middleware::from_fn_with_state(
+        auth_state,
+        basic_auth_middleware,
+    ));
 
     let listener = TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
@@ -273,7 +267,8 @@ pub async fn run_http_server_with_webrtc(
             let peek_result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tcp_stream.peek(&mut first_bytes),
-            ).await;
+            )
+            .await;
             let n = match peek_result {
                 Ok(Ok(0)) | Err(_) => return,
                 Ok(Ok(n)) => n,
@@ -290,7 +285,9 @@ pub async fn run_http_server_with_webrtc(
                 if let Ok(Ok(n2)) = tokio::time::timeout(
                     std::time::Duration::from_millis(50),
                     tcp_stream.peek(&mut retry_buf),
-                ).await {
+                )
+                .await
+                {
                     if n2 > 0 {
                         retry_buf.truncate(n2);
                         first_bytes = retry_buf;
@@ -298,7 +295,10 @@ pub async fn run_http_server_with_webrtc(
                 }
             }
             let kind = classify_first_bytes(&first_bytes);
-            debug!("Connection from {} classified as {:?} (first_bytes={:02x?})", peer_addr, kind, &first_bytes);
+            debug!(
+                "Connection from {} classified as {:?} (first_bytes={:02x?})",
+                peer_addr, kind, &first_bytes
+            );
 
             // Record protocol classification metric
             conn_state.record_protocol_classification(match kind {
@@ -350,7 +350,10 @@ pub async fn run_http_server_with_webrtc(
                     serve_http(TokioIo::new(tcp_stream), app).await;
                 }
                 ConnectionType::Unknown => {
-                    warn!("Unrecognized protocol from {} (first_bytes={:02x?}), closing", peer_addr, &first_bytes);
+                    warn!(
+                        "Unrecognized protocol from {} (first_bytes={:02x?}), closing",
+                        peer_addr, &first_bytes
+                    );
                 }
             }
         });
@@ -366,11 +369,9 @@ where
         let mut app = app.clone();
         async move { app.call(req).await }
     });
-    let _ = hyper_util::server::conn::auto::Builder::new(
-        hyper_util::rt::TokioExecutor::new(),
-    )
-    .serve_connection_with_upgrades(io, service)
-    .await;
+    let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+        .serve_connection_with_upgrades(io, service)
+        .await;
 }
 
 /// Handle an ICE-TCP connection
@@ -386,11 +387,16 @@ async fn handle_ice_connection(
             Ok(0) => return,
             Ok(n) => {
                 buf.truncate(n);
-                info!("ICE-TCP connection from {} ({} bytes, first16={:02x?})",
-                    peer_addr, n, &buf[..n.min(16)]);
-                if let Err(e) = sm.handle_ice_tcp_connection(
-                    stream, peer_addr, ice_local_addr, &buf,
-                ).await {
+                info!(
+                    "ICE-TCP connection from {} ({} bytes, first16={:02x?})",
+                    peer_addr,
+                    n,
+                    &buf[..n.min(16)]
+                );
+                if let Err(e) = sm
+                    .handle_ice_tcp_connection(stream, peer_addr, ice_local_addr, &buf)
+                    .await
+                {
                     warn!("ICE-TCP session match failed from {}: {}", peer_addr, e);
                 }
             }
@@ -399,7 +405,10 @@ async fn handle_ice_connection(
             }
         }
     } else {
-        debug!("ICE-TCP connection from {} but no session manager", peer_addr);
+        debug!(
+            "ICE-TCP connection from {} but no session manager",
+            peer_addr
+        );
     }
 }
 
@@ -416,10 +425,11 @@ fn create_tls_acceptor() -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())
         .map_err(|e| format!("TLS key error: {}", e))?;
 
-    let config = ServerConfig::builder_with_provider(StdArc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key_der)?;
+    let config =
+        ServerConfig::builder_with_provider(StdArc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)?;
 
     info!("TLS enabled with self-signed certificate");
     Ok(tokio_rustls::TlsAcceptor::from(StdArc::new(config)))
@@ -574,7 +584,7 @@ async fn ws_config_handler(State(state): State<Arc<SharedState>>) -> Response {
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(payload.to_string()))
-    .unwrap()
+        .unwrap()
 }
 
 /// Connections handler - returns all active connections
@@ -632,7 +642,8 @@ async fn fetch_ipv4() -> Result<String, Box<dyn std::error::Error + Send + Sync>
         .timeout(Duration::from_secs(10))
         .user_agent("curl/7.68.0")
         .build()?;
-    let ip = client.get("https://ipv4.im")
+    let ip = client
+        .get("https://ipv4.im")
         .send()
         .await?
         .text()
@@ -651,18 +662,15 @@ async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
     }
 
     // Fallback to filesystem
-    let static_root = std::env::var("IVNC_WEB_ROOT")
-        .unwrap_or_else(|_| "web/ivnc".to_string());
+    let static_root = std::env::var("IVNC_WEB_ROOT").unwrap_or_else(|_| "web/ivnc".to_string());
     let index_path = PathBuf::from(&static_root).join("index.html");
     match tokio::fs::read(&index_path).await {
-        Ok(data) => {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-store, max-age=0")
-                .body(Body::from(data))
-                .unwrap()
-        }
+        Ok(data) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-store, max-age=0")
+            .body(Body::from(data))
+            .unwrap(),
         Err(_) => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("index.html not found"))
@@ -695,7 +703,9 @@ async fn change_password_handler(
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"password must be at least 4 characters"}"#))
+            .body(Body::from(
+                r#"{"error":"password must be at least 4 characters"}"#,
+            ))
             .unwrap();
     }
 
@@ -720,18 +730,15 @@ async fn console_handler(State(_state): State<Arc<SharedState>>) -> Response {
     }
 
     // Fallback to filesystem
-    let static_root = std::env::var("IVNC_WEB_ROOT")
-        .unwrap_or_else(|_| "web/ivnc".to_string());
+    let static_root = std::env::var("IVNC_WEB_ROOT").unwrap_or_else(|_| "web/ivnc".to_string());
     let path = PathBuf::from(&static_root).join("console.html");
     match tokio::fs::read(&path).await {
-        Ok(data) => {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-store, max-age=0")
-                .body(Body::from(data))
-                .unwrap()
-        }
+        Ok(data) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-store, max-age=0")
+            .body(Body::from(data))
+            .unwrap(),
         Err(_) => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("console.html not found"))
@@ -758,9 +765,9 @@ struct UpgradeLogEntry {
     step: u8,
     total_steps: u8,
     message: String,
-    level: String,  // "info" | "error" | "success" | "progress"
+    level: String, // "info" | "error" | "success" | "progress"
     #[serde(skip_serializing_if = "Option::is_none")]
-    progress: Option<u8>,  // 0-100
+    progress: Option<u8>, // 0-100
 }
 
 /// GitHub Release response
@@ -797,7 +804,8 @@ async fn get_version_handler() -> axum::Json<VersionInfo> {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .user_agent("ivnc-updater")
-        .build() {
+        .build()
+    {
         Ok(c) => c,
         Err(_) => {
             return axum::Json(VersionInfo {
@@ -812,7 +820,8 @@ async fn get_version_handler() -> axum::Json<VersionInfo> {
     let latest_version = match client
         .get("https://api.github.com/repos/Xiechengqi/iVnc/releases/latest")
         .send()
-        .await {
+        .await
+    {
         Ok(resp) => match resp.json::<GitHubRelease>().await {
             Ok(release) => release.tag_name.trim_start_matches('v').to_string(),
             Err(_) => current.clone(),
@@ -859,7 +868,9 @@ async fn upgrade_ws_handler(
                                     }
                                 };
 
-                                if user == state.config.http.basic_auth_user && pass == expected_password {
+                                if user == state.config.http.basic_auth_user
+                                    && pass == expected_password
+                                {
                                     return Ok(ws.on_upgrade(handle_upgrade_websocket));
                                 }
                             }
@@ -879,15 +890,13 @@ async fn upgrade_ws_handler(
 
 /// Handle WebSocket connection for upgrade
 async fn handle_upgrade_websocket(mut socket: axum::extract::ws::WebSocket) {
-    use tokio::sync::mpsc;
     use futures::SinkExt;
+    use tokio::sync::mpsc;
 
     let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
 
     // Spawn upgrade task
-    let mut upgrade_task = tokio::spawn(async move {
-        perform_upgrade_with_logs(log_tx).await
-    });
+    let mut upgrade_task = tokio::spawn(async move { perform_upgrade_with_logs(log_tx).await });
 
     // Forward logs to WebSocket
     loop {
@@ -907,7 +916,9 @@ async fn handle_upgrade_websocket(mut socket: axum::extract::ws::WebSocket) {
     // Drain remaining logs
     while let Ok(entry) = log_rx.try_recv() {
         let json = serde_json::to_string(&entry).unwrap_or_default();
-        let _ = socket.send(axum::extract::ws::Message::Text(json.into())).await;
+        let _ = socket
+            .send(axum::extract::ws::Message::Text(json.into()))
+            .await;
     }
 
     let _ = socket.close().await;
@@ -915,9 +926,9 @@ async fn handle_upgrade_websocket(mut socket: axum::extract::ws::WebSocket) {
 
 /// Perform upgrade with real-time logging
 async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+    use futures::StreamExt;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use futures::StreamExt;
 
     let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
         let entry = UpgradeLogEntry {
@@ -969,7 +980,8 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .user_agent("ivnc-updater")
-        .build() {
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             send_log(3, &format!("创建 HTTP 客户端失败: {}", e), "error", None).await;
@@ -984,7 +996,7 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
                 return;
             }
             r
-        },
+        }
         Err(e) => {
             send_log(3, &format!("下载失败: {}", e), "error", None).await;
             return;
@@ -992,10 +1004,13 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     };
 
     let total_size = response.content_length().unwrap_or(0);
-    let temp_path = format!("/tmp/ivnc-new-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs());
+    let temp_path = format!(
+        "/tmp/ivnc-new-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
 
     let mut file = match tokio::fs::File::create(&temp_path).await {
         Ok(f) => f,
@@ -1018,7 +1033,10 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
             }
         };
 
-        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.is_err() {
+        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .is_err()
+        {
             send_log(3, "写入文件失败", "error", None).await;
             let _ = tokio::fs::remove_file(&temp_path).await;
             return;
@@ -1028,10 +1046,17 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         if total_size > 0 {
             let progress = ((downloaded as f64 / total_size as f64) * 100.0) as u8;
             if progress != last_progress && (progress % 5 == 0 || progress == 100) {
-                send_log(3, &format!("下载中... {}/{} MB",
-                    downloaded / 1024 / 1024,
-                    total_size / 1024 / 1024),
-                    "progress", Some(progress)).await;
+                send_log(
+                    3,
+                    &format!(
+                        "下载中... {}/{} MB",
+                        downloaded / 1024 / 1024,
+                        total_size / 1024 / 1024
+                    ),
+                    "progress",
+                    Some(progress),
+                )
+                .await;
                 last_progress = progress;
             }
         } else {
@@ -1062,7 +1087,13 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         let _ = tokio::fs::remove_file(&temp_path).await;
         return;
     }
-    send_log(4, &format!("文件大小: {} MB", metadata.len() / 1024 / 1024), "success", None).await;
+    send_log(
+        4,
+        &format!("文件大小: {} MB", metadata.len() / 1024 / 1024),
+        "success",
+        None,
+    )
+    .await;
 
     // Step 5: Backup current version
     send_log(5, "备份当前版本...", "info", None).await;
@@ -1075,7 +1106,8 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         }
     };
 
-    let backup_path = format!("{}.backup-{}",
+    let backup_path = format!(
+        "{}.backup-{}",
         current_exe.display(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1122,7 +1154,8 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     match tokio::process::Command::new(&current_exe)
         .arg("--version")
         .output()
-        .await {
+        .await
+    {
         Ok(output) if output.status.success() => {
             send_log(7, "新版本验证通过", "success", None).await;
         }
@@ -1205,7 +1238,9 @@ async fn cleanup_old_backups(exe_path: &std::path::Path) {
             if let Ok(file_name) = entry.file_name().into_string() {
                 // Match pattern: {exe_name}.backup-{timestamp}
                 if file_name.starts_with(&format!("{}.backup-", exe_name)) {
-                    if let Some(timestamp_str) = file_name.strip_prefix(&format!("{}.backup-", exe_name)) {
+                    if let Some(timestamp_str) =
+                        file_name.strip_prefix(&format!("{}.backup-", exe_name))
+                    {
                         if let Ok(timestamp) = timestamp_str.parse::<u64>() {
                             backups.push((entry.path(), timestamp));
                         }

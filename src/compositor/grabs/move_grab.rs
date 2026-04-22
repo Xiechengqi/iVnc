@@ -4,11 +4,10 @@ use crate::compositor::Compositor;
 use smithay::{
     desktop::Window,
     input::pointer::{
-        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent,
-        GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
-        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
-        GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab,
-        PointerInnerHandle, RelativeMotionEvent,
+        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
+        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
+        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
+        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point},
@@ -72,44 +71,76 @@ impl PointerGrab<Compositor> for MoveSurfaceGrab {
     }
 
     fn gesture_swipe_begin(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GestureSwipeBeginEvent,
-    ) { handle.gesture_swipe_begin(data, event) }
+    ) {
+        handle.gesture_swipe_begin(data, event)
+    }
 
     fn gesture_swipe_update(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GestureSwipeUpdateEvent,
-    ) { handle.gesture_swipe_update(data, event) }
+    ) {
+        handle.gesture_swipe_update(data, event)
+    }
 
     fn gesture_swipe_end(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GestureSwipeEndEvent,
-    ) { handle.gesture_swipe_end(data, event) }
+    ) {
+        handle.gesture_swipe_end(data, event)
+    }
 
     fn gesture_pinch_begin(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GesturePinchBeginEvent,
-    ) { handle.gesture_pinch_begin(data, event) }
+    ) {
+        handle.gesture_pinch_begin(data, event)
+    }
 
     fn gesture_pinch_update(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GesturePinchUpdateEvent,
-    ) { handle.gesture_pinch_update(data, event) }
+    ) {
+        handle.gesture_pinch_update(data, event)
+    }
 
     fn gesture_pinch_end(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GesturePinchEndEvent,
-    ) { handle.gesture_pinch_end(data, event) }
+    ) {
+        handle.gesture_pinch_end(data, event)
+    }
 
     fn gesture_hold_begin(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GestureHoldBeginEvent,
-    ) { handle.gesture_hold_begin(data, event) }
+    ) {
+        handle.gesture_hold_begin(data, event)
+    }
 
     fn gesture_hold_end(
-        &mut self, data: &mut Compositor, handle: &mut PointerInnerHandle<'_, Compositor>,
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
         event: &GestureHoldEndEvent,
-    ) { handle.gesture_hold_end(data, event) }
+    ) {
+        handle.gesture_hold_end(data, event)
+    }
 
     fn start_data(&self) -> &PointerGrabStartData<Compositor> {
         &self.start_data

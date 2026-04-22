@@ -36,7 +36,9 @@ pub struct MouseClickParams {
     pub double: bool,
 }
 
-fn default_button() -> String { "left".into() }
+fn default_button() -> String {
+    "left".into()
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MouseScrollParams {

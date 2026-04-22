@@ -190,14 +190,23 @@ fn detect_pulse_monitor_source() -> Option<String> {
         .ok()?;
 
     if sink_output.status.success() {
-        let default_sink = String::from_utf8_lossy(&sink_output.stdout).trim().to_string();
+        let default_sink = String::from_utf8_lossy(&sink_output.stdout)
+            .trim()
+            .to_string();
         // PipeWire-Pulse may return "@DEFAULT_SINK@" literally — treat as empty
         if !default_sink.is_empty() && !default_sink.starts_with('@') {
             let monitor = format!("{}.monitor", default_sink);
-            log::info!("Auto-detected audio monitor source: {} (from default sink: {})", monitor, default_sink);
+            log::info!(
+                "Auto-detected audio monitor source: {} (from default sink: {})",
+                monitor,
+                default_sink
+            );
             return Some(monitor);
         }
-        log::info!("get-default-sink returned '{}', falling back to source list", default_sink);
+        log::info!(
+            "get-default-sink returned '{}', falling back to source list",
+            default_sink
+        );
     }
 
     // Fallback: list sources and pick the first .monitor
@@ -251,13 +260,20 @@ pub fn run_audio_capture(
     // Outer loop: reconnect to PulseAudio on errors (timeout, disconnect, etc.)
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         // Re-detect source each attempt (PulseAudio may start after iVnc)
-        let source = std::env::var("PULSE_SOURCE").ok().or_else(|| {
-            detect_pulse_monitor_source()
-        });
+        let source = std::env::var("PULSE_SOURCE")
+            .ok()
+            .or_else(|| detect_pulse_monitor_source());
         let source_ref = source.as_deref();
 
         let simple = match Simple::new(
-            None, "ivnc", Direction::Record, source_ref, "capture", &spec, None, None,
+            None,
+            "ivnc",
+            Direction::Record,
+            source_ref,
+            "capture",
+            &spec,
+            None,
+            None,
         ) {
             Ok(s) => {
                 log::info!("PulseAudio capture opened (source: {:?})", source_ref);

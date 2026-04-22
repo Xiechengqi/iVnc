@@ -355,25 +355,6 @@ function InitUI() {
 		color: #fff;
 		border-color: rgba(76, 134, 230, 0.6);
 	}
-	.taskbar-close {
-		display: none;
-		margin-left: auto;
-		width: 14px;
-		height: 14px;
-		line-height: 12px;
-		text-align: center;
-		border-radius: 2px;
-		background: rgba(255, 255, 255, 0.15);
-		font-size: 10px;
-		cursor: pointer;
-		flex-shrink: 0;
-	}
-	.taskbar-close:hover {
-		background: rgba(232, 89, 89, 0.8);
-	}
-	.taskbar-item.focused .taskbar-close {
-		display: inline-block;
-	}
 	.pwd-overlay {
 		position: fixed;
 		inset: 0;
@@ -675,6 +656,11 @@ async function fetchInitialIPv4() {
 	} catch (e) {
 		console.warn('[IPv4] Failed to fetch:', e);
 	}
+}
+
+function getBasePath() {
+	const pathname = window.location.pathname;
+	return pathname.slice(0, pathname.lastIndexOf("/") + 1);
 }
 
 function showChangePasswordModal() {
@@ -2232,6 +2218,18 @@ export default function webrtc() {
 			});
 			taskbar.appendChild(updateBtn);
 
+			const consoleSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+			const consoleBtn = document.createElement('div');
+			consoleBtn.className = 'taskbar-pin';
+			consoleBtn.id = 'console-btn';
+			consoleBtn.innerHTML = consoleSvg;
+			consoleBtn.title = '控制台';
+			consoleBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				window.open(`${getBasePath()}console`, '_blank');
+			});
+			taskbar.appendChild(consoleBtn);
+
 			const connIndicator = document.createElement('div');
 			connIndicator.className = 'taskbar-conn';
 			connIndicator.id = 'conn-indicator';
@@ -2612,22 +2610,8 @@ export default function webrtc() {
 					label.style.maxWidth = '160px';
 					item.appendChild(label);
 
-					// Close button (only for focused item)
-					if (w.focused) {
-						const closeBtn = document.createElement('span');
-						closeBtn.className = 'taskbar-close';
-						closeBtn.textContent = '✕';
-						closeBtn.title = '关闭应用';
-						closeBtn.addEventListener('click', (e) => {
-							e.stopPropagation();
-							webrtc.sendDataChannelMessage(`close,${w.id}`);
-						});
-						item.appendChild(closeBtn);
-					}
-
 					// Click to focus
 					item.addEventListener('click', (e) => {
-						if (e.target.className === 'taskbar-close') return;
 						e.stopPropagation();
 						webrtc.sendDataChannelMessage(`focus,${w.id}`);
 					});

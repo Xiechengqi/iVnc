@@ -15,7 +15,7 @@ use crate::runtime_settings::RuntimeSettings;
 use crate::web::SharedState;
 
 use super::tcp_framing::frame_packet;
-use log::{info, warn, debug};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -122,27 +122,46 @@ impl SessionManager {
         // Determine the ICE candidate address.
         // If the browser connected via a tunnel/proxy, use the Host header
         // so the ICE-TCP candidate points to the same public address.
-        let candidate_addr = resolve_candidate_addr(&self.config, client_host, self.listen_addr).await;
+        let candidate_addr =
+            resolve_candidate_addr(&self.config, client_host, self.listen_addr).await;
 
         // Add TCP passive candidate
         session.add_local_tcp_candidate(candidate_addr)?;
-        info!("Session {} added TCP candidate: {} (host header: {:?})", session_id, candidate_addr, client_host);
+        info!(
+            "Session {} added TCP candidate: {} (host header: {:?})",
+            session_id, candidate_addr, client_host
+        );
 
         // Accept the SDP offer and generate answer
-        info!("Session {} SDP offer ({} bytes): {:?}", session_id, offer_sdp.len(), &offer_sdp[..offer_sdp.len().min(200)]);
+        info!(
+            "Session {} SDP offer ({} bytes): {:?}",
+            session_id,
+            offer_sdp.len(),
+            &offer_sdp[..offer_sdp.len().min(200)]
+        );
         let answer_sdp = session.accept_offer(offer_sdp)?;
-        info!("Session {} SDP answer generated ({} bytes):\n{}", session_id, answer_sdp.len(), answer_sdp);
+        info!(
+            "Session {} SDP answer generated ({} bytes):\n{}",
+            session_id,
+            answer_sdp.len(),
+            answer_sdp
+        );
 
         // Check capacity and insert under a single write lock to avoid TOCTOU race
         let mut pending = self.pending_sessions.write().await;
         if pending.len() >= self.max_sessions {
-            return Err(WebRTCError::ConnectionFailed("Maximum sessions reached".to_string()));
+            return Err(WebRTCError::ConnectionFailed(
+                "Maximum sessions reached".to_string(),
+            ));
         }
-        pending.insert(session_id.clone(), PendingSession {
-            session,
-            candidate_addr,
-            created_at: Instant::now(),
-        });
+        pending.insert(
+            session_id.clone(),
+            PendingSession {
+                session,
+                candidate_addr,
+                created_at: Instant::now(),
+            },
+        );
         self.shared_state.increment_webrtc_sessions();
 
         Ok((session_id, answer_sdp))
@@ -258,10 +277,9 @@ impl SessionManager {
             }
         }
 
-        let ice_pkt = frames
-            .get(0)
-            .cloned()
-            .ok_or_else(|| WebRTCError::ConnectionFailed("No RFC 4571 frames decoded".to_string()))?;
+        let ice_pkt = frames.get(0).cloned().ok_or_else(|| {
+            WebRTCError::ConnectionFailed("No RFC 4571 frames decoded".to_string())
+        })?;
 
         let mut pending = self.pending_sessions.write().await;
 
@@ -293,13 +311,20 @@ impl SessionManager {
         let candidate_addr = ps.candidate_addr;
         drop(pending);
 
-        info!("Session {} matched TCP connection from {}", session_id, peer_addr);
+        info!(
+            "Session {} matched TCP connection from {}",
+            session_id, peer_addr
+        );
 
         // Create shutdown channel for connection management
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         // Track connection
-        self.shared_state.add_connection(session_id.clone(), peer_addr.ip().to_string(), shutdown_tx);
+        self.shared_state.add_connection(
+            session_id.clone(),
+            peer_addr.ip().to_string(),
+            shutdown_tx,
+        );
 
         // Feed the first deframed packet (and any extra buffered packets) into str0m
         for (idx, pkt) in frames.iter().enumerate() {
@@ -320,7 +345,9 @@ impl SessionManager {
                     }
                 },
             };
-            session.rtc.handle_input(Input::Receive(std::time::Instant::now(), recv))
+            session
+                .rtc
+                .handle_input(Input::Receive(std::time::Instant::now(), recv))
                 .map_err(|e| WebRTCError::ConnectionFailed(format!("handle_input: {}", e)))?;
         }
 
@@ -337,12 +364,12 @@ impl SessionManager {
         // Spawn the session drive loop
         let shared_state = self.shared_state.clone();
         let input_tx = self.input_tx.clone();
-        let upload_handler = Arc::new(Mutex::new(
-            FileUploadHandler::new(self.upload_settings.clone())
-        ));
-        let clipboard = Arc::new(Mutex::new(
-            ClipboardReceiver::new(self.shared_state.clone())
-        ));
+        let upload_handler = Arc::new(Mutex::new(FileUploadHandler::new(
+            self.upload_settings.clone(),
+        )));
+        let clipboard = Arc::new(Mutex::new(ClipboardReceiver::new(
+            self.shared_state.clone(),
+        )));
         let runtime_settings = self.runtime_settings.clone();
 
         let initial_buffer = decoder.take_remaining();
@@ -359,7 +386,8 @@ impl SessionManager {
                 runtime_settings,
                 initial_buffer,
                 shutdown_rx,
-            ).await;
+            )
+            .await;
         });
 
         Ok(())
@@ -387,7 +415,8 @@ async fn reap_stale_sessions(
         interval.tick().await;
         let mut map = pending.write().await;
         let now = Instant::now();
-        let stale: Vec<String> = map.iter()
+        let stale: Vec<String> = map
+            .iter()
             .filter(|(_, ps)| now.duration_since(ps.created_at) > PENDING_SESSION_TTL)
             .map(|(id, _)| id.clone())
             .collect();
@@ -411,10 +440,9 @@ async fn drain_initial_outputs(
         match session.rtc.poll_output() {
             Ok(Output::Transmit(t)) => {
                 let framed = frame_packet(&t.contents);
-                tcp_stream.write_all(&framed).await
-                    .map_err(|e| WebRTCError::ConnectionFailed(
-                        format!("Initial drain TCP write: {}", e),
-                    ))?;
+                tcp_stream.write_all(&framed).await.map_err(|e| {
+                    WebRTCError::ConnectionFailed(format!("Initial drain TCP write: {}", e))
+                })?;
                 count += 1;
             }
             Ok(Output::Event(event)) => {
@@ -422,9 +450,10 @@ async fn drain_initial_outputs(
             }
             Ok(Output::Timeout(_)) => break,
             Err(e) => {
-                return Err(WebRTCError::ConnectionFailed(
-                    format!("Initial drain poll_output: {}", e),
-                ));
+                return Err(WebRTCError::ConnectionFailed(format!(
+                    "Initial drain poll_output: {}",
+                    e
+                )));
             }
         }
     }
@@ -456,7 +485,10 @@ async fn parse_host_to_addr(host: &str, default_port: u16) -> Option<SocketAddr>
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Some(SocketAddr::new(ip, default_port));
     }
-    tokio::net::lookup_host((host, default_port)).await.ok()?.next()
+    tokio::net::lookup_host((host, default_port))
+        .await
+        .ok()?
+        .next()
 }
 
 async fn resolve_candidate_addr(

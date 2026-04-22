@@ -4,9 +4,9 @@
 //! a tokio task that multiplexes TCP I/O, RTP broadcast, audio, and
 //! text forwarding through a single event loop.
 
-use super::tcp_framing::{frame_packet, TcpFrameDecoder};
 use super::data_channel::InputDataChannel;
 use super::media_track::rtp_util;
+use super::tcp_framing::{frame_packet, TcpFrameDecoder};
 use super::WebRTCError;
 use crate::clipboard::ClipboardReceiver;
 use crate::file_upload::FileUploadHandler;
@@ -16,19 +16,19 @@ use crate::web::SharedState;
 
 use log::{debug, error, info, warn};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use str0m::change::SdpOffer;
 use str0m::channel::{ChannelData, ChannelId};
 use str0m::media::{MediaKind, Mid, Pt};
 use str0m::net::{self, Protocol};
 use str0m::rtp::SeqNo;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
-use str0m::change::SdpOffer;
 
 /// A single str0m WebRTC session bound to a TCP connection.
 pub struct RtcSession {
@@ -95,7 +95,10 @@ impl RtcSession {
         let offer = SdpOffer::from_sdp_string(offer_sdp)
             .map_err(|e| WebRTCError::SdpError(format!("Failed to parse SDP offer: {}", e)))?;
 
-        let answer = self.rtc.sdp_api().accept_offer(offer)
+        let answer = self
+            .rtc
+            .sdp_api()
+            .accept_offer(offer)
             .map_err(|e| WebRTCError::SdpError(format!("Failed to accept offer: {}", e)))?;
 
         // Discover media line IDs from the SDP negotiation
@@ -144,10 +147,18 @@ impl RtcSession {
                 payload,
             );
             if self.video_seq == 1 {
-                info!("Session {} first write_rtp pt={:?} ok={}", self.id, pt, result.is_ok());
+                info!(
+                    "Session {} first write_rtp pt={:?} ok={}",
+                    self.id,
+                    pt,
+                    result.is_ok()
+                );
             }
         } else if self.video_seq == 1 {
-            warn!("Session {} stream_tx_by_mid({:?}) returned None", self.id, mid);
+            warn!(
+                "Session {} stream_tx_by_mid({:?}) returned None",
+                self.id, mid
+            );
         }
 
         Ok(())
@@ -183,11 +194,16 @@ impl RtcSession {
     pub fn send_datachannel_text(&mut self, text: &str) -> Result<(), WebRTCError> {
         let dc_id = match self.dc_id {
             Some(id) => id,
-            None => return Err(WebRTCError::DataChannelError("DataChannel not open".to_string())),
+            None => {
+                return Err(WebRTCError::DataChannelError(
+                    "DataChannel not open".to_string(),
+                ))
+            }
         };
 
         if let Some(mut channel) = self.rtc.channel(dc_id) {
-            channel.write(false, text.as_bytes())
+            channel
+                .write(false, text.as_bytes())
                 .map_err(|e| WebRTCError::DataChannelError(format!("DC write failed: {}", e)))?;
         }
 
@@ -220,7 +236,10 @@ pub async fn drive_session(
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let session_id = session.id.clone();
-    info!("Session {} drive loop started (peer: {})", session_id, peer_addr);
+    info!(
+        "Session {} drive loop started (peer: {})",
+        session_id, peer_addr
+    );
 
     // Disable Nagle's algorithm for low-latency RTP delivery
     if let Err(e) = tcp_stream.set_nodelay(true) {
@@ -533,8 +552,13 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
 
         Event::ChannelOpen(id, label) => {
             session.dc_id = Some(id);
-            info!("Session {} DataChannel '{}' opened (id={:?})", session.id, label, id);
-            ctx.shared_state.datachannel_open_count.fetch_add(1, Ordering::Relaxed);
+            info!(
+                "Session {} DataChannel '{}' opened (id={:?})",
+                session.id, label, id
+            );
+            ctx.shared_state
+                .datachannel_open_count
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         Event::ChannelData(data) => {
@@ -562,7 +586,9 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
 fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &EventContext) {
     if data.binary {
         // Binary data → file upload handler
-        ctx.upload_handler.lock().unwrap_or_else(|e| e.into_inner())
+        ctx.upload_handler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .handle_binary(&data.data);
         return;
     }
@@ -581,10 +607,20 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
     }
 
     // Try specialized handlers first
-    if ctx.upload_handler.lock().unwrap_or_else(|e| e.into_inner()).handle_control_message(text) {
+    if ctx
+        .upload_handler
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .handle_control_message(text)
+    {
         return;
     }
-    if ctx.clipboard.lock().unwrap_or_else(|e| e.into_inner()).handle_message(text) {
+    if ctx
+        .clipboard
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .handle_message(text)
+    {
         return;
     }
     if ctx.shared_state.handle_command_message(text) {
@@ -638,11 +674,13 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         return;
     }
     if text.starts_with("_stats_video,") {
-        ctx.shared_state.update_webrtc_stats("video", text.trim_start_matches("_stats_video,"));
+        ctx.shared_state
+            .update_webrtc_stats("video", text.trim_start_matches("_stats_video,"));
         return;
     }
     if text.starts_with("_stats_audio,") {
-        ctx.shared_state.update_webrtc_stats("audio", text.trim_start_matches("_stats_audio,"));
+        ctx.shared_state
+            .update_webrtc_stats("audio", text.trim_start_matches("_stats_audio,"));
         return;
     }
     if text.starts_with("focus,") {

@@ -99,8 +99,7 @@ impl FileUploadHandler {
                 if next > expected {
                     error!(
                         "Upload exceeded declared size (expected {}, got {})",
-                        expected,
-                        next
+                        expected, next
                     );
                     self.abort_active();
                     return;
@@ -147,9 +146,7 @@ impl FileUploadHandler {
                 if self.written_size != expected {
                     warn!(
                         "Upload size mismatch for {:?}: expected {}, got {}",
-                        path,
-                        expected,
-                        self.written_size
+                        path, expected, self.written_size
                     );
                     let _ = fs::remove_file(&path);
                 } else {
@@ -183,7 +180,10 @@ impl FileUploadHandler {
         }
         const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
         if size > MAX_UPLOAD_BYTES {
-            return Err(format!("Upload exceeds size limit ({} bytes)", MAX_UPLOAD_BYTES));
+            return Err(format!(
+                "Upload exceeds size limit ({} bytes)",
+                MAX_UPLOAD_BYTES
+            ));
         }
 
         let safe_rel = sanitize_relative_path(rel_path)
@@ -205,14 +205,25 @@ impl FileUploadHandler {
 
         if target_dir != upload_root {
             if let Err(err) = fs::create_dir_all(&target_dir) {
-                return Err(format!("Failed to create upload directory {:?}: {}", target_dir, err));
+                return Err(format!(
+                    "Failed to create upload directory {:?}: {}",
+                    target_dir, err
+                ));
             }
         }
 
-        let root_canon = fs::canonicalize(&upload_root)
-            .map_err(|err| format!("Failed to canonicalize upload root {:?}: {}", upload_root, err))?;
-        let target_dir_canon = fs::canonicalize(&target_dir)
-            .map_err(|err| format!("Failed to canonicalize upload target {:?}: {}", target_dir, err))?;
+        let root_canon = fs::canonicalize(&upload_root).map_err(|err| {
+            format!(
+                "Failed to canonicalize upload root {:?}: {}",
+                upload_root, err
+            )
+        })?;
+        let target_dir_canon = fs::canonicalize(&target_dir).map_err(|err| {
+            format!(
+                "Failed to canonicalize upload target {:?}: {}",
+                target_dir, err
+            )
+        })?;
         if !target_dir_canon.starts_with(&root_canon) {
             return Err(format!(
                 "Path escape attempt detected via symlink: {:?} is outside {:?}",
@@ -221,7 +232,10 @@ impl FileUploadHandler {
         }
         if let Ok(meta) = fs::symlink_metadata(&target_path) {
             if meta.file_type().is_symlink() {
-                return Err(format!("Refusing to follow symlink target {:?}", target_path));
+                return Err(format!(
+                    "Refusing to follow symlink target {:?}",
+                    target_path
+                ));
             }
         }
 
@@ -269,9 +283,7 @@ fn resolve_upload_dir(raw: &str) -> Option<PathBuf> {
 }
 
 fn sanitize_relative_path(rel_path: &str) -> Option<PathBuf> {
-    let trimmed = rel_path
-        .trim()
-        .trim_start_matches(&['/', '\\'][..]);
+    let trimmed = rel_path.trim().trim_start_matches(&['/', '\\'][..]);
     if trimmed.is_empty() {
         return None;
     }

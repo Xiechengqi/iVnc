@@ -1,7 +1,7 @@
 //! Clipboard message handling (text + binary, single or multipart).
 
-use crate::web::SharedState;
 use crate::system_clipboard;
+use crate::web::SharedState;
 use base64::Engine;
 use log::{info, warn};
 use std::sync::Arc;
@@ -133,7 +133,10 @@ impl ClipboardReceiver {
         self.mime_type = mime.to_string();
         self.in_progress = true;
         self.is_binary = is_binary;
-        info!("Started multipart clipboard receive: {} bytes ({})", total_size, mime);
+        info!(
+            "Started multipart clipboard receive: {} bytes ({})",
+            total_size, mime
+        );
     }
 
     fn start_multipart_binary(&mut self, payload: &str) {

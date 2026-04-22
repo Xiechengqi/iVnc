@@ -7,13 +7,13 @@
 #![allow(dead_code)]
 //! - RTP packetization for WebRTC
 
-use super::{GstError, encoder::EncoderSelection};
-use crate::config::{VideoCodec, HardwareEncoder, WebRTCConfig};
+use super::{encoder::EncoderSelection, GstError};
+use crate::config::{HardwareEncoder, VideoCodec, WebRTCConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use log::{info, warn, debug};
+use log::{debug, info, warn};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -109,7 +109,8 @@ impl VideoPipeline {
             "video/x-raw,format=BGRx,width={},height={},framerate={}/1",
             config.width, config.height, config.framerate
         );
-        let caps = caps_str.parse::<gst::Caps>()
+        let caps = caps_str
+            .parse::<gst::Caps>()
             .map_err(|e| GstError::PipelineFailed(format!("Invalid caps: {}", e)))?;
 
         let appsrc = gst_app::AppSrc::builder()
@@ -123,13 +124,17 @@ impl VideoPipeline {
         // videoconvert: BGRx -> I420 for encoder
         let convert = gst::ElementFactory::make("videoconvert")
             .build()
-            .map_err(|e| GstError::PipelineFailed(format!("Failed to create videoconvert: {}", e)))?;
+            .map_err(|e| {
+                GstError::PipelineFailed(format!("Failed to create videoconvert: {}", e))
+            })?;
 
         let encoder_selection = EncoderSelection::select(config.codec, config.hardware_encoder);
-        let (encoder, encoder_name) = encoder_selection.create_encoder(
-            config.bitrate, config.keyframe_interval,
-        )?;
-        info!("Using encoder: {} for codec {:?}", encoder_name, config.codec);
+        let (encoder, encoder_name) =
+            encoder_selection.create_encoder(config.bitrate, config.keyframe_interval)?;
+        info!(
+            "Using encoder: {} for codec {:?}",
+            encoder_name, config.codec
+        );
 
         let payloader = Self::create_payloader(config.codec)?;
 
@@ -140,22 +145,29 @@ impl VideoPipeline {
             .drop(false)
             .build();
 
-        pipeline.add_many([
-            appsrc.upcast_ref(),
-            &convert,
-            &encoder,
-            &payloader,
-            appsink.upcast_ref(),
-        ]).map_err(|e| GstError::PipelineFailed(format!("Failed to add elements: {}", e)))?;
+        pipeline
+            .add_many([
+                appsrc.upcast_ref(),
+                &convert,
+                &encoder,
+                &payloader,
+                appsink.upcast_ref(),
+            ])
+            .map_err(|e| GstError::PipelineFailed(format!("Failed to add elements: {}", e)))?;
 
         // Link: appsrc -> convert -> encoder -> payloader -> appsink
-        appsrc.upcast_ref::<gst::Element>().link(&convert)
+        appsrc
+            .upcast_ref::<gst::Element>()
+            .link(&convert)
             .map_err(|e| GstError::LinkFailed(format!("appsrc->convert: {}", e)))?;
-        convert.link(&encoder)
+        convert
+            .link(&encoder)
             .map_err(|e| GstError::LinkFailed(format!("convert->encoder: {}", e)))?;
-        encoder.link(&payloader)
+        encoder
+            .link(&payloader)
             .map_err(|e| GstError::LinkFailed(format!("encoder->payloader: {}", e)))?;
-        payloader.link(appsink.upcast_ref::<gst::Element>())
+        payloader
+            .link(appsink.upcast_ref::<gst::Element>())
             .map_err(|e| GstError::LinkFailed(format!("payloader->appsink: {}", e)))?;
 
         pipeline.set_latency(gst::ClockTime::from_mseconds(config.latency_ms as u64));
@@ -180,8 +192,7 @@ impl VideoPipeline {
             VideoCodec::AV1 => ("rtpav1pay", 99),
         };
 
-        let mut builder = gst::ElementFactory::make(element_name)
-            .property("pt", pt as u32);
+        let mut builder = gst::ElementFactory::make(element_name).property("pt", pt as u32);
 
         // For H264, ensure SPS/PPS are sent regularly for browser decoders.
         if matches!(codec, VideoCodec::H264) {
@@ -189,13 +200,17 @@ impl VideoPipeline {
         }
 
         // Note: aggregate-mode requires enum type, skip for now
-        builder.build()
-            .map_err(|e| GstError::PipelineFailed(format!("Failed to create {}: {}", element_name, e)))
+        builder.build().map_err(|e| {
+            GstError::PipelineFailed(format!("Failed to create {}: {}", element_name, e))
+        })
     }
 
     /// Start the pipeline
     pub fn start(&self) -> Result<(), GstError> {
-        info!("Starting GStreamer pipeline with encoder: {}", self.encoder_element);
+        info!(
+            "Starting GStreamer pipeline with encoder: {}",
+            self.encoder_element
+        );
 
         self.pipeline
             .set_state(gst::State::Playing)
@@ -224,11 +239,13 @@ impl VideoPipeline {
             .map_err(|e| GstError::PipelineFailed(format!("Buffer alloc failed: {}", e)))?;
         {
             let buffer_ref = buffer.get_mut().unwrap();
-            let mut map = buffer_ref.map_writable()
+            let mut map = buffer_ref
+                .map_writable()
                 .map_err(|e| GstError::PipelineFailed(format!("Buffer map failed: {}", e)))?;
             map.copy_from_slice(data);
         }
-        self.appsrc.push_buffer(buffer)
+        self.appsrc
+            .push_buffer(buffer)
             .map_err(|e| GstError::PipelineFailed(format!("appsrc push failed: {:?}", e)))?;
         self.frame_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -244,9 +261,9 @@ impl VideoPipeline {
 
     /// Resume the pipeline
     pub fn resume(&self) -> Result<(), GstError> {
-        self.pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|e| GstError::StateChangeFailed(format!("Failed to resume pipeline: {}", e)))?;
+        self.pipeline.set_state(gst::State::Playing).map_err(|e| {
+            GstError::StateChangeFailed(format!("Failed to resume pipeline: {}", e))
+        })?;
         Ok(())
     }
 
@@ -284,7 +301,8 @@ impl VideoPipeline {
 
     /// Pull a sample with timeout (blocks up to timeout_ms)
     pub fn try_pull_sample_timeout(&self, timeout_ms: u64) -> Option<gst::Sample> {
-        self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
+        self.appsink
+            .try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
     }
 
     /// Request a keyframe (IDR)
@@ -315,7 +333,10 @@ impl VideoPipeline {
             } else if encoder.has_property("target-bitrate", None) {
                 // vp8enc/vp9enc use bps
                 let _ = encoder.set_property("target-bitrate", bitrate_kbps * 1000);
-                debug!("Updated encoder target-bitrate to {} bps", bitrate_kbps * 1000);
+                debug!(
+                    "Updated encoder target-bitrate to {} bps",
+                    bitrate_kbps * 1000
+                );
             }
         }
     }

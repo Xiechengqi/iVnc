@@ -7,7 +7,11 @@
 /// Panics if `data` exceeds 65535 bytes (u16 max). WebRTC packets
 /// are well under this limit in practice (MTU ~1200-1400 bytes).
 pub fn frame_packet(data: &[u8]) -> Vec<u8> {
-    assert!(data.len() <= u16::MAX as usize, "RFC 4571 frame too large: {} bytes", data.len());
+    assert!(
+        data.len() <= u16::MAX as usize,
+        "RFC 4571 frame too large: {} bytes",
+        data.len()
+    );
     let len = data.len() as u16;
     let mut framed = Vec::with_capacity(2 + data.len());
     framed.extend_from_slice(&len.to_be_bytes());
@@ -36,7 +40,9 @@ pub struct TcpFrameDecoder {
 
 impl TcpFrameDecoder {
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(4096) }
+        Self {
+            buf: Vec::with_capacity(4096),
+        }
     }
 
     /// Append received bytes to the internal buffer
