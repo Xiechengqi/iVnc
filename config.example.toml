@@ -4,13 +4,23 @@
 # iVnc 使用 str0m Sans-I/O WebRTC 库，HTTP/WebSocket/ICE-TCP 共享同一端口。
 # 音频捕获需要 PulseAudio/PipeWire 运行，并设置 XDG_RUNTIME_DIR 环境变量。
 
+[server]
+# Run in foreground
+foreground = false
+# PID file path
+pidfile = "/var/run/ivnc.pid"
+
 [display]
-# Display width (0 = auto-detect from client)
-width = 0
-# Display height (0 = auto-detect from client)
-height = 0
+# Display width in pixels
+width = 1920
+# Display height in pixels
+height = 1080
+# Display refresh rate in Hz
+refresh_rate = 60
 
 [http]
+# HTTP bind address
+host = "0.0.0.0"
 # HTTP server port (also used for WebSocket signaling and ICE-TCP)
 port = 8008
 # Enable HTTP basic authentication
