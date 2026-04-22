@@ -73,11 +73,11 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO apps (id, name, app_type, url, mode, autostart, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 app.id, app.name, app.app_type.as_str(), url, mode,
-                app.show_nav as i32, exec_command, env_vars_json, app.created_at,
+                app.autostart as i32, app.show_nav as i32, exec_command, env_vars_json, app.created_at,
                 app.remote_debugging_port, app.proxy_server,
             ],
         ).map_err(|e| {
@@ -103,8 +103,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = conn.execute(
-            "UPDATE apps SET app_type=?1, url=?2, mode=?3, show_nav=?4, exec_command=?5, env_vars=?6, remote_debugging_port=?7, proxy_server=?8 WHERE id=?9",
-            params![app.app_type.as_str(), url, mode, app.show_nav as i32, exec_command, env_vars_json, app.remote_debugging_port, app.proxy_server, app.id],
+            "UPDATE apps SET app_type=?1, url=?2, mode=?3, autostart=?4, show_nav=?5, exec_command=?6, env_vars=?7, remote_debugging_port=?8, proxy_server=?9 WHERE id=?10",
+            params![app.app_type.as_str(), url, mode, app.autostart as i32, app.show_nav as i32, exec_command, env_vars_json, app.remote_debugging_port, app.proxy_server, app.id],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", app.id));
@@ -126,7 +126,7 @@ impl AppStore {
     pub fn get(&self, id: &str) -> Result<PakeApp, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, mode, autostart, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).map_err(|e| format!("App not found: {}", e))
@@ -135,7 +135,7 @@ impl AppStore {
     pub fn list(&self) -> Result<Vec<PakeApp>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, app_type, url, mode, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server FROM apps ORDER BY created_at"
+            "SELECT id, name, app_type, url, mode, autostart, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -153,21 +153,23 @@ impl AppStore {
         let url: Option<String> = row.get(3).ok().filter(|s: &String| !s.is_empty());
         let mode_str: Option<String> = row.get(4).ok().filter(|s: &String| !s.is_empty());
         let mode = mode_str.and_then(|s| AppMode::from_str(&s));
-        let show_nav = row.get::<_, i32>(5).unwrap_or(0) != 0;
+        let autostart = row.get::<_, i32>(5).unwrap_or(0) != 0;
+        let show_nav = row.get::<_, i32>(6).unwrap_or(0) != 0;
 
-        let exec_command: Option<String> = row.get(6).ok().filter(|s: &String| !s.is_empty());
-        let env_vars_json: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
+        let exec_command: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
+        let env_vars_json: Option<String> = row.get(8).ok().filter(|s: &String| !s.is_empty());
         let env_vars = env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
         let remote_debugging_port: Option<u16> = row
-            .get::<_, Option<i32>>(9)
+            .get::<_, Option<i32>>(10)
             .unwrap_or(None)
             .map(|p| p as u16);
-        let proxy_server: Option<String> = row.get(10).ok().filter(|s: &String| !s.is_empty());
+        let proxy_server: Option<String> = row.get(11).ok().filter(|s: &String| !s.is_empty());
 
         PakeApp {
             id: row.get(0).unwrap_or_default(),
             name: row.get(1).unwrap_or_default(),
             app_type,
+            autostart,
             url,
             mode,
             show_nav,
@@ -175,7 +177,7 @@ impl AppStore {
             proxy_server,
             exec_command,
             env_vars,
-            created_at: row.get(8).unwrap_or_default(),
+            created_at: row.get(9).unwrap_or_default(),
         }
     }
 }

@@ -109,11 +109,38 @@ impl PakeState {
         log::info!("Running state restoration completed");
         Ok(())
     }
+
+    pub async fn start_autostart_apps(&self) -> Result<(), String> {
+        let apps = self.store.list()?;
+        for app in apps.iter().filter(|app| app.autostart) {
+            let result = match app.mode {
+                Some(AppMode::Native) | None => self.process.start(app).map(|_| ()),
+                Some(AppMode::Webview) => self.webview.lock().unwrap().start(app),
+            };
+
+            match result {
+                Ok(()) => log::info!("Autostart app started: {} ({})", app.name, app.id),
+                Err(e) if e == "App is already running" => {
+                    log::debug!("Autostart app already running: {} ({})", app.name, app.id)
+                }
+                Err(e) => log::warn!("Failed to autostart app {} ({}): {}", app.name, app.id, e),
+            }
+        }
+        Ok(())
+    }
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
-    let has_terminal = store.list()?.iter().any(|app| app.name == "Terminal");
-    if has_terminal {
+    if let Some(mut terminal) = store
+        .list()?
+        .into_iter()
+        .find(|app| app.name == "Terminal")
+    {
+        if !terminal.autostart {
+            terminal.autostart = true;
+            store.update(&terminal)?;
+            log::info!("Updated built-in desktop app Terminal to autostart");
+        }
         return Ok(());
     }
 
@@ -121,6 +148,7 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
         id: "builtin-terminal".to_string(),
         name: "Terminal".to_string(),
         app_type: AppType::DesktopApp,
+        autostart: true,
         url: None,
         mode: None,
         show_nav: false,
@@ -170,6 +198,7 @@ fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> s
         "id": app.id,
         "name": app.name,
         "app_type": app.app_type.as_str(),
+        "autostart": app.autostart,
         "status": status,
         "pid": pid,
         "data_size_bytes": data_bytes,
@@ -295,11 +324,16 @@ async fn add_app(
                 (None, None, false, None, None, exec_command, env_vars)
             }
         };
+    let autostart = body
+        .get("autostart")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let app = PakeApp {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         app_type,
+        autostart,
         url,
         mode,
         show_nav,
@@ -409,6 +443,10 @@ async fn update_app(
                 );
             }
         }
+    }
+
+    if let Some(autostart) = body.get("autostart").and_then(|v| v.as_bool()) {
+        app.autostart = autostart;
     }
 
     if let Err(e) = state.store.update(&app) {

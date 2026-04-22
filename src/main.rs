@@ -1583,6 +1583,11 @@ async fn run_async_services(
                 } else {
                     log::info!("Running apps restoration completed");
                 }
+                if let Err(e) = ps_clone.start_autostart_apps().await {
+                    log::warn!("Failed to start autostart apps: {}", e);
+                } else {
+                    log::info!("Autostart apps initialization completed");
+                }
             });
 
             Some(ps_arc)

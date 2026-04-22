@@ -62,6 +62,7 @@ pub struct PakeApp {
     pub id: String,
     pub name: String,
     pub app_type: AppType,
+    pub autostart: bool,
 
     // WebApp fields
     pub url: Option<String>,

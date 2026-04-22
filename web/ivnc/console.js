@@ -96,6 +96,7 @@ function showAdd() {
     document.getElementById('f-app-type').disabled = false;
     document.getElementById('f-url').value = '';
     document.getElementById('f-mode').value = 'native';
+    document.getElementById('f-autostart').checked = false;
     document.getElementById('f-nav').checked = false;
     document.getElementById('f-debug-port').value = '';
     document.getElementById('f-proxy-server').value = 'socks5://127.0.0.1:1080';
@@ -120,6 +121,7 @@ async function showEdit(id) {
         document.getElementById('f-name').disabled = true;
         document.getElementById('f-app-type').value = a.app_type || 'webapp';
         document.getElementById('f-app-type').disabled = true;
+        document.getElementById('f-autostart').checked = !!a.autostart;
         
         if (a.app_type === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
@@ -150,7 +152,10 @@ function validateUrl(url) {
 async function saveApp() {
     const btn = document.getElementById('modal-save');
     const appType = document.getElementById('f-app-type').value;
-    const body = { app_type: appType };
+    const body = {
+        app_type: appType,
+        autostart: document.getElementById('f-autostart').checked
+    };
     
     if (!editId) {
         body.name = document.getElementById('f-name').value.trim();
