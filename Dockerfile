@@ -9,7 +9,7 @@ COPY web/ivnc/ ./
 RUN npm run build
 
 
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
