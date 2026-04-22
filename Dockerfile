@@ -48,9 +48,9 @@ RUN cargo build --release --features mcp --bin ivnc
 
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
     && add-apt-repository universe \
+    && add-apt-repository ppa:aslatter/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
