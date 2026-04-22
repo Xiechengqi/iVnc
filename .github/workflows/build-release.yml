@@ -4,22 +4,21 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: amd64
             docker_platform: linux/amd64
-          # - target: aarch64-unknown-linux-gnu
-          #   arch: arm64
-          #   docker_platform: linux/arm64
 
     steps:
       - name: Checkout code
@@ -31,13 +30,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build in Docker container
+      - name: Build binary in Docker container
         run: |
           cat > docker-build.sh << 'BUILDSCRIPT'
           #!/bin/bash
-          set -e
+          set -euo pipefail
 
-          # Install dependencies
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential \
@@ -45,6 +43,7 @@ jobs:
             curl \
             ca-certificates \
             cmake \
+            gnupg \
             libxcb1-dev \
             libxkbcommon-dev \
             libgstreamer1.0-dev \
@@ -55,24 +54,20 @@ jobs:
             libpixman-1-dev \
             libinput-dev \
             libudev-dev \
-            libseat-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev
+            libseat-dev
 
-          # Install Node.js 20.x
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-          apt-get install -y nodejs
+          apt-get install -y --no-install-recommends nodejs
 
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source $HOME/.cargo/env
+          source "$HOME/.cargo/env"
 
           cd /workspace
-
-          # Build frontend assets (plain JS copy)
-          bash build.sh --release
-
+          cd web/ivnc
+          npm ci
+          npm run build
+          cd /workspace
+          cargo build --release --features mcp --bin ivnc
           cp target/release/ivnc /output/ivnc-linux-$ARCH
           BUILDSCRIPT
 
@@ -81,9 +76,9 @@ jobs:
 
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
-            -v $(pwd):/workspace \
-            -v $(pwd)/output:/output \
-            -v $(pwd)/docker-build.sh:/docker-build.sh \
+            -v "$(pwd):/workspace" \
+            -v "$(pwd)/output:/output" \
+            -v "$(pwd)/docker-build.sh:/docker-build.sh" \
             -e ARCH=${{ matrix.arch }} \
             ubuntu:22.04 \
             /bin/bash /docker-build.sh
@@ -99,9 +94,57 @@ jobs:
           name: ivnc-${{ matrix.arch }}
           path: output/ivnc-linux-${{ matrix.arch }}
 
+  docker:
+    runs-on: ubuntu-22.04
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image name
+        id: image
+        run: |
+          IMAGE_NAME=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
   release:
-    needs: [build]
-    runs-on: ubuntu-latest
+    needs:
+      - build
+      - docker
+    runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -115,7 +158,6 @@ jobs:
         run: |
           mkdir -p release-files
           cp artifacts/ivnc-amd64/ivnc-linux-amd64 release-files/ || true
-          cp artifacts/ivnc-arm64/ivnc-linux-arm64 release-files/ || true
           chmod +x release-files/* || true
           echo "Release files:"
           ls -lh release-files/
@@ -124,8 +166,14 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Current version: v${VERSION}"
+
+      - name: Compute image name
+        id: image
+        run: |
+          IMAGE_NAME=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Delete existing latest release and tag
         run: |
@@ -152,48 +200,22 @@ jobs:
             **版本**: ${{ steps.version.outputs.version }}
             **提交**: ${{ github.sha }}
             **分支**: ${{ github.ref_name }}
-            **构建时间**: ${{ github.event.head_commit.timestamp }}
-
-            ### 变更内容
-
-            ${{ github.event.head_commit.message }}
-
-            ---
 
             ### 下载
-
-            需要系统安装 GStreamer 运行时库。
 
             | 架构 | 文件名 |
             |------|--------|
             | AMD64 | `ivnc-linux-amd64` |
-            | ARM64 | `ivnc-linux-arm64` |
 
-            ---
-
-            ### 快速安装
+            ### Docker 镜像
 
             ```bash
-            # AMD64
-            wget https://github.com/${{ github.repository }}/releases/download/latest/ivnc-linux-amd64 -O ivnc
-            # ARM64
-            # wget https://github.com/${{ github.repository }}/releases/download/latest/ivnc-linux-arm64 -O ivnc
-            chmod +x ivnc
+            docker pull ${{ steps.image.outputs.name }}:latest
             ```
 
             ### 运行时依赖
 
-            ```bash
-            apt-get install \
-              libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
-              libpixman-1-0 libxkbcommon0 \
-              gstreamer1.0-tools gstreamer1.0-plugins-base \
-              gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-              gstreamer1.0-plugins-ugly gstreamer1.0-x \
-              libpulse0 libopus0 pulseaudio pulseaudio-utils \
-              libgtk-3-0 libwebkit2gtk-4.1-0 libsoup-3.0-0
-            ```
-
+            Docker 镜像已经包含 iVnc 所需运行时依赖。
           files: release-files/*
           prerelease: false
           draft: false

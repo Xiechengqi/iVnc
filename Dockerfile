@@ -1,54 +1,80 @@
-FROM rust:1.70 AS builder
+FROM node:20-bookworm-slim AS web-builder
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
+WORKDIR /build/web/ivnc
+
+COPY web/ivnc/package.json web/ivnc/package-lock.json ./
+RUN npm ci
+
+COPY web/ivnc/ ./
+RUN npm run build
+
+
+FROM rust:1.75-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
-    libturbojpeg0-dev \
+    cmake \
+    curl \
+    ca-certificates \
     libx11-dev \
     libxcb1-dev \
     libxkbcommon-dev \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
+    libpulse-dev \
+    libopus-dev \
+    libwayland-dev \
+    libpixman-1-dev \
+    libinput-dev \
+    libudev-dev \
+    libseat-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY web/ivnc ./web/ivnc
+COPY --from=web-builder /build/web/ivnc/dist ./web/ivnc/dist
 
-# Build release binary
-RUN cargo build --release
+RUN cargo build --release --features mcp --bin ivnc
 
-# Runtime stage
+
 FROM ubuntu:22.04
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
     xvfb \
     openbox \
-    libjpeg-turbo8 \
+    pulseaudio \
+    pulseaudio-utils \
+    libgstreamer1.0-0 \
+    libgstreamer-plugins-base1.0-0 \
+    libpixman-1-0 \
+    libxkbcommon0 \
+    libpulse0 \
+    libopus0 \
     libx11-6 \
     libxcb1 \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
     gstreamer1.0-x \
     gstreamer1.0-vaapi \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binary
-COPY --from=builder /build/target/release/ivnc /usr/local/bin/
-
-# Copy config
+COPY --from=builder /build/target/release/ivnc /usr/local/bin/ivnc
 COPY config.example.toml /etc/ivnc.toml
 
-# Expose ports
-EXPOSE 8000 8080
+ENV XDG_RUNTIME_DIR=/run/user/0
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+EXPOSE 8008
 
-# Run
-CMD ["ivnc", "--config", "/etc/ivnc.toml"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -fsS http://localhost:8008/health || exit 1
+
+CMD ["/bin/bash", "-lc", "mkdir -p \"$XDG_RUNTIME_DIR\" && pulseaudio --start --exit-idle-time=-1 && ivnc --config /etc/ivnc.toml"]

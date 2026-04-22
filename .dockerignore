@@ -11,3 +11,5 @@ Dockerfile
 benches/
 examples/
 docs/
+web/ivnc/node_modules/
+web/ivnc/dist/
