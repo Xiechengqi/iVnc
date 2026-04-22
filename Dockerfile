@@ -89,5 +89,5 @@ EXPOSE 8008
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -fsS http://localhost:8008/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["--config", "/etc/ivnc.toml"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh", "--config", "/etc/ivnc.toml", "--"]
+CMD ["sleep", "infinity"]

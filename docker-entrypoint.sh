@@ -27,5 +27,77 @@ if ! pulseaudio --check >/dev/null 2>&1; then
     fi
 fi
 
-log "starting ivnc: /usr/local/bin/ivnc $*"
-exec /usr/local/bin/ivnc "$@"
+ivnc_args=()
+cmd_args=()
+parsing_ivnc_args=1
+
+for arg in "$@"; do
+    if [[ "$parsing_ivnc_args" -eq 1 && "$arg" == "--" ]]; then
+        parsing_ivnc_args=0
+        continue
+    fi
+
+    if [[ "$parsing_ivnc_args" -eq 1 ]]; then
+        ivnc_args+=("$arg")
+    else
+        cmd_args+=("$arg")
+    fi
+done
+
+if [[ "${#ivnc_args[@]}" -eq 0 ]]; then
+    fail "no ivnc arguments provided to entrypoint"
+fi
+
+log "starting ivnc: /usr/local/bin/ivnc ${ivnc_args[*]}"
+/usr/local/bin/ivnc "${ivnc_args[@]}" &
+ivnc_pid=$!
+
+sleep 2
+if ! kill -0 "$ivnc_pid" >/dev/null 2>&1; then
+    wait "$ivnc_pid" || fail "ivnc exited immediately during startup"
+fi
+
+if [[ "${#cmd_args[@]}" -eq 0 ]]; then
+    log "no foreground command provided, waiting on ivnc"
+    wait "$ivnc_pid"
+    exit $?
+fi
+
+log "starting foreground command: ${cmd_args[*]}"
+"${cmd_args[@]}" &
+cmd_pid=$!
+
+cleanup() {
+    local exit_code=$?
+    if kill -0 "$cmd_pid" >/dev/null 2>&1; then
+        kill "$cmd_pid" >/dev/null 2>&1 || true
+    fi
+    if kill -0 "$ivnc_pid" >/dev/null 2>&1; then
+        kill "$ivnc_pid" >/dev/null 2>&1 || true
+    fi
+    wait "$cmd_pid" >/dev/null 2>&1 || true
+    wait "$ivnc_pid" >/dev/null 2>&1 || true
+    exit "$exit_code"
+}
+
+trap cleanup INT TERM
+
+while true; do
+    if ! kill -0 "$ivnc_pid" >/dev/null 2>&1; then
+        wait "$ivnc_pid"
+        exit_code=$?
+        fail "ivnc exited with code $exit_code"
+    fi
+
+    if ! kill -0 "$cmd_pid" >/dev/null 2>&1; then
+        wait "$cmd_pid"
+        exit_code=$?
+        if kill -0 "$ivnc_pid" >/dev/null 2>&1; then
+            kill "$ivnc_pid" >/dev/null 2>&1 || true
+            wait "$ivnc_pid" >/dev/null 2>&1 || true
+        fi
+        exit "$exit_code"
+    fi
+
+    sleep 1
+done
