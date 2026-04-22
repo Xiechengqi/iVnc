@@ -54,7 +54,11 @@ jobs:
             libpixman-1-dev \
             libinput-dev \
             libudev-dev \
-            libseat-dev
+            libseat-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
 
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
           apt-get install -y --no-install-recommends nodejs

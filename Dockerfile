@@ -29,6 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libinput-dev \
     libudev-dev \
     libseat-dev \
+    libgtk-3-dev \
+    libwebkit2gtk-4.1-dev \
+    libsoup-3.0-dev \
+    libjavascriptcoregtk-4.1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -56,6 +60,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libpulse0 \
     libopus0 \
+    libgtk-3-0 \
+    libwebkit2gtk-4.1-0 \
+    libsoup-3.0-0 \
+    libjavascriptcoregtk-4.1-0 \
     libx11-6 \
     libxcb1 \
     gstreamer1.0-tools \
