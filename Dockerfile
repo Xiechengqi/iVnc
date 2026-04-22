@@ -51,6 +51,24 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    wget \
+    jq \
+    unzip \
+    tree \
+    gh \
+    git \
+    build-essential \
+    pkg-config \
+    lrzsz \
+    sshpass \
+    telnet \
+    net-tools \
+    iproute2 \
+    iputils-ping \
+    htop \
+    vnstat \
+    screen \
+    tmux \
     xvfb \
     openbox \
     pulseaudio \
