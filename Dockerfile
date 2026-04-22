@@ -39,6 +39,7 @@ WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY extension ./extension
 COPY web/ivnc ./web/ivnc
 COPY --from=web-builder /build/web/ivnc/dist ./web/ivnc/dist
 
