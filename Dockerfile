@@ -59,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
     pkg-config \
+    software-properties-common \
     lrzsz \
     sshpass \
     telnet \
@@ -74,6 +75,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-wqy-zenhei \
     xvfb \
     openbox \
+    alacritty \
     pulseaudio \
     pulseaudio-utils \
     libgstreamer1.0-0 \

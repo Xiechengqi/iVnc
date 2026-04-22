@@ -27,6 +27,7 @@ pub struct PakeState {
 impl PakeState {
     pub fn new() -> Result<Self, String> {
         let store = Arc::new(AppStore::new()?);
+        ensure_builtin_apps(&store)?;
         let mut process = ProcessManager::new();
         process.set_store(store.clone());
         let mut webview_mgr = WebViewManager::new();
@@ -108,6 +109,32 @@ impl PakeState {
         log::info!("Running state restoration completed");
         Ok(())
     }
+}
+
+fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
+    let has_terminal = store.list()?.iter().any(|app| app.name == "Terminal");
+    if has_terminal {
+        return Ok(());
+    }
+
+    let app = PakeApp {
+        id: "builtin-terminal".to_string(),
+        name: "Terminal".to_string(),
+        app_type: AppType::DesktopApp,
+        url: None,
+        mode: None,
+        show_nav: false,
+        remote_debugging_port: None,
+        proxy_server: None,
+        exec_command: Some("alacritty".to_string()),
+        env_vars: None,
+        created_at: chrono_now(),
+    };
+
+    store.add(&app)?;
+    desktop_entry::ensure_desktop_entry(&app.name, "alacritty")?;
+    log::info!("Seeded built-in desktop app: Terminal");
+    Ok(())
 }
 
 pub fn router(state: Arc<PakeState>) -> Router {
