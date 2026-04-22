@@ -57,8 +57,8 @@ bitrate = 128000
 [logging]
 # Log level: "trace", "debug", "info", "warn", "error"
 level = "info"
-# Optional log file path (null = stdout only)
-logfile = null
+# Optional log file path (omit to log to stdout only)
+# logfile = "/var/log/ivnc.log"
 # Log format: "json" or "text"
 format = "json"
 
