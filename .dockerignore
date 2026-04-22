@@ -8,6 +8,7 @@ target/
 docker-compose.yml
 Dockerfile
 *.sh
+!docker-entrypoint.sh
 benches/
 examples/
 docs/

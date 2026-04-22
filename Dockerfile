@@ -77,7 +77,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/ivnc /usr/local/bin/ivnc
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY config.example.toml /etc/ivnc.toml
+
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc
 
 ENV XDG_RUNTIME_DIR=/run/user/0
 
@@ -86,4 +89,5 @@ EXPOSE 8008
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -fsS http://localhost:8008/health || exit 1
 
-CMD ["/bin/bash", "-lc", "mkdir -p \"$XDG_RUNTIME_DIR\" && pulseaudio --start --exit-idle-time=-1 && ivnc --config /etc/ivnc.toml"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["--config", "/etc/ivnc.toml"]
