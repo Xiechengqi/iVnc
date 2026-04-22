@@ -69,6 +69,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vnstat \
     screen \
     tmux \
+    fontconfig \
+    fonts-noto-cjk \
+    fonts-wqy-zenhei \
     xvfb \
     openbox \
     pulseaudio \
@@ -92,6 +95,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-x \
     gstreamer1.0-vaapi \
+    && fc-cache -f -v \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/ivnc /usr/local/bin/ivnc
