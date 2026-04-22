@@ -49,6 +49,9 @@ RUN cargo build --release --features mcp --bin ivnc
 FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository universe \
+    && apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     wget \
@@ -59,7 +62,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
     pkg-config \
-    software-properties-common \
     lrzsz \
     sshpass \
     telnet \
