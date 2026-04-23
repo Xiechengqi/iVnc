@@ -60,6 +60,7 @@ RUN apt-get update && \
     curl \
     wget \
     jq \
+    sqlite3 \
     unzip \
     tree \
     gh \
