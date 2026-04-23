@@ -42,6 +42,21 @@ h1 {
 .toolbar {
   display: flex;
   gap: 12px;
+  align-items: center;
+}
+
+.lang-toggle {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.lang-toggle:hover {
+  color: var(--text-main);
 }
 
 .btn {
@@ -70,6 +85,17 @@ h1 {
 .btn-delete:hover { background: var(--danger); }
 .btn-edit { background: #636e72; }
 .btn-log { background: #2d3436; }
+.btn-save {
+  background: var(--primary);
+  color: #ffffff;
+  box-shadow: 0 10px 20px -14px rgba(9, 132, 227, 0.9);
+}
+.btn-save:hover {
+  background: var(--primary-hover);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 14px 24px -16px rgba(9, 132, 227, 0.9);
+}
 
 .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
@@ -154,6 +180,19 @@ tr:hover { background-color: #f8f9fa; }
 .checkbox-row label {
   margin: 0;
   font-weight: 500;
+}
+.field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.field-header label {
+  margin-bottom: 0;
+}
+.inline-slot {
+  display: inline-flex;
+  align-items: center;
 }
 .form-row { display: flex; gap: 12px; margin-bottom: 16px; }
 .form-row .form-group { flex: 1; margin-bottom: 0; }

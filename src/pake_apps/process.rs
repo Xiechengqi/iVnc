@@ -4,6 +4,7 @@ use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 struct RunningApp {
     child: Child,
@@ -114,8 +115,50 @@ impl ProcessManager {
 
         let mut procs = self.processes.lock().unwrap();
         if let Some(mut running) = procs.remove(app_id) {
-            info!("Stopping Pake app (pid={})", running.pid);
-            let _ = running.child.kill();
+            let pgid = -(running.pid as i32);
+            info!("Stopping Pake app process group (pid={}, pgid={})", running.pid, pgid);
+
+            if unsafe { libc::kill(pgid, libc::SIGTERM) } != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    warn!(
+                        "Failed to send SIGTERM to process group {} for app {}: {}",
+                        pgid, app_id, err
+                    );
+                }
+            }
+
+            let mut exited = false;
+            for _ in 0..20 {
+                match running.child.try_wait() {
+                    Ok(Some(_)) => {
+                        exited = true;
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(e) => {
+                        warn!("Failed to poll app {} during shutdown: {}", app_id, e);
+                        break;
+                    }
+                }
+            }
+
+            if !exited {
+                warn!(
+                    "Process group {} for app {} did not exit after SIGTERM, sending SIGKILL",
+                    pgid, app_id
+                );
+                if unsafe { libc::kill(pgid, libc::SIGKILL) } != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        warn!(
+                            "Failed to send SIGKILL to process group {} for app {}: {}",
+                            pgid, app_id, err
+                        );
+                    }
+                }
+            }
+
             let _ = running.child.wait();
             Ok(())
         } else {

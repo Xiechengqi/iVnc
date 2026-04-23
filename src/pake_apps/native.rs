@@ -1,6 +1,7 @@
 use super::app::{AppMode, AppType, PakeApp};
 use super::datadir;
 use log::info;
+use std::os::unix::process::CommandExt;
 use std::fs;
 use std::process::{Command, Stdio};
 
@@ -38,13 +39,26 @@ pub fn log_path(app_id: &str) -> std::path::PathBuf {
 
 /// Build the launch command for a Pake app
 pub fn build_command(app: &PakeApp) -> Result<Command, String> {
-    match app.app_type {
+    let mut cmd = match app.app_type {
         AppType::DesktopApp => build_desktop_command(app),
         AppType::WebApp => match app.mode {
             Some(AppMode::Native) => build_native_command(app),
             Some(AppMode::Webview) => build_webview_command(app),
             None => Err("WebApp must have a mode".to_string()),
         },
+    }?;
+    configure_process_group(&mut cmd);
+    Ok(cmd)
+}
+
+fn configure_process_group(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 

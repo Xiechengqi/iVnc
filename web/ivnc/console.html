@@ -1,16 +1,17 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>iVnc 控制台</title>
+    <title>VNC App Console</title>
     <link rel="stylesheet" href="./console.css">
 </head>
 <body>
     <div class="page-header">
-        <h1>iVnc 控制台</h1>
+        <h1 id="page-title">VNC App Console</h1>
         <div class="toolbar">
-            <button class="btn btn-add">+ 添加应用</button>
+            <button class="lang-toggle" id="lang-toggle" type="button">中文</button>
+            <button class="btn btn-add" id="add-app-btn">+ Add App</button>
         </div>
     </div>
     
@@ -18,16 +19,16 @@
         <table>
             <thead>
                 <tr>
-                    <th>名称</th>
-                    <th>类型</th>
-                    <th>配置</th>
-                    <th>状态</th>
-                    <th>数据</th>
-                    <th>操作</th>
+                    <th id="th-name">Name</th>
+                    <th id="th-type">Type</th>
+                    <th id="th-config">Config</th>
+                    <th id="th-status">Status</th>
+                    <th id="th-data">Data</th>
+                    <th id="th-actions">Actions</th>
                 </tr>
             </thead>
             <tbody id="app-list">
-                <tr><td colspan="6" class="empty">加载中...</td></tr>
+                <tr><td colspan="6" class="empty" id="loading-text">Loading...</td></tr>
             </tbody>
         </table>
     </div>
@@ -35,23 +36,24 @@
     <!-- 模态框：添加/编辑 -->
     <div class="modal-bg" id="modal">
         <div class="modal">
-            <h2 id="modal-title">添加应用</h2>
+            <h2 id="modal-title">Add App</h2>
             <div class="form-group">
-                <label>名称</label>
-                <input type="text" id="f-name" placeholder="应用显示名称">
+                <label id="label-name">Name</label>
+                <input type="text" id="f-name" placeholder="App display name">
             </div>
             <div class="form-group">
-                <label>应用类型</label>
+                <label id="label-app-type">App Type</label>
                 <select id="f-app-type">
-                    <option value="webapp">网页APP</option>
-                    <option value="desktop">桌面APP</option>
+                    <option value="webapp">Web App</option>
+                    <option value="desktop">Desktop App</option>
                 </select>
             </div>
 
-            <div class="form-group checkbox-row">
+            <div class="form-group checkbox-row" id="autostart-control">
                 <input type="checkbox" id="f-autostart">
-                <label for="f-autostart">开机启动</label>
+                <label for="f-autostart" id="label-autostart">Autostart</label>
             </div>
+            <div id="general-autostart-slot"></div>
             
             <div id="webapp-config">
                 <div class="form-row">
@@ -60,7 +62,7 @@
                         <input type="text" id="f-url" placeholder="https://">
                     </div>
                     <div class="form-group">
-                        <label>模式</label>
+                        <label id="label-mode">Mode</label>
                         <select id="f-mode">
                             <option value="native">Native</option>
                             <option value="webview">WebView</option>
@@ -70,11 +72,12 @@
 
                 <div class="form-group" id="nav-row" style="display:flex; align-items:center; gap:8px;">
                     <input type="checkbox" id="f-nav" style="width:auto; margin:0;">
-                    <label for="f-nav" style="margin:0; font-weight: 500;">显示导航栏（仅 Native 模式）</label>
+                    <label for="f-nav" id="label-nav" style="margin:0; font-weight: 500;">Show navigation bar (Native only)</label>
+                    <div id="webapp-autostart-slot"></div>
                 </div>
 
                 <div id="advanced-settings-group">
-                    <div class="advanced-title">高级配置</div>
+                    <div class="advanced-title" id="advanced-title">Advanced Settings</div>
                     <div class="form-row">
                         <div class="form-group" id="debug-port-row">
                             <label>Debugging Port</label>
@@ -85,24 +88,27 @@
                             <input type="text" id="f-proxy-server" placeholder="socks5://127.0.0.1:1080">
                         </div>
                     </div>
-                    <small class="help-text" id="proxy-help">清空则不使用代理</small>
+                    <small class="help-text" id="proxy-help">Leave empty to disable proxy</small>
                 </div>
             </div>
 
             <div id="desktop-config" style="display:none">
                 <div class="form-group">
-                    <label>启动命令</label>
+                    <div class="field-header">
+                        <label id="label-exec">Launch Command</label>
+                        <div id="desktop-autostart-slot"></div>
+                    </div>
                     <input type="text" id="f-exec" placeholder="/usr/bin/code --no-sandbox">
                 </div>
                 <div class="form-group">
-                    <label>环境变量（可选）</label>
+                    <label id="label-env">Environment Variables (Optional)</label>
                     <textarea id="f-env" rows="3" placeholder="KEY1=value1&#10;KEY2=value2"></textarea>
                 </div>
             </div>
 
             <div class="modal-actions">
-                <button class="btn btn-cancel">取消</button>
-                <button class="btn btn-save" id="modal-save">保存</button>
+                <button class="btn btn-cancel" id="modal-cancel">Cancel</button>
+                <button class="btn btn-save" id="modal-save">Save</button>
             </div>
         </div>
     </div>
@@ -112,10 +118,10 @@
     <!-- 模态框：日志 -->
     <div class="modal-bg" id="log-modal">
         <div class="modal log-modal">
-            <h2 id="log-title">应用日志</h2>
+            <h2 id="log-title">App Logs</h2>
             <div class="log-content" id="log-content">(loading...)</div>
             <div class="modal-actions">
-                <button class="btn btn-cancel">关闭</button>
+                <button class="btn btn-cancel" id="log-close-btn">Close</button>
             </div>
         </div>
     </div>
