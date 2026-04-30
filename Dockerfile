@@ -49,7 +49,7 @@ RUN cargo build --release --features mcp --bin ivnc
 FROM ubuntu:22.04
 
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata vim curl && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata bash vim curl && \
     update-alternatives --remove-all editor && \
     update-alternatives --remove-all vi && \
     update-alternatives --install /usr/bin/editor editor /usr/bin/vim.basic 1 && \

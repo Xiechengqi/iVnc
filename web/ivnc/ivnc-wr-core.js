@@ -433,6 +433,17 @@ function InitUI() {
 	.web-terminal-body .xterm {
 		height: 100%;
 	}
+	.web-terminal-body .xterm .xterm-helper-textarea {
+		position: absolute !important;
+		left: -9999em !important;
+		top: 0 !important;
+		width: 0 !important;
+		height: 0 !important;
+		opacity: 0 !important;
+		border: 0 !important;
+		background: transparent !important;
+		pointer-events: none !important;
+	}
 	.web-console-modal {
 		width: var(--ivnc-console-width, min(1080px, calc(100vw - 48px)));
 		height: var(--ivnc-console-height, min(720px, calc(100vh - 96px)));
@@ -1101,6 +1112,8 @@ function createWebTerminalController() {
 		modal.addEventListener('pointerdown', () => {
 			terminal?.focus();
 		});
+		modal.addEventListener('keydown', handleTerminalShortcut);
+		modal.addEventListener('paste', handleTerminalPaste);
 		terminal.onData((data) => {
 			send({ type: 'input', data });
 		});
@@ -1108,6 +1121,52 @@ function createWebTerminalController() {
 		resizeObserver = new ResizeObserver(() => queueResize());
 		resizeObserver.observe(modal.querySelector('#web-terminal-body'));
 		connect();
+	}
+
+	async function copySelectionToClipboard() {
+		const selection = terminal?.getSelection();
+		if (!selection) return;
+		try {
+			await navigator.clipboard.writeText(selection);
+			setStatus('copied');
+			setTimeout(() => setStatus(socket?.readyState === WebSocket.OPEN ? 'ready' : 'disconnected', socket?.readyState !== WebSocket.OPEN), 900);
+		} catch (err) {
+			setStatus('copy failed', true);
+			console.warn('Terminal copy failed:', err);
+		}
+	}
+
+	async function pasteClipboardToTerminal() {
+		try {
+			const text = await navigator.clipboard.readText();
+			if (text) send({ type: 'input', data: text });
+		} catch (err) {
+			setStatus('paste failed', true);
+			console.warn('Terminal paste failed:', err);
+		}
+	}
+
+	function handleTerminalShortcut(event) {
+		const modifier = event.ctrlKey || event.metaKey;
+		if (!modifier || !event.shiftKey) return;
+		const key = event.key.toLowerCase();
+		if (key === 'c') {
+			event.preventDefault();
+			event.stopPropagation();
+			copySelectionToClipboard();
+		} else if (key === 'v') {
+			event.preventDefault();
+			event.stopPropagation();
+			pasteClipboardToTerminal();
+		}
+	}
+
+	function handleTerminalPaste(event) {
+		const text = event.clipboardData?.getData('text/plain');
+		if (!text) return;
+		event.preventDefault();
+		event.stopPropagation();
+		send({ type: 'input', data: text });
 	}
 
 	function show() {

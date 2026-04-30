@@ -74,6 +74,11 @@ impl TerminalSession {
         let mut command = CommandBuilder::new(&shell);
         configure_interactive_shell(&mut command, &shell);
         command.env("TERM", &state.config.terminal.term);
+        command.env("SHELL", &shell);
+        command.env_remove("PROMPT_COMMAND");
+        command.env_remove("BASH_ENV");
+        command.env_remove("ENV");
+        command.env("PS1", "\\u@\\h:\\w\\$ ");
         command.cwd(cwd);
 
         let mut child = pair
@@ -308,7 +313,7 @@ async fn send_split_json(
 }
 
 fn resolve_shell(configured: &str) -> Result<String, String> {
-    for candidate in [configured, "/bin/bash", "/bin/sh"] {
+    for candidate in [configured, "/usr/bin/bash", "/bin/bash", "/bin/sh"] {
         if candidate.trim().is_empty() {
             continue;
         }
