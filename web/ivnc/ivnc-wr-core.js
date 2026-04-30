@@ -443,6 +443,12 @@ function InitUI() {
 		border: 0 !important;
 		background: transparent !important;
 		pointer-events: none !important;
+		clip: rect(0 0 0 0) !important;
+		clip-path: inset(50%) !important;
+	}
+	.web-terminal-body .xterm .composition-view,
+	.web-terminal-body .xterm .xterm-accessibility {
+		display: none !important;
 	}
 	.web-console-modal {
 		width: var(--ivnc-console-width, min(1080px, calc(100vw - 48px)));
@@ -1050,6 +1056,7 @@ function createWebTerminalController() {
 	let terminalBtn = null;
 	let intentionalRestart = false;
 	let destroyed = false;
+	let startupClearTimer = null;
 
 	const terminalSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
 
@@ -1089,6 +1096,7 @@ function createWebTerminalController() {
 		terminal = new Terminal({
 			cursorBlink: true,
 			convertEol: true,
+			screenReaderMode: false,
 			fontFamily: '"JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, monospace',
 			fontSize: 13,
 			theme: {
@@ -1237,6 +1245,7 @@ function createWebTerminalController() {
 		switch (message.type) {
 			case 'ready':
 				setStatus(message.shell || 'ready');
+				scheduleStartupClear();
 				break;
 			case 'output':
 				terminal?.write(Uint8Array.from(atob(message.data || ''), c => c.charCodeAt(0)));
@@ -1271,6 +1280,15 @@ function createWebTerminalController() {
 		}, 250);
 	}
 
+	function scheduleStartupClear() {
+		clearTimeout(startupClearTimer);
+		startupClearTimer = setTimeout(() => {
+			if (destroyed || !terminal) return;
+			terminal.clear();
+			fitAndResize();
+		}, 300);
+	}
+
 	function send(message) {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		socket.send(JSON.stringify(message));
@@ -1297,6 +1315,7 @@ function createWebTerminalController() {
 	function destroy() {
 		if (destroyed) return;
 		destroyed = true;
+		clearTimeout(startupClearTimer);
 		clearTimeout(resizeTimer);
 		resizeObserver?.disconnect();
 		try {
