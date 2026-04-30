@@ -360,8 +360,8 @@ function InitUI() {
 	}
 	.web-terminal-modal {
 		position: fixed;
-		right: calc(24px * var(--ivnc-modal-scale, 1));
-		bottom: calc(54px * var(--ivnc-modal-scale, 1));
+		left: 50%;
+		top: 50%;
 		width: var(--ivnc-terminal-width, min(920px, calc(100vw - 48px)));
 		height: var(--ivnc-terminal-height, min(560px, calc(100vh - 96px)));
 		min-width: 320px;
@@ -369,8 +369,8 @@ function InitUI() {
 		z-index: 1800;
 		display: flex;
 		flex-direction: column;
-		transform: scale(var(--ivnc-modal-scale, 1));
-		transform-origin: bottom right;
+		transform: translate(-50%, -50%) scale(var(--ivnc-modal-scale, 1));
+		transform-origin: center center;
 		background: #101214;
 		border: 1px solid rgba(255, 255, 255, 0.18);
 		border-radius: 8px;

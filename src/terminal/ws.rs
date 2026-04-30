@@ -72,6 +72,7 @@ impl TerminalSession {
         let master = Arc::new(Mutex::new(pair.master));
 
         let mut command = CommandBuilder::new(&shell);
+        configure_interactive_shell(&mut command, &shell);
         command.env("TERM", &state.config.terminal.term);
         command.cwd(cwd);
 
@@ -316,6 +317,19 @@ fn resolve_shell(configured: &str) -> Result<String, String> {
         }
     }
     Err("no usable shell found".to_string())
+}
+
+fn configure_interactive_shell(command: &mut CommandBuilder, shell: &str) {
+    let shell_name = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell);
+
+    match shell_name {
+        "bash" => command.args(["--noprofile", "--norc", "-i"]),
+        "sh" | "dash" => command.arg("-i"),
+        _ => {}
+    }
 }
 
 fn resolve_cwd(configured: &str) -> PathBuf {
