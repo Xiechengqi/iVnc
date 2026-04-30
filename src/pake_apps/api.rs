@@ -131,37 +131,16 @@ impl PakeState {
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
-    if let Some(mut terminal) = store
-        .list()?
-        .into_iter()
-        .find(|app| app.name == "Terminal")
-    {
-        if !terminal.autostart {
-            terminal.autostart = true;
-            store.update(&terminal)?;
-            log::info!("Updated built-in desktop app Terminal to autostart");
+    for app in store.list()? {
+        let is_builtin_terminal = app.id == "builtin-terminal"
+            || (app.name == "Terminal" && app.exec_command.as_deref() == Some("alacritty"));
+        if is_builtin_terminal {
+            match store.delete(&app.id) {
+                Ok(()) => log::info!("Removed legacy built-in desktop terminal app: {}", app.id),
+                Err(err) => log::warn!("Failed to remove legacy terminal app {}: {}", app.id, err),
+            }
         }
-        return Ok(());
     }
-
-    let app = PakeApp {
-        id: "builtin-terminal".to_string(),
-        name: "Terminal".to_string(),
-        app_type: AppType::DesktopApp,
-        autostart: true,
-        url: None,
-        mode: None,
-        show_nav: false,
-        remote_debugging_port: None,
-        proxy_server: None,
-        exec_command: Some("alacritty".to_string()),
-        env_vars: None,
-        created_at: chrono_now(),
-    };
-
-    store.add(&app)?;
-    desktop_entry::ensure_desktop_entry(&app.name, "alacritty")?;
-    log::info!("Seeded built-in desktop app: Terminal");
     Ok(())
 }
 

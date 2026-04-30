@@ -1,7 +1,7 @@
 const API = '/api/apps';
 let editId = null;
 let lastDataHash = '';
-let currentLang = 'en';
+let currentLang = 'zh';
 
 const I18N = {
     en: {

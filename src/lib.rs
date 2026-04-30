@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod pake_apps;
 pub mod runtime_settings;
 pub mod system_clipboard;
+pub mod terminal;
 pub mod transport;
 pub mod web;
 pub mod webrtc;

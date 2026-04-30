@@ -116,7 +116,10 @@ impl ProcessManager {
         let mut procs = self.processes.lock().unwrap();
         if let Some(mut running) = procs.remove(app_id) {
             let pgid = -(running.pid as i32);
-            info!("Stopping Pake app process group (pid={}, pgid={})", running.pid, pgid);
+            info!(
+                "Stopping Pake app process group (pid={}, pgid={})",
+                running.pid, pgid
+            );
 
             if unsafe { libc::kill(pgid, libc::SIGTERM) } != 0 {
                 let err = std::io::Error::last_os_error();

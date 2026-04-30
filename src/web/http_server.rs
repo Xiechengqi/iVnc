@@ -15,7 +15,7 @@ use axum::{
     extract::{Query, State, WebSocketUpgrade},
     http::{header, Request, StatusCode, Uri},
     middleware,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -127,7 +127,8 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/upgrade/ws", get(upgrade_ws_handler))
         .route("/api/connections", get(connections_handler))
         .route("/api/connections/{id}/disconnect", post(disconnect_handler))
-        .route("/api/ipv4", get(ipv4_handler));
+        .route("/api/ipv4", get(ipv4_handler))
+        .route("/terminal/ws", get(terminal_ws_handler));
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(ref manager) = session_manager {
@@ -636,6 +637,25 @@ async fn ipv4_handler(State(state): State<Arc<SharedState>>) -> Response {
         .unwrap()
 }
 
+/// Browser terminal WebSocket endpoint.
+async fn terminal_ws_handler(
+    State(state): State<Arc<SharedState>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !state.config.terminal.enabled {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":"terminal disabled"}"#))
+            .unwrap();
+    }
+
+    ws.on_upgrade(move |socket| async move {
+        crate::terminal::ws::handle_terminal_websocket(socket, state).await;
+    })
+    .into_response()
+}
+
 /// Fetch IPv4 address from ipv4.im
 async fn fetch_ipv4() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
@@ -926,7 +946,6 @@ async fn handle_upgrade_websocket(mut socket: axum::extract::ws::WebSocket) {
 
 /// Perform upgrade with real-time logging
 async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
-    use futures::StreamExt;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 

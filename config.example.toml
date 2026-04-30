@@ -72,6 +72,16 @@ level = "info"
 # Log format: "json" or "text"
 format = "json"
 
+[terminal]
+# Enable browser-based interactive terminal
+enabled = true
+# Shell used for new terminal sessions
+shell = "/bin/bash"
+# Working directory for new terminal sessions
+cwd = "/root"
+# TERM value passed to the shell
+term = "xterm-256color"
+
 # ============================================================================
 # WebRTC Configuration (str0m Sans-I/O)
 # ============================================================================

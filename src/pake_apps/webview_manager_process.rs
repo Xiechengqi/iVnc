@@ -189,12 +189,6 @@ impl WebViewManager {
         }
     }
 
-    /// Get PID of a WebView process
-    pub fn pid(&self, app_id: &str) -> Option<u32> {
-        let processes = self.processes.lock().unwrap();
-        processes.get(app_id).map(|p| p.pid)
-    }
-
     /// Stop all WebViews
     pub fn stop_all(&self) {
         info!("Stopping all WebView processes");

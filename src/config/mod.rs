@@ -72,6 +72,10 @@ pub struct Config {
     /// WebRTC configuration
     #[serde(default)]
     pub webrtc: WebRTCConfig,
+
+    /// Built-in browser terminal configuration
+    #[serde(default)]
+    pub terminal: TerminalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +340,36 @@ impl Default for WebRTCConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalConfig {
+    /// Enable the browser-based interactive terminal
+    #[serde(default = "default_terminal_enabled")]
+    pub enabled: bool,
+
+    /// Shell path to spawn for new terminal sessions
+    #[serde(default = "default_terminal_shell")]
+    pub shell: String,
+
+    /// Working directory for new terminal sessions
+    #[serde(default = "default_terminal_cwd")]
+    pub cwd: String,
+
+    /// Environment TERM value for spawned shell
+    #[serde(default = "default_terminal_term")]
+    pub term: String,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_terminal_enabled(),
+            shell: default_terminal_shell(),
+            cwd: default_terminal_cwd(),
+            term: default_terminal_term(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     /// Log level
     #[serde(default = "default_log_level")]
@@ -418,6 +452,18 @@ impl Config {
             }
         }
 
+        if self.terminal.enabled {
+            if self.terminal.shell.trim().is_empty() {
+                return Err("Terminal shell must not be empty".into());
+            }
+            if self.terminal.cwd.trim().is_empty() {
+                return Err("Terminal cwd must not be empty".into());
+            }
+            if self.terminal.term.trim().is_empty() {
+                return Err("Terminal TERM must not be empty".into());
+            }
+        }
+
         // WebRTC validation
         if self.webrtc.enabled {
             if self.webrtc.video_bitrate == 0 {
@@ -441,6 +487,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use std::path::PathBuf;
 
     #[test]
     fn validate_rejects_invalid_dimensions() {
@@ -477,6 +524,8 @@ port = 9000
         assert_eq!(cfg.http.host, "0.0.0.0");
         assert_eq!(cfg.http.port, 9000);
         assert_eq!(cfg.server.pidfile, PathBuf::from("/var/run/ivnc.pid"));
+        assert!(cfg.terminal.enabled);
+        assert_eq!(cfg.terminal.shell, "/bin/bash");
     }
 
     #[test]
@@ -580,4 +629,20 @@ fn default_pipeline_latency_ms() -> u32 {
 }
 fn default_keyframe_interval() -> u32 {
     60
+}
+
+fn default_terminal_enabled() -> bool {
+    true
+}
+
+fn default_terminal_shell() -> String {
+    "/bin/bash".to_string()
+}
+
+fn default_terminal_cwd() -> String {
+    "/root".to_string()
+}
+
+fn default_terminal_term() -> String {
+    "xterm-256color".to_string()
 }

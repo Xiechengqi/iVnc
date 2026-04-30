@@ -15,6 +15,7 @@ mod mcp;
 mod pake_apps;
 mod runtime_settings;
 mod system_clipboard;
+mod terminal;
 mod transport;
 mod web;
 mod webrtc;

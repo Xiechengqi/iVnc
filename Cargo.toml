@@ -81,6 +81,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Standard directories
 dirs = "5"
 tokio-tungstenite = "0.24"
+portable-pty = "0.8"
 
 # WebView support for Pake apps
 wry = { version = "0.47", features = ["linux-body", "protocol"] }
@@ -116,4 +117,3 @@ panic = "abort"
 
 [dev-dependencies]
 criterion = "0.5"
-

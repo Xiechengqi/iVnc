@@ -29,6 +29,9 @@ import { WebRTCDemo } from "./lib/webrtc.js?v=24";
 import { WebRTCDemoSignaling } from "./lib/signaling.js?v=1";
 import { stringToBase64 } from "./lib/util.js?v=1";
 import { Input } from "./lib/input2.js?v=18";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 function InitUI() {
 	let style = document.createElement('style');
@@ -354,6 +357,97 @@ function InitUI() {
 		background: rgba(76, 134, 230, 0.35);
 		color: #fff;
 		border-color: rgba(76, 134, 230, 0.6);
+	}
+	.web-terminal-modal {
+		position: fixed;
+		right: 24px;
+		bottom: 54px;
+		width: min(920px, calc(100vw - 48px));
+		height: min(560px, calc(100vh - 96px));
+		min-width: 320px;
+		min-height: 240px;
+		z-index: 1800;
+		display: flex;
+		flex-direction: column;
+		background: #101214;
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		border-radius: 8px;
+		box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+		overflow: hidden;
+	}
+	.web-terminal-modal.minimized {
+		display: none;
+	}
+	.web-terminal-header {
+		height: 34px;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0 8px 0 12px;
+		background: #1b1f23;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+		color: #e5e7eb;
+		font: 12px system-ui, sans-serif;
+		flex-shrink: 0;
+	}
+	.web-terminal-title {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+	}
+	.web-terminal-status {
+		color: #8bd18b;
+		white-space: nowrap;
+	}
+	.web-terminal-status.error {
+		color: #ff8f8f;
+	}
+	.web-terminal-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.web-terminal-action {
+		width: 24px;
+		height: 24px;
+		border: 0;
+		border-radius: 4px;
+		background: rgba(255, 255, 255, 0.08);
+		color: #d1d5db;
+		cursor: pointer;
+		line-height: 1;
+	}
+	.web-terminal-action:hover {
+		background: rgba(255, 255, 255, 0.16);
+		color: #fff;
+	}
+	.web-terminal-body {
+		flex: 1;
+		min-height: 0;
+		padding: 8px;
+		background: #050607;
+	}
+	.web-terminal-body .xterm {
+		height: 100%;
+	}
+	.web-console-modal {
+		width: min(1080px, calc(100vw - 48px));
+		height: min(720px, calc(100vh - 96px));
+		min-width: 360px;
+		min-height: 300px;
+		background: #f4f7f9;
+	}
+	.web-console-body {
+		padding: 0;
+		background: #f4f7f9;
+	}
+	.web-console-frame {
+		width: 100%;
+		height: 100%;
+		border: 0;
+		display: block;
+		background: #f4f7f9;
 	}
 	.pwd-overlay {
 		position: fixed;
@@ -895,6 +989,298 @@ function showForceUpdateModal() {
 	}
 }
 
+function createWebTerminalController() {
+	let modal = null;
+	let terminal = null;
+	let fitAddon = null;
+	let socket = null;
+	let resizeObserver = null;
+	let resizeTimer = null;
+	let terminalBtn = null;
+	let intentionalRestart = false;
+	let destroyed = false;
+
+	const terminalSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+
+	function setButton(btn) {
+		terminalBtn = btn;
+	}
+
+	function setStatus(text, isError = false) {
+		const status = modal?.querySelector('.web-terminal-status');
+		if (!status) return;
+		status.textContent = text;
+		status.classList.toggle('error', isError);
+	}
+
+	function ensureModal() {
+		if (destroyed) return;
+		if (modal) return;
+
+		modal = document.createElement('div');
+		modal.className = 'web-terminal-modal minimized';
+		modal.innerHTML = `
+			<div class="web-terminal-header">
+				<div class="web-terminal-title">${terminalSvgSmall}<span>Terminal</span><span class="web-terminal-status">connecting</span></div>
+				<div class="web-terminal-actions">
+					<button class="web-terminal-action" id="web-terminal-minimize" type="button" title="最小化">_</button>
+				</div>
+			</div>
+			<div class="web-terminal-body" id="web-terminal-body"></div>
+		`;
+		document.body.appendChild(modal);
+		modal.querySelector('#web-terminal-minimize').addEventListener('click', (e) => {
+			e.stopPropagation();
+			minimize();
+		});
+
+		terminal = new Terminal({
+			cursorBlink: true,
+			convertEol: true,
+			fontFamily: '"JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, monospace',
+			fontSize: 13,
+			theme: {
+				background: '#050607',
+				foreground: '#e5e7eb',
+				cursor: '#f4f4f5',
+				selectionBackground: '#315a8c',
+				black: '#0b0f10',
+				red: '#ef4444',
+				green: '#22c55e',
+				yellow: '#eab308',
+				blue: '#3b82f6',
+				magenta: '#d946ef',
+				cyan: '#06b6d4',
+				white: '#e5e7eb',
+			},
+		});
+		fitAddon = new FitAddon();
+		terminal.loadAddon(fitAddon);
+		terminal.open(modal.querySelector('#web-terminal-body'));
+		terminal.onData((data) => {
+			send({ type: 'input', data });
+		});
+
+		resizeObserver = new ResizeObserver(() => queueResize());
+		resizeObserver.observe(modal.querySelector('#web-terminal-body'));
+		connect();
+	}
+
+	function show() {
+		ensureModal();
+		if (!modal) return;
+		modal.classList.remove('minimized');
+		terminalBtn?.classList.add('active');
+		setTimeout(() => {
+			fitAndResize();
+			terminal?.focus();
+		}, 0);
+	}
+
+	function minimize() {
+		if (!modal) return;
+		modal.classList.add('minimized');
+		terminalBtn?.classList.remove('active');
+	}
+
+	function toggle() {
+		ensureModal();
+		if (!modal) return;
+		if (modal.classList.contains('minimized')) {
+			show();
+		} else {
+			minimize();
+		}
+	}
+
+	function connect() {
+		if (destroyed) return;
+		if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+			return;
+		}
+		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+		socket = new WebSocket(`${protocol}//${window.location.host}/terminal/ws`);
+		setStatus('connecting');
+
+		socket.onopen = () => {
+			setStatus('connected');
+			fitAndResize();
+		};
+
+		socket.onmessage = (event) => {
+			let message;
+			try {
+				message = JSON.parse(event.data);
+			} catch (err) {
+				console.warn('Invalid terminal message:', err);
+				return;
+			}
+			handleServerMessage(message);
+		};
+
+		socket.onerror = () => {
+			setStatus('connection error', true);
+		};
+
+		socket.onclose = () => {
+			if (!intentionalRestart) {
+				setStatus('disconnected', true);
+			}
+		};
+	}
+
+	function handleServerMessage(message) {
+		switch (message.type) {
+			case 'ready':
+				setStatus(message.shell || 'ready');
+				break;
+			case 'output':
+				terminal?.write(Uint8Array.from(atob(message.data || ''), c => c.charCodeAt(0)));
+				break;
+			case 'exit':
+				terminal?.writeln('');
+				terminal?.writeln('[terminal exited, starting a new shell]');
+				restart();
+				break;
+			case 'error':
+				setStatus('error', true);
+				terminal?.writeln(`\r\n[terminal error] ${message.message || 'unknown error'}`);
+				break;
+			case 'pong':
+				break;
+			default:
+				console.warn('Unhandled terminal message:', message);
+		}
+	}
+
+	function restart() {
+		intentionalRestart = true;
+		try {
+			socket?.close();
+		} catch (_) {}
+		socket = null;
+		setStatus('restarting');
+		show();
+		setTimeout(() => {
+			intentionalRestart = false;
+			connect();
+		}, 250);
+	}
+
+	function send(message) {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+		socket.send(JSON.stringify(message));
+	}
+
+	function fitAndResize() {
+		if (!terminal || !fitAddon || !modal || modal.classList.contains('minimized')) return;
+		try {
+			fitAddon.fit();
+			const dims = fitAddon.proposeDimensions();
+			if (dims && dims.cols > 0 && dims.rows > 0) {
+				send({ type: 'resize', cols: dims.cols, rows: dims.rows });
+			}
+		} catch (err) {
+			console.warn('Terminal fit failed:', err);
+		}
+	}
+
+	function queueResize() {
+		clearTimeout(resizeTimer);
+		resizeTimer = setTimeout(fitAndResize, 100);
+	}
+
+	function destroy() {
+		if (destroyed) return;
+		destroyed = true;
+		clearTimeout(resizeTimer);
+		resizeObserver?.disconnect();
+		try {
+			socket?.close();
+		} catch (_) {}
+		terminal?.dispose();
+		modal?.remove();
+		window.removeEventListener('beforeunload', destroy);
+	}
+
+	window.addEventListener('beforeunload', destroy);
+
+	return { setButton, toggle, show, minimize, destroy };
+}
+
+function createConsoleModalController() {
+	let modal = null;
+	let frame = null;
+	let consoleBtn = null;
+	let destroyed = false;
+
+	const consoleSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
+
+	function setButton(btn) {
+		consoleBtn = btn;
+	}
+
+	function ensureModal() {
+		if (destroyed) return;
+		if (modal) return;
+
+		modal = document.createElement('div');
+		modal.className = 'web-terminal-modal web-console-modal minimized';
+		modal.innerHTML = `
+			<div class="web-terminal-header">
+				<div class="web-terminal-title">${consoleSvgSmall}<span>控制台</span></div>
+				<div class="web-terminal-actions">
+					<button class="web-terminal-action" id="web-console-minimize" type="button" title="最小化">_</button>
+				</div>
+			</div>
+			<div class="web-terminal-body web-console-body">
+				<iframe class="web-console-frame" title="iVnc 控制台"></iframe>
+			</div>
+		`;
+		document.body.appendChild(modal);
+		frame = modal.querySelector('.web-console-frame');
+		frame.src = `${getBasePath()}console`;
+		modal.querySelector('#web-console-minimize').addEventListener('click', (e) => {
+			e.stopPropagation();
+			minimize();
+		});
+	}
+
+	function show() {
+		ensureModal();
+		if (!modal) return;
+		modal.classList.remove('minimized');
+		consoleBtn?.classList.add('active');
+	}
+
+	function minimize() {
+		if (!modal) return;
+		modal.classList.add('minimized');
+		consoleBtn?.classList.remove('active');
+	}
+
+	function toggle() {
+		ensureModal();
+		if (!modal) return;
+		if (modal.classList.contains('minimized')) {
+			show();
+		} else {
+			minimize();
+		}
+	}
+
+	function destroy() {
+		if (destroyed) return;
+		destroyed = true;
+		frame?.removeAttribute('src');
+		modal?.remove();
+		frame = null;
+		modal = null;
+	}
+
+	return { setButton, toggle, show, minimize, destroy };
+}
+
 export default function webrtc() {
 	// Connection page functions (must be defined before early return)
 	function initConnectionPage() {
@@ -978,6 +1364,8 @@ export default function webrtc() {
 	let logEntries = [];
 	let debugEntries = [];
 	let status = 'connecting';
+	const terminalController = createWebTerminalController();
+	const consoleController = createConsoleModalController();
 	let clipboardStatus = 'enabled';
 	let windowResolution = "";
 	let encoderLabel = "";
@@ -2218,7 +2606,21 @@ export default function webrtc() {
 			});
 			taskbar.appendChild(updateBtn);
 
-			const consoleSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+			const terminalSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+			const terminalBtn = document.createElement('div');
+			terminalBtn.className = 'taskbar-pin';
+			terminalBtn.id = 'terminal-btn';
+			terminalBtn.innerHTML = terminalSvg;
+			terminalBtn.title = '终端';
+			terminalBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				consoleController.minimize();
+				terminalController.toggle();
+			});
+			terminalController.setButton(terminalBtn);
+			taskbar.appendChild(terminalBtn);
+
+			const consoleSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
 			const consoleBtn = document.createElement('div');
 			consoleBtn.className = 'taskbar-pin';
 			consoleBtn.id = 'console-btn';
@@ -2226,8 +2628,10 @@ export default function webrtc() {
 			consoleBtn.title = '控制台';
 			consoleBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
-				window.open(`${getBasePath()}console`, '_blank');
+				terminalController.minimize();
+				consoleController.toggle();
 			});
+			consoleController.setButton(consoleBtn);
 			taskbar.appendChild(consoleBtn);
 
 			const connIndicator = document.createElement('div');
@@ -2752,6 +3156,8 @@ export default function webrtc() {
 			statWatchEnabled = false;
 			if (statsLoopId) { clearInterval(statsLoopId); statsLoopId = null; }
 			if (metricsLoopId) { clearInterval(metricsLoopId); metricsLoopId = null; }
+			terminalController.destroy();
+			consoleController.destroy();
 			webrtc = null;
 			input = null;
 			useCssScaling = true;

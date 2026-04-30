@@ -49,13 +49,11 @@ RUN cargo build --release --features mcp --bin ivnc
 FROM ubuntu:22.04
 
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata vim software-properties-common curl && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata vim curl && \
     update-alternatives --remove-all editor && \
     update-alternatives --remove-all vi && \
     update-alternatives --install /usr/bin/editor editor /usr/bin/vim.basic 1 && \
     update-alternatives --install /usr/bin/vi vi /usr/bin/vim.basic 1 && \
-    add-apt-repository ppa:aslatter/ppa && \
-    apt-get update && \
     apt-get install -y ca-certificates \
     curl \
     wget \
@@ -82,7 +80,6 @@ RUN apt-get update && \
     fonts-wqy-zenhei \
     xvfb \
     openbox \
-    alacritty \
     pulseaudio \
     pulseaudio-utils \
     libgstreamer1.0-0 \

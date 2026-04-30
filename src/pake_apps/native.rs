@@ -1,8 +1,8 @@
 use super::app::{AppMode, AppType, PakeApp};
 use super::datadir;
 use log::info;
-use std::os::unix::process::CommandExt;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 /// Detect Chrome/Chromium binary path on Linux
