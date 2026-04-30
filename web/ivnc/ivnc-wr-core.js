@@ -360,15 +360,17 @@ function InitUI() {
 	}
 	.web-terminal-modal {
 		position: fixed;
-		right: 24px;
-		bottom: 54px;
-		width: min(920px, calc(100vw - 48px));
-		height: min(560px, calc(100vh - 96px));
+		right: calc(24px * var(--ivnc-modal-scale, 1));
+		bottom: calc(54px * var(--ivnc-modal-scale, 1));
+		width: var(--ivnc-terminal-width, min(920px, calc(100vw - 48px)));
+		height: var(--ivnc-terminal-height, min(560px, calc(100vh - 96px)));
 		min-width: 320px;
 		min-height: 240px;
 		z-index: 1800;
 		display: flex;
 		flex-direction: column;
+		transform: scale(var(--ivnc-modal-scale, 1));
+		transform-origin: bottom right;
 		background: #101214;
 		border: 1px solid rgba(255, 255, 255, 0.18);
 		border-radius: 8px;
@@ -432,8 +434,8 @@ function InitUI() {
 		height: 100%;
 	}
 	.web-console-modal {
-		width: min(1080px, calc(100vw - 48px));
-		height: min(720px, calc(100vh - 96px));
+		width: var(--ivnc-console-width, min(1080px, calc(100vw - 48px)));
+		height: var(--ivnc-console-height, min(720px, calc(100vh - 96px)));
 		min-width: 360px;
 		min-height: 300px;
 		background: #f4f7f9;
@@ -989,7 +991,45 @@ function showForceUpdateModal() {
 	}
 }
 
+function clampNumber(value, min, max) {
+	return Math.max(min, Math.min(max, value));
+}
+
+function updateOverlayModalScale() {
+	const stream = document.getElementById('stream');
+	let scale = 1;
+	if (stream && stream.width > 0 && stream.height > 0) {
+		const rect = stream.getBoundingClientRect();
+		const scaleX = rect.width / stream.width;
+		const scaleY = rect.height / stream.height;
+		const nextScale = Math.min(scaleX, scaleY);
+		if (Number.isFinite(nextScale) && nextScale > 0) {
+			scale = clampNumber(nextScale, 0.45, 1.5);
+		}
+	}
+
+	const horizontalMargin = 48 * scale;
+	const verticalMargin = 96 * scale;
+	const terminalWidth = Math.min(920, Math.max(320, (window.innerWidth - horizontalMargin) / scale));
+	const terminalHeight = Math.min(560, Math.max(240, (window.innerHeight - verticalMargin) / scale));
+	const consoleWidth = Math.min(1080, Math.max(360, (window.innerWidth - horizontalMargin) / scale));
+	const consoleHeight = Math.min(720, Math.max(300, (window.innerHeight - verticalMargin) / scale));
+	const rootStyle = document.documentElement.style;
+	rootStyle.setProperty('--ivnc-modal-scale', scale.toFixed(3));
+	rootStyle.setProperty('--ivnc-terminal-width', `${terminalWidth.toFixed(1)}px`);
+	rootStyle.setProperty('--ivnc-terminal-height', `${terminalHeight.toFixed(1)}px`);
+	rootStyle.setProperty('--ivnc-console-width', `${consoleWidth.toFixed(1)}px`);
+	rootStyle.setProperty('--ivnc-console-height', `${consoleHeight.toFixed(1)}px`);
+}
+
+function installOverlayModalInputGuard() {
+	if (window.__ivncOverlayModalInputGuardInstalled) return;
+	window.__ivncOverlayModalInputGuardInstalled = true;
+	window.addEventListener('resize', updateOverlayModalScale);
+}
+
 function createWebTerminalController() {
+	installOverlayModalInputGuard();
 	let modal = null;
 	let terminal = null;
 	let fitAddon = null;
@@ -1016,6 +1056,7 @@ function createWebTerminalController() {
 	function ensureModal() {
 		if (destroyed) return;
 		if (modal) return;
+		updateOverlayModalScale();
 
 		modal = document.createElement('div');
 		modal.className = 'web-terminal-modal minimized';
@@ -1057,6 +1098,9 @@ function createWebTerminalController() {
 		fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
 		terminal.open(modal.querySelector('#web-terminal-body'));
+		modal.addEventListener('pointerdown', () => {
+			terminal?.focus();
+		});
 		terminal.onData((data) => {
 			send({ type: 'input', data });
 		});
@@ -1069,6 +1113,7 @@ function createWebTerminalController() {
 	function show() {
 		ensureModal();
 		if (!modal) return;
+		updateOverlayModalScale();
 		modal.classList.remove('minimized');
 		terminalBtn?.classList.add('active');
 		setTimeout(() => {
@@ -1209,6 +1254,7 @@ function createWebTerminalController() {
 }
 
 function createConsoleModalController() {
+	installOverlayModalInputGuard();
 	let modal = null;
 	let frame = null;
 	let consoleBtn = null;
@@ -1223,6 +1269,7 @@ function createConsoleModalController() {
 	function ensureModal() {
 		if (destroyed) return;
 		if (modal) return;
+		updateOverlayModalScale();
 
 		modal = document.createElement('div');
 		modal.className = 'web-terminal-modal web-console-modal minimized';
@@ -1249,6 +1296,7 @@ function createConsoleModalController() {
 	function show() {
 		ensureModal();
 		if (!modal) return;
+		updateOverlayModalScale();
 		modal.classList.remove('minimized');
 		consoleBtn?.classList.add('active');
 	}
@@ -1690,6 +1738,7 @@ export default function webrtc() {
 			console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Pos 0,0`);
 		}
 		updateVideoImageRendering();
+		updateOverlayModalScale();
 	}
 
 	function resetToWindowResolution(targetWidth, targetHeight) {
@@ -1712,6 +1761,7 @@ export default function webrtc() {
 		videoElement.style.left = '0px';
 		videoElement.style.objectFit = 'fill';
 		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight}`);
+		updateOverlayModalScale();
 	}
 
 	function sendResolutionToServer(width, height) {
