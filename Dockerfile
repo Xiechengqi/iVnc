@@ -52,12 +52,8 @@ RUN apt-get update && \
     bash \
     curl \
     ca-certificates \
-    iproute2 \
-    iputils-ping \
     fontconfig \
     fonts-wqy-microhei \
-    xvfb \
-    openbox \
     libgstreamer1.0-0 \
     libgstreamer-plugins-base1.0-0 \
     libpixman-1-0 \
