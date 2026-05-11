@@ -20,11 +20,15 @@ fi
 
 mkdir -p "$XDG_RUNTIME_DIR" || fail "failed to create XDG_RUNTIME_DIR: $XDG_RUNTIME_DIR"
 
-if ! pulseaudio --check >/dev/null 2>&1; then
-    log "starting PulseAudio"
-    if ! pulseaudio --start --exit-idle-time=-1; then
-        fail "failed to start PulseAudio"
+if command -v pulseaudio >/dev/null 2>&1; then
+    if ! pulseaudio --check >/dev/null 2>&1; then
+        log "starting PulseAudio"
+        if ! pulseaudio --start --exit-idle-time=-1; then
+            fail "failed to start PulseAudio"
+        fi
     fi
+else
+    log "PulseAudio not installed; audio capture is disabled"
 fi
 
 ivnc_args=()

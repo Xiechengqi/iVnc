@@ -22,8 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon-dev \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
-    libpulse-dev \
-    libopus-dev \
     libwayland-dev \
     libpixman-1-dev \
     libinput-dev \
@@ -43,7 +41,7 @@ COPY extension ./extension
 COPY web/ivnc ./web/ivnc
 COPY --from=web-builder /build/web/ivnc/dist ./web/ivnc/dist
 
-RUN cargo build --release --features mcp --bin ivnc
+RUN cargo build --release --no-default-features --features mcp --bin ivnc
 
 
 FROM ubuntu:22.04
@@ -57,29 +55,19 @@ RUN apt-get update && \
     iproute2 \
     iputils-ping \
     fontconfig \
-    fonts-noto-cjk \
+    fonts-wqy-microhei \
     xvfb \
     openbox \
-    pulseaudio \
-    pulseaudio-utils \
     libgstreamer1.0-0 \
     libgstreamer-plugins-base1.0-0 \
     libpixman-1-0 \
     libxkbcommon0 \
-    libpulse0 \
-    libopus0 \
-    libgtk-3-0 \
-    libwebkit2gtk-4.1-0 \
-    libsoup-3.0-0 \
-    libjavascriptcoregtk-4.1-0 \
     libxcb1 \
     libx11-6 \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-x \
-    gstreamer1.0-vaapi \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 

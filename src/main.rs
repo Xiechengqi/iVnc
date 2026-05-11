@@ -148,7 +148,7 @@ fn check_runtime_deps() {
         ("appsrc", "gstreamer1.0-plugins-base"),
         ("rtph264pay", "gstreamer1.0-plugins-good"),
         ("rtpvp8pay", "gstreamer1.0-plugins-good"),
-        ("openh264enc", "gstreamer1.0-plugins-bad"),
+        ("x264enc", "gstreamer1.0-plugins-ugly"),
         ("ximagesrc", "gstreamer1.0-x"),
     ];
 
