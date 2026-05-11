@@ -49,35 +49,15 @@ RUN cargo build --release --features mcp --bin ivnc
 FROM ubuntu:22.04
 
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata bash vim curl && \
-    update-alternatives --remove-all editor && \
-    update-alternatives --remove-all vi && \
-    update-alternatives --install /usr/bin/editor editor /usr/bin/vim.basic 1 && \
-    update-alternatives --install /usr/bin/vi vi /usr/bin/vim.basic 1 && \
-    apt-get install -y ca-certificates \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    tzdata \
+    bash \
     curl \
-    wget \
-    jq \
-    sqlite3 \
-    unzip \
-    tree \
-    gh \
-    git \
-    build-essential \
-    pkg-config \
-    lrzsz \
-    sshpass \
-    telnet \
-    net-tools \
+    ca-certificates \
     iproute2 \
     iputils-ping \
-    htop \
-    vnstat \
-    screen \
-    tmux \
     fontconfig \
     fonts-noto-cjk \
-    fonts-wqy-zenhei \
     xvfb \
     openbox \
     pulseaudio \
@@ -92,16 +72,15 @@ RUN apt-get update && \
     libwebkit2gtk-4.1-0 \
     libsoup-3.0-0 \
     libjavascriptcoregtk-4.1-0 \
-    libx11-6 \
     libxcb1 \
-    gstreamer1.0-tools \
+    libx11-6 \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-x \
     gstreamer1.0-vaapi \
-    && fc-cache -f -v \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/ivnc /usr/local/bin/ivnc
