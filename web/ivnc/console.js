@@ -310,7 +310,7 @@ function showAdd() {
     document.getElementById('f-app-type').value = 'webapp';
     document.getElementById('f-app-type').disabled = false;
     document.getElementById('f-url').value = '';
-    document.getElementById('f-mode').value = 'native';
+    document.getElementById('f-mode').value = 'webview';
     document.getElementById('f-autostart').checked = false;
     document.getElementById('f-nav').checked = false;
     document.getElementById('f-debug-port').value = '';
@@ -348,7 +348,7 @@ async function showEdit(id) {
             document.getElementById('f-env').value = envToText(a.env_vars);
         } else {
             document.getElementById('f-url').value = a.url || '';
-            document.getElementById('f-mode').value = a.mode || 'native';
+            document.getElementById('f-mode').value = a.mode || 'webview';
             document.getElementById('f-nav').checked = a.show_nav || false;
             document.getElementById('f-debug-port').value = a.remote_debugging_port || '';
             document.getElementById('f-proxy-server').value = a.proxy_server || '';
