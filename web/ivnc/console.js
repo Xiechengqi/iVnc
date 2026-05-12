@@ -40,15 +40,16 @@ const I18N = {
         mode: 'Mode',
         nav: 'Show navigation bar (Native only)',
         advanced: 'Advanced Settings',
+        debugPort: 'Debugging Port (Optional, default: none)',
+        proxyServer: 'Proxy Server (Optional, default: none)',
         launchSettings: 'Service Launch',
-        launchCommand: 'Launch Command (Optional)',
-        launchCwd: 'Working Directory (Optional)',
-        launchTimeout: 'Wait Timeout (seconds)',
-        launchWaitUrl: 'Health Check URL (Optional)',
-        launchEnv: 'Service Environment Variables (Optional)',
-        proxyHelp: 'Leave empty to disable proxy',
+        launchCommand: 'Launch Command (Optional, default: none)',
+        launchCwd: 'Working Directory (Optional, default: current directory)',
+        launchTimeout: 'Wait Timeout (seconds, optional, default: 30)',
+        launchWaitUrl: 'Health Check URL (Optional, default: URL)',
+        launchEnv: 'Service Environment Variables (Optional, default: none)',
         exec: 'Launch Command',
-        env: 'Environment Variables (Optional)',
+        env: 'Environment Variables (Optional, default: none)',
         cancel: 'Cancel',
         close: 'Close',
         logsTitle: 'App Logs',
@@ -112,15 +113,16 @@ const I18N = {
         mode: '模式',
         nav: '显示导航栏（仅 Native 模式）',
         advanced: '高级配置',
+        debugPort: 'Debugging Port（可选，默认值：无）',
+        proxyServer: 'Proxy Server（可选，默认值：无）',
         launchSettings: '启动服务',
-        launchCommand: '启动命令（可选）',
-        launchCwd: '工作目录（可选）',
-        launchTimeout: '等待超时（秒）',
-        launchWaitUrl: '健康检查 URL（可选）',
-        launchEnv: '服务环境变量（可选）',
-        proxyHelp: '清空则不使用代理',
+        launchCommand: '启动命令（可选，默认值：无）',
+        launchCwd: '工作目录（可选，默认值：当前目录）',
+        launchTimeout: '等待超时（秒，可选，默认值：30）',
+        launchWaitUrl: '健康检查 URL（可选，默认值：URL）',
+        launchEnv: '服务环境变量（可选，默认值：无）',
         exec: '启动命令',
-        env: '环境变量（可选）',
+        env: '环境变量（可选，默认值：无）',
         cancel: '取消',
         close: '关闭',
         logsTitle: '应用日志',
@@ -194,13 +196,14 @@ function applyTranslations() {
     document.getElementById('label-mode').textContent = t('mode');
     document.getElementById('label-nav').textContent = t('nav');
     document.getElementById('advanced-title').textContent = t('advanced');
+    document.getElementById('label-debug-port').textContent = t('debugPort');
+    document.getElementById('label-proxy-server').textContent = t('proxyServer');
     document.getElementById('launch-title').textContent = t('launchSettings');
     document.getElementById('label-launch-command').textContent = t('launchCommand');
     document.getElementById('label-launch-cwd').textContent = t('launchCwd');
     document.getElementById('label-launch-timeout').textContent = t('launchTimeout');
     document.getElementById('label-launch-wait-url').textContent = t('launchWaitUrl');
     document.getElementById('label-launch-env').textContent = t('launchEnv');
-    document.getElementById('proxy-help').textContent = t('proxyHelp');
     document.getElementById('label-exec').textContent = t('exec');
     document.getElementById('label-env').textContent = t('env');
     document.getElementById('modal-cancel').textContent = t('cancel');
@@ -311,7 +314,7 @@ function showAdd() {
     document.getElementById('f-autostart').checked = false;
     document.getElementById('f-nav').checked = false;
     document.getElementById('f-debug-port').value = '';
-    document.getElementById('f-proxy-server').value = 'socks5://127.0.0.1:1080';
+    document.getElementById('f-proxy-server').value = '';
     document.getElementById('f-launch-command').value = '';
     document.getElementById('f-launch-cwd').value = '';
     document.getElementById('f-launch-timeout').value = '';
