@@ -90,6 +90,32 @@
                     </div>
                     <small class="help-text" id="proxy-help">清空则不使用代理</small>
                 </div>
+
+                <div id="launch-settings-group">
+                    <div class="advanced-title" id="launch-title">启动服务</div>
+                    <div class="form-group">
+                        <label id="label-launch-command">启动命令（可选）</label>
+                        <input type="text" id="f-launch-command" placeholder="python3 app.py --host 0.0.0.0 --port 7860">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label id="label-launch-cwd">工作目录（可选）</label>
+                            <input type="text" id="f-launch-cwd" placeholder="/workspace/app">
+                        </div>
+                        <div class="form-group">
+                            <label id="label-launch-timeout">等待超时（秒）</label>
+                            <input type="number" id="f-launch-timeout" placeholder="30" min="1" max="600">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label id="label-launch-wait-url">健康检查 URL（可选）</label>
+                        <input type="text" id="f-launch-wait-url" placeholder="默认使用 URL">
+                    </div>
+                    <div class="form-group">
+                        <label id="label-launch-env">服务环境变量（可选）</label>
+                        <textarea id="f-launch-env" rows="3" placeholder="KEY1=value1&#10;KEY2=value2"></textarea>
+                    </div>
+                </div>
             </div>
 
             <div id="desktop-config" style="display:none">

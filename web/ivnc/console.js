@@ -40,6 +40,12 @@ const I18N = {
         mode: 'Mode',
         nav: 'Show navigation bar (Native only)',
         advanced: 'Advanced Settings',
+        launchSettings: 'Service Launch',
+        launchCommand: 'Launch Command (Optional)',
+        launchCwd: 'Working Directory (Optional)',
+        launchTimeout: 'Wait Timeout (seconds)',
+        launchWaitUrl: 'Health Check URL (Optional)',
+        launchEnv: 'Service Environment Variables (Optional)',
         proxyHelp: 'Leave empty to disable proxy',
         exec: 'Launch Command',
         env: 'Environment Variables (Optional)',
@@ -106,6 +112,12 @@ const I18N = {
         mode: '模式',
         nav: '显示导航栏（仅 Native 模式）',
         advanced: '高级配置',
+        launchSettings: '启动服务',
+        launchCommand: '启动命令（可选）',
+        launchCwd: '工作目录（可选）',
+        launchTimeout: '等待超时（秒）',
+        launchWaitUrl: '健康检查 URL（可选）',
+        launchEnv: '服务环境变量（可选）',
         proxyHelp: '清空则不使用代理',
         exec: '启动命令',
         env: '环境变量（可选）',
@@ -151,7 +163,14 @@ function esc(s) {
 }
 
 function getHash(data) {
-    return JSON.stringify(data.apps.map(a => ({ id: a.id, status: a.status, size: a.data_size_human })));
+    return JSON.stringify(data.apps.map(a => ({
+        id: a.id,
+        status: a.status,
+        size: a.data_size_human,
+        url: a.url,
+        exec: a.exec_command,
+        launch: a.launch_command
+    })));
 }
 
 function applyTranslations() {
@@ -175,6 +194,12 @@ function applyTranslations() {
     document.getElementById('label-mode').textContent = t('mode');
     document.getElementById('label-nav').textContent = t('nav');
     document.getElementById('advanced-title').textContent = t('advanced');
+    document.getElementById('launch-title').textContent = t('launchSettings');
+    document.getElementById('label-launch-command').textContent = t('launchCommand');
+    document.getElementById('label-launch-cwd').textContent = t('launchCwd');
+    document.getElementById('label-launch-timeout').textContent = t('launchTimeout');
+    document.getElementById('label-launch-wait-url').textContent = t('launchWaitUrl');
+    document.getElementById('label-launch-env').textContent = t('launchEnv');
     document.getElementById('proxy-help').textContent = t('proxyHelp');
     document.getElementById('label-exec').textContent = t('exec');
     document.getElementById('label-env').textContent = t('env');
@@ -211,7 +236,9 @@ async function load() {
         d.apps.forEach(a => {
             const tr = document.createElement('tr');
             const type = a.app_type === 'desktop' ? t('desktop') : t('webapp');
-            const configStr = a.app_type === 'desktop' ? (a.exec_command || '') : (a.url || '');
+            const configStr = a.app_type === 'desktop'
+                ? (a.exec_command || '')
+                : [a.url || '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
             const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
             const statusText = t(a.status) || a.status;
 
@@ -285,6 +312,11 @@ function showAdd() {
     document.getElementById('f-nav').checked = false;
     document.getElementById('f-debug-port').value = '';
     document.getElementById('f-proxy-server').value = 'socks5://127.0.0.1:1080';
+    document.getElementById('f-launch-command').value = '';
+    document.getElementById('f-launch-cwd').value = '';
+    document.getElementById('f-launch-timeout').value = '';
+    document.getElementById('f-launch-wait-url').value = '';
+    document.getElementById('f-launch-env').value = '';
     document.getElementById('f-exec').value = '';
     document.getElementById('f-env').value = '';
 
@@ -310,14 +342,18 @@ async function showEdit(id) {
 
         if (a.app_type === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
-            const envStr = a.env_vars ? Object.entries(a.env_vars).map(([k, v]) => `${k}=${v}`).join('\n') : '';
-            document.getElementById('f-env').value = envStr;
+            document.getElementById('f-env').value = envToText(a.env_vars);
         } else {
             document.getElementById('f-url').value = a.url || '';
             document.getElementById('f-mode').value = a.mode || 'native';
             document.getElementById('f-nav').checked = a.show_nav || false;
             document.getElementById('f-debug-port').value = a.remote_debugging_port || '';
             document.getElementById('f-proxy-server').value = a.proxy_server || '';
+            document.getElementById('f-launch-command').value = a.launch_command || '';
+            document.getElementById('f-launch-cwd').value = a.launch_cwd || '';
+            document.getElementById('f-launch-timeout').value = a.launch_wait_timeout_secs || '';
+            document.getElementById('f-launch-wait-url').value = a.launch_wait_url || '';
+            document.getElementById('f-launch-env').value = envToText(a.launch_env_vars);
         }
         updateAppTypeVisibility();
         updateNavVisibility();
@@ -342,6 +378,25 @@ function validateUrl(url) {
     }
 }
 
+function envToText(envVars) {
+    return envVars ? Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join('\n') : '';
+}
+
+function parseEnvText(text) {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    const envVars = {};
+    trimmed.split('\n').forEach(line => {
+        const idx = line.indexOf('=');
+        if (idx > 0) {
+            const key = line.substring(0, idx).trim();
+            const value = line.substring(idx + 1).trim();
+            if (key && value) envVars[key] = value;
+        }
+    });
+    return Object.keys(envVars).length ? envVars : null;
+}
+
 async function saveApp() {
     const btn = document.getElementById('modal-save');
     const appType = document.getElementById('f-app-type').value;
@@ -359,19 +414,7 @@ async function saveApp() {
         body.exec_command = document.getElementById('f-exec').value.trim();
         if (!body.exec_command) return toast(t('missingExec'), 'err');
 
-        const envText = document.getElementById('f-env').value.trim();
-        if (envText) {
-            const envVars = {};
-            envText.split('\n').forEach(line => {
-                const idx = line.indexOf('=');
-                if (idx > 0) {
-                    const k = line.substring(0, idx).trim();
-                    const v = line.substring(idx + 1).trim();
-                    if (k) envVars[k] = v;
-                }
-            });
-            body.env_vars = envVars;
-        }
+        body.env_vars = parseEnvText(document.getElementById('f-env').value);
     } else {
         body.url = document.getElementById('f-url').value.trim();
         if (!validateUrl(body.url)) return toast(t('invalidUrl'), 'err');
@@ -382,6 +425,14 @@ async function saveApp() {
         body.remote_debugging_port = debugPort ? parseInt(debugPort, 10) : null;
         const proxyServer = document.getElementById('f-proxy-server').value.trim();
         body.proxy_server = proxyServer || null;
+        body.launch_command = document.getElementById('f-launch-command').value.trim() || null;
+        body.launch_cwd = document.getElementById('f-launch-cwd').value.trim() || null;
+        const launchTimeout = document.getElementById('f-launch-timeout').value;
+        body.launch_wait_timeout_secs = launchTimeout ? parseInt(launchTimeout, 10) : null;
+        const launchWaitUrl = document.getElementById('f-launch-wait-url').value.trim();
+        if (launchWaitUrl && !validateUrl(launchWaitUrl)) return toast(t('invalidUrl'), 'err');
+        body.launch_wait_url = launchWaitUrl || null;
+        body.launch_env_vars = parseEnvText(document.getElementById('f-launch-env').value);
     }
 
     btn.disabled = true;

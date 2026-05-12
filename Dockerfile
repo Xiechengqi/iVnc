@@ -41,7 +41,7 @@ COPY extension ./extension
 COPY web/ivnc ./web/ivnc
 COPY --from=web-builder /build/web/ivnc/dist ./web/ivnc/dist
 
-RUN cargo build --release --no-default-features --features mcp --bin ivnc
+RUN cargo build --release --no-default-features --features mcp --bin ivnc --bin ivnc-webview
 
 
 FROM ubuntu:22.04
@@ -60,6 +60,10 @@ RUN apt-get update && \
     libxkbcommon0 \
     libxcb1 \
     libx11-6 \
+    libgtk-3-0 \
+    libwebkit2gtk-4.1-0 \
+    libsoup-3.0-0 \
+    libjavascriptcoregtk-4.1-0 \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-ugly \
@@ -68,10 +72,11 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/ivnc /usr/local/bin/ivnc
+COPY --from=builder /build/target/release/ivnc-webview /usr/local/bin/ivnc-webview
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY config.example.toml /etc/ivnc.toml
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc /usr/local/bin/ivnc-webview
 
 ENV XDG_RUNTIME_DIR=/run/user/0
 

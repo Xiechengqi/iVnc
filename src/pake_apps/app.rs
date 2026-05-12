@@ -72,6 +72,16 @@ pub struct PakeApp {
     pub remote_debugging_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_env_vars: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_wait_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_wait_timeout_secs: Option<u64>,
 
     // DesktopApp fields
     pub exec_command: Option<String>,

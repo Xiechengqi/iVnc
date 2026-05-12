@@ -169,13 +169,6 @@ impl ProcessManager {
         }
     }
 
-    pub fn restart(&self, app: &PakeApp) -> Result<u32, String> {
-        let _ = self.stop(&app.id);
-        // Remove from stopped_by_user so it stays alive after restart
-        self.stopped_by_user.lock().unwrap().remove(&app.id);
-        self.start(app)
-    }
-
     pub fn status(&self, app_id: &str) -> AppStatus {
         let mut procs = self.processes.lock().unwrap();
         if let Some(running) = procs.get_mut(app_id) {

@@ -160,8 +160,10 @@ tr:hover { background-color: #f8f9fa; }
   background: var(--surface);
   border-radius: 16px;
   padding: 32px;
-  width: 480px;
+  width: 560px;
   max-width: 95%;
+  max-height: 92vh;
+  overflow-y: auto;
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
 }
 

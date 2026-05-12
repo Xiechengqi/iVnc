@@ -3,6 +3,7 @@ use super::datadir;
 use super::desktop_entry;
 use super::native;
 use super::process::ProcessManager;
+use super::service_process::{self, ServiceProcessManager};
 use super::state_recovery::AppRunningState;
 use super::store::AppStore;
 use super::WebViewManager;
@@ -21,6 +22,7 @@ use std::sync::{Arc, Mutex};
 pub struct PakeState {
     pub store: Arc<AppStore>,
     pub process: ProcessManager,
+    pub service: ServiceProcessManager,
     pub webview: Arc<Mutex<WebViewManager>>,
 }
 
@@ -30,11 +32,14 @@ impl PakeState {
         ensure_builtin_apps(&store)?;
         let mut process = ProcessManager::new();
         process.set_store(store.clone());
+        let mut service = ServiceProcessManager::new();
+        service.set_store(store.clone());
         let mut webview_mgr = WebViewManager::new();
         webview_mgr.set_store(store.clone());
         Ok(Self {
             store,
             process,
+            service,
             webview: Arc::new(Mutex::new(webview_mgr)),
         })
     }
@@ -45,10 +50,7 @@ impl PakeState {
         let running_ids: Vec<String> = apps
             .iter()
             .filter(|app| {
-                let status = match app.mode {
-                    Some(AppMode::Native) | None => self.process.status(&app.id),
-                    Some(AppMode::Webview) => self.webview.lock().unwrap().status(&app.id),
-                };
+                let status = self.app_status(app);
                 matches!(status, AppStatus::Running)
             })
             .map(|app| app.id.clone())
@@ -86,10 +88,7 @@ impl PakeState {
             match self.store.get(app_id) {
                 Ok(app) => {
                     log::info!("Restoring app: {} ({})", app.name, app_id);
-                    let result = match app.mode {
-                        Some(AppMode::Native) | None => self.process.start(&app).map(|_| ()),
-                        Some(AppMode::Webview) => self.webview.lock().unwrap().start(&app),
-                    };
+                    let result = self.start_app_processes(&app).await.map(|_| ());
 
                     if let Err(e) = result {
                         log::warn!("Failed to restore app {}: {}", app_id, e);
@@ -113,10 +112,7 @@ impl PakeState {
     pub async fn start_autostart_apps(&self) -> Result<(), String> {
         let apps = self.store.list()?;
         for app in apps.iter().filter(|app| app.autostart) {
-            let result = match app.mode {
-                Some(AppMode::Native) | None => self.process.start(app).map(|_| ()),
-                Some(AppMode::Webview) => self.webview.lock().unwrap().start(app),
-            };
+            let result = self.start_app_processes(app).await.map(|_| ());
 
             match result {
                 Ok(()) => log::info!("Autostart app started: {} ({})", app.name, app.id),
@@ -127,6 +123,70 @@ impl PakeState {
             }
         }
         Ok(())
+    }
+
+    async fn start_app_processes(&self, app: &PakeApp) -> Result<Option<u32>, String> {
+        let service_pid = self.service.start_and_wait(app).await?;
+        let viewer_pid = match app.mode {
+            Some(AppMode::Native) | None => Some(self.process.start(app)?),
+            Some(AppMode::Webview) => {
+                self.webview.lock().unwrap().start(app)?;
+                None
+            }
+        };
+        Ok(viewer_pid.or(service_pid))
+    }
+
+    fn stop_app_processes(&self, app: &PakeApp) -> Result<(), String> {
+        let viewer_result = match app.mode {
+            Some(AppMode::Native) | None => self.process.stop(&app.id),
+            Some(AppMode::Webview) => self.webview.lock().unwrap().stop(&app.id),
+        };
+        let service_result = self.service.stop(&app.id);
+
+        match (viewer_result, service_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(viewer_err), Ok(())) if service_process::has_launch_command(app) => {
+                if viewer_err == "App is not running" {
+                    Ok(())
+                } else {
+                    Err(viewer_err)
+                }
+            }
+            (Err(viewer_err), Ok(())) => Err(viewer_err),
+            (Ok(()), Err(service_err)) => Err(service_err),
+            (Err(viewer_err), Err(_)) => Err(viewer_err),
+        }
+    }
+
+    async fn restart_app_processes(&self, app: &PakeApp) -> Result<Option<u32>, String> {
+        let _ = self.stop_app_processes(app);
+        self.start_app_processes(app).await
+    }
+
+    fn app_status(&self, app: &PakeApp) -> AppStatus {
+        let viewer_status = match app.mode {
+            Some(AppMode::Native) | None => self.process.status(&app.id),
+            Some(AppMode::Webview) => self.webview.lock().unwrap().status(&app.id),
+        };
+        if service_process::has_launch_command(app) {
+            let service_status = self.service.status(&app.id);
+            match (service_status, viewer_status) {
+                (AppStatus::Crashed, _) | (_, AppStatus::Crashed) => AppStatus::Crashed,
+                (AppStatus::Running, AppStatus::Running) => AppStatus::Running,
+                _ => AppStatus::Stopped,
+            }
+        } else {
+            viewer_status
+        }
+    }
+
+    fn app_pid(&self, app: &PakeApp) -> Option<u32> {
+        match app.mode {
+            Some(AppMode::Native) | None => self.process.pid(&app.id),
+            Some(AppMode::Webview) => self.service.pid(&app.id),
+        }
+        .or_else(|| self.service.pid(&app.id))
     }
 }
 
@@ -172,6 +232,27 @@ fn err_response(status: StatusCode, msg: &str) -> Response {
     json_response(status, json!({"error": msg}))
 }
 
+fn parse_env_vars(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
+    value.and_then(|v| v.as_object()).and_then(|obj| {
+        let vars: HashMap<String, String> = obj
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| (key.trim().to_string(), value.to_string()))
+            })
+            .filter(|(key, _)| !key.is_empty())
+            .collect();
+        if vars.is_empty() {
+            None
+        } else {
+            Some(vars)
+        }
+    })
+}
+
 fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> serde_json::Value {
     let mut obj = json!({
         "id": app.id,
@@ -192,6 +273,11 @@ fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> s
             obj["show_nav"] = json!(app.show_nav);
             obj["remote_debugging_port"] = json!(app.remote_debugging_port);
             obj["proxy_server"] = json!(app.proxy_server);
+            obj["launch_command"] = json!(app.launch_command);
+            obj["launch_env_vars"] = json!(app.launch_env_vars);
+            obj["launch_cwd"] = json!(app.launch_cwd);
+            obj["launch_wait_url"] = json!(app.launch_wait_url);
+            obj["launch_wait_timeout_secs"] = json!(app.launch_wait_timeout_secs);
         }
         AppType::DesktopApp => {
             obj["exec_command"] = json!(app.exec_command);
@@ -208,23 +294,8 @@ async fn list_apps(State(state): State<Arc<PakeState>>) -> Response {
             let items: Vec<_> = apps
                 .iter()
                 .map(|app| {
-                    let (st, pid) = match app.mode {
-                        Some(AppMode::Native) => {
-                            let status = state.process.status(&app.id);
-                            let pid = state.process.pid(&app.id);
-                            (status, pid)
-                        }
-                        Some(AppMode::Webview) => {
-                            let status = state.webview.lock().unwrap().status(&app.id);
-                            (status, None)
-                        }
-                        None => {
-                            // DesktopApp uses process manager
-                            let status = state.process.status(&app.id);
-                            let pid = state.process.pid(&app.id);
-                            (status, pid)
-                        }
-                    };
+                    let st = state.app_status(app);
+                    let pid = state.app_pid(app);
                     let size = datadir::dir_size(&datadir::data_dir(app));
                     app_json(app, &format!("{:?}", st).to_lowercase(), pid, size)
                 })
@@ -250,59 +321,105 @@ async fn add_app(
         .unwrap_or("webapp");
     let app_type = AppType::from_str(app_type_str).unwrap_or(AppType::WebApp);
 
-    let (url, mode, show_nav, remote_debugging_port, proxy_server, exec_command, env_vars) =
-        match app_type {
-            AppType::WebApp => {
-                let url = match body.get("url").and_then(|v| v.as_str()) {
-                    Some(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
-                    _ => return err_response(StatusCode::BAD_REQUEST, "missing url for webapp"),
-                };
-                let mode = body
-                    .get("mode")
-                    .and_then(|v| v.as_str())
-                    .and_then(AppMode::from_str)
-                    .or(Some(AppMode::Native));
-                let show_nav = body
-                    .get("show_nav")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let remote_debugging_port = body
-                    .get("remote_debugging_port")
-                    .and_then(|v| v.as_u64())
-                    .map(|p| p as u16);
-                let proxy_server = body
-                    .get("proxy_server")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                (
-                    url,
-                    mode,
-                    show_nav,
-                    remote_debugging_port,
-                    proxy_server,
-                    None,
-                    None,
-                )
-            }
-            AppType::DesktopApp => {
-                let exec_command = match body.get("exec_command").and_then(|v| v.as_str()) {
-                    Some(e) if !e.trim().is_empty() => Some(e.trim().to_string()),
-                    _ => {
-                        return err_response(
-                            StatusCode::BAD_REQUEST,
-                            "missing exec_command for desktop app",
-                        )
-                    }
-                };
-                let env_vars = body.get("env_vars").and_then(|v| v.as_object()).map(|obj| {
-                    obj.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                        .collect::<HashMap<String, String>>()
-                });
-                (None, None, false, None, None, exec_command, env_vars)
-            }
-        };
+    let (
+        url,
+        mode,
+        show_nav,
+        remote_debugging_port,
+        proxy_server,
+        launch_command,
+        launch_env_vars,
+        launch_cwd,
+        launch_wait_url,
+        launch_wait_timeout_secs,
+        exec_command,
+        env_vars,
+    ) = match app_type {
+        AppType::WebApp => {
+            let url = match body.get("url").and_then(|v| v.as_str()) {
+                Some(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
+                _ => return err_response(StatusCode::BAD_REQUEST, "missing url for webapp"),
+            };
+            let mode = body
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .and_then(AppMode::from_str)
+                .or(Some(AppMode::Native));
+            let show_nav = body
+                .get("show_nav")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let remote_debugging_port = body
+                .get("remote_debugging_port")
+                .and_then(|v| v.as_u64())
+                .map(|p| p as u16);
+            let proxy_server = body
+                .get("proxy_server")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let launch_command = body
+                .get("launch_command")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let launch_env_vars = parse_env_vars(body.get("launch_env_vars"));
+            let launch_cwd = body
+                .get("launch_cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let launch_wait_url = body
+                .get("launch_wait_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let launch_wait_timeout_secs = body
+                .get("launch_wait_timeout_secs")
+                .and_then(|v| v.as_u64())
+                .filter(|secs| *secs > 0);
+            (
+                url,
+                mode,
+                show_nav,
+                remote_debugging_port,
+                proxy_server,
+                launch_command,
+                launch_env_vars,
+                launch_cwd,
+                launch_wait_url,
+                launch_wait_timeout_secs,
+                None,
+                None,
+            )
+        }
+        AppType::DesktopApp => {
+            let exec_command = match body.get("exec_command").and_then(|v| v.as_str()) {
+                Some(e) if !e.trim().is_empty() => Some(e.trim().to_string()),
+                _ => {
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        "missing exec_command for desktop app",
+                    )
+                }
+            };
+            let env_vars = parse_env_vars(body.get("env_vars"));
+            (
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                exec_command,
+                env_vars,
+            )
+        }
+    };
     let autostart = body
         .get("autostart")
         .and_then(|v| v.as_bool())
@@ -318,6 +435,11 @@ async fn add_app(
         show_nav,
         remote_debugging_port,
         proxy_server,
+        launch_command,
+        launch_env_vars,
+        launch_cwd,
+        launch_wait_url,
+        launch_wait_timeout_secs,
         exec_command,
         env_vars,
         created_at: chrono_now(),
@@ -352,22 +474,8 @@ async fn add_app(
 async fn get_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
     match state.store.get(&id) {
         Ok(app) => {
-            let (st, pid) = match app.mode {
-                Some(AppMode::Native) => {
-                    let status = state.process.status(&app.id);
-                    let pid = state.process.pid(&app.id);
-                    (status, pid)
-                }
-                Some(AppMode::Webview) => {
-                    let status = state.webview.lock().unwrap().status(&app.id);
-                    (status, None)
-                }
-                None => {
-                    let status = state.process.status(&app.id);
-                    let pid = state.process.pid(&app.id);
-                    (status, pid)
-                }
-            };
+            let st = state.app_status(&app);
+            let pid = state.app_pid(&app);
             let size = datadir::dir_size(&datadir::data_dir(&app));
             json_response(
                 StatusCode::OK,
@@ -408,19 +516,32 @@ async fn update_app(
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
+            app.launch_command = body
+                .get("launch_command")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            app.launch_env_vars = parse_env_vars(body.get("launch_env_vars"));
+            app.launch_cwd = body
+                .get("launch_cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            app.launch_wait_url = body
+                .get("launch_wait_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            app.launch_wait_timeout_secs = body
+                .get("launch_wait_timeout_secs")
+                .and_then(|v| v.as_u64())
+                .filter(|secs| *secs > 0);
         }
         AppType::DesktopApp => {
             if let Some(exec) = body.get("exec_command").and_then(|v| v.as_str()) {
                 app.exec_command = Some(exec.to_string());
             }
-            if let Some(env_obj) = body.get("env_vars").and_then(|v| v.as_object()) {
-                app.env_vars = Some(
-                    env_obj
-                        .iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                        .collect(),
-                );
-            }
+            app.env_vars = parse_env_vars(body.get("env_vars"));
         }
     }
 
@@ -435,10 +556,9 @@ async fn update_app(
 }
 
 async fn delete_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
-    let _ = state.process.stop(&id);
-    let _ = state.webview.lock().unwrap().stop(&id);
     // Clean up data directory before removing from store
     if let Ok(app) = state.store.get(&id) {
+        let _ = state.stop_app_processes(&app);
         let data_dir = datadir::data_dir(&app)
             .parent()
             .map(|p| p.to_path_buf())
@@ -457,15 +577,15 @@ async fn start_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) 
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
 
-    match app.mode {
-        Some(AppMode::Native) | None => match state.process.start(&app) {
-            Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
-            Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-        },
-        Some(AppMode::Webview) => match state.webview.lock().unwrap().start(&app) {
-            Ok(()) => json_response(StatusCode::OK, json!({"ok": true, "mode": "webview"})),
-            Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-        },
+    match state.start_app_processes(&app).await {
+        Ok(pid) => json_response(
+            StatusCode::OK,
+            json!({"ok": true, "pid": pid, "mode": app.mode.map(|m| m.as_str())}),
+        ),
+        Err(e) => {
+            let _ = state.stop_app_processes(&app);
+            err_response(StatusCode::INTERNAL_SERVER_ERROR, &e)
+        }
     }
 }
 
@@ -475,12 +595,7 @@ async fn stop_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
 
-    let result = match app.mode {
-        Some(AppMode::Native) | None => state.process.stop(&id),
-        Some(AppMode::Webview) => state.webview.lock().unwrap().stop(&id),
-    };
-
-    match result {
+    match state.stop_app_processes(&app) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(e) => err_response(StatusCode::BAD_REQUEST, &e),
     }
@@ -492,15 +607,12 @@ async fn restart_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
 
-    match app.mode {
-        Some(AppMode::Native) | None => match state.process.restart(&app) {
-            Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
-            Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-        },
-        Some(AppMode::Webview) => match state.webview.lock().unwrap().restart(&app) {
-            Ok(()) => json_response(StatusCode::OK, json!({"ok": true, "mode": "webview"})),
-            Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-        },
+    match state.restart_app_processes(&app).await {
+        Ok(pid) => json_response(
+            StatusCode::OK,
+            json!({"ok": true, "pid": pid, "mode": app.mode.map(|m| m.as_str())}),
+        ),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
 }
 
@@ -527,14 +639,7 @@ async fn clear_data(State(state): State<Arc<PakeState>>, Path(id): Path<String>)
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
     // Stop app before clearing data
-    match app.mode {
-        Some(AppMode::Native) | None => {
-            let _ = state.process.stop(&id);
-        }
-        Some(AppMode::Webview) => {
-            let _ = state.webview.lock().unwrap().stop(&id);
-        }
-    }
+    let _ = state.stop_app_processes(&app);
     match datadir::clear(&app) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -547,7 +652,18 @@ async fn get_logs(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -
         return err_response(StatusCode::NOT_FOUND, &e);
     }
     let log_file = native::log_path(&id);
-    let content = std::fs::read_to_string(&log_file).unwrap_or_else(|_| "(no logs yet)".into());
+    let service_log_file = service_process::service_log_path(&id);
+    let app_content =
+        std::fs::read_to_string(&log_file).unwrap_or_else(|_| "(no app logs yet)".into());
+    let service_content = std::fs::read_to_string(&service_log_file).ok();
+    let content = if let Some(service_content) = service_content {
+        format!(
+            "== service.log ==\n{}\n\n== app.log ==\n{}",
+            service_content, app_content
+        )
+    } else {
+        app_content
+    };
     // Return last 200 lines
     let lines: Vec<&str> = content.lines().collect();
     let start = if lines.len() > 200 {

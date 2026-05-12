@@ -166,15 +166,6 @@ impl WebViewManager {
         }
     }
 
-    /// Restart a WebView
-    pub fn restart(&mut self, app: &PakeApp) -> Result<(), String> {
-        info!("Restarting WebView for app: {}", app.id);
-        let _ = self.stop(&app.id);
-        // Remove from stopped_by_user so watchdog keeps it alive after restart
-        self.stopped_by_user.lock().unwrap().remove(&app.id);
-        self.start(app)
-    }
-
     /// Get status of a WebView
     pub fn status(&self, app_id: &str) -> AppStatus {
         let processes = self.processes.lock().unwrap();
