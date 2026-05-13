@@ -1,12 +1,12 @@
-use super::app::{AppType, PakeApp};
+use super::app::{AppType, ManagedApp};
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 
-pub fn data_dir(app: &PakeApp) -> PathBuf {
+pub fn data_dir(app: &ManagedApp) -> PathBuf {
     // Use /tmp for Chromium data dir because snap-packaged Chromium
     // has confinement that prevents writing to /root/.config
-    let base = PathBuf::from("/tmp").join("ivnc-pake-apps").join(&app.id);
+    let base = PathBuf::from("/tmp").join("ivnc-apps").join(&app.id);
 
     base.join(match app.app_type {
         AppType::WebApp => "chrome",
@@ -14,8 +14,12 @@ pub fn data_dir(app: &PakeApp) -> PathBuf {
     })
 }
 
+pub fn app_root(app: &ManagedApp) -> PathBuf {
+    PathBuf::from("/tmp").join("ivnc-apps").join(&app.id)
+}
+
 /// Ensure the data directory exists with write permissions for all users
-pub fn ensure_data_dir(app: &PakeApp) -> Result<PathBuf, String> {
+pub fn ensure_data_dir(app: &ManagedApp) -> Result<PathBuf, String> {
     let dir = data_dir(app);
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -57,7 +61,7 @@ pub fn dir_size(path: &PathBuf) -> u64 {
         .unwrap_or(0)
 }
 
-pub fn clear(app: &PakeApp) -> Result<(), String> {
+pub fn clear(app: &ManagedApp) -> Result<(), String> {
     let dir = data_dir(app);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to clear data: {}", e))?;

@@ -1043,6 +1043,24 @@ function installOverlayModalInputGuard() {
 	if (window.__ivncOverlayModalInputGuardInstalled) return;
 	window.__ivncOverlayModalInputGuardInstalled = true;
 	window.addEventListener('resize', updateOverlayModalScale);
+	document.addEventListener('pointerdown', (event) => {
+		const target = event.target;
+		const controllers = window.__ivncOverlayControllers || [];
+		if (!controllers.length) return;
+		if (target?.closest?.('.web-terminal-modal, .taskbar-pin, .force-update-modal, .modal')) return;
+		controllers.forEach((controller) => {
+			if (controller.isOpen?.() && !controller.contains?.(target)) {
+				controller.minimize?.();
+			}
+		});
+	}, true);
+}
+
+function registerOverlayController(controller) {
+	installOverlayModalInputGuard();
+	if (!window.__ivncOverlayControllers) window.__ivncOverlayControllers = [];
+	window.__ivncOverlayControllers.push(controller);
+	return controller;
 }
 
 function createWebTerminalController() {
@@ -1328,7 +1346,15 @@ function createWebTerminalController() {
 
 	window.addEventListener('beforeunload', destroy);
 
-	return { setButton, toggle, show, minimize, destroy };
+	function isOpen() {
+		return !!modal && !modal.classList.contains('minimized');
+	}
+
+	function contains(target) {
+		return !!modal && modal.contains(target);
+	}
+
+	return registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
 }
 
 function createConsoleModalController() {
@@ -1404,7 +1430,99 @@ function createConsoleModalController() {
 		modal = null;
 	}
 
-	return { setButton, toggle, show, minimize, destroy };
+	function isOpen() {
+		return !!modal && !modal.classList.contains('minimized');
+	}
+
+	function contains(target) {
+		return !!modal && modal.contains(target);
+	}
+
+	return registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
+}
+
+function createProxyModalController() {
+	installOverlayModalInputGuard();
+	let modal = null;
+	let frame = null;
+	let proxyBtn = null;
+	let destroyed = false;
+
+	const proxySvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
+
+	function setButton(btn) {
+		proxyBtn = btn;
+	}
+
+	function ensureModal() {
+		if (destroyed) return;
+		if (modal) return;
+		updateOverlayModalScale();
+
+		modal = document.createElement('div');
+		modal.className = 'web-terminal-modal web-console-modal minimized';
+		modal.innerHTML = `
+			<div class="web-terminal-header">
+				<div class="web-terminal-title">${proxySvgSmall}<span>代理</span></div>
+				<div class="web-terminal-actions">
+					<button class="web-terminal-action" id="web-proxy-minimize" type="button" title="最小化">_</button>
+				</div>
+			</div>
+			<div class="web-terminal-body web-console-body">
+				<iframe class="web-console-frame" title="iVnc 代理"></iframe>
+			</div>
+		`;
+		document.body.appendChild(modal);
+		frame = modal.querySelector('.web-console-frame');
+		frame.src = `${getBasePath()}proxy/`;
+		modal.querySelector('#web-proxy-minimize').addEventListener('click', (e) => {
+			e.stopPropagation();
+			minimize();
+		});
+	}
+
+	function show() {
+		ensureModal();
+		if (!modal) return;
+		updateOverlayModalScale();
+		modal.classList.remove('minimized');
+		proxyBtn?.classList.add('active');
+	}
+
+	function minimize() {
+		if (!modal) return;
+		modal.classList.add('minimized');
+		proxyBtn?.classList.remove('active');
+	}
+
+	function toggle() {
+		ensureModal();
+		if (!modal) return;
+		if (modal.classList.contains('minimized')) {
+			show();
+		} else {
+			minimize();
+		}
+	}
+
+	function destroy() {
+		if (destroyed) return;
+		destroyed = true;
+		frame?.removeAttribute('src');
+		modal?.remove();
+		frame = null;
+		modal = null;
+	}
+
+	function isOpen() {
+		return !!modal && !modal.classList.contains('minimized');
+	}
+
+	function contains(target) {
+		return !!modal && modal.contains(target);
+	}
+
+	return registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
 }
 
 export default function webrtc() {
@@ -1491,6 +1609,7 @@ export default function webrtc() {
 	let debugEntries = [];
 	let status = 'connecting';
 	const terminalController = createWebTerminalController();
+	const proxyController = createProxyModalController();
 	const consoleController = createConsoleModalController();
 	let clipboardStatus = 'enabled';
 	let windowResolution = "";
@@ -2734,6 +2853,21 @@ export default function webrtc() {
 			});
 			taskbar.appendChild(updateBtn);
 
+			const proxySvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
+			const proxyBtn = document.createElement('div');
+			proxyBtn.className = 'taskbar-pin';
+			proxyBtn.id = 'proxy-btn';
+			proxyBtn.innerHTML = proxySvg;
+			proxyBtn.title = '代理';
+			proxyBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				terminalController.minimize();
+				consoleController.minimize();
+				proxyController.toggle();
+			});
+			proxyController.setButton(proxyBtn);
+			taskbar.appendChild(proxyBtn);
+
 			const terminalSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
 			const terminalBtn = document.createElement('div');
 			terminalBtn.className = 'taskbar-pin';
@@ -2742,6 +2876,7 @@ export default function webrtc() {
 			terminalBtn.title = '终端';
 			terminalBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
+				proxyController.minimize();
 				consoleController.minimize();
 				terminalController.toggle();
 			});
@@ -2756,6 +2891,7 @@ export default function webrtc() {
 			consoleBtn.title = '控制台';
 			consoleBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
+				proxyController.minimize();
 				terminalController.minimize();
 				consoleController.toggle();
 			});
@@ -3285,6 +3421,7 @@ export default function webrtc() {
 			if (statsLoopId) { clearInterval(statsLoopId); statsLoopId = null; }
 			if (metricsLoopId) { clearInterval(metricsLoopId); metricsLoopId = null; }
 			terminalController.destroy();
+			proxyController.destroy();
 			consoleController.destroy();
 			webrtc = null;
 			input = null;

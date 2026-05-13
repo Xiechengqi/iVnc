@@ -1,4 +1,4 @@
-//! Pake application management module
+//! Application management module.
 //!
 //! Manages web-to-desktop applications with native Chrome windows.
 

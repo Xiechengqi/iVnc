@@ -1,4 +1,4 @@
-use super::app::{AppType, PakeApp};
+use super::app::{AppType, ManagedApp};
 use super::datadir;
 use log::info;
 use std::fs;
@@ -26,19 +26,19 @@ pub fn find_chrome() -> Option<String> {
     None
 }
 
-/// Log file path for a pake app
+/// Log file path for a managed app
 pub fn log_path(app_id: &str) -> std::path::PathBuf {
     let dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/root/.config"))
         .join("ivnc")
-        .join("pake-apps")
+        .join("apps")
         .join(app_id);
     let _ = fs::create_dir_all(&dir);
     dir.join("app.log")
 }
 
-/// Build the launch command for a Pake app
-pub fn build_command(app: &PakeApp) -> Result<Command, String> {
+/// Build the launch command for a managed app.
+pub fn build_command(app: &ManagedApp) -> Result<Command, String> {
     let mut cmd = match app.app_type {
         AppType::DesktopApp => build_desktop_command(app),
         AppType::WebApp => build_native_command(app),
@@ -66,7 +66,7 @@ fn alloc_debug_port() -> u16 {
         .unwrap_or(9222)
 }
 
-fn build_native_command(app: &PakeApp) -> Result<Command, String> {
+fn build_native_command(app: &ManagedApp) -> Result<Command, String> {
     let chrome = find_chrome().ok_or("Chrome/Chromium not found")?;
     let data = datadir::ensure_data_dir(app)?;
 
@@ -77,7 +77,7 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
     let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "(not set)".into());
     let display = std::env::var("DISPLAY").unwrap_or_else(|_| "(not set)".into());
 
-    info!("Pake app '{}' launch info:", app.name);
+    info!("Managed application '{}' launch info:", app.name);
     info!("  Chrome: {}", chrome);
     info!("  URL: {}", url);
     info!("  Data dir: {}", data.display());
@@ -94,12 +94,12 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
         // Don't use --app or --new-window, just pass the URL
         cmd.arg(url);
         // Use a special WM_CLASS to identify windows that should not be fullscreened
-        cmd.arg("--class=ivnc-pake-windowed");
+        cmd.arg("--class=ivnc-webapp-windowed");
         info!("  -> Using browser mode (with full navigation UI)");
     } else {
         // App mode without navigation bar
         cmd.arg(format!("--app={}", url));
-        cmd.arg("--class=ivnc-pake-app");
+        cmd.arg("--class=ivnc-webapp");
         info!("  -> Using app mode (no navigation bar)");
     }
 
@@ -182,7 +182,7 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
     Ok(cmd)
 }
 
-fn build_desktop_command(app: &PakeApp) -> Result<Command, String> {
+fn build_desktop_command(app: &ManagedApp) -> Result<Command, String> {
     let exec_cmd = app
         .exec_command
         .as_ref()
@@ -231,9 +231,9 @@ async fn cdp_inject_nav(port: u16) {
     let inject_script = format!(
         r#"
 (function() {{
-    if (document.getElementById('pake-nav')) return;
+    if (document.getElementById('ivnc-nav')) return;
     var style = document.createElement('style');
-    style.id = 'pake-nav-style';
+    style.id = 'ivnc-nav-style';
     style.textContent = {css_json};
     document.head.appendChild(style);
     {nav_js}

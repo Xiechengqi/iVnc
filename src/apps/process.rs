@@ -1,4 +1,4 @@
-use super::app::{AppStatus, PakeApp};
+use super::app::{AppStatus, ManagedApp};
 use super::native;
 use log::{info, warn};
 use std::collections::{HashMap, HashSet};
@@ -86,7 +86,7 @@ impl ProcessManager {
         });
     }
 
-    pub fn start(&self, app: &PakeApp) -> Result<u32, String> {
+    pub fn start(&self, app: &ManagedApp) -> Result<u32, String> {
         if self.is_running(&app.id) {
             return Err("App is already running".into());
         }
@@ -97,7 +97,7 @@ impl ProcessManager {
         let mut cmd = native::build_command(app)?;
         let child = cmd.spawn().map_err(|e| format!("Failed to start: {}", e))?;
         let pid = child.id();
-        info!("Started Pake app '{}' (pid={})", app.name, pid);
+        info!("Started managed app '{}' (pid={})", app.name, pid);
 
         self.processes
             .lock()
@@ -117,7 +117,7 @@ impl ProcessManager {
         if let Some(mut running) = procs.remove(app_id) {
             let pgid = -(running.pid as i32);
             info!(
-                "Stopping Pake app process group (pid={}, pgid={})",
+                "Stopping managed app process group (pid={}, pgid={})",
                 running.pid, pgid
             );
 

@@ -1,4 +1,4 @@
-use super::app::{AppMode, AppStatus, AppType, PakeApp};
+use super::app::{AppStatus, AppType, ManagedApp};
 use super::datadir;
 use super::desktop_entry;
 use super::native;
@@ -18,13 +18,13 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub struct PakeState {
+pub struct AppsState {
     pub store: Arc<AppStore>,
     pub process: ProcessManager,
     pub service: ServiceProcessManager,
 }
 
-impl PakeState {
+impl AppsState {
     pub fn new() -> Result<Self, String> {
         let store = Arc::new(AppStore::new()?);
         ensure_builtin_apps(&store)?;
@@ -120,13 +120,29 @@ impl PakeState {
         Ok(())
     }
 
-    async fn start_app_processes(&self, app: &PakeApp) -> Result<Option<u32>, String> {
-        let service_pid = self.service.start_and_wait(app).await?;
-        let viewer_pid = Some(self.process.start(app)?);
-        Ok(viewer_pid.or(service_pid))
+    async fn start_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
+        match app.app_type {
+            AppType::DesktopApp => Ok(Some(self.process.start(app)?)),
+            AppType::WebApp if !app.open_window => {
+                if !service_process::has_launch_command(app) {
+                    return Err("background web app requires launch_command".to_string());
+                }
+                self.service.start_and_wait(app).await
+            }
+            AppType::WebApp => {
+                let service_pid = self.service.start_and_wait(app).await?;
+                let viewer_pid = Some(self.process.start(app)?);
+                Ok(viewer_pid.or(service_pid))
+            }
+        }
     }
 
-    fn stop_app_processes(&self, app: &PakeApp) -> Result<(), String> {
+    fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
+        if app.app_type == AppType::WebApp && !app.open_window {
+            let _ = self.process.stop(&app.id);
+            return self.service.stop(&app.id);
+        }
+
         let viewer_result = self.process.stop(&app.id);
         let service_result = self.service.stop(&app.id);
 
@@ -145,15 +161,21 @@ impl PakeState {
         }
     }
 
-    async fn restart_app_processes(&self, app: &PakeApp) -> Result<Option<u32>, String> {
+    async fn restart_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
         let _ = self.stop_app_processes(app);
         self.start_app_processes(app).await
     }
 
-    fn app_status(&self, app: &PakeApp) -> AppStatus {
+    fn app_status(&self, app: &ManagedApp) -> AppStatus {
         let viewer_status = self.process.status(&app.id);
+        if app.app_type == AppType::DesktopApp {
+            return viewer_status;
+        }
         if service_process::has_launch_command(app) {
             let service_status = self.service.status(&app.id);
+            if !app.open_window {
+                return service_status;
+            }
             match (service_status, viewer_status) {
                 (AppStatus::Crashed, _) | (_, AppStatus::Crashed) => AppStatus::Crashed,
                 (AppStatus::Running, AppStatus::Running) => AppStatus::Running,
@@ -164,7 +186,10 @@ impl PakeState {
         }
     }
 
-    fn app_pid(&self, app: &PakeApp) -> Option<u32> {
+    fn app_pid(&self, app: &ManagedApp) -> Option<u32> {
+        if app.app_type == AppType::WebApp && !app.open_window {
+            return self.service.pid(&app.id);
+        }
         self.process
             .pid(&app.id)
             .or_else(|| self.service.pid(&app.id))
@@ -185,7 +210,7 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn router(state: Arc<PakeState>) -> Router {
+pub fn router(state: Arc<AppsState>) -> Router {
     Router::new()
         .route("/api/apps", get(list_apps).post(add_app))
         .route(
@@ -234,7 +259,12 @@ fn parse_env_vars(value: Option<&serde_json::Value>) -> Option<HashMap<String, S
     })
 }
 
-fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> serde_json::Value {
+fn app_json(
+    app: &ManagedApp,
+    status: &str,
+    pid: Option<u32>,
+    data_bytes: u64,
+) -> serde_json::Value {
     let mut obj = json!({
         "id": app.id,
         "name": app.name,
@@ -250,8 +280,8 @@ fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> s
     match app.app_type {
         AppType::WebApp => {
             obj["url"] = json!(app.url);
-            obj["mode"] = json!(AppMode::Native.as_str());
             obj["show_nav"] = json!(app.show_nav);
+            obj["open_window"] = json!(app.open_window);
             obj["remote_debugging_port"] = json!(app.remote_debugging_port);
             obj["proxy_server"] = json!(app.proxy_server);
             obj["launch_command"] = json!(app.launch_command);
@@ -269,7 +299,7 @@ fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> s
     obj
 }
 
-async fn list_apps(State(state): State<Arc<PakeState>>) -> Response {
+async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
     match state.store.list() {
         Ok(apps) => {
             let items: Vec<_> = apps
@@ -288,7 +318,7 @@ async fn list_apps(State(state): State<Arc<PakeState>>) -> Response {
 }
 
 async fn add_app(
-    State(state): State<Arc<PakeState>>,
+    State(state): State<Arc<AppsState>>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
     let name = match body.get("name").and_then(|v| v.as_str()) {
@@ -305,6 +335,7 @@ async fn add_app(
     let (
         url,
         show_nav,
+        open_window,
         remote_debugging_port,
         proxy_server,
         launch_command,
@@ -322,6 +353,10 @@ async fn add_app(
             };
             let show_nav = body
                 .get("show_nav")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let open_window = body
+                .get("open_window")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let remote_debugging_port = body
@@ -353,9 +388,16 @@ async fn add_app(
                 .get("launch_wait_timeout_secs")
                 .and_then(|v| v.as_u64())
                 .filter(|secs| *secs > 0);
+            if !open_window && launch_command.is_none() {
+                return err_response(
+                    StatusCode::BAD_REQUEST,
+                    "background web app requires launch_command",
+                );
+            }
             (
                 url,
                 show_nav,
+                open_window,
                 remote_debugging_port,
                 proxy_server,
                 launch_command,
@@ -381,6 +423,7 @@ async fn add_app(
             (
                 None,
                 false,
+                false,
                 None,
                 None,
                 None,
@@ -398,18 +441,14 @@ async fn add_app(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let app = PakeApp {
+    let app = ManagedApp {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         app_type,
         autostart,
         url,
-        mode: if app_type == AppType::WebApp {
-            Some(AppMode::Native)
-        } else {
-            None
-        },
         show_nav,
+        open_window,
         remote_debugging_port,
         proxy_server,
         launch_command,
@@ -448,7 +487,7 @@ async fn add_app(
     json_response(StatusCode::CREATED, json!({"ok": true, "app": app}))
 }
 
-async fn get_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn get_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     match state.store.get(&id) {
         Ok(app) => {
             let st = state.app_status(&app);
@@ -464,7 +503,7 @@ async fn get_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) ->
 }
 
 async fn update_app(
-    State(state): State<Arc<PakeState>>,
+    State(state): State<Arc<AppsState>>,
     Path(id): Path<String>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
@@ -478,9 +517,11 @@ async fn update_app(
             if let Some(url_str) = body.get("url").and_then(|v| v.as_str()) {
                 app.url = Some(url_str.to_string());
             }
-            app.mode = Some(AppMode::Native);
             if let Some(show_nav) = body.get("show_nav").and_then(|v| v.as_bool()) {
                 app.show_nav = show_nav;
+            }
+            if let Some(open_window) = body.get("open_window").and_then(|v| v.as_bool()) {
+                app.open_window = open_window;
             }
             app.remote_debugging_port = body
                 .get("remote_debugging_port")
@@ -511,6 +552,12 @@ async fn update_app(
                 .get("launch_wait_timeout_secs")
                 .and_then(|v| v.as_u64())
                 .filter(|secs| *secs > 0);
+            if !app.open_window && !service_process::has_launch_command(&app) {
+                return err_response(
+                    StatusCode::BAD_REQUEST,
+                    "background web app requires launch_command",
+                );
+            }
         }
         AppType::DesktopApp => {
             if let Some(exec) = body.get("exec_command").and_then(|v| v.as_str()) {
@@ -530,15 +577,11 @@ async fn update_app(
     json_response(StatusCode::OK, json!({"ok": true}))
 }
 
-async fn delete_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     // Clean up data directory before removing from store
     if let Ok(app) = state.store.get(&id) {
         let _ = state.stop_app_processes(&app);
-        let data_dir = datadir::data_dir(&app)
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| datadir::data_dir(&app));
-        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(datadir::app_root(&app));
     }
     match state.store.delete(&id) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
@@ -546,17 +589,14 @@ async fn delete_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>)
     }
 }
 
-async fn start_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
 
     match state.start_app_processes(&app).await {
-        Ok(pid) => json_response(
-            StatusCode::OK,
-            json!({"ok": true, "pid": pid, "mode": AppMode::Native.as_str()}),
-        ),
+        Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
         Err(e) => {
             let _ = state.stop_app_processes(&app);
             err_response(StatusCode::INTERNAL_SERVER_ERROR, &e)
@@ -564,7 +604,7 @@ async fn start_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) 
     }
 }
 
-async fn stop_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn stop_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
@@ -576,22 +616,19 @@ async fn stop_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -
     }
 }
 
-async fn restart_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn restart_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
 
     match state.restart_app_processes(&app).await {
-        Ok(pid) => json_response(
-            StatusCode::OK,
-            json!({"ok": true, "pid": pid, "mode": AppMode::Native.as_str()}),
-        ),
+        Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
 }
 
-async fn data_size(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn data_size(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
@@ -608,7 +645,7 @@ async fn data_size(State(state): State<Arc<PakeState>>, Path(id): Path<String>) 
     )
 }
 
-async fn clear_data(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn clear_data(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
@@ -621,7 +658,7 @@ async fn clear_data(State(state): State<Arc<PakeState>>, Path(id): Path<String>)
     }
 }
 
-async fn get_logs(State(state): State<Arc<PakeState>>, Path(id): Path<String>) -> Response {
+async fn get_logs(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     // Verify app exists
     if let Err(e) = state.store.get(&id) {
         return err_response(StatusCode::NOT_FOUND, &e);

@@ -6,6 +6,7 @@ use crate::audio::AudioPacket;
 use crate::config::ui::UiConfig;
 use crate::config::Config;
 use crate::input::InputEventData;
+use crate::proxy_panel::ProxyPanelManager;
 use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
 use log::{info, warn};
@@ -109,6 +110,9 @@ pub struct SharedState {
 
     /// Current IPv4 address
     pub ipv4_address: Arc<RwLock<String>>,
+
+    /// Built-in miao proxy panel process manager
+    pub proxy_panel: Arc<ProxyPanelManager>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -165,6 +169,7 @@ impl SharedState {
             last_taskbar_json: Arc::new(Mutex::new(None)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             ipv4_address: Arc::new(RwLock::new(String::new())),
+            proxy_panel: Arc::new(ProxyPanelManager::new()),
         }
     }
 

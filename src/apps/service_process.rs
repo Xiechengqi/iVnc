@@ -1,4 +1,4 @@
-use super::app::{AppStatus, PakeApp};
+use super::app::{AppStatus, ManagedApp};
 use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -85,7 +85,7 @@ impl ServiceProcessManager {
         });
     }
 
-    pub async fn start_and_wait(&self, app: &PakeApp) -> Result<Option<u32>, String> {
+    pub async fn start_and_wait(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
         if !has_launch_command(app) {
             return Ok(None);
         }
@@ -158,7 +158,7 @@ impl ServiceProcessManager {
         self.status(app_id) == AppStatus::Running
     }
 
-    async fn wait_until_ready(&self, app: &PakeApp) -> Result<(), String> {
+    async fn wait_until_ready(&self, app: &ManagedApp) -> Result<(), String> {
         let url = app
             .launch_wait_url
             .as_deref()
@@ -201,7 +201,7 @@ impl ServiceProcessManager {
     }
 }
 
-pub fn has_launch_command(app: &PakeApp) -> bool {
+pub fn has_launch_command(app: &ManagedApp) -> bool {
     app.launch_command
         .as_deref()
         .map(|cmd| !cmd.trim().is_empty())
@@ -212,13 +212,13 @@ pub fn service_log_path(app_id: &str) -> std::path::PathBuf {
     let dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/root/.config"))
         .join("ivnc")
-        .join("pake-apps")
+        .join("apps")
         .join(app_id);
     let _ = fs::create_dir_all(&dir);
     dir.join("service.log")
 }
 
-fn build_service_command(app: &PakeApp) -> Result<Command, String> {
+fn build_service_command(app: &ManagedApp) -> Result<Command, String> {
     let launch_command = app
         .launch_command
         .as_deref()

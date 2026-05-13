@@ -27,29 +27,6 @@ impl AppType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AppMode {
-    Native,
-}
-
-impl AppMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AppMode::Native => "native",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "native" => Some(AppMode::Native),
-            // Keep old records and clients compatible after removing WebView mode.
-            "webview" => Some(AppMode::Native),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum AppStatus {
     Running,
     Stopped,
@@ -57,7 +34,7 @@ pub enum AppStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PakeApp {
+pub struct ManagedApp {
     pub id: String,
     pub name: String,
     pub app_type: AppType,
@@ -65,8 +42,8 @@ pub struct PakeApp {
 
     // WebApp fields
     pub url: Option<String>,
-    pub mode: Option<AppMode>,
     pub show_nav: bool,
+    pub open_window: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_debugging_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]

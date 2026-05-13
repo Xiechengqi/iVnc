@@ -2,6 +2,7 @@
 //!
 //! A high-performance WebRTC streaming solution using smithay Wayland compositor and GStreamer.
 
+pub mod apps;
 pub mod audio;
 pub mod clipboard;
 pub mod compositor;
@@ -11,7 +12,7 @@ pub mod gstreamer;
 pub mod input;
 #[cfg(feature = "mcp")]
 pub mod mcp;
-pub mod pake_apps;
+pub mod proxy_panel;
 pub mod runtime_settings;
 pub mod system_clipboard;
 pub mod terminal;

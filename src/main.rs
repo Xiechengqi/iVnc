@@ -2,6 +2,7 @@
 //!
 //! Wayland compositor + WebRTC streaming using smithay and GStreamer.
 
+mod apps;
 mod args;
 mod audio;
 mod clipboard;
@@ -12,7 +13,7 @@ mod gstreamer;
 mod input;
 #[cfg(feature = "mcp")]
 mod mcp;
-mod pake_apps;
+mod proxy_panel;
 mod runtime_settings;
 mod system_clipboard;
 mod terminal;
@@ -44,15 +45,15 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Look up a .desktop file whose StartupWMClass matches the given app_id,
 /// and return its Name= value. Returns None if no match found.
-/// For Pake apps (ivnc-pake-*), extract the app name from the window title.
+/// For managed web apps, extract the app name from the window title.
 fn resolve_display_name(app_id: &str, title: &str) -> Option<String> {
     if app_id.is_empty() {
         return None;
     }
 
-    // Special handling for Pake apps: extract name from window title
+    // Special handling for managed web apps: extract name from window title
     // Chrome window titles are typically: "Page Title - Google Chrome" or "Page Title - Chromium"
-    if app_id == "ivnc-pake-windowed" || app_id == "ivnc-pake-app" {
+    if app_id == "ivnc-webapp-windowed" || app_id == "ivnc-webapp" {
         // Try to extract the page title before " - Google Chrome" or " - Chromium"
         if let Some(pos) = title.rfind(" - ") {
             let page_title = &title[..pos];
@@ -258,6 +259,7 @@ fn main() {
         input_tx.clone(),
         runtime_settings.clone(),
     ));
+    shared_state.proxy_panel.clone().start_watchdog();
 
     if let Err(e) = run(
         config,
@@ -1568,10 +1570,10 @@ async fn run_async_services(
         });
     }
 
-    // Pake apps manager
-    let pake_state = match crate::pake_apps::api::PakeState::new() {
+    // Apps manager
+    let apps_state = match crate::apps::api::AppsState::new() {
         Ok(ps) => {
-            info!("Pake apps manager initialized");
+            info!("Apps manager initialized");
             let ps_arc = std::sync::Arc::new(ps);
 
             // Restore previously running apps after update
@@ -1594,7 +1596,7 @@ async fn run_async_services(
             Some(ps_arc)
         }
         Err(e) => {
-            warn!("Failed to init Pake apps manager: {}", e);
+            warn!("Failed to init Apps manager: {}", e);
             None
         }
     };
@@ -1607,7 +1609,7 @@ async fn run_async_services(
         shared.clone(),
         session_manager,
         config.http.tls,
-        pake_state,
+        apps_state,
     )
     .await
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {

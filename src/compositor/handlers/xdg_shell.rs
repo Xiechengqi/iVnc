@@ -123,8 +123,7 @@ impl XdgShellHandler for Compositor {
         self.space.map_element(window, (0, 0), false);
 
         // Main window (not dialog): set fullscreen to fill the screen.
-        // Exception: windows with app_id "ivnc-pake-windowed" should not be fullscreened
-        // (these are Pake apps with show_nav=true that need to keep their browser toolbar)
+        // Exception: managed web app windows with show_nav=true need to keep their browser toolbar.
         if !is_dialog {
             let app_id = with_states(surface.wl_surface(), |states| {
                 states
@@ -135,7 +134,7 @@ impl XdgShellHandler for Compositor {
             })
             .unwrap_or_default();
 
-            let should_fullscreen = app_id != "ivnc-pake-windowed";
+            let should_fullscreen = app_id != "ivnc-webapp-windowed";
 
             if should_fullscreen {
                 if let Some(output_geo) = output_geo {
@@ -146,7 +145,7 @@ impl XdgShellHandler for Compositor {
                     surface.send_pending_configure();
                 }
             } else {
-                // For windowed Pake apps: set size to fill screen but don't set Fullscreen state
+                // For windowed web apps: set size to fill screen but don't set Fullscreen state.
                 if let Some(output_geo) = output_geo {
                     surface.with_pending_state(|state| {
                         state.size = Some((output_geo.size.w, output_geo.size.h).into());
@@ -154,7 +153,7 @@ impl XdgShellHandler for Compositor {
                     surface.send_pending_configure();
                 }
                 log::info!(
-                    "new_toplevel: windowed Pake app detected (app_id={}), not setting fullscreen",
+                    "new_toplevel: windowed managed app detected (app_id={}), not setting fullscreen",
                     app_id
                 );
             }
@@ -465,10 +464,10 @@ pub fn handle_commit(
             (data.initial_configure_sent, changed, app_id)
         });
 
-        // If this is a windowed Pake app (show_nav=true), unfullscreen it to preserve the browser toolbar
-        if app_id == "ivnc-pake-windowed" && title_changed {
+        // If this is a windowed managed app (show_nav=true), unfullscreen it to preserve the browser toolbar.
+        if app_id == "ivnc-webapp-windowed" && title_changed {
             log::info!(
-                "handle_commit: detected windowed Pake app, unfullscreening (app_id={})",
+                "handle_commit: detected windowed managed app, unfullscreening (app_id={})",
                 app_id
             );
             let toplevel = window.toplevel().unwrap();

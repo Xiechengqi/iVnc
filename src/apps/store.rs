@@ -1,4 +1,4 @@
-use super::app::{AppMode, AppType, PakeApp};
+use super::app::{AppType, ManagedApp};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -22,10 +22,9 @@ impl AppStore {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 url TEXT,
-                mode TEXT,
-                dark_mode INTEGER DEFAULT 0,
                 autostart INTEGER DEFAULT 0,
                 show_nav INTEGER DEFAULT 0,
+                open_window INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 app_type TEXT DEFAULT 'webapp',
                 exec_command TEXT,
@@ -42,11 +41,22 @@ impl AppStore {
         .map_err(|e| format!("Failed to init db: {}", e))?;
 
         // Migrations
+        let had_open_window = column_exists(&conn, "apps", "open_window");
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN show_nav INTEGER DEFAULT 0", []);
+        let _ = conn.execute(
+            "ALTER TABLE apps ADD COLUMN open_window INTEGER DEFAULT 0",
+            [],
+        );
         let _ = conn.execute(
             "ALTER TABLE apps ADD COLUMN app_type TEXT DEFAULT 'webapp'",
             [],
         );
+        if !had_open_window {
+            let _ = conn.execute(
+                "UPDATE apps SET open_window=1 WHERE app_type='webapp' OR app_type IS NULL",
+                [],
+            );
+        }
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN exec_command TEXT", []);
         let _ = conn.execute("ALTER TABLE apps ADD COLUMN env_vars TEXT", []);
         let _ = conn.execute(
@@ -62,10 +72,6 @@ impl AppStore {
             "ALTER TABLE apps ADD COLUMN launch_wait_timeout_secs INTEGER",
             [],
         );
-        let _ = conn.execute(
-            "UPDATE apps SET mode='native' WHERE app_type='webapp' AND mode='webview'",
-            [],
-        );
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -79,11 +85,10 @@ impl AppStore {
             .join("apps.db")
     }
 
-    pub fn add(&self, app: &PakeApp) -> Result<(), String> {
+    pub fn add(&self, app: &ManagedApp) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
 
         let url = app.url.as_deref().unwrap_or("");
-        let mode = app.mode.map(|m| m.as_str()).unwrap_or("");
         let exec_command = app.exec_command.as_deref().unwrap_or("");
         let env_vars_json = app
             .env_vars
@@ -97,11 +102,11 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, mode, autostart, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs)
+            "INSERT INTO apps (id, name, app_type, url, autostart, show_nav, open_window, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
-                app.id, app.name, app.app_type.as_str(), url, mode,
-                app.autostart as i32, app.show_nav as i32, exec_command, env_vars_json, app.created_at,
+                app.id, app.name, app.app_type.as_str(), url,
+                app.autostart as i32, app.show_nav as i32, app.open_window as i32, exec_command, env_vars_json, app.created_at,
                 app.remote_debugging_port, app.proxy_server, app.launch_command, launch_env_vars_json,
                 app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64),
             ],
@@ -115,11 +120,10 @@ impl AppStore {
         Ok(())
     }
 
-    pub fn update(&self, app: &PakeApp) -> Result<(), String> {
+    pub fn update(&self, app: &ManagedApp) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
 
         let url = app.url.as_deref().unwrap_or("");
-        let mode = app.mode.map(|m| m.as_str()).unwrap_or("");
         let exec_command = app.exec_command.as_deref().unwrap_or("");
         let env_vars_json = app
             .env_vars
@@ -133,8 +137,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = conn.execute(
-            "UPDATE apps SET app_type=?1, url=?2, mode=?3, autostart=?4, show_nav=?5, exec_command=?6, env_vars=?7, remote_debugging_port=?8, proxy_server=?9, launch_command=?10, launch_env_vars=?11, launch_cwd=?12, launch_wait_url=?13, launch_wait_timeout_secs=?14 WHERE id=?15",
-            params![app.app_type.as_str(), url, mode, app.autostart as i32, app.show_nav as i32, exec_command, env_vars_json, app.remote_debugging_port, app.proxy_server, app.launch_command, launch_env_vars_json, app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64), app.id],
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, show_nav=?4, open_window=?5, exec_command=?6, env_vars=?7, remote_debugging_port=?8, proxy_server=?9, launch_command=?10, launch_env_vars=?11, launch_cwd=?12, launch_wait_url=?13, launch_wait_timeout_secs=?14 WHERE id=?15",
+            params![app.app_type.as_str(), url, app.autostart as i32, app.show_nav as i32, app.open_window as i32, exec_command, env_vars_json, app.remote_debugging_port, app.proxy_server, app.launch_command, launch_env_vars_json, app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64), app.id],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", app.id));
@@ -153,19 +157,19 @@ impl AppStore {
         Ok(())
     }
 
-    pub fn get(&self, id: &str) -> Result<PakeApp, String> {
+    pub fn get(&self, id: &str) -> Result<ManagedApp, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, mode, autostart, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, show_nav, open_window, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).map_err(|e| format!("App not found: {}", e))
     }
 
-    pub fn list(&self) -> Result<Vec<PakeApp>, String> {
+    pub fn list(&self) -> Result<Vec<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, app_type, url, mode, autostart, show_nav, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps ORDER BY created_at"
+            "SELECT id, name, app_type, url, autostart, show_nav, open_window, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -176,15 +180,14 @@ impl AppStore {
         Ok(apps)
     }
 
-    fn row_to_app(row: &rusqlite::Row) -> PakeApp {
+    fn row_to_app(row: &rusqlite::Row) -> ManagedApp {
         let app_type_str: String = row.get(2).unwrap_or_else(|_| "webapp".to_string());
         let app_type = AppType::from_str(&app_type_str).unwrap_or(AppType::WebApp);
 
         let url: Option<String> = row.get(3).ok().filter(|s: &String| !s.is_empty());
-        let mode_str: Option<String> = row.get(4).ok().filter(|s: &String| !s.is_empty());
-        let mode = mode_str.and_then(|s| AppMode::from_str(&s));
-        let autostart = row.get::<_, i32>(5).unwrap_or(0) != 0;
-        let show_nav = row.get::<_, i32>(6).unwrap_or(0) != 0;
+        let autostart = row.get::<_, i32>(4).unwrap_or(0) != 0;
+        let show_nav = row.get::<_, i32>(5).unwrap_or(0) != 0;
+        let open_window = row.get::<_, i32>(6).unwrap_or(0) != 0;
 
         let exec_command: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
         let env_vars_json: Option<String> = row.get(8).ok().filter(|s: &String| !s.is_empty());
@@ -206,14 +209,14 @@ impl AppStore {
             .unwrap_or(None)
             .and_then(|v| u64::try_from(v).ok());
 
-        PakeApp {
+        ManagedApp {
             id: row.get(0).unwrap_or_default(),
             name: row.get(1).unwrap_or_default(),
             app_type,
             autostart,
             url,
-            mode,
             show_nav,
+            open_window,
             remote_debugging_port,
             proxy_server,
             launch_command,
@@ -226,4 +229,17 @@ impl AppStore {
             created_at: row.get(9).unwrap_or_default(),
         }
     }
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    let mut stmt = match conn.prepare(&format!("PRAGMA table_info({})", table)) {
+        Ok(stmt) => stmt,
+        Err(_) => return false,
+    };
+    let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
+        Ok(rows) => rows,
+        Err(_) => return false,
+    };
+    let exists = rows.filter_map(Result::ok).any(|name| name == column);
+    exists
 }

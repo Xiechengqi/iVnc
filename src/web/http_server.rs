@@ -11,12 +11,13 @@
 use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::shared::SharedState;
 use axum::{
-    body::Body,
+    body::{to_bytes, Body, Bytes},
+    extract::ws::{Message as AxumWsMessage, WebSocket as AxumWebSocket},
     extract::{Query, State, WebSocketUpgrade},
-    http::{header, Request, StatusCode, Uri},
+    http::{header, HeaderMap, Method, Request, StatusCode, Uri},
     middleware,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 
@@ -35,7 +36,7 @@ use tokio::net::TcpListener;
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::pake_apps::api::PakeState;
+use crate::apps::api::AppsState;
 use crate::webrtc::SessionManager;
 
 /// Classify a TCP connection by its first bytes.
@@ -93,7 +94,7 @@ pub async fn run_http_server_with_webrtc(
     state: Arc<SharedState>,
     session_manager: Option<Arc<SessionManager>>,
     enable_tls: bool,
-    pake_state: Option<Arc<PakeState>>,
+    apps_state: Option<Arc<AppsState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", port);
 
@@ -128,6 +129,12 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/connections", get(connections_handler))
         .route("/api/connections/{id}/disconnect", post(disconnect_handler))
         .route("/api/ipv4", get(ipv4_handler))
+        .route("/api/proxy/status", get(proxy_status_handler))
+        .route("/api/proxy/restart", post(proxy_restart_handler))
+        .route("/proxy", get(proxy_panel_root_handler))
+        .route("/proxy/", any(proxy_panel_handler))
+        .route("/proxy/{*path}", any(proxy_panel_handler))
+        .route("/proxy-ws/{*path}", get(proxy_panel_ws_handler))
         .route("/terminal/ws", get(terminal_ws_handler));
 
     // Add WebRTC signaling endpoint if session manager is provided
@@ -177,10 +184,10 @@ pub async fn run_http_server_with_webrtc(
         info!("MCP Streamable HTTP endpoint enabled at /mcp");
     }
 
-    // Pake apps management routes
-    if let Some(_pake) = &pake_state {
+    // Apps management routes
+    if let Some(_apps) = &apps_state {
         app = app.route("/console", get(console_handler));
-        info!("Pake apps console enabled at /console");
+        info!("Apps console enabled at /console");
     }
 
     // Set up fallback for static files
@@ -195,15 +202,20 @@ pub async fn run_http_server_with_webrtc(
         app.fallback_service(static_service).with_state(state)
     };
 
-    // Merge pake routes after with_state (both are Router<()> now)
-    if let Some(ref pake) = pake_state {
-        app = app.merge(crate::pake_apps::api::router(pake.clone()));
+    // Merge apps routes after with_state (both are Router<()> now)
+    if let Some(ref apps) = apps_state {
+        app = app.merge(crate::apps::api::router(apps.clone()));
     }
 
-    let app = app.layer(middleware::from_fn_with_state(
-        auth_state,
-        basic_auth_middleware,
-    ));
+    let app = app
+        .layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            proxy_panel_absolute_path_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            auth_state,
+            basic_auth_middleware,
+        ));
 
     let listener = TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
@@ -740,7 +752,7 @@ async fn change_password_handler(
         .unwrap()
 }
 
-/// Console page handler - serves the Pake apps management UI
+/// Console page handler - serves the Apps management UI
 async fn console_handler(State(_state): State<Arc<SharedState>>) -> Response {
     // Check for embedded assets first, then fall back to filesystem
     let use_embedded = has_embedded_assets() && std::env::var("IVNC_WEB_ROOT").is_err();
@@ -764,6 +776,327 @@ async fn console_handler(State(_state): State<Arc<SharedState>>) -> Response {
             .body(Body::from("console.html not found"))
             .unwrap(),
     }
+}
+
+fn proxy_json_response(status: StatusCode, body: serde_json::Value) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn proxy_status_handler(State(state): State<Arc<SharedState>>) -> Response {
+    proxy_json_response(StatusCode::OK, json!(state.proxy_panel.status()))
+}
+
+async fn proxy_restart_handler(State(state): State<Arc<SharedState>>) -> Response {
+    match state.proxy_panel.restart().await {
+        Ok(pid) => proxy_json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
+        Err(err) => proxy_json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"ok": false, "error": err}),
+        ),
+    }
+}
+
+async fn proxy_panel_root_handler() -> Response {
+    Response::builder()
+        .status(StatusCode::TEMPORARY_REDIRECT)
+        .header(header::LOCATION, "/proxy/")
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn proxy_panel_handler(
+    State(state): State<Arc<SharedState>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    proxy_to_miao(state, method, uri, headers, body, true).await
+}
+
+async fn proxy_panel_ws_handler(
+    State(state): State<Arc<SharedState>>,
+    ws: WebSocketUpgrade,
+    uri: Uri,
+) -> Response {
+    if let Err(err) = state.proxy_panel.ensure_running().await {
+        return proxy_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ok": false, "error": err}),
+        );
+    }
+
+    let path_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let upstream_path = path_query.strip_prefix("/proxy-ws").unwrap_or(path_query);
+    let upstream_path = if upstream_path.is_empty() {
+        "/"
+    } else {
+        upstream_path
+    };
+    let upstream = format!(
+        "ws://127.0.0.1:{}{}",
+        crate::proxy_panel::MIAO_PORT,
+        upstream_path
+    );
+
+    ws.on_upgrade(move |socket| async move {
+        proxy_miao_websocket(socket, upstream).await;
+    })
+    .into_response()
+}
+
+async fn proxy_panel_absolute_path_middleware(
+    State(state): State<Arc<SharedState>>,
+    req: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    let referer_from_proxy = req
+        .headers()
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uri>().ok())
+        .map(|uri| uri.path().starts_with("/proxy"))
+        .unwrap_or(false);
+    let should_proxy = path.starts_with("/_next/")
+        || path.starts_with("/miao-inject/")
+        || (path.starts_with("/api/") && referer_from_proxy);
+
+    if !should_proxy {
+        return next.run(req).await;
+    }
+
+    let (parts, body) = req.into_parts();
+    proxy_to_miao(state, parts.method, parts.uri, parts.headers, body, false).await
+}
+
+async fn proxy_to_miao(
+    state: Arc<SharedState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+    strip_proxy_prefix: bool,
+) -> Response {
+    if let Err(err) = state.proxy_panel.ensure_running().await {
+        return proxy_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ok": false, "error": err}),
+        );
+    }
+
+    let path_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let upstream_path = if strip_proxy_prefix {
+        path_query.strip_prefix("/proxy").unwrap_or(path_query)
+    } else {
+        path_query
+    };
+    let upstream_path = if upstream_path.is_empty() {
+        "/"
+    } else {
+        upstream_path
+    };
+    let upstream = format!(
+        "http://127.0.0.1:{}{}",
+        crate::proxy_panel::MIAO_PORT,
+        upstream_path
+    );
+
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(60))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return proxy_json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"ok": false, "error": format!("proxy client error: {}", err)}),
+            )
+        }
+    };
+
+    let body_bytes = match to_bytes(body, 32 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return proxy_json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"ok": false, "error": format!("request body error: {}", err)}),
+            )
+        }
+    };
+
+    let mut req = client.request(method, upstream).body(body_bytes);
+    for (name, value) in headers.iter() {
+        if name == header::HOST
+            || name == header::CONTENT_LENGTH
+            || name == header::CONNECTION
+            || name == header::ACCEPT_ENCODING
+        {
+            continue;
+        }
+        req = req.header(name, value);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let mut bytes = match resp.bytes().await {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return proxy_json_response(
+                        StatusCode::BAD_GATEWAY,
+                        json!({"ok": false, "error": format!("upstream read error: {}", err)}),
+                    )
+                }
+            };
+            let is_html = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.contains("text/html"))
+                .unwrap_or(false);
+            if strip_proxy_prefix && is_html {
+                bytes = inject_proxy_panel_rewrite(bytes);
+            }
+            let mut builder = Response::builder().status(status);
+            for (name, value) in headers.iter() {
+                if name == header::CONTENT_LENGTH
+                    || name == header::CONNECTION
+                    || name == header::TRANSFER_ENCODING
+                {
+                    continue;
+                }
+                builder = builder.header(name, value);
+            }
+            builder.body(Body::from(bytes)).unwrap()
+        }
+        Err(err) => proxy_json_response(
+            StatusCode::BAD_GATEWAY,
+            json!({"ok": false, "error": format!("upstream proxy error: {}", err)}),
+        ),
+    }
+}
+
+async fn proxy_miao_websocket(client_socket: AxumWebSocket, upstream: String) {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+    let upstream_socket = match tokio_tungstenite::connect_async(&upstream).await {
+        Ok((socket, _)) => socket,
+        Err(err) => {
+            warn!("failed to connect miao websocket {}: {}", upstream, err);
+            return;
+        }
+    };
+
+    let (mut client_tx, mut client_rx) = client_socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream_socket.split();
+
+    loop {
+        tokio::select! {
+            msg = client_rx.next() => {
+                let Some(Ok(msg)) = msg else { break; };
+                let upstream_msg = match msg {
+                    AxumWsMessage::Text(text) => TungsteniteMessage::Text(text.to_string().into()),
+                    AxumWsMessage::Binary(data) => TungsteniteMessage::Binary(data.to_vec().into()),
+                    AxumWsMessage::Ping(data) => TungsteniteMessage::Ping(data.to_vec().into()),
+                    AxumWsMessage::Pong(data) => TungsteniteMessage::Pong(data.to_vec().into()),
+                    AxumWsMessage::Close(frame) => {
+                        let _ = upstream_tx.send(TungsteniteMessage::Close(frame.map(|frame| {
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: frame.code.into(),
+                                reason: frame.reason.to_string().into(),
+                            }
+                        }))).await;
+                        break;
+                    }
+                };
+                if upstream_tx.send(upstream_msg).await.is_err() {
+                    break;
+                }
+            }
+            msg = upstream_rx.next() => {
+                let Some(Ok(msg)) = msg else { break; };
+                let client_msg = match msg {
+                    TungsteniteMessage::Text(text) => AxumWsMessage::Text(text.to_string().into()),
+                    TungsteniteMessage::Binary(data) => AxumWsMessage::Binary(data.to_vec().into()),
+                    TungsteniteMessage::Ping(data) => AxumWsMessage::Ping(data.to_vec().into()),
+                    TungsteniteMessage::Pong(data) => AxumWsMessage::Pong(data.to_vec().into()),
+                    TungsteniteMessage::Close(frame) => {
+                        let _ = client_tx.send(AxumWsMessage::Close(frame.map(|frame| {
+                            axum::extract::ws::CloseFrame {
+                                code: frame.code.into(),
+                                reason: frame.reason.to_string().into(),
+                            }
+                        }))).await;
+                        break;
+                    }
+                    TungsteniteMessage::Frame(_) => continue,
+                };
+                if client_tx.send(client_msg).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
+    const SCRIPT: &str = r#"<script>
+(() => {
+  if (window.__ivncProxyPanelRewrite) return;
+  window.__ivncProxyPanelRewrite = true;
+  const mapPath = (value) => {
+    if (typeof value !== "string") return value;
+    if (value.startsWith("/api/") || value === "/login" || value.startsWith("/dashboard")) {
+      return `/proxy${value}`;
+    }
+    return value;
+  };
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    if (typeof input === "string") return nativeFetch(mapPath(input), init);
+    if (input instanceof Request) {
+      const url = new URL(input.url);
+      const mapped = mapPath(`${url.pathname}${url.search}`);
+      if (mapped !== `${url.pathname}${url.search}`) {
+        input = new Request(mapped, input);
+      }
+    }
+    return nativeFetch(input, init);
+  };
+  const NativeWebSocket = window.WebSocket;
+  window.WebSocket = function(url, protocols) {
+    try {
+      const parsed = new URL(String(url), window.location.href);
+      if (parsed.pathname.startsWith("/api/")) {
+        const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+        url = `${scheme}//${window.location.host}/proxy-ws${parsed.pathname}${parsed.search}`;
+      }
+    } catch (_) {}
+    return protocols ? new NativeWebSocket(url, protocols) : new NativeWebSocket(url);
+  };
+  window.WebSocket.prototype = NativeWebSocket.prototype;
+})();
+</script>"#;
+
+    let Ok(mut html) = String::from_utf8(bytes.to_vec()) else {
+        return bytes;
+    };
+    if html.contains("__ivncProxyPanelRewrite") {
+        return Bytes::from(html);
+    }
+    if let Some(index) = html.find("<head>") {
+        html.insert_str(index + "<head>".len(), SCRIPT);
+    } else {
+        html.insert_str(0, SCRIPT);
+    }
+    Bytes::from(html)
 }
 
 // ============================================================================
@@ -965,8 +1298,8 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
 
     // Step 0: Save running apps state (before upgrade)
     send_log(0, "保存运行中的应用状态...", "info", None).await;
-    if let Ok(pake_state) = crate::pake_apps::api::PakeState::new() {
-        if let Err(e) = pake_state.save_running_state() {
+    if let Ok(apps_state) = crate::apps::api::AppsState::new() {
+        if let Err(e) = apps_state.save_running_state() {
             log::warn!("Failed to save running apps state: {}", e);
             send_log(0, &format!("保存应用状态失败: {}", e), "error", None).await;
         } else {

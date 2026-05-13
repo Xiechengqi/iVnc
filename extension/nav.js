@@ -1,8 +1,8 @@
 (function () {
-  if (document.getElementById("pake-nav")) return;
+  if (document.getElementById("ivnc-nav")) return;
 
   var nav = document.createElement("div");
-  nav.id = "pake-nav";
+  nav.id = "ivnc-nav";
 
   var backBtn = document.createElement("button");
   backBtn.textContent = "\u25C0";
@@ -33,7 +33,7 @@
     var closeBtn = document.createElement("button");
     closeBtn.textContent = "\u2715";
     closeBtn.title = "Close (Alt+W)";
-    closeBtn.className = "pake-close";
+    closeBtn.className = "ivnc-close";
     closeBtn.addEventListener("click", function () {
       window.close();
     });

@@ -1,4 +1,4 @@
-#pake-nav {
+#ivnc-nav {
   position: fixed;
   top: 8px;
   left: 8px;
@@ -15,7 +15,7 @@
   user-select: none;
 }
 
-#pake-nav button {
+#ivnc-nav button {
   width: 28px;
   height: 28px;
   border: none;
@@ -31,38 +31,38 @@
   justify-content: center;
 }
 
-#pake-nav button:hover {
+#ivnc-nav button:hover {
   background: rgba(0, 0, 0, 0.08);
 }
 
-#pake-nav button:active {
+#ivnc-nav button:active {
   background: rgba(0, 0, 0, 0.14);
 }
 
-#pake-nav button.pake-close:hover {
+#ivnc-nav button.ivnc-close:hover {
   background: rgba(220, 38, 38, 0.8);
   color: #fff;
 }
 
 @media (prefers-color-scheme: dark) {
-  #pake-nav {
+  #ivnc-nav {
     background: rgba(40, 40, 40, 0.78);
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.32);
   }
 
-  #pake-nav button {
+  #ivnc-nav button {
     color: #ddd;
   }
 
-  #pake-nav button:hover {
+  #ivnc-nav button:hover {
     background: rgba(255, 255, 255, 0.1);
   }
 
-  #pake-nav button:active {
+  #ivnc-nav button:active {
     background: rgba(255, 255, 255, 0.18);
   }
 
-  #pake-nav button.pake-close:hover {
+  #ivnc-nav button.ivnc-close:hover {
     background: rgba(220, 38, 38, 0.8);
     color: #fff;
   }

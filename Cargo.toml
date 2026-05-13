@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 description = "iVnc - WebRTC + GStreamer + Wayland compositor streaming core"
 authors = ["iVnc Team"]
+build = "build.rs"
 
 [dependencies]
 # Async runtime
@@ -75,7 +76,7 @@ rcgen = { version = "0.13", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 
-# SQLite for Pake app management
+# SQLite for app management
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Standard directories
