@@ -1,4 +1,4 @@
-use super::app::{AppMode, PakeApp};
+use super::app::{AppType, PakeApp};
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
@@ -8,10 +8,9 @@ pub fn data_dir(app: &PakeApp) -> PathBuf {
     // has confinement that prevents writing to /root/.config
     let base = PathBuf::from("/tmp").join("ivnc-pake-apps").join(&app.id);
 
-    base.join(match app.mode {
-        Some(AppMode::Native) => "chrome",
-        Some(AppMode::Webview) => "webview",
-        None => "desktop",
+    base.join(match app.app_type {
+        AppType::WebApp => "chrome",
+        AppType::DesktopApp => "desktop",
     })
 }
 

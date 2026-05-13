@@ -29,21 +29,20 @@ impl AppType {
 #[serde(rename_all = "lowercase")]
 pub enum AppMode {
     Native,
-    Webview,
 }
 
 impl AppMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             AppMode::Native => "native",
-            AppMode::Webview => "webview",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "native" => Some(AppMode::Native),
-            "webview" => Some(AppMode::Webview),
+            // Keep old records and clients compatible after removing WebView mode.
+            "webview" => Some(AppMode::Native),
             _ => None,
         }
     }

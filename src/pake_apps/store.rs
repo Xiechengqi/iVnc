@@ -62,6 +62,10 @@ impl AppStore {
             "ALTER TABLE apps ADD COLUMN launch_wait_timeout_secs INTEGER",
             [],
         );
+        let _ = conn.execute(
+            "UPDATE apps SET mode='native' WHERE app_type='webapp' AND mode='webview'",
+            [],
+        );
 
         Ok(Self {
             conn: Mutex::new(conn),

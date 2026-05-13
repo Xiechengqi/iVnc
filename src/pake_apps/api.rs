@@ -6,7 +6,6 @@ use super::process::ProcessManager;
 use super::service_process::{self, ServiceProcessManager};
 use super::state_recovery::AppRunningState;
 use super::store::AppStore;
-use super::WebViewManager;
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -17,13 +16,12 @@ use axum::{
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct PakeState {
     pub store: Arc<AppStore>,
     pub process: ProcessManager,
     pub service: ServiceProcessManager,
-    pub webview: Arc<Mutex<WebViewManager>>,
 }
 
 impl PakeState {
@@ -34,13 +32,10 @@ impl PakeState {
         process.set_store(store.clone());
         let mut service = ServiceProcessManager::new();
         service.set_store(store.clone());
-        let mut webview_mgr = WebViewManager::new();
-        webview_mgr.set_store(store.clone());
         Ok(Self {
             store,
             process,
             service,
-            webview: Arc::new(Mutex::new(webview_mgr)),
         })
     }
 
@@ -127,21 +122,12 @@ impl PakeState {
 
     async fn start_app_processes(&self, app: &PakeApp) -> Result<Option<u32>, String> {
         let service_pid = self.service.start_and_wait(app).await?;
-        let viewer_pid = match app.mode {
-            Some(AppMode::Native) | None => Some(self.process.start(app)?),
-            Some(AppMode::Webview) => {
-                self.webview.lock().unwrap().start(app)?;
-                None
-            }
-        };
+        let viewer_pid = Some(self.process.start(app)?);
         Ok(viewer_pid.or(service_pid))
     }
 
     fn stop_app_processes(&self, app: &PakeApp) -> Result<(), String> {
-        let viewer_result = match app.mode {
-            Some(AppMode::Native) | None => self.process.stop(&app.id),
-            Some(AppMode::Webview) => self.webview.lock().unwrap().stop(&app.id),
-        };
+        let viewer_result = self.process.stop(&app.id);
         let service_result = self.service.stop(&app.id);
 
         match (viewer_result, service_result) {
@@ -165,10 +151,7 @@ impl PakeState {
     }
 
     fn app_status(&self, app: &PakeApp) -> AppStatus {
-        let viewer_status = match app.mode {
-            Some(AppMode::Native) | None => self.process.status(&app.id),
-            Some(AppMode::Webview) => self.webview.lock().unwrap().status(&app.id),
-        };
+        let viewer_status = self.process.status(&app.id);
         if service_process::has_launch_command(app) {
             let service_status = self.service.status(&app.id);
             match (service_status, viewer_status) {
@@ -182,11 +165,9 @@ impl PakeState {
     }
 
     fn app_pid(&self, app: &PakeApp) -> Option<u32> {
-        match app.mode {
-            Some(AppMode::Native) | None => self.process.pid(&app.id),
-            Some(AppMode::Webview) => self.service.pid(&app.id),
-        }
-        .or_else(|| self.service.pid(&app.id))
+        self.process
+            .pid(&app.id)
+            .or_else(|| self.service.pid(&app.id))
     }
 }
 
@@ -269,7 +250,7 @@ fn app_json(app: &PakeApp, status: &str, pid: Option<u32>, data_bytes: u64) -> s
     match app.app_type {
         AppType::WebApp => {
             obj["url"] = json!(app.url);
-            obj["mode"] = json!(app.mode.map(|m| m.as_str()));
+            obj["mode"] = json!(AppMode::Native.as_str());
             obj["show_nav"] = json!(app.show_nav);
             obj["remote_debugging_port"] = json!(app.remote_debugging_port);
             obj["proxy_server"] = json!(app.proxy_server);
@@ -323,7 +304,6 @@ async fn add_app(
 
     let (
         url,
-        mode,
         show_nav,
         remote_debugging_port,
         proxy_server,
@@ -340,11 +320,6 @@ async fn add_app(
                 Some(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
                 _ => return err_response(StatusCode::BAD_REQUEST, "missing url for webapp"),
             };
-            let mode = body
-                .get("mode")
-                .and_then(|v| v.as_str())
-                .and_then(AppMode::from_str)
-                .or(Some(AppMode::Native));
             let show_nav = body
                 .get("show_nav")
                 .and_then(|v| v.as_bool())
@@ -380,7 +355,6 @@ async fn add_app(
                 .filter(|secs| *secs > 0);
             (
                 url,
-                mode,
                 show_nav,
                 remote_debugging_port,
                 proxy_server,
@@ -406,7 +380,6 @@ async fn add_app(
             let env_vars = parse_env_vars(body.get("env_vars"));
             (
                 None,
-                None,
                 false,
                 None,
                 None,
@@ -431,7 +404,11 @@ async fn add_app(
         app_type,
         autostart,
         url,
-        mode,
+        mode: if app_type == AppType::WebApp {
+            Some(AppMode::Native)
+        } else {
+            None
+        },
         show_nav,
         remote_debugging_port,
         proxy_server,
@@ -501,9 +478,7 @@ async fn update_app(
             if let Some(url_str) = body.get("url").and_then(|v| v.as_str()) {
                 app.url = Some(url_str.to_string());
             }
-            if let Some(mode_str) = body.get("mode").and_then(|v| v.as_str()) {
-                app.mode = AppMode::from_str(mode_str);
-            }
+            app.mode = Some(AppMode::Native);
             if let Some(show_nav) = body.get("show_nav").and_then(|v| v.as_bool()) {
                 app.show_nav = show_nav;
             }
@@ -580,7 +555,7 @@ async fn start_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>) 
     match state.start_app_processes(&app).await {
         Ok(pid) => json_response(
             StatusCode::OK,
-            json!({"ok": true, "pid": pid, "mode": app.mode.map(|m| m.as_str())}),
+            json!({"ok": true, "pid": pid, "mode": AppMode::Native.as_str()}),
         ),
         Err(e) => {
             let _ = state.stop_app_processes(&app);
@@ -610,7 +585,7 @@ async fn restart_app(State(state): State<Arc<PakeState>>, Path(id): Path<String>
     match state.restart_app_processes(&app).await {
         Ok(pid) => json_response(
             StatusCode::OK,
-            json!({"ok": true, "pid": pid, "mode": app.mode.map(|m| m.as_str())}),
+            json!({"ok": true, "pid": pid, "mode": AppMode::Native.as_str()}),
         ),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }

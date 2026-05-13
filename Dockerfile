@@ -27,10 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libinput-dev \
     libudev-dev \
     libseat-dev \
-    libgtk-3-dev \
-    libwebkit2gtk-4.1-dev \
-    libsoup-3.0-dev \
-    libjavascriptcoregtk-4.1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -41,7 +37,7 @@ COPY extension ./extension
 COPY web/ivnc ./web/ivnc
 COPY --from=web-builder /build/web/ivnc/dist ./web/ivnc/dist
 
-RUN cargo build --release --no-default-features --features mcp --bin ivnc --bin ivnc-webview
+RUN cargo build --release --no-default-features --features mcp --bin ivnc
 
 
 FROM ubuntu:22.04
@@ -60,23 +56,22 @@ RUN apt-get update && \
     libxkbcommon0 \
     libxcb1 \
     libx11-6 \
-    libgtk-3-0 \
-    libwebkit2gtk-4.1-0 \
-    libsoup-3.0-0 \
-    libjavascriptcoregtk-4.1-0 \
+    wget \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-x \
+    && wget -O /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/google-chrome-stable_current_amd64.deb \
+    && rm -f /tmp/google-chrome-stable_current_amd64.deb \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/ivnc /usr/local/bin/ivnc
-COPY --from=builder /build/target/release/ivnc-webview /usr/local/bin/ivnc-webview
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY config.example.toml /etc/ivnc.toml
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc /usr/local/bin/ivnc-webview
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc
 
 ENV XDG_RUNTIME_DIR=/run/user/0
 

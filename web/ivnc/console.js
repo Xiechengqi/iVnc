@@ -37,8 +37,7 @@ const I18N = {
         namePlaceholder: 'App display name',
         appType: 'App Type',
         autostart: 'Autostart',
-        mode: 'Mode',
-        nav: 'Show navigation bar (Native only)',
+        nav: 'Show navigation bar',
         advanced: 'Advanced Settings',
         debugPort: 'Debugging Port (Optional, default: none)',
         proxyServer: 'Proxy Server (Optional, default: none)',
@@ -110,8 +109,7 @@ const I18N = {
         namePlaceholder: '应用显示名称',
         appType: '应用类型',
         autostart: '开机启动',
-        mode: '模式',
-        nav: '显示导航栏（仅 Native 模式）',
+        nav: '显示导航栏',
         advanced: '高级配置',
         debugPort: 'Debugging Port（可选，默认值：无）',
         proxyServer: 'Proxy Server（可选，默认值：无）',
@@ -193,7 +191,6 @@ function applyTranslations() {
     document.querySelector('#f-app-type option[value="webapp"]').textContent = t('webappOption');
     document.querySelector('#f-app-type option[value="desktop"]').textContent = t('desktopOption');
     document.getElementById('label-autostart').textContent = t('autostart');
-    document.getElementById('label-mode').textContent = t('mode');
     document.getElementById('label-nav').textContent = t('nav');
     document.getElementById('advanced-title').textContent = t('advanced');
     document.getElementById('label-debug-port').textContent = t('debugPort');
@@ -310,7 +307,6 @@ function showAdd() {
     document.getElementById('f-app-type').value = 'webapp';
     document.getElementById('f-app-type').disabled = false;
     document.getElementById('f-url').value = '';
-    document.getElementById('f-mode').value = 'webview';
     document.getElementById('f-autostart').checked = false;
     document.getElementById('f-nav').checked = false;
     document.getElementById('f-debug-port').value = '';
@@ -324,7 +320,6 @@ function showAdd() {
     document.getElementById('f-env').value = '';
 
     updateAppTypeVisibility();
-    updateNavVisibility();
     modal.classList.add('show');
 }
 
@@ -348,7 +343,6 @@ async function showEdit(id) {
             document.getElementById('f-env').value = envToText(a.env_vars);
         } else {
             document.getElementById('f-url').value = a.url || '';
-            document.getElementById('f-mode').value = a.mode || 'webview';
             document.getElementById('f-nav').checked = a.show_nav || false;
             document.getElementById('f-debug-port').value = a.remote_debugging_port || '';
             document.getElementById('f-proxy-server').value = a.proxy_server || '';
@@ -359,7 +353,6 @@ async function showEdit(id) {
             document.getElementById('f-launch-env').value = envToText(a.launch_env_vars);
         }
         updateAppTypeVisibility();
-        updateNavVisibility();
         modal.classList.add('show');
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
@@ -422,7 +415,6 @@ async function saveApp() {
         body.url = document.getElementById('f-url').value.trim();
         if (!validateUrl(body.url)) return toast(t('invalidUrl'), 'err');
 
-        body.mode = document.getElementById('f-mode').value;
         body.show_nav = document.getElementById('f-nav').checked;
         const debugPort = document.getElementById('f-debug-port').value;
         body.remote_debugging_port = debugPort ? parseInt(debugPort, 10) : null;
@@ -567,14 +559,6 @@ function updateAppTypeVisibility() {
     }
 }
 
-function updateNavVisibility() {
-    const mode = document.getElementById('f-mode').value;
-    const isWebView = mode === 'webview';
-    document.getElementById('nav-row').style.display = isWebView ? 'none' : 'flex';
-    document.getElementById('advanced-settings-group').style.display = isWebView ? 'none' : 'block';
-    document.getElementById('f-nav').disabled = isWebView;
-}
-
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('add-app-btn').addEventListener('click', showAdd);
     document.getElementById('lang-toggle').addEventListener('click', () => {
@@ -583,7 +567,6 @@ document.addEventListener('DOMContentLoaded', () => {
         load();
     });
     document.getElementById('f-app-type').addEventListener('change', updateAppTypeVisibility);
-    document.getElementById('f-mode').addEventListener('change', updateNavVisibility);
 
     document.querySelectorAll('.btn-cancel').forEach(btn => {
         btn.addEventListener('click', (e) => {

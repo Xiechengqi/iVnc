@@ -1,6 +1,6 @@
 //! Pake application management module
 //!
-//! Manages web-to-desktop applications with native (Chrome --app) and webview modes.
+//! Manages web-to-desktop applications with native Chrome windows.
 
 pub mod api;
 pub mod app;
@@ -11,7 +11,3 @@ pub mod process;
 pub mod service_process;
 pub mod state_recovery;
 pub mod store;
-pub mod webview_manager_process;
-
-// Re-export the process-based WebViewManager as the default
-pub use webview_manager_process::WebViewManager;

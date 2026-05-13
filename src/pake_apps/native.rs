@@ -1,4 +1,4 @@
-use super::app::{AppMode, AppType, PakeApp};
+use super::app::{AppType, PakeApp};
 use super::datadir;
 use log::info;
 use std::fs;
@@ -41,11 +41,7 @@ pub fn log_path(app_id: &str) -> std::path::PathBuf {
 pub fn build_command(app: &PakeApp) -> Result<Command, String> {
     let mut cmd = match app.app_type {
         AppType::DesktopApp => build_desktop_command(app),
-        AppType::WebApp => match app.mode {
-            Some(AppMode::Native) => build_native_command(app),
-            Some(AppMode::Webview) => build_webview_command(app),
-            None => Err("WebApp must have a mode".to_string()),
-        },
+        AppType::WebApp => build_native_command(app),
     }?;
     configure_process_group(&mut cmd);
     Ok(cmd)
@@ -184,11 +180,6 @@ fn build_native_command(app: &PakeApp) -> Result<Command, String> {
     }
 
     Ok(cmd)
-}
-
-fn build_webview_command(app: &PakeApp) -> Result<Command, String> {
-    // For webview mode, we also use Chrome in app mode for now.
-    build_native_command(app)
 }
 
 fn build_desktop_command(app: &PakeApp) -> Result<Command, String> {
