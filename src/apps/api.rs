@@ -123,41 +123,19 @@ impl AppsState {
     async fn start_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
         match app.app_type {
             AppType::DesktopApp => Ok(Some(self.process.start(app)?)),
-            AppType::WebApp if !app.open_window => {
+            AppType::WebApp => {
                 if !service_process::has_launch_command(app) {
-                    return Err("background web app requires launch_command".to_string());
+                    return Err("web app requires launch_command".to_string());
                 }
                 self.service.start_and_wait(app).await
-            }
-            AppType::WebApp => {
-                let service_pid = self.service.start_and_wait(app).await?;
-                let viewer_pid = Some(self.process.start(app)?);
-                Ok(viewer_pid.or(service_pid))
             }
         }
     }
 
     fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
-        if app.app_type == AppType::WebApp && !app.open_window {
-            let _ = self.process.stop(&app.id);
-            return self.service.stop(&app.id);
-        }
-
-        let viewer_result = self.process.stop(&app.id);
-        let service_result = self.service.stop(&app.id);
-
-        match (viewer_result, service_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(viewer_err), Ok(())) if service_process::has_launch_command(app) => {
-                if viewer_err == "App is not running" {
-                    Ok(())
-                } else {
-                    Err(viewer_err)
-                }
-            }
-            (Err(viewer_err), Ok(())) => Err(viewer_err),
-            (Ok(()), Err(service_err)) => Err(service_err),
-            (Err(viewer_err), Err(_)) => Err(viewer_err),
+        match app.app_type {
+            AppType::DesktopApp => self.process.stop(&app.id),
+            AppType::WebApp => self.service.stop(&app.id),
         }
     }
 
@@ -167,36 +145,23 @@ impl AppsState {
     }
 
     fn app_status(&self, app: &ManagedApp) -> AppStatus {
-        let viewer_status = self.process.status(&app.id);
-        if app.app_type == AppType::DesktopApp {
-            return viewer_status;
-        }
-        if service_process::has_launch_command(app) {
-            let service_status = self.service.status(&app.id);
-            if !app.open_window {
-                return service_status;
-            }
-            match (service_status, viewer_status) {
-                (AppStatus::Crashed, _) | (_, AppStatus::Crashed) => AppStatus::Crashed,
-                (AppStatus::Running, AppStatus::Running) => AppStatus::Running,
-                _ => AppStatus::Stopped,
-            }
-        } else {
-            viewer_status
+        match app.app_type {
+            AppType::DesktopApp => self.process.status(&app.id),
+            AppType::WebApp => self.service.status(&app.id),
         }
     }
 
     fn app_pid(&self, app: &ManagedApp) -> Option<u32> {
-        if app.app_type == AppType::WebApp && !app.open_window {
-            return self.service.pid(&app.id);
+        match app.app_type {
+            AppType::DesktopApp => self.process.pid(&app.id),
+            AppType::WebApp => self.service.pid(&app.id),
         }
-        self.process
-            .pid(&app.id)
-            .or_else(|| self.service.pid(&app.id))
     }
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
+    const CHROME_COMMAND: &str = "google-chrome --no-sandbox --disable-dev-shm-usage";
+
     for app in store.list()? {
         let is_builtin_terminal = app.id == "builtin-terminal"
             || (app.name == "Terminal" && app.exec_command.as_deref() == Some("alacritty"));
@@ -207,6 +172,29 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
             }
         }
     }
+    if store.get("builtin-chrome").is_err() {
+        let app = ManagedApp {
+            id: "builtin-chrome".to_string(),
+            name: "Chrome".to_string(),
+            app_type: AppType::DesktopApp,
+            autostart: false,
+            url: None,
+            launch_command: None,
+            launch_env_vars: None,
+            launch_cwd: None,
+            launch_wait_url: None,
+            launch_wait_timeout_secs: None,
+            exec_command: Some(CHROME_COMMAND.to_string()),
+            env_vars: None,
+            created_at: chrono_now(),
+        };
+        match store.add(&app) {
+            Ok(()) => log::info!("Added built-in Chrome desktop app"),
+            Err(err) if err.contains("already exists") => {}
+            Err(err) => return Err(err),
+        }
+    }
+    desktop_entry::ensure_desktop_entry("Chrome", CHROME_COMMAND)?;
     Ok(())
 }
 
@@ -280,10 +268,6 @@ fn app_json(
     match app.app_type {
         AppType::WebApp => {
             obj["url"] = json!(app.url);
-            obj["show_nav"] = json!(app.show_nav);
-            obj["open_window"] = json!(app.open_window);
-            obj["remote_debugging_port"] = json!(app.remote_debugging_port);
-            obj["proxy_server"] = json!(app.proxy_server);
             obj["launch_command"] = json!(app.launch_command);
             obj["launch_env_vars"] = json!(app.launch_env_vars);
             obj["launch_cwd"] = json!(app.launch_cwd);
@@ -334,10 +318,6 @@ async fn add_app(
 
     let (
         url,
-        show_nav,
-        open_window,
-        remote_debugging_port,
-        proxy_server,
         launch_command,
         launch_env_vars,
         launch_cwd,
@@ -351,28 +331,20 @@ async fn add_app(
                 Some(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
                 _ => return err_response(StatusCode::BAD_REQUEST, "missing url for webapp"),
             };
-            let show_nav = body
-                .get("show_nav")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let open_window = body
-                .get("open_window")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let remote_debugging_port = body
-                .get("remote_debugging_port")
-                .and_then(|v| v.as_u64())
-                .map(|p| p as u16);
-            let proxy_server = body
-                .get("proxy_server")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let launch_command = body
+            let launch_command = match body
                 .get("launch_command")
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+                .filter(|s| !s.is_empty())
+            {
+                Some(cmd) => Some(cmd),
+                None => {
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        "missing launch_command for webapp",
+                    )
+                }
+            };
             let launch_env_vars = parse_env_vars(body.get("launch_env_vars"));
             let launch_cwd = body
                 .get("launch_cwd")
@@ -388,18 +360,8 @@ async fn add_app(
                 .get("launch_wait_timeout_secs")
                 .and_then(|v| v.as_u64())
                 .filter(|secs| *secs > 0);
-            if !open_window && launch_command.is_none() {
-                return err_response(
-                    StatusCode::BAD_REQUEST,
-                    "background web app requires launch_command",
-                );
-            }
             (
                 url,
-                show_nav,
-                open_window,
-                remote_debugging_port,
-                proxy_server,
                 launch_command,
                 launch_env_vars,
                 launch_cwd,
@@ -420,20 +382,7 @@ async fn add_app(
                 }
             };
             let env_vars = parse_env_vars(body.get("env_vars"));
-            (
-                None,
-                false,
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                exec_command,
-                env_vars,
-            )
+            (None, None, None, None, None, None, exec_command, env_vars)
         }
     };
     let autostart = body
@@ -447,10 +396,6 @@ async fn add_app(
         app_type,
         autostart,
         url,
-        show_nav,
-        open_window,
-        remote_debugging_port,
-        proxy_server,
         launch_command,
         launch_env_vars,
         launch_cwd,
@@ -517,26 +462,14 @@ async fn update_app(
             if let Some(url_str) = body.get("url").and_then(|v| v.as_str()) {
                 app.url = Some(url_str.to_string());
             }
-            if let Some(show_nav) = body.get("show_nav").and_then(|v| v.as_bool()) {
-                app.show_nav = show_nav;
-            }
-            if let Some(open_window) = body.get("open_window").and_then(|v| v.as_bool()) {
-                app.open_window = open_window;
-            }
-            app.remote_debugging_port = body
-                .get("remote_debugging_port")
-                .and_then(|v| v.as_u64())
-                .map(|p| p as u16);
-            app.proxy_server = body
-                .get("proxy_server")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            app.launch_command = body
+            if let Some(command) = body
                 .get("launch_command")
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+                .filter(|s| !s.is_empty())
+            {
+                app.launch_command = Some(command);
+            }
             app.launch_env_vars = parse_env_vars(body.get("launch_env_vars"));
             app.launch_cwd = body
                 .get("launch_cwd")
@@ -552,15 +485,22 @@ async fn update_app(
                 .get("launch_wait_timeout_secs")
                 .and_then(|v| v.as_u64())
                 .filter(|secs| *secs > 0);
-            if !app.open_window && !service_process::has_launch_command(&app) {
-                return err_response(
-                    StatusCode::BAD_REQUEST,
-                    "background web app requires launch_command",
-                );
+            if app.url.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                return err_response(StatusCode::BAD_REQUEST, "missing url for webapp");
+            }
+            if !service_process::has_launch_command(&app) {
+                return err_response(StatusCode::BAD_REQUEST, "missing launch_command for webapp");
             }
         }
         AppType::DesktopApp => {
             if let Some(exec) = body.get("exec_command").and_then(|v| v.as_str()) {
+                let exec = exec.trim();
+                if exec.is_empty() {
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        "missing exec_command for desktop app",
+                    );
+                }
                 app.exec_command = Some(exec.to_string());
             }
             app.env_vars = parse_env_vars(body.get("env_vars"));

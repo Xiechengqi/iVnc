@@ -31,11 +31,6 @@ use crate::compositor::{
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     Compositor,
 };
-use std::collections::HashSet;
-
-fn is_windowed_managed_web_app(app_id: &str) -> bool {
-    matches!(app_id, "ivnc-webapp-windowed" | "ivnc-pake-windowed")
-}
 
 /// Check if `child` is a descendant process of `ancestor` via /proc ppid chain.
 fn is_descendant_of(child: i32, ancestor: i32) -> bool {
@@ -128,39 +123,13 @@ impl XdgShellHandler for Compositor {
         self.space.map_element(window, (0, 0), false);
 
         // Main window (not dialog): set fullscreen to fill the screen.
-        // Exception: managed web app windows with show_nav=true need to keep their browser toolbar.
         if !is_dialog {
-            let app_id = with_states(surface.wl_surface(), |states| {
-                states
-                    .data_map
-                    .get::<XdgToplevelSurfaceData>()
-                    .and_then(|data| data.lock().ok())
-                    .and_then(|data| data.app_id.clone())
-            })
-            .unwrap_or_default();
-
-            let should_fullscreen = !is_windowed_managed_web_app(&app_id);
-
-            if should_fullscreen {
-                if let Some(output_geo) = output_geo {
-                    surface.with_pending_state(|state| {
-                        state.states.set(xdg_toplevel::State::Fullscreen);
-                        state.size = Some((output_geo.size.w, output_geo.size.h).into());
-                    });
-                    surface.send_pending_configure();
-                }
-            } else {
-                // For windowed web apps: set size to fill screen but don't set Fullscreen state.
-                if let Some(output_geo) = output_geo {
-                    surface.with_pending_state(|state| {
-                        state.size = Some((output_geo.size.w, output_geo.size.h).into());
-                    });
-                    surface.send_pending_configure();
-                }
-                log::info!(
-                    "new_toplevel: windowed managed app detected (app_id={}), not setting fullscreen",
-                    app_id
-                );
+            if let Some(output_geo) = output_geo {
+                surface.with_pending_state(|state| {
+                    state.states.set(xdg_toplevel::State::Fullscreen);
+                    state.size = Some((output_geo.size.w, output_geo.size.h).into());
+                });
+                surface.send_pending_configure();
             }
         }
 
@@ -376,7 +345,6 @@ impl XdgShellHandler for Compositor {
 
         let proto_id = surface.wl_surface().id().protocol_id();
         self.dialog_surfaces.remove(&proto_id);
-        self.browser_unfullscreened.remove(&proto_id);
 
         // Remove only the destroyed surface from window registry (not siblings)
         let surf_id = surface.wl_surface().id();
@@ -451,14 +419,13 @@ pub fn handle_commit(
     space: &Space<Window>,
     surface: &WlSurface,
     taskbar_dirty: &mut bool,
-    browser_unfullscreened: &mut HashSet<u32>,
 ) {
     if let Some(window) = space
         .elements()
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)
         .cloned()
     {
-        let (initial_configure_sent, identity_available, app_id) = with_states(surface, |states| {
+        let (initial_configure_sent, identity_available) = with_states(surface, |states| {
             let data = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
@@ -467,25 +434,8 @@ pub fn handle_commit(
                 .unwrap();
             // Title or app_id changes trigger taskbar update
             let identity_available = data.title.is_some() || data.app_id.is_some();
-            let app_id = data.app_id.clone().unwrap_or_default();
-            (data.initial_configure_sent, identity_available, app_id)
+            (data.initial_configure_sent, identity_available)
         });
-
-        // If this is a windowed managed app (show_nav=true), unfullscreen it to preserve the browser toolbar.
-        let surface_id = surface.id().protocol_id();
-        if is_windowed_managed_web_app(&app_id) && browser_unfullscreened.insert(surface_id) {
-            log::debug!(
-                "handle_commit: detected windowed managed web app, ensuring non-fullscreen (app_id={}, sid={})",
-                app_id,
-                surface_id
-            );
-            let toplevel = window.toplevel().unwrap();
-            toplevel.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Fullscreen);
-                // Keep the size but remove fullscreen state
-            });
-            toplevel.send_pending_configure();
-        }
 
         if !initial_configure_sent {
             window.toplevel().unwrap().send_configure();

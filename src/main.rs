@@ -45,27 +45,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Look up a .desktop file whose StartupWMClass matches the given app_id,
 /// and return its Name= value. Returns None if no match found.
-/// For managed web apps, extract the app name from the window title.
-fn resolve_display_name(app_id: &str, title: &str) -> Option<String> {
+fn resolve_display_name(app_id: &str) -> Option<String> {
     if app_id.is_empty() {
-        return None;
-    }
-
-    // Special handling for managed web apps: extract name from window title
-    // Chrome window titles are typically: "Page Title - Google Chrome" or "Page Title - Chromium"
-    if app_id == "ivnc-webapp-windowed" || app_id == "ivnc-webapp" {
-        // Try to extract the page title before " - Google Chrome" or " - Chromium"
-        if let Some(pos) = title.rfind(" - ") {
-            let page_title = &title[..pos];
-            // Skip generic titles like "Untitled"
-            if !page_title.is_empty() && page_title != "Untitled" {
-                return Some(page_title.to_string());
-            }
-        }
-        // Fallback: return the full title if we can't parse it
-        if !title.is_empty() && title != "Untitled" {
-            return Some(title.to_string());
-        }
         return None;
     }
 
@@ -705,7 +686,7 @@ fn run(
                     "id": idx,
                     "title": title,
                     "app_id": app_id,
-                    "display_name": resolve_display_name(&app_id, &title),
+                    "display_name": resolve_display_name(&app_id),
                     "focused": is_focused,
                 }));
             }

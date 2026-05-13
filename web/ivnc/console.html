@@ -63,34 +63,12 @@
                     </div>
                 </div>
 
-                <div class="form-group" id="nav-row" style="display:flex; align-items:center; gap:8px;">
-                    <input type="checkbox" id="f-nav" style="width:auto; margin:0;">
-                    <label for="f-nav" id="label-nav" style="margin:0; font-weight: 500;">显示导航栏</label>
-                </div>
-                <div class="form-group" id="open-window-row" style="display:flex; align-items:center; gap:8px;">
-                    <input type="checkbox" id="f-open-window" style="width:auto; margin:0;">
-                    <label for="f-open-window" id="label-open-window" style="margin:0; font-weight: 500;">启动后打开网页窗口</label>
-                </div>
                 <div id="webapp-autostart-slot"></div>
-
-                <div id="advanced-settings-group">
-                    <div class="advanced-title" id="advanced-title">高级配置</div>
-                    <div class="form-row">
-                        <div class="form-group" id="debug-port-row">
-                            <label id="label-debug-port">Debugging Port（可选，默认值：无）</label>
-                            <input type="number" id="f-debug-port" placeholder="可选" min="1024" max="65535">
-                        </div>
-                        <div class="form-group" id="proxy-server-row">
-                            <label id="label-proxy-server">Proxy Server（可选，默认值：无）</label>
-                            <input type="text" id="f-proxy-server" placeholder="socks5://127.0.0.1:1080">
-                        </div>
-                    </div>
-                </div>
 
                 <div id="launch-settings-group">
                     <div class="advanced-title" id="launch-title">启动服务</div>
                     <div class="form-group">
-                        <label id="label-launch-command">启动命令（可选，默认值：无）</label>
+                        <label id="label-launch-command">后台启动命令</label>
                         <input type="text" id="f-launch-command" placeholder="python3 app.py --host 0.0.0.0 --port 7860">
                     </div>
                     <div class="form-row">

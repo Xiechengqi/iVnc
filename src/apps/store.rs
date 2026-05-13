@@ -23,14 +23,10 @@ impl AppStore {
                 name TEXT NOT NULL UNIQUE,
                 url TEXT,
                 autostart INTEGER DEFAULT 0,
-                show_nav INTEGER DEFAULT 0,
-                open_window INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 app_type TEXT DEFAULT 'webapp',
                 exec_command TEXT,
                 env_vars TEXT,
-                remote_debugging_port INTEGER,
-                proxy_server TEXT,
                 launch_command TEXT,
                 launch_env_vars TEXT,
                 launch_cwd TEXT,
@@ -39,39 +35,6 @@ impl AppStore {
             );",
         )
         .map_err(|e| format!("Failed to init db: {}", e))?;
-
-        // Migrations
-        let had_open_window = column_exists(&conn, "apps", "open_window");
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN show_nav INTEGER DEFAULT 0", []);
-        let _ = conn.execute(
-            "ALTER TABLE apps ADD COLUMN open_window INTEGER DEFAULT 0",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE apps ADD COLUMN app_type TEXT DEFAULT 'webapp'",
-            [],
-        );
-        if !had_open_window {
-            let _ = conn.execute(
-                "UPDATE apps SET open_window=1 WHERE app_type='webapp' OR app_type IS NULL",
-                [],
-            );
-        }
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN exec_command TEXT", []);
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN env_vars TEXT", []);
-        let _ = conn.execute(
-            "ALTER TABLE apps ADD COLUMN remote_debugging_port INTEGER",
-            [],
-        );
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN proxy_server TEXT", []);
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN launch_command TEXT", []);
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN launch_env_vars TEXT", []);
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN launch_cwd TEXT", []);
-        let _ = conn.execute("ALTER TABLE apps ADD COLUMN launch_wait_url TEXT", []);
-        let _ = conn.execute(
-            "ALTER TABLE apps ADD COLUMN launch_wait_timeout_secs INTEGER",
-            [],
-        );
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -102,12 +65,12 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, autostart, show_nav, open_window, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 app.id, app.name, app.app_type.as_str(), url,
-                app.autostart as i32, app.show_nav as i32, app.open_window as i32, exec_command, env_vars_json, app.created_at,
-                app.remote_debugging_port, app.proxy_server, app.launch_command, launch_env_vars_json,
+                app.autostart as i32, exec_command, env_vars_json, app.created_at,
+                app.launch_command, launch_env_vars_json,
                 app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64),
             ],
         ).map_err(|e| {
@@ -137,8 +100,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = conn.execute(
-            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, show_nav=?4, open_window=?5, exec_command=?6, env_vars=?7, remote_debugging_port=?8, proxy_server=?9, launch_command=?10, launch_env_vars=?11, launch_cwd=?12, launch_wait_url=?13, launch_wait_timeout_secs=?14 WHERE id=?15",
-            params![app.app_type.as_str(), url, app.autostart as i32, app.show_nav as i32, app.open_window as i32, exec_command, env_vars_json, app.remote_debugging_port, app.proxy_server, app.launch_command, launch_env_vars_json, app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64), app.id],
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_url=?9, launch_wait_timeout_secs=?10 WHERE id=?11",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command, launch_env_vars_json, app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64), app.id],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", app.id));
@@ -160,7 +123,7 @@ impl AppStore {
     pub fn get(&self, id: &str) -> Result<ManagedApp, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, autostart, show_nav, open_window, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).map_err(|e| format!("App not found: {}", e))
@@ -169,7 +132,7 @@ impl AppStore {
     pub fn list(&self) -> Result<Vec<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, app_type, url, autostart, show_nav, open_window, exec_command, env_vars, created_at, remote_debugging_port, proxy_server, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps ORDER BY created_at"
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -186,26 +149,19 @@ impl AppStore {
 
         let url: Option<String> = row.get(3).ok().filter(|s: &String| !s.is_empty());
         let autostart = row.get::<_, i32>(4).unwrap_or(0) != 0;
-        let show_nav = row.get::<_, i32>(5).unwrap_or(0) != 0;
-        let open_window = row.get::<_, i32>(6).unwrap_or(0) != 0;
 
-        let exec_command: Option<String> = row.get(7).ok().filter(|s: &String| !s.is_empty());
-        let env_vars_json: Option<String> = row.get(8).ok().filter(|s: &String| !s.is_empty());
+        let exec_command: Option<String> = row.get(5).ok().filter(|s: &String| !s.is_empty());
+        let env_vars_json: Option<String> = row.get(6).ok().filter(|s: &String| !s.is_empty());
         let env_vars = env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
-        let remote_debugging_port: Option<u16> = row
-            .get::<_, Option<i32>>(10)
-            .unwrap_or(None)
-            .map(|p| p as u16);
-        let proxy_server: Option<String> = row.get(11).ok().filter(|s: &String| !s.is_empty());
-        let launch_command: Option<String> = row.get(12).ok().filter(|s: &String| !s.is_empty());
+        let launch_command: Option<String> = row.get(8).ok().filter(|s: &String| !s.is_empty());
         let launch_env_vars_json: Option<String> =
-            row.get(13).ok().filter(|s: &String| !s.is_empty());
+            row.get(9).ok().filter(|s: &String| !s.is_empty());
         let launch_env_vars =
             launch_env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
-        let launch_cwd: Option<String> = row.get(14).ok().filter(|s: &String| !s.is_empty());
-        let launch_wait_url: Option<String> = row.get(15).ok().filter(|s: &String| !s.is_empty());
+        let launch_cwd: Option<String> = row.get(10).ok().filter(|s: &String| !s.is_empty());
+        let launch_wait_url: Option<String> = row.get(11).ok().filter(|s: &String| !s.is_empty());
         let launch_wait_timeout_secs: Option<u64> = row
-            .get::<_, Option<i64>>(16)
+            .get::<_, Option<i64>>(12)
             .unwrap_or(None)
             .and_then(|v| u64::try_from(v).ok());
 
@@ -215,10 +171,6 @@ impl AppStore {
             app_type,
             autostart,
             url,
-            show_nav,
-            open_window,
-            remote_debugging_port,
-            proxy_server,
             launch_command,
             launch_env_vars,
             launch_cwd,
@@ -226,20 +178,7 @@ impl AppStore {
             launch_wait_timeout_secs,
             exec_command,
             env_vars,
-            created_at: row.get(9).unwrap_or_default(),
+            created_at: row.get(7).unwrap_or_default(),
         }
     }
-}
-
-fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-    let mut stmt = match conn.prepare(&format!("PRAGMA table_info({})", table)) {
-        Ok(stmt) => stmt,
-        Err(_) => return false,
-    };
-    let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
-        Ok(rows) => rows,
-        Err(_) => return false,
-    };
-    let exists = rows.filter_map(Result::ok).any(|name| name == column);
-    exists
 }

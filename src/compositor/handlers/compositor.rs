@@ -53,7 +53,6 @@ impl CompositorHandler for Compositor {
             &self.space,
             surface,
             &mut self.taskbar_dirty,
-            &mut self.browser_unfullscreened,
         );
         resize_grab::handle_commit(&mut self.space, surface);
 

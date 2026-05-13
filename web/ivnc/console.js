@@ -37,13 +37,8 @@ const I18N = {
         namePlaceholder: 'App display name',
         appType: 'App Type',
         autostart: 'Autostart',
-        nav: 'Show navigation bar',
-        openWindow: 'Open web window after launch',
-        advanced: 'Advanced Settings',
-        debugPort: 'Debugging Port (Optional, default: none)',
-        proxyServer: 'Proxy Server (Optional, default: none)',
         launchSettings: 'Service Launch',
-        launchCommand: 'Launch Command (Optional, default: none)',
+        launchCommand: 'Background Command',
         launchCwd: 'Working Directory (Optional, default: current directory)',
         launchTimeout: 'Wait Timeout (seconds, optional, default: 30)',
         launchWaitUrl: 'Health Check URL (Optional, default: URL)',
@@ -58,7 +53,7 @@ const I18N = {
         fetchFailed: 'Failed to load: ',
         missingName: 'Please enter an app name',
         missingExec: 'Please enter a launch command',
-        missingLaunchCommand: 'Please enter a launch command when the web window is disabled',
+        missingLaunchCommand: 'Please enter a background command for this web app',
         invalidUrl: 'Please enter a valid URL',
         updated: 'Updated',
         added: 'Added',
@@ -111,13 +106,8 @@ const I18N = {
         namePlaceholder: '应用显示名称',
         appType: '应用类型',
         autostart: '开机启动',
-        nav: '显示导航栏',
-        openWindow: '启动后打开网页窗口',
-        advanced: '高级配置',
-        debugPort: 'Debugging Port（可选，默认值：无）',
-        proxyServer: 'Proxy Server（可选，默认值：无）',
         launchSettings: '启动服务',
-        launchCommand: '启动命令（可选，默认值：无）',
+        launchCommand: '后台启动命令',
         launchCwd: '工作目录（可选，默认值：当前目录）',
         launchTimeout: '等待超时（秒，可选，默认值：30）',
         launchWaitUrl: '健康检查 URL（可选，默认值：URL）',
@@ -132,7 +122,7 @@ const I18N = {
         fetchFailed: '获取失败: ',
         missingName: '请输入应用名称',
         missingExec: '请输入启动命令',
-        missingLaunchCommand: '关闭网页窗口时请输入启动命令',
+        missingLaunchCommand: '请输入网页APP的后台启动命令',
         invalidUrl: '请输入有效的 URL',
         updated: '已更新',
         added: '已添加',
@@ -173,8 +163,7 @@ function getHash(data) {
         size: a.data_size_human,
         url: a.url,
         exec: a.exec_command,
-        launch: a.launch_command,
-        openWindow: a.open_window
+        launch: a.launch_command
     })));
 }
 
@@ -196,11 +185,6 @@ function applyTranslations() {
     document.querySelector('#f-app-type option[value="webapp"]').textContent = t('webappOption');
     document.querySelector('#f-app-type option[value="desktop"]').textContent = t('desktopOption');
     document.getElementById('label-autostart').textContent = t('autostart');
-    document.getElementById('label-nav').textContent = t('nav');
-    document.getElementById('label-open-window').textContent = t('openWindow');
-    document.getElementById('advanced-title').textContent = t('advanced');
-    document.getElementById('label-debug-port').textContent = t('debugPort');
-    document.getElementById('label-proxy-server').textContent = t('proxyServer');
     document.getElementById('launch-title').textContent = t('launchSettings');
     document.getElementById('label-launch-command').textContent = t('launchCommand');
     document.getElementById('label-launch-cwd').textContent = t('launchCwd');
@@ -314,10 +298,6 @@ function showAdd() {
     document.getElementById('f-app-type').disabled = false;
     document.getElementById('f-url').value = '';
     document.getElementById('f-autostart').checked = false;
-    document.getElementById('f-nav').checked = false;
-    document.getElementById('f-open-window').checked = false;
-    document.getElementById('f-debug-port').value = '';
-    document.getElementById('f-proxy-server').value = '';
     document.getElementById('f-launch-command').value = '';
     document.getElementById('f-launch-cwd').value = '';
     document.getElementById('f-launch-timeout').value = '';
@@ -350,10 +330,6 @@ async function showEdit(id) {
             document.getElementById('f-env').value = envToText(a.env_vars);
         } else {
             document.getElementById('f-url').value = a.url || '';
-            document.getElementById('f-nav').checked = a.show_nav || false;
-            document.getElementById('f-open-window').checked = !!a.open_window;
-            document.getElementById('f-debug-port').value = a.remote_debugging_port || '';
-            document.getElementById('f-proxy-server').value = a.proxy_server || '';
             document.getElementById('f-launch-command').value = a.launch_command || '';
             document.getElementById('f-launch-cwd').value = a.launch_cwd || '';
             document.getElementById('f-launch-timeout').value = a.launch_wait_timeout_secs || '';
@@ -423,14 +399,8 @@ async function saveApp() {
         body.url = document.getElementById('f-url').value.trim();
         if (!validateUrl(body.url)) return toast(t('invalidUrl'), 'err');
 
-        body.show_nav = document.getElementById('f-nav').checked;
-        body.open_window = document.getElementById('f-open-window').checked;
-        const debugPort = document.getElementById('f-debug-port').value;
-        body.remote_debugging_port = debugPort ? parseInt(debugPort, 10) : null;
-        const proxyServer = document.getElementById('f-proxy-server').value.trim();
-        body.proxy_server = proxyServer || null;
         body.launch_command = document.getElementById('f-launch-command').value.trim() || null;
-        if (!body.open_window && !body.launch_command) return toast(t('missingLaunchCommand'), 'err');
+        if (!body.launch_command) return toast(t('missingLaunchCommand'), 'err');
         body.launch_cwd = document.getElementById('f-launch-cwd').value.trim() || null;
         const launchTimeout = document.getElementById('f-launch-timeout').value;
         body.launch_wait_timeout_secs = launchTimeout ? parseInt(launchTimeout, 10) : null;
@@ -567,16 +537,6 @@ function updateAppTypeVisibility() {
     if (!autostartControl.parentElement) {
         generalSlot.appendChild(autostartControl);
     }
-
-    updateWindowOptionsVisibility();
-}
-
-function updateWindowOptionsVisibility() {
-    const type = document.getElementById('f-app-type').value;
-    const openWindow = document.getElementById('f-open-window').checked;
-    const showChromeOptions = type !== 'desktop' && openWindow;
-    document.getElementById('nav-row').style.display = showChromeOptions ? 'flex' : 'none';
-    document.getElementById('advanced-settings-group').style.display = showChromeOptions ? 'block' : 'none';
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -587,7 +547,6 @@ document.addEventListener('DOMContentLoaded', () => {
         load();
     });
     document.getElementById('f-app-type').addEventListener('change', updateAppTypeVisibility);
-    document.getElementById('f-open-window').addEventListener('change', updateWindowOptionsVisibility);
 
     document.querySelectorAll('.btn-cancel').forEach(btn => {
         btn.addEventListener('click', (e) => {

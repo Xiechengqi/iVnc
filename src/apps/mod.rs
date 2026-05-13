@@ -1,6 +1,6 @@
 //! Application management module.
 //!
-//! Manages web-to-desktop applications with native Chrome windows.
+//! Manages background web services and desktop applications.
 
 pub mod api;
 pub mod app;

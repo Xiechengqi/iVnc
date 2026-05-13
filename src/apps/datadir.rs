@@ -1,43 +1,17 @@
 use super::app::{AppType, ManagedApp};
-use std::fs;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 
 pub fn data_dir(app: &ManagedApp) -> PathBuf {
-    // Use /tmp for Chromium data dir because snap-packaged Chromium
-    // has confinement that prevents writing to /root/.config
     let base = PathBuf::from("/tmp").join("ivnc-apps").join(&app.id);
 
     base.join(match app.app_type {
-        AppType::WebApp => "chrome",
+        AppType::WebApp => "web",
         AppType::DesktopApp => "desktop",
     })
 }
 
 pub fn app_root(app: &ManagedApp) -> PathBuf {
     PathBuf::from("/tmp").join("ivnc-apps").join(&app.id)
-}
-
-/// Ensure the data directory exists with write permissions for all users
-pub fn ensure_data_dir(app: &ManagedApp) -> Result<PathBuf, String> {
-    let dir = data_dir(app);
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    // Use 0o755: rwxr-xr-x (owner rwx, others rx) - Chrome needs write for SingletonLock
-    builder.mode(0o755);
-    builder
-        .create(&dir)
-        .map_err(|e| format!("Failed to create data dir: {}", e))?;
-
-    // Also ensure parent directories are writable
-    if let Some(parent) = dir.parent() {
-        let mut pbuilder = fs::DirBuilder::new();
-        pbuilder.recursive(true);
-        pbuilder.mode(0o755);
-        let _ = pbuilder.create(parent);
-    }
-
-    Ok(dir)
 }
 
 pub fn dir_size(path: &PathBuf) -> u64 {

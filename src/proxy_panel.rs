@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::net::TcpStream;
 
 const MIAO_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/miao-rust-linux-amd64"));
 pub const MIAO_PORT: u16 = 6161;
@@ -50,14 +51,19 @@ impl ProxyPanelManager {
 
     pub async fn ensure_running(&self) -> Result<Option<u32>, String> {
         if let Some(pid) = self.running_pid() {
+            self.wait_until_ready().await?;
             return Ok(Some(pid));
         }
-        self.start()
+        let pid = self.start()?;
+        self.wait_until_ready().await?;
+        Ok(pid)
     }
 
     pub async fn restart(&self) -> Result<Option<u32>, String> {
         self.stop();
-        self.start()
+        let pid = self.start()?;
+        self.wait_until_ready().await?;
+        Ok(pid)
     }
 
     pub fn status(&self) -> ProxyPanelStatus {
@@ -84,7 +90,7 @@ impl ProxyPanelManager {
 
     fn start(&self) -> Result<Option<u32>, String> {
         let bin = ensure_binary()?;
-        ensure_runtime_links()?;
+        cleanup_legacy_runtime_link()?;
         let dir = data_dir()?;
         let log_path = dir.join("miao.log");
         let stdout = fs::File::create(&log_path)
@@ -122,6 +128,35 @@ impl ProxyPanelManager {
         Ok(Some(pid))
     }
 
+    async fn wait_until_ready(&self) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            if self.running_pid().is_none() {
+                return Err(format!(
+                    "miao proxy panel exited before port {} became ready\n{}",
+                    MIAO_PORT,
+                    log_tail()
+                ));
+            }
+
+            match TcpStream::connect(("127.0.0.1", MIAO_PORT)).await {
+                Ok(_) => return Ok(()),
+                Err(err) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "miao proxy panel did not listen on 127.0.0.1:{} within 8s: {}\n{}",
+                            MIAO_PORT,
+                            err,
+                            log_tail()
+                        ));
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     fn stop(&self) {
         let mut guard = self.process.lock().unwrap();
         if let Some(mut running) = guard.take() {
@@ -154,15 +189,18 @@ fn ensure_binary() -> Result<PathBuf, String> {
     Ok(bin)
 }
 
-fn ensure_runtime_links() -> Result<(), String> {
-    let dir = data_dir()?;
-    let target = dir.join("sing-box");
+fn cleanup_legacy_runtime_link() -> Result<(), String> {
     let link = PathBuf::from("/tmp/miao-sing-box");
-    if link.exists() || link.is_symlink() {
-        let _ = fs::remove_file(&link);
+    if let Ok(meta) = fs::symlink_metadata(&link) {
+        let file_type = meta.file_type();
+        if file_type.is_dir() && !file_type.is_symlink() {
+            fs::remove_dir_all(&link)
+                .map_err(|err| format!("failed to remove legacy {}: {}", link.display(), err))?;
+        } else {
+            fs::remove_file(&link)
+                .map_err(|err| format!("failed to remove legacy {}: {}", link.display(), err))?;
+        }
     }
-    std::os::unix::fs::symlink(&target, &link)
-        .map_err(|err| format!("failed to create {}: {}", link.display(), err))?;
     Ok(())
 }
 
@@ -177,4 +215,15 @@ fn data_dir() -> Result<PathBuf, String> {
 
 fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
+}
+
+fn log_tail() -> String {
+    let path = data_dir()
+        .unwrap_or_else(|_| PathBuf::from("/root/.config/ivnc/miao"))
+        .join("miao.log");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|err| format!("failed to read {}: {}", path.display(), err));
+    let lines: Vec<&str> = content.lines().rev().take(40).collect();
+    let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+    format!("miao log tail ({}):\n{}", path.display(), tail)
 }
