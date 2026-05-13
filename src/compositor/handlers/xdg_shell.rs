@@ -31,6 +31,11 @@ use crate::compositor::{
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     Compositor,
 };
+use std::collections::HashSet;
+
+fn is_windowed_managed_web_app(app_id: &str) -> bool {
+    matches!(app_id, "ivnc-webapp-windowed" | "ivnc-pake-windowed")
+}
 
 /// Check if `child` is a descendant process of `ancestor` via /proc ppid chain.
 fn is_descendant_of(child: i32, ancestor: i32) -> bool {
@@ -134,7 +139,7 @@ impl XdgShellHandler for Compositor {
             })
             .unwrap_or_default();
 
-            let should_fullscreen = app_id != "ivnc-webapp-windowed";
+            let should_fullscreen = !is_windowed_managed_web_app(&app_id);
 
             if should_fullscreen {
                 if let Some(output_geo) = output_geo {
@@ -371,6 +376,7 @@ impl XdgShellHandler for Compositor {
 
         let proto_id = surface.wl_surface().id().protocol_id();
         self.dialog_surfaces.remove(&proto_id);
+        self.browser_unfullscreened.remove(&proto_id);
 
         // Remove only the destroyed surface from window registry (not siblings)
         let surf_id = surface.wl_surface().id();
@@ -445,13 +451,14 @@ pub fn handle_commit(
     space: &Space<Window>,
     surface: &WlSurface,
     taskbar_dirty: &mut bool,
+    browser_unfullscreened: &mut HashSet<u32>,
 ) {
     if let Some(window) = space
         .elements()
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)
         .cloned()
     {
-        let (initial_configure_sent, title_changed, app_id) = with_states(surface, |states| {
+        let (initial_configure_sent, identity_available, app_id) = with_states(surface, |states| {
             let data = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
@@ -459,16 +466,18 @@ pub fn handle_commit(
                 .lock()
                 .unwrap();
             // Title or app_id changes trigger taskbar update
-            let changed = data.title.is_some() || data.app_id.is_some();
+            let identity_available = data.title.is_some() || data.app_id.is_some();
             let app_id = data.app_id.clone().unwrap_or_default();
-            (data.initial_configure_sent, changed, app_id)
+            (data.initial_configure_sent, identity_available, app_id)
         });
 
         // If this is a windowed managed app (show_nav=true), unfullscreen it to preserve the browser toolbar.
-        if app_id == "ivnc-webapp-windowed" && title_changed {
-            log::info!(
-                "handle_commit: detected windowed managed app, unfullscreening (app_id={})",
-                app_id
+        let surface_id = surface.id().protocol_id();
+        if is_windowed_managed_web_app(&app_id) && browser_unfullscreened.insert(surface_id) {
+            log::debug!(
+                "handle_commit: detected windowed managed web app, ensuring non-fullscreen (app_id={}, sid={})",
+                app_id,
+                surface_id
             );
             let toplevel = window.toplevel().unwrap();
             toplevel.with_pending_state(|state| {
@@ -483,7 +492,7 @@ pub fn handle_commit(
         }
         // Mark dirty on every commit that has title/app_id — the main loop
         // will deduplicate by comparing the serialized JSON.
-        if title_changed {
+        if identity_available {
             *taskbar_dirty = true;
         }
     }
