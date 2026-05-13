@@ -57,8 +57,8 @@ fn build_desktop_command(app: &ManagedApp) -> Result<Command, String> {
     }
 
     cmd.env_remove("LD_PRELOAD");
-    cmd.env("DBUS_SYSTEM_BUS_ADDRESS", "disabled:");
-    cmd.env("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+    cmd.env_remove("DBUS_SYSTEM_BUS_ADDRESS");
+    cmd.env_remove("DBUS_SESSION_BUS_ADDRESS");
 
     if let Ok(val) = std::env::var("WAYLAND_DISPLAY") {
         cmd.env("WAYLAND_DISPLAY", &val);

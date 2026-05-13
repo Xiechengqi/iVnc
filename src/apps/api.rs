@@ -160,7 +160,7 @@ impl AppsState {
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
-    const CHROME_COMMAND: &str = "google-chrome --no-sandbox --disable-dev-shm-usage";
+    const CHROME_COMMAND: &str = "google-chrome --ozone-platform=wayland --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-dev-shm-usage";
 
     for app in store.list()? {
         let is_builtin_terminal = app.id == "builtin-terminal"
@@ -172,26 +172,47 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
             }
         }
     }
-    if store.get("builtin-chrome").is_err() {
-        let app = ManagedApp {
-            id: "builtin-chrome".to_string(),
-            name: "Chrome".to_string(),
-            app_type: AppType::DesktopApp,
-            autostart: false,
-            url: None,
-            launch_command: None,
-            launch_env_vars: None,
-            launch_cwd: None,
-            launch_wait_url: None,
-            launch_wait_timeout_secs: None,
-            exec_command: Some(CHROME_COMMAND.to_string()),
-            env_vars: None,
-            created_at: chrono_now(),
-        };
-        match store.add(&app) {
-            Ok(()) => log::info!("Added built-in Chrome desktop app"),
-            Err(err) if err.contains("already exists") => {}
-            Err(err) => return Err(err),
+    match store.get("builtin-chrome") {
+        Ok(mut app) => {
+            if app.app_type != AppType::DesktopApp
+                || app.exec_command.as_deref() != Some(CHROME_COMMAND)
+                || app.autostart
+            {
+                app.app_type = AppType::DesktopApp;
+                app.autostart = false;
+                app.url = None;
+                app.launch_command = None;
+                app.launch_env_vars = None;
+                app.launch_cwd = None;
+                app.launch_wait_url = None;
+                app.launch_wait_timeout_secs = None;
+                app.exec_command = Some(CHROME_COMMAND.to_string());
+                app.env_vars = None;
+                store.update(&app)?;
+                log::info!("Updated built-in Chrome desktop app");
+            }
+        }
+        Err(_) => {
+            let app = ManagedApp {
+                id: "builtin-chrome".to_string(),
+                name: "Chrome".to_string(),
+                app_type: AppType::DesktopApp,
+                autostart: false,
+                url: None,
+                launch_command: None,
+                launch_env_vars: None,
+                launch_cwd: None,
+                launch_wait_url: None,
+                launch_wait_timeout_secs: None,
+                exec_command: Some(CHROME_COMMAND.to_string()),
+                env_vars: None,
+                created_at: chrono_now(),
+            };
+            match store.add(&app) {
+                Ok(()) => log::info!("Added built-in Chrome desktop app"),
+                Err(err) if err.contains("already exists") => {}
+                Err(err) => return Err(err),
+            }
         }
     }
     desktop_entry::ensure_desktop_entry("Chrome", CHROME_COMMAND)?;
