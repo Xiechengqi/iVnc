@@ -123,9 +123,9 @@ impl AppsState {
     async fn start_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
         match app.app_type {
             AppType::DesktopApp => Ok(Some(self.process.start(app)?)),
-            AppType::WebApp => {
+            AppType::BackgroundApp => {
                 if !service_process::has_launch_command(app) {
-                    return Err("web app requires launch_command".to_string());
+                    return Err("background app requires launch_command".to_string());
                 }
                 self.service.start_and_wait(app).await
             }
@@ -135,7 +135,7 @@ impl AppsState {
     fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
         match app.app_type {
             AppType::DesktopApp => self.process.stop(&app.id),
-            AppType::WebApp => self.service.stop(&app.id),
+            AppType::BackgroundApp => self.service.stop(&app.id),
         }
     }
 
@@ -147,14 +147,14 @@ impl AppsState {
     fn app_status(&self, app: &ManagedApp) -> AppStatus {
         match app.app_type {
             AppType::DesktopApp => self.process.status(&app.id),
-            AppType::WebApp => self.service.status(&app.id),
+            AppType::BackgroundApp => self.service.status(&app.id),
         }
     }
 
     fn app_pid(&self, app: &ManagedApp) -> Option<u32> {
         match app.app_type {
             AppType::DesktopApp => self.process.pid(&app.id),
-            AppType::WebApp => self.service.pid(&app.id),
+            AppType::BackgroundApp => self.service.pid(&app.id),
         }
     }
 }
@@ -184,7 +184,6 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 app.launch_command = None;
                 app.launch_env_vars = None;
                 app.launch_cwd = None;
-                app.launch_wait_url = None;
                 app.launch_wait_timeout_secs = None;
                 app.exec_command = Some(CHROME_COMMAND.to_string());
                 app.env_vars = None;
@@ -202,7 +201,6 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 launch_command: None,
                 launch_env_vars: None,
                 launch_cwd: None,
-                launch_wait_url: None,
                 launch_wait_timeout_secs: None,
                 exec_command: Some(CHROME_COMMAND.to_string()),
                 env_vars: None,
@@ -268,6 +266,14 @@ fn parse_env_vars(value: Option<&serde_json::Value>) -> Option<HashMap<String, S
     })
 }
 
+fn parse_optional_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn app_json(
     app: &ManagedApp,
     status: &str,
@@ -287,12 +293,11 @@ fn app_json(
     });
 
     match app.app_type {
-        AppType::WebApp => {
+        AppType::BackgroundApp => {
             obj["url"] = json!(app.url);
             obj["launch_command"] = json!(app.launch_command);
             obj["launch_env_vars"] = json!(app.launch_env_vars);
             obj["launch_cwd"] = json!(app.launch_cwd);
-            obj["launch_wait_url"] = json!(app.launch_wait_url);
             obj["launch_wait_timeout_secs"] = json!(app.launch_wait_timeout_secs);
         }
         AppType::DesktopApp => {
@@ -334,24 +339,20 @@ async fn add_app(
     let app_type_str = body
         .get("app_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("webapp");
-    let app_type = AppType::from_str(app_type_str).unwrap_or(AppType::WebApp);
+        .unwrap_or("background");
+    let app_type = AppType::from_str(app_type_str).unwrap_or(AppType::BackgroundApp);
 
     let (
         url,
         launch_command,
         launch_env_vars,
         launch_cwd,
-        launch_wait_url,
         launch_wait_timeout_secs,
         exec_command,
         env_vars,
     ) = match app_type {
-        AppType::WebApp => {
-            let url = match body.get("url").and_then(|v| v.as_str()) {
-                Some(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
-                _ => return err_response(StatusCode::BAD_REQUEST, "missing url for webapp"),
-            };
+        AppType::BackgroundApp => {
+            let url = parse_optional_string(body.get("url"));
             let launch_command = match body
                 .get("launch_command")
                 .and_then(|v| v.as_str())
@@ -362,18 +363,13 @@ async fn add_app(
                 None => {
                     return err_response(
                         StatusCode::BAD_REQUEST,
-                        "missing launch_command for webapp",
+                        "missing launch_command for background",
                     )
                 }
             };
             let launch_env_vars = parse_env_vars(body.get("launch_env_vars"));
             let launch_cwd = body
                 .get("launch_cwd")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let launch_wait_url = body
-                .get("launch_wait_url")
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
@@ -386,7 +382,6 @@ async fn add_app(
                 launch_command,
                 launch_env_vars,
                 launch_cwd,
-                launch_wait_url,
                 launch_wait_timeout_secs,
                 None,
                 None,
@@ -403,7 +398,7 @@ async fn add_app(
                 }
             };
             let env_vars = parse_env_vars(body.get("env_vars"));
-            (None, None, None, None, None, None, exec_command, env_vars)
+            (None, None, None, None, None, exec_command, env_vars)
         }
     };
     let autostart = body
@@ -420,7 +415,6 @@ async fn add_app(
         launch_command,
         launch_env_vars,
         launch_cwd,
-        launch_wait_url,
         launch_wait_timeout_secs,
         exec_command,
         env_vars,
@@ -479,9 +473,9 @@ async fn update_app(
     };
 
     match app.app_type {
-        AppType::WebApp => {
-            if let Some(url_str) = body.get("url").and_then(|v| v.as_str()) {
-                app.url = Some(url_str.to_string());
+        AppType::BackgroundApp => {
+            if body.get("url").is_some() {
+                app.url = parse_optional_string(body.get("url"));
             }
             if let Some(command) = body
                 .get("launch_command")
@@ -497,20 +491,15 @@ async fn update_app(
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            app.launch_wait_url = body
-                .get("launch_wait_url")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
             app.launch_wait_timeout_secs = body
                 .get("launch_wait_timeout_secs")
                 .and_then(|v| v.as_u64())
                 .filter(|secs| *secs > 0);
-            if app.url.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                return err_response(StatusCode::BAD_REQUEST, "missing url for webapp");
-            }
             if !service_process::has_launch_command(&app) {
-                return err_response(StatusCode::BAD_REQUEST, "missing launch_command for webapp");
+                return err_response(
+                    StatusCode::BAD_REQUEST,
+                    "missing launch_command for background",
+                );
             }
         }
         AppType::DesktopApp => {

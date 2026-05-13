@@ -1,6 +1,6 @@
 //! Application management module.
 //!
-//! Manages background web services and desktop applications.
+//! Manages background services and desktop applications.
 
 pub mod api;
 pub mod app;

@@ -18,7 +18,7 @@ pub fn log_path(app_id: &str) -> std::path::PathBuf {
 /// Build the launch command for a desktop app.
 pub fn build_command(app: &ManagedApp) -> Result<Command, String> {
     if app.app_type != AppType::DesktopApp {
-        return Err("WebApp runs as a background service".to_string());
+        return Err("BackgroundApp runs as a background process".to_string());
     }
 
     let mut cmd = build_desktop_command(app)?;

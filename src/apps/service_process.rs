@@ -159,11 +159,14 @@ impl ServiceProcessManager {
     }
 
     async fn wait_until_ready(&self, app: &ManagedApp) -> Result<(), String> {
-        let url = app
-            .launch_wait_url
-            .as_deref()
-            .or(app.url.as_deref())
-            .ok_or("missing URL for service readiness check")?;
+        let Some(url) = app.url.as_deref() else {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if self.status(&app.id) != AppStatus::Running {
+                return Err("service exited immediately after start".to_string());
+            }
+            info!("Service for app '{}' is running", app.name);
+            return Ok(());
+        };
         let timeout_secs = app.launch_wait_timeout_secs.unwrap_or(30).max(1);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
         let client = reqwest::Client::builder()

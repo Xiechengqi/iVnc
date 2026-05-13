@@ -17,13 +17,14 @@ const I18N = {
         loading: 'Loading...',
         empty: 'No apps yet. Click "Add App" to create one.',
         desktop: 'Desktop',
-        webapp: 'Web',
+        background: 'Background',
         running: 'running',
         stopped: 'stopped',
         crashed: 'crashed',
         start: 'Start',
         stop: 'Stop',
         restart: 'Restart',
+        visit: 'Visit',
         edit: 'Edit',
         log: 'Logs',
         clear: 'Clear',
@@ -37,12 +38,11 @@ const I18N = {
         namePlaceholder: 'App display name',
         appType: 'App Type',
         autostart: 'Autostart',
-        launchSettings: 'Service Launch',
-        launchCommand: 'Background Command',
+        launchCommand: 'Launch Command',
         launchCwd: 'Working Directory (Optional, default: current directory)',
         launchTimeout: 'Wait Timeout (seconds, optional, default: 30)',
-        launchWaitUrl: 'Health Check URL (Optional, default: URL)',
-        launchEnv: 'Service Environment Variables (Optional, default: none)',
+        accessUrl: 'Access Address (Optional, default: none)',
+        launchEnv: 'Environment Variables (Optional, default: none)',
         exec: 'Launch Command',
         env: 'Environment Variables (Optional, default: none)',
         cancel: 'Cancel',
@@ -53,8 +53,8 @@ const I18N = {
         fetchFailed: 'Failed to load: ',
         missingName: 'Please enter an app name',
         missingExec: 'Please enter a launch command',
-        missingLaunchCommand: 'Please enter a background command for this web app',
-        invalidUrl: 'Please enter a valid URL',
+        missingLaunchCommand: 'Please enter a launch command',
+        invalidUrl: 'Please enter a valid access address',
         updated: 'Updated',
         added: 'Added',
         actionFailed: 'Operation failed: ',
@@ -70,7 +70,7 @@ const I18N = {
         clearFailed: 'Clear failed',
         logsFor: (name) => `Logs: ${name}`,
         logLoadFailed: 'Load failed: ',
-        webappOption: 'Web App',
+        backgroundOption: 'Background App',
         desktopOption: 'Desktop App',
     },
     zh: {
@@ -86,13 +86,14 @@ const I18N = {
         loading: '加载中...',
         empty: '暂无应用，点击“添加应用”创建。',
         desktop: '桌面',
-        webapp: '网页',
+        background: '后台',
         running: '运行中',
         stopped: '已停止',
         crashed: '已崩溃',
         start: '启动',
         stop: '停止',
         restart: '重启',
+        visit: '访问',
         edit: '编辑',
         log: '日志',
         clear: '清理',
@@ -106,12 +107,11 @@ const I18N = {
         namePlaceholder: '应用显示名称',
         appType: '应用类型',
         autostart: '开机启动',
-        launchSettings: '启动服务',
-        launchCommand: '后台启动命令',
+        launchCommand: '启动命令',
         launchCwd: '工作目录（可选，默认值：当前目录）',
         launchTimeout: '等待超时（秒，可选，默认值：30）',
-        launchWaitUrl: '健康检查 URL（可选，默认值：URL）',
-        launchEnv: '服务环境变量（可选，默认值：无）',
+        accessUrl: '访问地址（可选，默认值：无）',
+        launchEnv: '环境变量（可选，默认值：无）',
         exec: '启动命令',
         env: '环境变量（可选，默认值：无）',
         cancel: '取消',
@@ -122,8 +122,8 @@ const I18N = {
         fetchFailed: '获取失败: ',
         missingName: '请输入应用名称',
         missingExec: '请输入启动命令',
-        missingLaunchCommand: '请输入网页APP的后台启动命令',
-        invalidUrl: '请输入有效的 URL',
+        missingLaunchCommand: '请输入启动命令',
+        invalidUrl: '请输入有效的访问地址',
         updated: '已更新',
         added: '已添加',
         actionFailed: '操作失败: ',
@@ -139,7 +139,7 @@ const I18N = {
         clearFailed: '清理失败',
         logsFor: (name) => `日志: ${name}`,
         logLoadFailed: '加载失败: ',
-        webappOption: '网页APP',
+        backgroundOption: '后台应用',
         desktopOption: '桌面APP',
     }
 };
@@ -182,14 +182,13 @@ function applyTranslations() {
     document.getElementById('label-name').textContent = t('name');
     document.getElementById('f-name').placeholder = t('namePlaceholder');
     document.getElementById('label-app-type').textContent = t('appType');
-    document.querySelector('#f-app-type option[value="webapp"]').textContent = t('webappOption');
+    document.querySelector('#f-app-type option[value="background"]').textContent = t('backgroundOption');
     document.querySelector('#f-app-type option[value="desktop"]').textContent = t('desktopOption');
     document.getElementById('label-autostart').textContent = t('autostart');
-    document.getElementById('launch-title').textContent = t('launchSettings');
     document.getElementById('label-launch-command').textContent = t('launchCommand');
     document.getElementById('label-launch-cwd').textContent = t('launchCwd');
     document.getElementById('label-launch-timeout').textContent = t('launchTimeout');
-    document.getElementById('label-launch-wait-url').textContent = t('launchWaitUrl');
+    document.getElementById('label-access-url').textContent = t('accessUrl');
     document.getElementById('label-launch-env').textContent = t('launchEnv');
     document.getElementById('label-exec').textContent = t('exec');
     document.getElementById('label-env').textContent = t('env');
@@ -225,10 +224,10 @@ async function load() {
         const fragment = document.createDocumentFragment();
         d.apps.forEach(a => {
             const tr = document.createElement('tr');
-            const type = a.app_type === 'desktop' ? t('desktop') : t('webapp');
+            const type = a.app_type === 'desktop' ? t('desktop') : t('background');
             const configStr = a.app_type === 'desktop'
                 ? (a.exec_command || '')
-                : [a.url || '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
+                : [a.url ? `${t('visit')}: ${a.url}` : '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
             const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
             const statusText = t(a.status) || a.status;
 
@@ -267,7 +266,11 @@ async function load() {
             const clearBtn = createBtn(t('clear'), 'btn-clear btn-sm', () => clearData(a.id, a.name));
             const delBtn = createBtn(t('delete'), 'btn-delete btn-sm', () => del(a.id, a.name));
 
-            actionsCell.append(editBtn, logBtn, clearBtn, delBtn);
+            actionsCell.append(editBtn);
+            if (a.app_type !== 'desktop' && a.url) {
+                actionsCell.append(createBtn(t('visit'), 'btn-visit btn-sm', () => window.open(a.url, '_blank')));
+            }
+            actionsCell.append(logBtn, clearBtn, delBtn);
             fragment.appendChild(tr);
         });
 
@@ -294,14 +297,13 @@ function showAdd() {
 
     document.getElementById('f-name').value = '';
     document.getElementById('f-name').disabled = false;
-    document.getElementById('f-app-type').value = 'webapp';
+    document.getElementById('f-app-type').value = 'background';
     document.getElementById('f-app-type').disabled = false;
     document.getElementById('f-url').value = '';
     document.getElementById('f-autostart').checked = false;
     document.getElementById('f-launch-command').value = '';
     document.getElementById('f-launch-cwd').value = '';
     document.getElementById('f-launch-timeout').value = '';
-    document.getElementById('f-launch-wait-url').value = '';
     document.getElementById('f-launch-env').value = '';
     document.getElementById('f-exec').value = '';
     document.getElementById('f-env').value = '';
@@ -321,7 +323,7 @@ async function showEdit(id) {
 
         document.getElementById('f-name').value = a.name;
         document.getElementById('f-name').disabled = true;
-        document.getElementById('f-app-type').value = a.app_type || 'webapp';
+        document.getElementById('f-app-type').value = a.app_type || 'background';
         document.getElementById('f-app-type').disabled = true;
         document.getElementById('f-autostart').checked = !!a.autostart;
 
@@ -333,7 +335,6 @@ async function showEdit(id) {
             document.getElementById('f-launch-command').value = a.launch_command || '';
             document.getElementById('f-launch-cwd').value = a.launch_cwd || '';
             document.getElementById('f-launch-timeout').value = a.launch_wait_timeout_secs || '';
-            document.getElementById('f-launch-wait-url').value = a.launch_wait_url || '';
             document.getElementById('f-launch-env').value = envToText(a.launch_env_vars);
         }
         updateAppTypeVisibility();
@@ -396,17 +397,13 @@ async function saveApp() {
 
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
     } else {
-        body.url = document.getElementById('f-url').value.trim();
-        if (!validateUrl(body.url)) return toast(t('invalidUrl'), 'err');
-
         body.launch_command = document.getElementById('f-launch-command').value.trim() || null;
         if (!body.launch_command) return toast(t('missingLaunchCommand'), 'err');
         body.launch_cwd = document.getElementById('f-launch-cwd').value.trim() || null;
         const launchTimeout = document.getElementById('f-launch-timeout').value;
         body.launch_wait_timeout_secs = launchTimeout ? parseInt(launchTimeout, 10) : null;
-        const launchWaitUrl = document.getElementById('f-launch-wait-url').value.trim();
-        if (launchWaitUrl && !validateUrl(launchWaitUrl)) return toast(t('invalidUrl'), 'err');
-        body.launch_wait_url = launchWaitUrl || null;
+        body.url = document.getElementById('f-url').value.trim() || null;
+        if (body.url && !validateUrl(body.url)) return toast(t('invalidUrl'), 'err');
         body.launch_env_vars = parseEnvText(document.getElementById('f-launch-env').value);
     }
 
@@ -519,10 +516,10 @@ function updateAppTypeVisibility() {
     const type = document.getElementById('f-app-type').value;
     const autostartControl = document.getElementById('autostart-control');
     const generalSlot = document.getElementById('general-autostart-slot');
-    const webappSlot = document.getElementById('webapp-autostart-slot');
+    const backgroundSlot = document.getElementById('background-autostart-slot');
     const desktopSlot = document.getElementById('desktop-autostart-slot');
 
-    document.getElementById('webapp-config').style.display = type === 'desktop' ? 'none' : 'block';
+    document.getElementById('background-config').style.display = type === 'desktop' ? 'none' : 'block';
     document.getElementById('desktop-config').style.display = type === 'desktop' ? 'block' : 'none';
 
     autostartControl.classList.remove('inline-slot');
@@ -530,7 +527,7 @@ function updateAppTypeVisibility() {
         desktopSlot.appendChild(autostartControl);
         autostartControl.classList.add('inline-slot');
     } else {
-        webappSlot.appendChild(autostartControl);
+        backgroundSlot.appendChild(autostartControl);
         autostartControl.classList.add('inline-slot');
     }
 

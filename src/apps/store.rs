@@ -24,13 +24,12 @@ impl AppStore {
                 url TEXT,
                 autostart INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
-                app_type TEXT DEFAULT 'webapp',
+                app_type TEXT DEFAULT 'background',
                 exec_command TEXT,
                 env_vars TEXT,
                 launch_command TEXT,
                 launch_env_vars TEXT,
                 launch_cwd TEXT,
-                launch_wait_url TEXT,
                 launch_wait_timeout_secs INTEGER
             );",
         )
@@ -65,13 +64,13 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 app.id, app.name, app.app_type.as_str(), url,
                 app.autostart as i32, exec_command, env_vars_json, app.created_at,
                 app.launch_command, launch_env_vars_json,
-                app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64),
+                app.launch_cwd, app.launch_wait_timeout_secs.map(|v| v as i64),
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -100,8 +99,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = conn.execute(
-            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_url=?9, launch_wait_timeout_secs=?10 WHERE id=?11",
-            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command, launch_env_vars_json, app.launch_cwd, app.launch_wait_url, app.launch_wait_timeout_secs.map(|v| v as i64), app.id],
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9 WHERE id=?10",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command, launch_env_vars_json, app.launch_cwd, app.launch_wait_timeout_secs.map(|v| v as i64), app.id],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", app.id));
@@ -123,7 +122,7 @@ impl AppStore {
     pub fn get(&self, id: &str) -> Result<ManagedApp, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).map_err(|e| format!("App not found: {}", e))
@@ -132,7 +131,7 @@ impl AppStore {
     pub fn list(&self) -> Result<Vec<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_url, launch_wait_timeout_secs FROM apps ORDER BY created_at"
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -144,8 +143,8 @@ impl AppStore {
     }
 
     fn row_to_app(row: &rusqlite::Row) -> ManagedApp {
-        let app_type_str: String = row.get(2).unwrap_or_else(|_| "webapp".to_string());
-        let app_type = AppType::from_str(&app_type_str).unwrap_or(AppType::WebApp);
+        let app_type_str: String = row.get(2).unwrap_or_else(|_| "background".to_string());
+        let app_type = AppType::from_str(&app_type_str).unwrap_or(AppType::BackgroundApp);
 
         let url: Option<String> = row.get(3).ok().filter(|s: &String| !s.is_empty());
         let autostart = row.get::<_, i32>(4).unwrap_or(0) != 0;
@@ -159,9 +158,8 @@ impl AppStore {
         let launch_env_vars =
             launch_env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
         let launch_cwd: Option<String> = row.get(10).ok().filter(|s: &String| !s.is_empty());
-        let launch_wait_url: Option<String> = row.get(11).ok().filter(|s: &String| !s.is_empty());
         let launch_wait_timeout_secs: Option<u64> = row
-            .get::<_, Option<i64>>(12)
+            .get::<_, Option<i64>>(11)
             .unwrap_or(None)
             .and_then(|v| u64::try_from(v).ok());
 
@@ -174,7 +172,6 @@ impl AppStore {
             launch_command,
             launch_env_vars,
             launch_cwd,
-            launch_wait_url,
             launch_wait_timeout_secs,
             exec_command,
             env_vars,

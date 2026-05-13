@@ -44,7 +44,7 @@
             <div class="form-group">
                 <label id="label-app-type">应用类型</label>
                 <select id="f-app-type">
-                    <option value="webapp">网页APP</option>
+                    <option value="background">后台应用</option>
                     <option value="desktop">桌面APP</option>
                 </select>
             </div>
@@ -55,40 +55,31 @@
             </div>
             <div id="general-autostart-slot"></div>
             
-            <div id="webapp-config">
+            <div id="background-config">
+                <div class="form-group">
+                    <div class="field-header">
+                        <label id="label-launch-command">启动命令</label>
+                        <div id="background-autostart-slot"></div>
+                    </div>
+                    <input type="text" id="f-launch-command" placeholder="python3 app.py --host 0.0.0.0 --port 7860">
+                </div>
                 <div class="form-row">
-                    <div class="form-group" style="flex: 2;">
-                        <label>URL</label>
-                        <input type="text" id="f-url" placeholder="https://">
+                    <div class="form-group">
+                        <label id="label-launch-cwd">工作目录（可选，默认值：当前目录）</label>
+                        <input type="text" id="f-launch-cwd" placeholder="/workspace/app">
+                    </div>
+                    <div class="form-group">
+                        <label id="label-launch-timeout">等待超时（秒，可选，默认值：30）</label>
+                        <input type="number" id="f-launch-timeout" placeholder="30" min="1" max="600">
                     </div>
                 </div>
-
-                <div id="webapp-autostart-slot"></div>
-
-                <div id="launch-settings-group">
-                    <div class="advanced-title" id="launch-title">启动服务</div>
-                    <div class="form-group">
-                        <label id="label-launch-command">后台启动命令</label>
-                        <input type="text" id="f-launch-command" placeholder="python3 app.py --host 0.0.0.0 --port 7860">
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label id="label-launch-cwd">工作目录（可选，默认值：当前目录）</label>
-                            <input type="text" id="f-launch-cwd" placeholder="/workspace/app">
-                        </div>
-                        <div class="form-group">
-                            <label id="label-launch-timeout">等待超时（秒，可选，默认值：30）</label>
-                            <input type="number" id="f-launch-timeout" placeholder="30" min="1" max="600">
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label id="label-launch-wait-url">健康检查 URL（可选，默认值：URL）</label>
-                        <input type="text" id="f-launch-wait-url" placeholder="默认使用 URL">
-                    </div>
-                    <div class="form-group">
-                        <label id="label-launch-env">服务环境变量（可选，默认值：无）</label>
-                        <textarea id="f-launch-env" rows="3" placeholder="KEY1=value1&#10;KEY2=value2"></textarea>
-                    </div>
+                <div class="form-group">
+                    <label id="label-access-url">访问地址（可选，默认值：无）</label>
+                    <input type="text" id="f-url" placeholder="http://127.0.0.1:7860">
+                </div>
+                <div class="form-group">
+                    <label id="label-launch-env">环境变量（可选，默认值：无）</label>
+                    <textarea id="f-launch-env" rows="3" placeholder="KEY1=value1&#10;KEY2=value2"></textarea>
                 </div>
             </div>
 

@@ -81,6 +81,7 @@ h1 {
 .btn-stop { background: var(--danger); }
 .btn-restart { background: var(--warning); color: #2d3436; }
 .btn-clear { background: var(--info); }
+.btn-visit { background: var(--primary); }
 .btn-delete { background: #b2bec3; }
 .btn-delete:hover { background: var(--danger); }
 .btn-edit { background: #636e72; }

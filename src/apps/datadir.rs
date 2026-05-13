@@ -5,7 +5,7 @@ pub fn data_dir(app: &ManagedApp) -> PathBuf {
     let base = PathBuf::from("/tmp").join("ivnc-apps").join(&app.id);
 
     base.join(match app.app_type {
-        AppType::WebApp => "web",
+        AppType::BackgroundApp => "background",
         AppType::DesktopApp => "desktop",
     })
 }

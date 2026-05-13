@@ -4,21 +4,21 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppType {
-    WebApp,
+    BackgroundApp,
     DesktopApp,
 }
 
 impl AppType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            AppType::WebApp => "webapp",
+            AppType::BackgroundApp => "background",
             AppType::DesktopApp => "desktop",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "webapp" => Some(AppType::WebApp),
+            "background" => Some(AppType::BackgroundApp),
             "desktop" => Some(AppType::DesktopApp),
             _ => None,
         }
@@ -40,7 +40,7 @@ pub struct ManagedApp {
     pub app_type: AppType,
     pub autostart: bool,
 
-    // WebApp fields
+    // BackgroundApp fields
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_command: Option<String>,
@@ -48,8 +48,6 @@ pub struct ManagedApp {
     pub launch_env_vars: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub launch_wait_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_wait_timeout_secs: Option<u64>,
 
