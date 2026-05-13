@@ -259,7 +259,6 @@ fn main() {
         input_tx.clone(),
         runtime_settings.clone(),
     ));
-    shared_state.proxy_panel.clone().start_watchdog();
 
     if let Err(e) = run(
         config,
@@ -1517,6 +1516,8 @@ async fn run_async_services(
     _running: Arc<AtomicBool>,
     #[cfg(feature = "mcp")] mcp_stdio: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    shared.proxy_panel.clone().start_watchdog();
+
     let upload_settings = file_upload::FileUploadSettings::from_config(&config);
 
     // Session manager (WebRTC)
