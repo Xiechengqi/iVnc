@@ -33,6 +33,13 @@
 * @property {function} connect - initiate connection to server.
 * @property {function} disconnect - close connection to server.
 */
+import { t } from "./i18n.js?v=1";
+
+const LIB_I18N = {
+    zh: { forcedDisconnectReload: "您已被管理员断开连接，请刷新页面重新连接" },
+    en: { forcedDisconnectReload: "You have been disconnected by an administrator. Please refresh to reconnect." },
+};
+
 export class WebRTCDemoSignaling {
     /**
      * Interface to WebRTC demo signaling server.
@@ -297,7 +304,7 @@ export class WebRTCDemoSignaling {
 
             // Check if this is a forced disconnect from server
             if (window.__FORCE_DISCONNECTED__) {
-                this._setError("您已被管理员断开连接，请刷新页面重新连接");
+                this._setError(t(LIB_I18N, "forcedDisconnectReload"));
                 if (this.ondisconnect !== null) {
                     this.ondisconnect(false); // Don't reconnect
                 }

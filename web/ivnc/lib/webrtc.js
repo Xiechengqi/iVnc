@@ -40,6 +40,13 @@ import { base64ToString, Queue } from "./util.js?v=1";
  * @property {Objet} rtcPeerConfig - RTC configuration containing ICE servers and other connection properties.
  * @property {fucntion} sendDataChannelMessage - Send a message to the peer though the data channel.
  */
+import { t } from "./i18n.js?v=1";
+
+const LIB_I18N = {
+    zh: { forcedDisconnect: "您已被管理员断开连接" },
+    en: { forcedDisconnect: "You have been disconnected by an administrator." },
+};
+
 export class WebRTCDemo {
 	/**
 	 * Interface to WebRTC demo.
@@ -559,7 +566,7 @@ export class WebRTCDemo {
 		} else if (msg.type === 'force_disconnect') {
 			// Server is forcing disconnect - prevent auto-reconnect
 			window.__FORCE_DISCONNECTED__ = true;
-			this._setStatus("您已被管理员断开连接");
+			this._setStatus(t(LIB_I18N, "forcedDisconnect"));
 		} else if (msg.type === 'system') {
 			if (msg.data !== null && msg.data.action !== undefined) {
 				if (msg.data.action !== 'bitrate') {

@@ -32,6 +32,162 @@ import { Input } from "./lib/input2.js?v=18";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { t, onLangChange, getLang } from "./lib/i18n.js?v=1";
+
+const MAIN_I18N = {
+	zh: {
+		// toolbar tooltips
+		connectionsCount: n => `连接数: ${n}`,
+		connectionMode: '连接模式',
+		unpinTaskbar: '取消固定',
+		pinTaskbar: '固定任务栏',
+		imeOn: '中文输入 (Ctrl+Shift+Space)',
+		imeOff: '关闭中文输入 (Ctrl+Shift+Space)',
+		changePassword: '修改密码',
+		uploadFile: '上传文件到桌面',
+		restartOrUpgrade: '重启或升级',
+		proxyTooltip: '代理',
+		terminalTooltip: '终端',
+		consoleTooltip: '控制台',
+		// floating windows
+		minimize: '最小化',
+		consoleTitle: '控制台',
+		proxyTitle: '代理',
+		consoleFrameTitle: 'iVnc 控制台',
+		proxyFrameTitle: 'iVnc 代理',
+		// password modal
+		pwdHeader: '修改密码',
+		pwdNewPlaceholder: '新密码 (至少4位)',
+		pwdConfirmPlaceholder: '确认新密码',
+		cancel: '取消',
+		confirm: '确定',
+		pwdTooShort: '密码至少需要4个字符',
+		pwdMismatch: '两次输入的密码不一致',
+		pwdChanged: '密码已修改，下次请求将使用新密码',
+		pwdChangeFailed: '修改失败',
+		networkError: '网络错误',
+		// upgrade modal
+		upgradeHeader: '重启或升级',
+		upgradeNotice: '将重启 iVNC 服务，连接会短暂中断。',
+		upgradeOption: '升级到最新',
+		upgradeWarning: '勾选后会先更新 iVNC binary，然后重启服务。',
+		restartService: '重启服务',
+		upgradeAndRestart: '升级并重启',
+		close: '关闭',
+		upgradePreparing: '准备升级...',
+		restartPreparing: '准备重启...',
+		restarting: '重启中...',
+		failed: '失败',
+		upgradeDoneWaiting: '更新完成，等待服务重启...',
+		websocketFailed: 'WebSocket 连接失败',
+		requestingRestart: '正在请求重启服务...',
+		restartSent: '重启请求已发送，等待服务恢复...',
+		restartRequestFailed: err => `重启请求失败: ${err}`,
+		serviceRecovered: '服务已恢复，即将刷新页面...',
+		serviceNotRecovered: '服务未恢复，请稍后手动刷新',
+		// no-window overlay
+		waitingAppTitle: '等待应用启动',
+		noAppRunning: '当前没有应用在运行',
+		// connection management
+		connectionMgmtTitle: '连接管理',
+		currentConnectionsCount: n => `当前连接数: ${n}`,
+		connTime: '连接时间',
+		connDuration: '持续',
+		connType: '类型',
+		disconnectBtn: '断开连接',
+		noConnections: '暂无连接',
+		confirmDisconnect: '确定要断开此连接吗？',
+		durationHM: (h, m) => `${h}小时${m}分钟`,
+		durationM: m => `${m}分钟`,
+		// upload toast
+		uploadFileTitle: '上传文件',
+		uploadSuccess: '✓ 上传成功',
+		uploadSavedTo: path => `文件已保存到: ${path}`,
+		uploadFailed: '✗ 上传失败',
+		unknownError: '未知错误',
+	},
+	en: {
+		connectionsCount: n => `Connections: ${n}`,
+		connectionMode: 'Connection mode',
+		unpinTaskbar: 'Unpin taskbar',
+		pinTaskbar: 'Pin taskbar',
+		imeOn: 'Chinese IME (Ctrl+Shift+Space)',
+		imeOff: 'Disable Chinese IME (Ctrl+Shift+Space)',
+		changePassword: 'Change password',
+		uploadFile: 'Upload file to desktop',
+		restartOrUpgrade: 'Restart or upgrade',
+		proxyTooltip: 'Proxy',
+		terminalTooltip: 'Terminal',
+		consoleTooltip: 'Console',
+		minimize: 'Minimize',
+		consoleTitle: 'Console',
+		proxyTitle: 'Proxy',
+		consoleFrameTitle: 'iVnc Console',
+		proxyFrameTitle: 'iVnc Proxy',
+		pwdHeader: 'Change Password',
+		pwdNewPlaceholder: 'New password (min 4 chars)',
+		pwdConfirmPlaceholder: 'Confirm new password',
+		cancel: 'Cancel',
+		confirm: 'OK',
+		pwdTooShort: 'Password must be at least 4 characters',
+		pwdMismatch: 'Passwords do not match',
+		pwdChanged: 'Password changed. The next request will use the new password.',
+		pwdChangeFailed: 'Change failed',
+		networkError: 'Network error',
+		upgradeHeader: 'Restart or Upgrade',
+		upgradeNotice: 'iVNC service will restart, the connection will be briefly interrupted.',
+		upgradeOption: 'Upgrade to latest',
+		upgradeWarning: 'If checked, the iVNC binary will be updated before restarting.',
+		restartService: 'Restart',
+		upgradeAndRestart: 'Upgrade & restart',
+		close: 'Close',
+		upgradePreparing: 'Preparing upgrade...',
+		restartPreparing: 'Preparing restart...',
+		restarting: 'Restarting...',
+		failed: 'Failed',
+		upgradeDoneWaiting: 'Update complete, waiting for service to restart...',
+		websocketFailed: 'WebSocket connection failed',
+		requestingRestart: 'Requesting service restart...',
+		restartSent: 'Restart request sent, waiting for service to recover...',
+		restartRequestFailed: err => `Restart request failed: ${err}`,
+		serviceRecovered: 'Service recovered, refreshing page...',
+		serviceNotRecovered: 'Service not recovered, please refresh manually later',
+		waitingAppTitle: 'Waiting for App',
+		noAppRunning: 'No app is currently running',
+		connectionMgmtTitle: 'Connection Management',
+		currentConnectionsCount: n => `Current connections: ${n}`,
+		connTime: 'Connected at',
+		connDuration: 'Duration',
+		connType: 'Type',
+		disconnectBtn: 'Disconnect',
+		noConnections: 'No connections',
+		confirmDisconnect: 'Disconnect this connection?',
+		durationHM: (h, m) => `${h}h ${m}m`,
+		durationM: m => `${m}m`,
+		uploadFileTitle: 'Upload File',
+		uploadSuccess: '✓ Upload succeeded',
+		uploadSavedTo: path => `Saved to: ${path}`,
+		uploadFailed: '✗ Upload failed',
+		unknownError: 'Unknown error',
+	},
+};
+
+const tt = (key, ...args) => t(MAIN_I18N, key, ...args);
+
+const _liveTitles = new Set();
+function setLiveTitle(el, key, ...args) {
+	if (!el) return;
+	el._titleKey = key;
+	el._titleArgs = args;
+	el.title = tt(key, ...args);
+	_liveTitles.add(el);
+}
+onLangChange(() => {
+	for (const el of Array.from(_liveTitles)) {
+		if (!el.isConnected) { _liveTitles.delete(el); continue; }
+		el.title = tt(el._titleKey, ...(el._titleArgs || []));
+	}
+});
 
 function InitUI() {
 	let style = document.createElement('style');
@@ -799,13 +955,13 @@ function showChangePasswordModal() {
 	const dialog = document.createElement('div');
 	dialog.className = 'pwd-dialog';
 	dialog.innerHTML = `
-		<h3>修改密码</h3>
-		<input type="password" id="pwd-new" placeholder="新密码 (至少4位)" autocomplete="new-password" />
-		<input type="password" id="pwd-confirm" placeholder="确认新密码" autocomplete="new-password" />
+		<h3>${tt('pwdHeader')}</h3>
+		<input type="password" id="pwd-new" placeholder="${tt('pwdNewPlaceholder')}" autocomplete="new-password" />
+		<input type="password" id="pwd-confirm" placeholder="${tt('pwdConfirmPlaceholder')}" autocomplete="new-password" />
 		<div class="pwd-msg" id="pwd-msg"></div>
 		<div class="pwd-btns">
-			<button class="pwd-cancel" id="pwd-cancel">取消</button>
-			<button class="pwd-ok" id="pwd-ok">确定</button>
+			<button class="pwd-cancel" id="pwd-cancel">${tt('cancel')}</button>
+			<button class="pwd-ok" id="pwd-ok">${tt('confirm')}</button>
 		</div>
 	`;
 	overlay.appendChild(dialog);
@@ -834,12 +990,12 @@ function showChangePasswordModal() {
 
 		if (np.length < 4) {
 			msg.className = 'pwd-msg error';
-			msg.textContent = '密码至少需要4个字符';
+			msg.textContent = tt('pwdTooShort');
 			return;
 		}
 		if (np !== cp) {
 			msg.className = 'pwd-msg error';
-			msg.textContent = '两次输入的密码不一致';
+			msg.textContent = tt('pwdMismatch');
 			return;
 		}
 
@@ -853,19 +1009,19 @@ function showChangePasswordModal() {
 			});
 			if (resp.ok) {
 				msg.className = 'pwd-msg ok';
-				msg.textContent = '密码已修改，下次请求将使用新密码';
+				msg.textContent = tt('pwdChanged');
 				setTimeout(close, 1500);
 			} else {
 				const data = await resp.json().catch(() => ({}));
 				msg.className = 'pwd-msg error';
-				msg.textContent = data.error || '修改失败';
+				msg.textContent = data.error || tt('pwdChangeFailed');
 			}
 		} catch (e) {
 			msg.className = 'pwd-msg error';
-			msg.textContent = '网络错误';
+			msg.textContent = tt('networkError');
 		}
 		okBtn.disabled = false;
-		okBtn.textContent = '确定';
+		okBtn.textContent = tt('confirm');
 	});
 }
 
@@ -880,14 +1036,14 @@ function showForceUpdateModal() {
 	const dialog = document.createElement('div');
 	dialog.className = 'update-dialog';
 	dialog.innerHTML = `
-		<h3>重启或升级</h3>
+		<h3>${tt('upgradeHeader')}</h3>
 		<div class="update-info" id="update-info">
-			<p>将重启 iVNC 服务，连接会短暂中断。</p>
+			<p>${tt('upgradeNotice')}</p>
 			<label class="update-option">
 				<input type="checkbox" id="upgrade-latest">
-				<span>升级到最新</span>
+				<span>${tt('upgradeOption')}</span>
 			</label>
-			<p class="update-warning">勾选后会先更新 iVNC binary，然后重启服务。</p>
+			<p class="update-warning">${tt('upgradeWarning')}</p>
 		</div>
 		<div class="update-progress" id="update-progress" style="display:none;">
 			<div class="progress-bar">
@@ -897,8 +1053,8 @@ function showForceUpdateModal() {
 		</div>
 		<div class="update-logs" id="update-logs" style="display:none;"></div>
 		<div class="update-btns" id="update-btns">
-			<button class="update-cancel" id="update-cancel">取消</button>
-			<button class="update-ok" id="update-ok">重启服务</button>
+			<button class="update-cancel" id="update-cancel">${tt('cancel')}</button>
+			<button class="update-ok" id="update-ok">${tt('restartService')}</button>
 		</div>
 	`;
 	overlay.appendChild(dialog);
@@ -922,7 +1078,7 @@ function showForceUpdateModal() {
 	overlay.addEventListener('click', (e) => { if (e.target === overlay && !isUpdating) close(); });
 	cancelBtn.addEventListener('click', close);
 	upgradeCheckbox.addEventListener('change', () => {
-		okBtn.textContent = upgradeCheckbox.checked ? '升级并重启' : '重启服务';
+		okBtn.textContent = upgradeCheckbox.checked ? tt('upgradeAndRestart') : tt('restartService');
 	});
 
 	okBtn.addEventListener('click', () => {
@@ -935,7 +1091,7 @@ function showForceUpdateModal() {
 		logsDiv.innerHTML = '';
 		progressFill.style.backgroundColor = '#4c86e6';
 		progressFill.style.width = '5%';
-		progressText.textContent = upgradeCheckbox.checked ? '准备升级...' : '准备重启...';
+		progressText.textContent = upgradeCheckbox.checked ? tt('upgradePreparing') : tt('restartPreparing');
 
 		if (!upgradeCheckbox.checked) {
 			restartService();
@@ -964,7 +1120,7 @@ function showForceUpdateModal() {
 					progressFill.style.backgroundColor = '#ef4444';
 					isUpdating = false;
 					cancelBtn.disabled = false;
-					cancelBtn.textContent = '关闭';
+					cancelBtn.textContent = tt('close');
 				}
 			} catch (err) {
 				console.error('Failed to parse upgrade log:', err);
@@ -977,33 +1133,33 @@ function showForceUpdateModal() {
 				progressFill.style.backgroundColor = '#10b981';
 				const logEntry = document.createElement('div');
 				logEntry.className = 'log-entry log-success';
-				logEntry.textContent = '更新完成，等待服务重启...';
+				logEntry.textContent = tt('upgradeDoneWaiting');
 				logsDiv.appendChild(logEntry);
 				logsDiv.scrollTop = logsDiv.scrollHeight;
 				waitForRestart();
 			} else {
 				isUpdating = false;
 				cancelBtn.disabled = false;
-				cancelBtn.textContent = '关闭';
+				cancelBtn.textContent = tt('close');
 			}
 		};
 
 		ws.onerror = () => {
 			const logEntry = document.createElement('div');
 			logEntry.className = 'log-entry log-error';
-			logEntry.textContent = 'WebSocket 连接失败';
+			logEntry.textContent = tt('websocketFailed');
 			logsDiv.appendChild(logEntry);
 			progressFill.style.backgroundColor = '#ef4444';
 			isUpdating = false;
 			cancelBtn.disabled = false;
-			cancelBtn.textContent = '关闭';
+			cancelBtn.textContent = tt('close');
 		};
 	});
 
 	async function restartService() {
 		const logEntry = document.createElement('div');
 		logEntry.className = 'log-entry log-info';
-		logEntry.textContent = '正在请求重启服务...';
+		logEntry.textContent = tt('requestingRestart');
 		logsDiv.appendChild(logEntry);
 
 		try {
@@ -1011,25 +1167,25 @@ function showForceUpdateModal() {
 			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
 			progressFill.style.width = '50%';
-			progressText.textContent = '重启中...';
+			progressText.textContent = tt('restarting');
 
 			const okEntry = document.createElement('div');
 			okEntry.className = 'log-entry log-success';
-			okEntry.textContent = '重启请求已发送，等待服务恢复...';
+			okEntry.textContent = tt('restartSent');
 			logsDiv.appendChild(okEntry);
 			logsDiv.scrollTop = logsDiv.scrollHeight;
 			waitForRestart();
 		} catch (err) {
 			progressFill.style.backgroundColor = '#ef4444';
-			progressText.textContent = '失败';
+			progressText.textContent = tt('failed');
 			const errEntry = document.createElement('div');
 			errEntry.className = 'log-entry log-error';
-			errEntry.textContent = `重启请求失败: ${err.message || err}`;
+			errEntry.textContent = tt('restartRequestFailed', err.message || err);
 			logsDiv.appendChild(errEntry);
 			logsDiv.scrollTop = logsDiv.scrollHeight;
 			isUpdating = false;
 			cancelBtn.disabled = false;
-			cancelBtn.textContent = '关闭';
+			cancelBtn.textContent = tt('close');
 		}
 	}
 
@@ -1044,7 +1200,7 @@ function showForceUpdateModal() {
 						clearInterval(checkInterval);
 						const logEntry = document.createElement('div');
 						logEntry.className = 'log-entry log-success';
-						logEntry.textContent = '服务已恢复，即将刷新页面...';
+						logEntry.textContent = tt('serviceRecovered');
 						logsDiv.appendChild(logEntry);
 						setTimeout(() => window.location.reload(), 1000);
 					}
@@ -1057,11 +1213,11 @@ function showForceUpdateModal() {
 				clearInterval(checkInterval);
 				const logEntry = document.createElement('div');
 				logEntry.className = 'log-entry log-error';
-				logEntry.textContent = '服务未恢复，请稍后手动刷新';
+				logEntry.textContent = tt('serviceNotRecovered');
 				logsDiv.appendChild(logEntry);
 				isUpdating = false;
 				cancelBtn.disabled = false;
-				cancelBtn.textContent = '关闭';
+				cancelBtn.textContent = tt('close');
 			}
 		}, 1000);
 	}
@@ -1134,6 +1290,9 @@ function createWebTerminalController() {
 	let intentionalRestart = false;
 	let destroyed = false;
 	let startupClearTimer = null;
+	let reconnectTimer = null;
+	let reconnectAttempt = 0;
+	let socketGeneration = 0;
 
 	const terminalSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
 
@@ -1148,6 +1307,11 @@ function createWebTerminalController() {
 		status.classList.toggle('error', isError);
 	}
 
+	function clearReconnectTimer() {
+		clearTimeout(reconnectTimer);
+		reconnectTimer = null;
+	}
+
 	function ensureModal() {
 		if (destroyed) return;
 		if (modal) return;
@@ -1159,7 +1323,7 @@ function createWebTerminalController() {
 			<div class="web-terminal-header">
 				<div class="web-terminal-title">${terminalSvgSmall}<span>Terminal</span><span class="web-terminal-status">connecting</span></div>
 				<div class="web-terminal-actions">
-					<button class="web-terminal-action" id="web-terminal-minimize" type="button" title="最小化">_</button>
+					<button class="web-terminal-action" id="web-terminal-minimize" type="button" title="${tt('minimize')}">_</button>
 				</div>
 			</div>
 			<div class="web-terminal-body" id="web-terminal-body"></div>
@@ -1257,6 +1421,10 @@ function createWebTerminalController() {
 	function show() {
 		ensureModal();
 		if (!modal) return;
+		if (!intentionalRestart && (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING)) {
+			clearReconnectTimer();
+			connect();
+		}
 		updateOverlayModalScale();
 		modal.classList.remove('minimized');
 		terminalBtn?.classList.add('active');
@@ -1287,16 +1455,22 @@ function createWebTerminalController() {
 		if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
 			return;
 		}
+		clearReconnectTimer();
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+		const generation = ++socketGeneration;
 		socket = new WebSocket(`${protocol}//${window.location.host}/terminal/ws`);
 		setStatus('connecting');
 
 		socket.onopen = () => {
+			if (generation !== socketGeneration || destroyed) return;
+			clearReconnectTimer();
+			reconnectAttempt = 0;
 			setStatus('connected');
 			fitAndResize();
 		};
 
 		socket.onmessage = (event) => {
+			if (generation !== socketGeneration || destroyed) return;
 			let message;
 			try {
 				message = JSON.parse(event.data);
@@ -1308,14 +1482,33 @@ function createWebTerminalController() {
 		};
 
 		socket.onerror = () => {
+			if (generation !== socketGeneration || destroyed) return;
 			setStatus('connection error', true);
 		};
 
 		socket.onclose = () => {
-			if (!intentionalRestart) {
-				setStatus('disconnected', true);
+			if (generation !== socketGeneration || destroyed) return;
+			if (socket && generation === socketGeneration) {
+				socket = null;
 			}
+			if (intentionalRestart) return;
+			setStatus('disconnected', true);
+			scheduleReconnect();
 		};
+	}
+
+	function scheduleReconnect() {
+		if (destroyed || !modal || reconnectTimer) return;
+		const delays = [300, 800, 1500, 3000, 5000, 8000];
+		const delay = delays[Math.min(reconnectAttempt, delays.length - 1)];
+		reconnectAttempt += 1;
+		const seconds = Math.max(1, Math.ceil(delay / 1000));
+		setStatus(`reconnecting in ${seconds}s`, true);
+		reconnectTimer = setTimeout(() => {
+			reconnectTimer = null;
+			if (destroyed || !modal) return;
+			connect();
+		}, delay);
 	}
 
 	function handleServerMessage(message) {
@@ -1345,13 +1538,16 @@ function createWebTerminalController() {
 
 	function restart() {
 		intentionalRestart = true;
+		clearReconnectTimer();
 		try {
 			socket?.close();
 		} catch (_) {}
 		socket = null;
+		socketGeneration += 1;
 		setStatus('restarting');
 		show();
 		setTimeout(() => {
+			if (destroyed) return;
 			intentionalRestart = false;
 			connect();
 		}, 250);
@@ -1394,6 +1590,7 @@ function createWebTerminalController() {
 		destroyed = true;
 		clearTimeout(startupClearTimer);
 		clearTimeout(resizeTimer);
+		clearReconnectTimer();
 		resizeObserver?.disconnect();
 		try {
 			socket?.close();
@@ -1438,13 +1635,13 @@ function createConsoleModalController() {
 		modal.className = 'web-terminal-modal web-console-modal minimized';
 		modal.innerHTML = `
 			<div class="web-terminal-header">
-				<div class="web-terminal-title">${consoleSvgSmall}<span>控制台</span></div>
+				<div class="web-terminal-title">${consoleSvgSmall}<span>${tt('consoleTitle')}</span></div>
 				<div class="web-terminal-actions">
-					<button class="web-terminal-action" id="web-console-minimize" type="button" title="最小化">_</button>
+					<button class="web-terminal-action" id="web-console-minimize" type="button" title="${tt('minimize')}">_</button>
 				</div>
 			</div>
 			<div class="web-terminal-body web-console-body">
-				<iframe class="web-console-frame" title="iVnc 控制台"></iframe>
+				<iframe class="web-console-frame" title="${tt('consoleFrameTitle')}"></iframe>
 			</div>
 		`;
 		document.body.appendChild(modal);
@@ -1522,13 +1719,13 @@ function createProxyModalController() {
 		modal.className = 'web-terminal-modal web-console-modal minimized';
 		modal.innerHTML = `
 			<div class="web-terminal-header">
-				<div class="web-terminal-title">${proxySvgSmall}<span>代理</span></div>
+				<div class="web-terminal-title">${proxySvgSmall}<span>${tt('proxyTitle')}</span></div>
 				<div class="web-terminal-actions">
-					<button class="web-terminal-action" id="web-proxy-minimize" type="button" title="最小化">_</button>
+					<button class="web-terminal-action" id="web-proxy-minimize" type="button" title="${tt('minimize')}">_</button>
 				</div>
 			</div>
 			<div class="web-terminal-body web-console-body">
-				<iframe class="web-console-frame" title="iVnc 代理"></iframe>
+				<iframe class="web-console-frame" title="${tt('proxyFrameTitle')}"></iframe>
 			</div>
 		`;
 		document.body.appendChild(modal);
@@ -1614,18 +1811,18 @@ export default function webrtc() {
 			const duration = now - c.connected_at;
 			const hours = Math.floor(duration / 3600);
 			const minutes = Math.floor((duration % 3600) / 60);
-			const durationText = hours > 0 ? `${hours}小时${minutes}分钟` : `${minutes}分钟`;
-			const connTime = new Date(c.connected_at * 1000).toLocaleString('zh-CN');
+			const durationText = hours > 0 ? tt('durationHM', hours, minutes) : tt('durationM', minutes);
+			const connTime = new Date(c.connected_at * 1000).toLocaleString(getLang() === 'zh' ? 'zh-CN' : 'en-US');
 
 			return `
 				<div class="connection-item">
 					<div class="conn-ip">${c.peer_ip}</div>
 					<div class="conn-info">
-						<span>连接时间: ${connTime}</span>
-						<span>持续: ${durationText}</span>
-						<span>类型: ${c.connection_type.toUpperCase()}</span>
+						<span>${tt('connTime')}: ${connTime}</span>
+						<span>${tt('connDuration')}: ${durationText}</span>
+						<span>${tt('connType')}: ${c.connection_type.toUpperCase()}</span>
 					</div>
-					<button class="disconnect-btn" onclick="disconnectConnection('${c.id}')">断开连接</button>
+					<button class="disconnect-btn" onclick="disconnectConnection('${c.id}')">${tt('disconnectBtn')}</button>
 				</div>
 			`;
 		}).join('');
@@ -1633,15 +1830,15 @@ export default function webrtc() {
 		page.innerHTML = `
 			<div class="connect-header">
 				<span class="connect-back" onclick="window.close()">←</span>
-				<span>连接管理</span>
+				<span>${tt('connectionMgmtTitle')}</span>
 			</div>
-			<div style="margin-bottom:12px;color:rgba(255,255,255,0.7);">当前连接数: ${connections.length}</div>
-			<div class="connection-list">${items || '<div style="color:rgba(255,255,255,0.5);">暂无连接</div>'}</div>
+			<div style="margin-bottom:12px;color:rgba(255,255,255,0.7);">${tt('currentConnectionsCount', connections.length)}</div>
+			<div class="connection-list">${items || `<div style="color:rgba(255,255,255,0.5);">${tt('noConnections')}</div>`}</div>
 		`;
 	}
 
 	window.disconnectConnection = async function(id) {
-		if (!confirm('确定要断开此连接吗？')) return;
+		if (!confirm(tt('confirmDisconnect'))) return;
 		try {
 			await fetch(`/api/connections/${id}/disconnect`, { method: 'POST' });
 			loadConnections();
@@ -2244,7 +2441,7 @@ export default function webrtc() {
 		toast.className = 'upload-toast';
 		toast.innerHTML = `
 			<div class="upload-toast-header">
-				<div class="upload-toast-title">上传文件</div>
+				<div class="upload-toast-title">${tt('uploadFileTitle')}</div>
 				<button class="upload-toast-close" onclick="this.parentElement.parentElement.remove()">×</button>
 			</div>
 			<div class="upload-toast-filename">${fileName}</div>
@@ -2275,11 +2472,11 @@ export default function webrtc() {
 		const uploadPath = UPLOAD_DIR + '/' + fileName;
 		toast.innerHTML = `
 			<div class="upload-toast-header">
-				<div class="upload-toast-title">✓ 上传成功</div>
+				<div class="upload-toast-title">${tt('uploadSuccess')}</div>
 				<button class="upload-toast-close" onclick="this.parentElement.parentElement.remove()">×</button>
 			</div>
 			<div class="upload-toast-filename">${fileName}</div>
-			<div class="upload-toast-path">文件已保存到: ${uploadPath}</div>
+			<div class="upload-toast-path">${tt('uploadSavedTo', uploadPath)}</div>
 		`;
 		// Auto-remove after 5 seconds
 		setTimeout(() => {
@@ -2302,7 +2499,7 @@ export default function webrtc() {
 		}
 		toast.innerHTML = `
 			<div class="upload-toast-header">
-				<div class="upload-toast-title">✗ 上传失败</div>
+				<div class="upload-toast-title">${tt('uploadFailed')}</div>
 				<button class="upload-toast-close" onclick="this.parentElement.parentElement.remove()">×</button>
 			</div>
 			<div class="upload-toast-filename">${fileName}</div>
@@ -2341,7 +2538,7 @@ export default function webrtc() {
 		} else if (status === 'end') {
 			showUploadSuccess(currentUploadToast, fileName);
 		} else if (status === 'error') {
-			showUploadError(currentUploadToast, fileName, message || '未知错误');
+			showUploadError(currentUploadToast, fileName, message || tt('unknownError'));
 		}
 	});
 
@@ -2632,7 +2829,7 @@ export default function webrtc() {
 							connEl.textContent = String(lastSessionCount);
 							connEl.style.display = 'block';
 							connEl.style.color = '#4caf50';
-							connEl.title = '连接数: ' + lastSessionCount;
+							setLiveTitle(connEl, 'connectionsCount', lastSessionCount);
 						} else {
 							connEl.style.display = 'none';
 						}
@@ -2813,7 +3010,7 @@ export default function webrtc() {
 			// No-window overlay (shown when no X11 windows are running)
 			const noWindowOverlay = document.createElement('div');
 			noWindowOverlay.className = 'no-window-overlay hidden';
-			noWindowOverlay.innerHTML = '<div class="no-window-content"><h2>等待应用启动</h2><p>当前没有应用在运行</p></div>';
+			noWindowOverlay.innerHTML = `<div class="no-window-content"><h2>${tt('waitingAppTitle')}</h2><p>${tt('noAppRunning')}</p></div>`;
 			videoContainer.appendChild(noWindowOverlay);
 
 			// Taskbar: trigger zone + bar
@@ -2834,7 +3031,7 @@ export default function webrtc() {
 			const pinBtn = document.createElement('div');
 			pinBtn.className = 'taskbar-pin' + (taskbarPinned ? ' active' : '');
 			pinBtn.innerHTML = taskbarPinned ? pinSvgPinned : pinSvgUnpinned;
-			pinBtn.title = taskbarPinned ? '取消固定' : '固定任务栏';
+			setLiveTitle(pinBtn, taskbarPinned ? 'unpinTaskbar' : 'pinTaskbar');
 			if (taskbarPinned) taskbar.classList.add('pinned');
 			pinBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
@@ -2842,7 +3039,7 @@ export default function webrtc() {
 				pinBtn.classList.toggle('active', taskbarPinned);
 				taskbar.classList.toggle('pinned', taskbarPinned);
 				pinBtn.innerHTML = taskbarPinned ? pinSvgPinned : pinSvgUnpinned;
-				pinBtn.title = taskbarPinned ? '取消固定' : '固定任务栏';
+				setLiveTitle(pinBtn, taskbarPinned ? 'unpinTaskbar' : 'pinTaskbar');
 				setBoolParam('taskbar_pinned', taskbarPinned);
 			});
 			taskbar.appendChild(pinBtn);
@@ -2853,13 +3050,13 @@ export default function webrtc() {
 			const imeBtn = document.createElement('div');
 			imeBtn.className = 'taskbar-pin' + (imeModeActive ? ' active' : '');
 			imeBtn.innerHTML = imeSvg;
-			imeBtn.title = imeModeActive ? '关闭中文输入 (Ctrl+Shift+Space)' : '中文输入 (Ctrl+Shift+Space)';
+			setLiveTitle(imeBtn, imeModeActive ? 'imeOff' : 'imeOn');
 			imeBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				if (input) {
 					const active = input.toggleImeMode();
 					imeBtn.classList.toggle('active', active);
-					imeBtn.title = active ? '关闭中文输入 (Ctrl+Shift+Space)' : '中文输入 (Ctrl+Shift+Space)';
+					setLiveTitle(imeBtn, active ? 'imeOff' : 'imeOn');
 					setBoolParam('ime_mode', active);
 				}
 			});
@@ -2870,7 +3067,7 @@ export default function webrtc() {
 			const pwdBtn = document.createElement('div');
 			pwdBtn.className = 'taskbar-pin';
 			pwdBtn.innerHTML = pwdSvg;
-			pwdBtn.title = '修改密码';
+			setLiveTitle(pwdBtn, 'changePassword');
 			pwdBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				showChangePasswordModal();
@@ -2883,7 +3080,7 @@ export default function webrtc() {
 			uploadBtn.className = 'taskbar-pin disabled';  // 初始为禁用状态
 			uploadBtn.id = 'upload-btn';
 			uploadBtn.innerHTML = uploadSvg;
-			uploadBtn.title = '上传文件到桌面';
+			setLiveTitle(uploadBtn, 'uploadFile');
 			uploadBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				// Check if WebRTC data channel is open
@@ -2905,7 +3102,7 @@ export default function webrtc() {
 			updateBtn.className = 'taskbar-pin';
 			updateBtn.id = 'update-btn';
 			updateBtn.innerHTML = updateSvg;
-			updateBtn.title = '重启或升级';
+			setLiveTitle(updateBtn, 'restartOrUpgrade');
 			updateBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				showForceUpdateModal();
@@ -2917,7 +3114,7 @@ export default function webrtc() {
 			proxyBtn.className = 'taskbar-pin';
 			proxyBtn.id = 'proxy-btn';
 			proxyBtn.innerHTML = proxySvg;
-			proxyBtn.title = '代理';
+			setLiveTitle(proxyBtn, 'proxyTooltip');
 			proxyBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				terminalController.minimize();
@@ -2932,7 +3129,7 @@ export default function webrtc() {
 			terminalBtn.className = 'taskbar-pin';
 			terminalBtn.id = 'terminal-btn';
 			terminalBtn.innerHTML = terminalSvg;
-			terminalBtn.title = '终端';
+			setLiveTitle(terminalBtn, 'terminalTooltip');
 			terminalBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				proxyController.minimize();
@@ -2947,7 +3144,7 @@ export default function webrtc() {
 			consoleBtn.className = 'taskbar-pin';
 			consoleBtn.id = 'console-btn';
 			consoleBtn.innerHTML = consoleSvg;
-			consoleBtn.title = '控制台';
+			setLiveTitle(consoleBtn, 'consoleTooltip');
 			consoleBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				proxyController.minimize();
@@ -2961,7 +3158,7 @@ export default function webrtc() {
 			connIndicator.className = 'taskbar-conn';
 			connIndicator.id = 'conn-indicator';
 			connIndicator.textContent = '—';
-			connIndicator.title = '连接模式';
+			setLiveTitle(connIndicator, 'connectionMode');
 			connIndicator.style.cursor = 'pointer';
 			connIndicator.style.pointerEvents = 'auto';
 			connIndicator.addEventListener('click', (e) => {
@@ -3192,7 +3389,7 @@ export default function webrtc() {
 
 			input.onimetoggle = (active) => {
 				imeBtn.classList.toggle('active', active);
-				imeBtn.title = active ? '关闭中文输入 (Ctrl+Shift+Space)' : '中文输入 (Ctrl+Shift+Space)';
+				setLiveTitle(imeBtn, active ? 'imeOff' : 'imeOn');
 				setBoolParam('ime_mode', active);
 			};
 

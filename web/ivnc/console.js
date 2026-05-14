@@ -1,7 +1,9 @@
+import { getLang, setLang, onLangChange } from './lib/i18n.js?v=1';
+
 const API = '/api/apps';
 let editId = null;
 let lastDataHash = '';
-let currentLang = 'zh';
+let currentLang = getLang();
 
 const I18N = {
     en: {
@@ -49,6 +51,8 @@ const I18N = {
         exec: 'Launch Command',
         env: 'Environment Variables',
         envDefault: '(Optional, default: none)',
+        launchCommandHelp: 'Command to run when the app starts',
+        execHelp: 'Command to run when the app starts',
         nameInputPlaceholder: 'App display name',
         backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: 'Enter launch command, e.g. /usr/bin/code --no-sandbox',
@@ -130,6 +134,8 @@ const I18N = {
         exec: '启动命令',
         env: '环境变量',
         envDefault: '（可选，默认值：无）',
+        launchCommandHelp: '应用启动时要执行的命令',
+        execHelp: '应用启动时要执行的命令',
         nameInputPlaceholder: '应用显示名称',
         backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: '请输入启动命令，例如： /usr/bin/code --no-sandbox',
@@ -210,6 +216,7 @@ function applyTranslations() {
     document.querySelector('#f-app-type option[value="desktop"]').textContent = t('desktopOption');
     document.getElementById('label-autostart').textContent = t('autostart');
     document.getElementById('label-launch-command').textContent = t('launchCommand');
+    document.getElementById('label-launch-command-help').textContent = t('launchCommandHelp');
     document.getElementById('label-launch-cwd').textContent = t('launchCwd');
     document.getElementById('label-launch-cwd-default').textContent = t('launchCwdDefault');
     document.getElementById('label-launch-timeout').textContent = t('launchTimeout');
@@ -219,6 +226,7 @@ function applyTranslations() {
     document.getElementById('label-launch-env').textContent = t('launchEnv');
     document.getElementById('label-launch-env-default').textContent = t('envDefault');
     document.getElementById('label-exec').textContent = t('exec');
+    document.getElementById('label-exec-help').textContent = t('execHelp');
     document.getElementById('label-env').textContent = t('env');
     document.getElementById('label-env-default').textContent = t('envDefault');
     document.getElementById('modal-cancel').textContent = t('cancel');
@@ -577,7 +585,10 @@ function updateAppTypeVisibility() {
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('add-app-btn').addEventListener('click', showAdd);
     document.getElementById('lang-toggle').addEventListener('click', () => {
-        currentLang = currentLang === 'en' ? 'zh' : 'en';
+        setLang(currentLang === 'en' ? 'zh' : 'en');
+    });
+    onLangChange((lang) => {
+        currentLang = lang;
         applyTranslations();
         load();
     });

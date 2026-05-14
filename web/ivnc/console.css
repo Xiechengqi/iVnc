@@ -279,6 +279,11 @@ tr:hover { background-color: #f8f9fa; }
   font-size: 13px;
   font-weight: 700;
 }
+.info-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
 .info-icon {
   display: inline-flex;
   align-items: center;
@@ -292,12 +297,41 @@ tr:hover { background-color: #f8f9fa; }
   font-weight: 700;
   font-style: normal;
   line-height: 1;
+  cursor: help;
+}
+.info-icon:focus {
+  outline: none;
+  border-color: var(--primary);
+  color: var(--primary);
 }
 .default-text {
-  color: #9ca3af;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  padding: 6px 10px;
+  background: #2d3436;
+  color: #fff;
   font-size: 12px;
   font-weight: 500;
-  white-space: nowrap;
+  line-height: 1.4;
+  border-radius: 6px;
+  white-space: normal;
+  width: max-content;
+  max-width: 200px;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease, visibility 0.15s ease;
+}
+.split-row > .form-group:last-child .default-text {
+  left: auto;
+  right: 0;
+}
+.info-tip:hover .default-text,
+.info-tip:focus-within .default-text {
+  opacity: 1;
+  visibility: visible;
 }
 .compact-label {
   display: flex;
@@ -459,9 +493,5 @@ tr:hover { background-color: #f8f9fa; }
   .split-row {
     grid-template-columns: 1fr;
     gap: 12px;
-  }
-
-  .default-text {
-    white-space: normal;
   }
 }

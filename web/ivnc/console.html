@@ -68,7 +68,10 @@
                 <div class="form-line command-line">
                     <label class="form-label info-label">
                         <span id="label-launch-command">启动命令</span>
-                        <span class="info-icon">i</span>
+                        <span class="info-tip">
+                            <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                            <span class="default-text" id="label-launch-command-help">应用启动时要执行的命令</span>
+                        </span>
                     </label>
                     <div class="command-control">
                         <div class="command-options">
@@ -82,16 +85,20 @@
                         <div class="form-group">
                             <label class="compact-label">
                                 <span id="label-launch-cwd">工作目录</span>
-                                <span class="info-icon">i</span>
-                                <span class="default-text" id="label-launch-cwd-default">（可选，默认值：当前目录）</span>
+                                <span class="info-tip">
+                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                    <span class="default-text" id="label-launch-cwd-default">（可选，默认值：当前目录）</span>
+                                </span>
                             </label>
                             <input type="text" id="f-launch-cwd" placeholder="请输入工作目录，例如： /workspace/app">
                         </div>
                         <div class="form-group">
                             <label class="compact-label">
                                 <span id="label-launch-timeout">等待超时（秒）</span>
-                                <span class="info-icon">i</span>
-                                <span class="default-text" id="label-launch-timeout-default">（可选，默认值：30）</span>
+                                <span class="info-tip">
+                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                    <span class="default-text" id="label-launch-timeout-default">（可选，默认值：30）</span>
+                                </span>
                             </label>
                             <input type="number" id="f-launch-timeout" placeholder="请输入超时时间，例如： 30" min="1" max="600">
                         </div>
@@ -100,16 +107,20 @@
                 <div class="form-line">
                     <label class="form-label info-label">
                         <span id="label-access-url">访问地址</span>
-                        <span class="info-icon">i</span>
-                        <span class="default-text" id="label-access-url-default">（可选，默认值：无）</span>
+                        <span class="info-tip">
+                            <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                            <span class="default-text" id="label-access-url-default">（可选，默认值：无）</span>
+                        </span>
                     </label>
                     <input type="text" id="f-url" placeholder="请输入访问地址，例如： http://127.0.0.1:7860">
                 </div>
                 <div class="form-line">
                     <label class="form-label info-label">
                         <span id="label-launch-env">环境变量</span>
-                        <span class="info-icon">i</span>
-                        <span class="default-text" id="label-launch-env-default">（可选，默认值：无）</span>
+                        <span class="info-tip">
+                            <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                            <span class="default-text" id="label-launch-env-default">（可选，默认值：无）</span>
+                        </span>
                     </label>
                     <textarea id="f-launch-env" rows="5" placeholder="请输入环境变量，每行一个，格式：KEY=value&#10;KEY1=value1&#10;KEY2=value2"></textarea>
                 </div>
@@ -119,7 +130,10 @@
                 <div class="form-line command-line">
                     <label class="form-label info-label">
                         <span id="label-exec">启动命令</span>
-                        <span class="info-icon">i</span>
+                        <span class="info-tip">
+                            <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                            <span class="default-text" id="label-exec-help">应用启动时要执行的命令</span>
+                        </span>
                     </label>
                     <div class="command-control">
                         <div class="command-options">
@@ -131,8 +145,10 @@
                 <div class="form-line">
                     <label class="form-label info-label">
                         <span id="label-env">环境变量</span>
-                        <span class="info-icon">i</span>
-                        <span class="default-text" id="label-env-default">（可选，默认值：无）</span>
+                        <span class="info-tip">
+                            <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                            <span class="default-text" id="label-env-default">（可选，默认值：无）</span>
+                        </span>
                     </label>
                     <textarea id="f-env" rows="5" placeholder="请输入环境变量，每行一个，格式：KEY=value"></textarea>
                 </div>
