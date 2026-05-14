@@ -169,41 +169,41 @@ tr:hover { background-color: #f8f9fa; }
 }
 
 .app-modal {
-  width: 1040px;
-  max-width: min(95vw, 1040px);
-  padding: 56px 56px 48px;
-  border-radius: 18px;
+  width: 480px;
+  max-width: min(95vw, 480px);
+  padding: 24px;
+  border-radius: 12px;
 }
 
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 44px;
+  gap: 16px;
+  margin-bottom: 18px;
 }
 
 .modal h2 {
-  font-size: 2rem;
-  line-height: 1.2;
+  font-size: 1.125rem;
+  line-height: 1.3;
   margin: 0;
-  font-weight: 800;
+  font-weight: 700;
   color: #111827;
 }
 
 .modal-close {
   border: 0;
   background: transparent;
-  color: #111827;
+  color: #9ca3af;
   cursor: pointer;
-  width: 42px;
-  height: 42px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 42px;
+  font-size: 22px;
   line-height: 1;
-  font-weight: 300;
+  font-weight: 400;
 }
 
 .modal-close:hover {
@@ -238,84 +238,80 @@ tr:hover { background-color: #f8f9fa; }
   align-items: center;
 }
 .form-line {
-  display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
-  gap: 28px;
-  align-items: center;
-  margin-bottom: 34px;
-}
-.form-line.stacked-control {
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
 }
 .form-line.command-line {
-  align-items: end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label options"
+    "input input";
+  column-gap: 12px;
+  row-gap: 6px;
 }
-.form-line.no-label {
-  grid-template-columns: 170px minmax(0, 1fr);
-}
-.form-line.no-label::before {
-  content: "";
-}
-.form-field-header {
-  margin-bottom: 22px;
-}
+.form-line.command-line > .form-label { grid-area: label; }
+.form-line.command-line > .command-control { display: contents; }
+.form-line.command-line .command-options { grid-area: options; }
+.form-line.command-line .command-control > input { grid-area: input; }
 .command-control {
   min-width: 0;
 }
 .command-options {
-  min-height: 34px;
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  margin-bottom: 18px;
 }
 .form-label {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   color: #374151;
-  font-size: 20px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 600;
   line-height: 1.4;
 }
 .required-mark {
   color: #ef1f1f;
-  font-weight: 900;
+  font-size: 13px;
+  font-weight: 700;
 }
 .info-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
-  border: 2px solid #6b7280;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #9ca3af;
   border-radius: 999px;
-  color: #4b5563;
-  font-size: 13px;
-  font-weight: 800;
+  color: #6b7280;
+  font-size: 10px;
+  font-weight: 700;
   font-style: normal;
   line-height: 1;
 }
 .default-text {
   color: #9ca3af;
-  font-size: 18px;
+  font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
 }
 .compact-label {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 18px;
+  gap: 6px;
+  margin-bottom: 0;
   color: #374151;
-  font-size: 20px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 600;
 }
 .split-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 36px;
+  gap: 14px;
 }
 .form-row { display: flex; gap: 12px; margin-bottom: 16px; }
 .form-row .form-group { flex: 1; margin-bottom: 0; }
@@ -323,33 +319,33 @@ tr:hover { background-color: #f8f9fa; }
 .form-group .compact-label {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 18px;
+  gap: 6px;
+  margin-bottom: 6px;
   color: #374151;
-  font-size: 20px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 600;
 }
 .form-line input, .form-line select, .form-line textarea,
 .form-group input, .form-group select, .form-group textarea {
   width: 100%;
   min-width: 0;
-  padding: 0 18px;
+  padding: 0 12px;
   border: 1px solid #d1d8e0;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff;
-  font-size: 20px;
+  font-size: 14px;
   color: #111827;
   transition: all 0.2s;
 }
 .form-line input, .form-line select,
 .form-group input, .form-group select {
-  height: 64px;
+  height: 36px;
 }
 .form-line textarea, .form-group textarea {
-  min-height: 154px;
-  padding-top: 20px;
-  padding-bottom: 20px;
-  line-height: 1.6;
+  min-height: 96px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  line-height: 1.5;
 }
 .form-line input::placeholder,
 .form-line textarea::placeholder,
@@ -388,25 +384,25 @@ tr:hover { background-color: #f8f9fa; }
 .advanced-title::after { content: ""; flex: 1; height: 1px; background: transparent; }
 
 .app-modal .checkbox-row {
-  gap: 14px;
+  gap: 6px;
   margin: 0;
-  color: #111827;
-  font-size: 20px;
-  font-weight: 700;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 500;
 }
 .app-modal .checkbox-row input {
-  width: 26px;
-  height: 26px;
+  width: 14px;
+  height: 14px;
   border: 1px solid #d1d8e0;
 }
 
-.modal-actions { margin-top: 42px; display: flex; gap: 20px; justify-content: flex-end; }
+.modal-actions { margin-top: 20px; display: flex; gap: 8px; justify-content: flex-end; }
 .app-modal .modal-actions .btn {
-  min-width: 116px;
-  height: 64px;
-  border-radius: 8px;
-  font-size: 20px;
-  font-weight: 800;
+  min-width: 64px;
+  height: 34px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
 }
 .btn-cancel { background: #f8fafc; color: var(--text-main); border: 1px solid #d1d8e0; }
 .btn-cancel:hover { background: #e9ecef; }
@@ -455,78 +451,17 @@ tr:hover { background-color: #f8f9fa; }
   }
 
   .app-modal {
-    padding: 28px 20px 24px;
-    max-width: 96vw;
-    border-radius: 14px;
-  }
-
-  .modal-header {
-    margin-bottom: 28px;
-  }
-
-  .modal h2 {
-    font-size: 1.5rem;
-  }
-
-  .modal-close {
-    width: 34px;
-    height: 34px;
-    font-size: 34px;
-  }
-
-  .form-line,
-  .form-line.no-label {
-    grid-template-columns: 1fr;
-    gap: 10px;
-    margin-bottom: 24px;
-  }
-
-  .form-line.no-label::before {
-    display: none;
-  }
-
-  .form-label,
-  .form-group .compact-label {
-    font-size: 16px;
-    flex-wrap: wrap;
-  }
-
-  .default-text {
-    font-size: 14px;
-    white-space: normal;
+    width: auto;
+    max-width: 95vw;
+    padding: 20px;
   }
 
   .split-row {
     grid-template-columns: 1fr;
-    gap: 20px;
+    gap: 12px;
   }
 
-  .form-line input,
-  .form-line select,
-  .form-group input,
-  .form-group select {
-    height: 52px;
-    font-size: 16px;
-  }
-
-  .form-line textarea,
-  .form-group textarea {
-    font-size: 16px;
-    min-height: 128px;
-  }
-
-  .command-options {
-    min-height: 28px;
-    margin-bottom: 10px;
-  }
-
-  .app-modal .checkbox-row {
-    font-size: 16px;
-  }
-
-  .app-modal .modal-actions .btn {
-    min-width: 92px;
-    height: 48px;
-    font-size: 16px;
+  .default-text {
+    white-space: normal;
   }
 }

@@ -16,6 +16,7 @@ use axum::{
 };
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct AppsState {
@@ -160,7 +161,7 @@ impl AppsState {
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
-    const CHROME_COMMAND: &str = "google-chrome --ozone-platform=wayland --class=ivnc-chrome-windowed --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-dev-shm-usage";
+    let chrome_command = builtin_chrome_command()?;
 
     for app in store.list()? {
         let is_builtin_terminal = app.id == "builtin-terminal"
@@ -175,7 +176,7 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
     match store.get("builtin-chrome") {
         Ok(mut app) => {
             if app.app_type != AppType::DesktopApp
-                || app.exec_command.as_deref() != Some(CHROME_COMMAND)
+                || app.exec_command.as_deref() != Some(chrome_command.as_str())
                 || app.autostart
             {
                 app.app_type = AppType::DesktopApp;
@@ -185,7 +186,7 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 app.launch_env_vars = None;
                 app.launch_cwd = None;
                 app.launch_wait_timeout_secs = None;
-                app.exec_command = Some(CHROME_COMMAND.to_string());
+                app.exec_command = Some(chrome_command.clone());
                 app.env_vars = None;
                 store.update(&app)?;
                 log::info!("Updated built-in Chrome desktop app");
@@ -202,7 +203,7 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 launch_env_vars: None,
                 launch_cwd: None,
                 launch_wait_timeout_secs: None,
-                exec_command: Some(CHROME_COMMAND.to_string()),
+                exec_command: Some(chrome_command.clone()),
                 env_vars: None,
                 created_at: chrono_now(),
             };
@@ -213,8 +214,47 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
             }
         }
     }
-    desktop_entry::ensure_desktop_entry("Chrome", CHROME_COMMAND)?;
+    desktop_entry::ensure_desktop_entry("Chrome", &chrome_command)?;
     Ok(())
+}
+
+fn ivnc_config_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/root/.config"))
+        .join("ivnc")
+}
+
+fn builtin_chrome_data_dir() -> Result<PathBuf, String> {
+    let dir = ivnc_config_dir().join("chrome");
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        format!(
+            "Failed to create Chrome data dir {}: {}",
+            dir.display(),
+            err
+        )
+    })?;
+    Ok(dir)
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn builtin_chrome_command() -> Result<String, String> {
+    let data_dir = builtin_chrome_data_dir()?;
+    let data_dir = shell_quote(&data_dir.to_string_lossy());
+    Ok(format!(
+        "google-chrome --user-data-dir={} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
+        data_dir
+    ))
 }
 
 pub fn router(state: Arc<AppsState>) -> Router {
