@@ -589,6 +589,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     onLangChange((lang) => {
         currentLang = lang;
+        lastDataHash = '';
         applyTranslations();
         load();
     });
