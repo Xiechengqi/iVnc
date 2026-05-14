@@ -3527,7 +3527,7 @@ export default function webrtc() {
 
 					// Label with title (truncate if too long)
 					const label = document.createElement('span');
-					label.textContent = w.display_name || w.app_id || w.title || `Window ${w.id}`;
+					label.textContent = w.title || w.display_name || w.app_id || `Window ${w.id}`;
 					label.style.textOverflow = 'ellipsis';
 					label.style.overflow = 'hidden';
 					label.style.whiteSpace = 'nowrap';
