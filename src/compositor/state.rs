@@ -89,6 +89,9 @@ pub struct Compositor {
     /// Surface protocol IDs that were identified as dialogs at creation time
     pub dialog_surfaces: HashSet<u32>,
 
+    /// Chrome browser surfaces that should remain windowed.
+    pub chrome_windowed_surfaces: HashSet<u32>,
+
     /// Whether keyboard focus needs to be re-sent after the first pointer enter.
     /// Chromium's Ozone/Wayland layer may ignore keyboard events received before
     /// wl_pointer.enter, so we re-send wl_keyboard.enter on first pointer motion.
@@ -147,6 +150,7 @@ impl Compositor {
             focused_surface_id: None,
             window_registry: Vec::new(),
             dialog_surfaces: HashSet::new(),
+            chrome_windowed_surfaces: HashSet::new(),
             kbd_focus_needs_reenter: true,
         }
     }

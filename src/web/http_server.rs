@@ -125,6 +125,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/ws-config", get(ws_config_handler))
         .route("/api/change-password", post(change_password_handler))
         .route("/api/version", get(get_version_handler))
+        .route("/api/restart", post(restart_handler))
         .route("/api/upgrade/ws", get(upgrade_ws_handler))
         .route("/api/connections", get(connections_handler))
         .route("/api/connections/{id}/disconnect", post(disconnect_handler))
@@ -1196,6 +1197,17 @@ async fn get_version_handler() -> axum::Json<VersionInfo> {
     })
 }
 
+/// POST /api/restart - Restart iVNC without upgrading
+async fn restart_handler() -> axum::Json<serde_json::Value> {
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Err(err) = restart_current_process().await {
+            log::error!("Failed to restart iVNC: {}", err);
+        }
+    });
+    axum::Json(json!({"ok": true}))
+}
+
 /// GET /api/upgrade/ws - WebSocket upgrade endpoint
 async fn upgrade_ws_handler(
     State(state): State<Arc<SharedState>>,
@@ -1533,25 +1545,29 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     send_log(10, "重启服务...", "info", None).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Try systemd restart first
-    if try_restart_systemd("ivnc").await.is_ok() {
-        return;
+    if let Err(err) = restart_current_process().await {
+        let err = err.to_string();
+        send_log(10, &format!("重启失败: {}", err), "error", None).await;
     }
-
-    // Use exec to restart
-    use std::os::unix::process::CommandExt;
-    let args: Vec<String> = std::env::args().collect();
-    let err = std::process::Command::new(&current_exe)
-        .args(&args[1..])
-        .exec();
-
-    // If we reach here, exec failed
-    send_log(10, &format!("重启失败: {}", err), "error", None).await;
 
     // Try to restore backup
     let _ = fs::remove_file(&current_exe);
     let _ = fs::copy(&backup_path, &current_exe);
     let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
+}
+
+async fn restart_current_process() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if try_restart_systemd("ivnc").await.is_ok() {
+        return Ok(());
+    }
+
+    let current_exe = std::env::current_exe()?;
+    let args: Vec<String> = std::env::args().collect();
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(&current_exe)
+        .args(&args[1..])
+        .exec();
+    Err(Box::new(err))
 }
 
 /// Try to restart via systemd

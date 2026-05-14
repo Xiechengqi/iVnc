@@ -31,6 +31,11 @@ use crate::compositor::{
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     Compositor,
 };
+use std::collections::HashSet;
+
+fn is_windowed_chrome(app_id: &str) -> bool {
+    app_id == "ivnc-chrome-windowed"
+}
 
 /// Check if `child` is a descendant process of `ancestor` via /proc ppid chain.
 fn is_descendant_of(child: i32, ancestor: i32) -> bool {
@@ -122,11 +127,26 @@ impl XdgShellHandler for Compositor {
 
         self.space.map_element(window, (0, 0), false);
 
+        let app_id = with_states(surface.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().ok())
+                .and_then(|data| data.app_id.clone())
+        })
+        .unwrap_or_default();
+
         // Main window (not dialog): set fullscreen to fill the screen.
+        // Chrome launched with the built-in desktop command stays windowed so
+        // its browser toolbar/address bar remains visible.
         if !is_dialog {
             if let Some(output_geo) = output_geo {
                 surface.with_pending_state(|state| {
-                    state.states.set(xdg_toplevel::State::Fullscreen);
+                    if is_windowed_chrome(&app_id) {
+                        state.states.unset(xdg_toplevel::State::Fullscreen);
+                    } else {
+                        state.states.set(xdg_toplevel::State::Fullscreen);
+                    }
                     state.size = Some((output_geo.size.w, output_geo.size.h).into());
                 });
                 surface.send_pending_configure();
@@ -345,6 +365,7 @@ impl XdgShellHandler for Compositor {
 
         let proto_id = surface.wl_surface().id().protocol_id();
         self.dialog_surfaces.remove(&proto_id);
+        self.chrome_windowed_surfaces.remove(&proto_id);
 
         // Remove only the destroyed surface from window registry (not siblings)
         let surf_id = surface.wl_surface().id();
@@ -419,13 +440,14 @@ pub fn handle_commit(
     space: &Space<Window>,
     surface: &WlSurface,
     taskbar_dirty: &mut bool,
+    chrome_windowed_surfaces: &mut HashSet<u32>,
 ) {
     if let Some(window) = space
         .elements()
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)
         .cloned()
     {
-        let (initial_configure_sent, identity_available) = with_states(surface, |states| {
+        let (initial_configure_sent, identity_available, app_id) = with_states(surface, |states| {
             let data = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
@@ -434,8 +456,18 @@ pub fn handle_commit(
                 .unwrap();
             // Title or app_id changes trigger taskbar update
             let identity_available = data.title.is_some() || data.app_id.is_some();
-            (data.initial_configure_sent, identity_available)
+            let app_id = data.app_id.clone().unwrap_or_default();
+            (data.initial_configure_sent, identity_available, app_id)
         });
+
+        let surface_id = surface.id().protocol_id();
+        if is_windowed_chrome(&app_id) && chrome_windowed_surfaces.insert(surface_id) {
+            let toplevel = window.toplevel().unwrap();
+            toplevel.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Fullscreen);
+            });
+            toplevel.send_pending_configure();
+        }
 
         if !initial_configure_sent {
             window.toplevel().unwrap().send_configure();

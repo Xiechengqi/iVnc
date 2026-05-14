@@ -160,7 +160,7 @@ impl AppsState {
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
-    const CHROME_COMMAND: &str = "google-chrome --ozone-platform=wayland --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-dev-shm-usage";
+    const CHROME_COMMAND: &str = "google-chrome --ozone-platform=wayland --class=ivnc-chrome-windowed --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-dev-shm-usage";
 
     for app in store.list()? {
         let is_builtin_terminal = app.id == "builtin-terminal"

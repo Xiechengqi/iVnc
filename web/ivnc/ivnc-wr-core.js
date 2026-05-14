@@ -584,6 +584,18 @@ function InitUI() {
 		color: #f59e0b;
 		margin-top: 12px !important;
 	}
+	.update-option {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 12px;
+		color: #ddd;
+		user-select: none;
+	}
+	.update-option input {
+		width: 16px;
+		height: 16px;
+	}
 	.update-ok-msg {
 		color: #10b981;
 	}
@@ -868,9 +880,14 @@ function showForceUpdateModal() {
 	const dialog = document.createElement('div');
 	dialog.className = 'update-dialog';
 	dialog.innerHTML = `
-		<h3>强制更新</h3>
+		<h3>重启或升级</h3>
 		<div class="update-info" id="update-info">
-			<p class="update-warning">⚠️ 更新过程中服务将短暂中断</p>
+			<p>将重启 iVNC 服务，连接会短暂中断。</p>
+			<label class="update-option">
+				<input type="checkbox" id="upgrade-latest">
+				<span>升级到最新</span>
+			</label>
+			<p class="update-warning">勾选后会先更新 iVNC binary，然后重启服务。</p>
 		</div>
 		<div class="update-progress" id="update-progress" style="display:none;">
 			<div class="progress-bar">
@@ -881,7 +898,7 @@ function showForceUpdateModal() {
 		<div class="update-logs" id="update-logs" style="display:none;"></div>
 		<div class="update-btns" id="update-btns">
 			<button class="update-cancel" id="update-cancel">取消</button>
-			<button class="update-ok" id="update-ok">开始更新</button>
+			<button class="update-ok" id="update-ok">重启服务</button>
 		</div>
 	`;
 	overlay.appendChild(dialog);
@@ -895,6 +912,7 @@ function showForceUpdateModal() {
 	const btnsDiv = document.getElementById('update-btns');
 	const okBtn = document.getElementById('update-ok');
 	const cancelBtn = document.getElementById('update-cancel');
+	const upgradeCheckbox = document.getElementById('upgrade-latest');
 
 	let isUpdating = false;
 
@@ -903,18 +921,26 @@ function showForceUpdateModal() {
 	};
 	overlay.addEventListener('click', (e) => { if (e.target === overlay && !isUpdating) close(); });
 	cancelBtn.addEventListener('click', close);
+	upgradeCheckbox.addEventListener('change', () => {
+		okBtn.textContent = upgradeCheckbox.checked ? '升级并重启' : '重启服务';
+	});
 
 	okBtn.addEventListener('click', () => {
-		if (!confirm('确定要强制更新到最新版本吗？\n更新过程中服务将短暂中断。')) {
-			return;
-		}
-
 		isUpdating = true;
 		okBtn.disabled = true;
 		cancelBtn.disabled = true;
 		infoDiv.style.display = 'none';
 		progressDiv.style.display = 'block';
 		logsDiv.style.display = 'block';
+		logsDiv.innerHTML = '';
+		progressFill.style.backgroundColor = '#4c86e6';
+		progressFill.style.width = '5%';
+		progressText.textContent = upgradeCheckbox.checked ? '准备升级...' : '准备重启...';
+
+		if (!upgradeCheckbox.checked) {
+			restartService();
+			return;
+		}
 
 		// Connect to WebSocket
 		const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -973,6 +999,39 @@ function showForceUpdateModal() {
 			cancelBtn.textContent = '关闭';
 		};
 	});
+
+	async function restartService() {
+		const logEntry = document.createElement('div');
+		logEntry.className = 'log-entry log-info';
+		logEntry.textContent = '正在请求重启服务...';
+		logsDiv.appendChild(logEntry);
+
+		try {
+			const resp = await fetch('/api/restart', { method: 'POST' });
+			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+			progressFill.style.width = '50%';
+			progressText.textContent = '重启中...';
+
+			const okEntry = document.createElement('div');
+			okEntry.className = 'log-entry log-success';
+			okEntry.textContent = '重启请求已发送，等待服务恢复...';
+			logsDiv.appendChild(okEntry);
+			logsDiv.scrollTop = logsDiv.scrollHeight;
+			waitForRestart();
+		} catch (err) {
+			progressFill.style.backgroundColor = '#ef4444';
+			progressText.textContent = '失败';
+			const errEntry = document.createElement('div');
+			errEntry.className = 'log-entry log-error';
+			errEntry.textContent = `重启请求失败: ${err.message || err}`;
+			logsDiv.appendChild(errEntry);
+			logsDiv.scrollTop = logsDiv.scrollHeight;
+			isUpdating = false;
+			cancelBtn.disabled = false;
+			cancelBtn.textContent = '关闭';
+		}
+	}
 
 	function waitForRestart() {
 		let attempts = 0;
@@ -2840,13 +2899,13 @@ export default function webrtc() {
 			});
 			taskbar.appendChild(uploadBtn);
 
-			// Force update button
+			// Restart / upgrade button
 			const updateSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>`;
 			const updateBtn = document.createElement('div');
 			updateBtn.className = 'taskbar-pin';
 			updateBtn.id = 'update-btn';
 			updateBtn.innerHTML = updateSvg;
-			updateBtn.title = '强制更新';
+			updateBtn.title = '重启或升级';
 			updateBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				showForceUpdateModal();

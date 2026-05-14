@@ -168,7 +168,47 @@ tr:hover { background-color: #f8f9fa; }
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
 }
 
-.modal h2 { font-size: 1.25rem; margin-bottom: 24px; }
+.app-modal {
+  width: 1040px;
+  max-width: min(95vw, 1040px);
+  padding: 56px 56px 48px;
+  border-radius: 18px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 44px;
+}
+
+.modal h2 {
+  font-size: 2rem;
+  line-height: 1.2;
+  margin: 0;
+  font-weight: 800;
+  color: #111827;
+}
+
+.modal-close {
+  border: 0;
+  background: transparent;
+  color: #111827;
+  cursor: pointer;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 42px;
+  line-height: 1;
+  font-weight: 300;
+}
+
+.modal-close:hover {
+  color: var(--danger);
+}
 
 .form-group { margin-bottom: 16px; }
 .checkbox-row {
@@ -197,18 +237,127 @@ tr:hover { background-color: #f8f9fa; }
   display: inline-flex;
   align-items: center;
 }
+.form-line {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
+  margin-bottom: 34px;
+}
+.form-line.stacked-control {
+  align-items: start;
+}
+.form-line.command-line {
+  align-items: end;
+}
+.form-line.no-label {
+  grid-template-columns: 170px minmax(0, 1fr);
+}
+.form-line.no-label::before {
+  content: "";
+}
+.form-field-header {
+  margin-bottom: 22px;
+}
+.command-control {
+  min-width: 0;
+}
+.command-options {
+  min-height: 34px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 18px;
+}
+.form-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #374151;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+.required-mark {
+  color: #ef1f1f;
+  font-weight: 900;
+}
+.info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #6b7280;
+  border-radius: 999px;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 800;
+  font-style: normal;
+  line-height: 1;
+}
+.default-text {
+  color: #9ca3af;
+  font-size: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.compact-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+  color: #374151;
+  font-size: 20px;
+  font-weight: 800;
+}
+.split-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 36px;
+}
 .form-row { display: flex; gap: 12px; margin-bottom: 16px; }
 .form-row .form-group { flex: 1; margin-bottom: 0; }
 .form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text-muted); }
+.form-group .compact-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+  color: #374151;
+  font-size: 20px;
+  font-weight: 800;
+}
+.form-line input, .form-line select, .form-line textarea,
 .form-group input, .form-group select, .form-group textarea {
   width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
+  min-width: 0;
+  padding: 0 18px;
+  border: 1px solid #d1d8e0;
   border-radius: 8px;
   background: #fff;
-  font-size: 14px;
+  font-size: 20px;
+  color: #111827;
   transition: all 0.2s;
 }
+.form-line input, .form-line select,
+.form-group input, .form-group select {
+  height: 64px;
+}
+.form-line textarea, .form-group textarea {
+  min-height: 154px;
+  padding-top: 20px;
+  padding-bottom: 20px;
+  line-height: 1.6;
+}
+.form-line input::placeholder,
+.form-line textarea::placeholder,
+.form-group input::placeholder,
+.form-group textarea::placeholder {
+  color: #9ca3af;
+}
+.form-line input:focus, .form-line select:focus, .form-line textarea:focus,
 .form-group input:focus, .form-group select:focus, .form-group textarea:focus { 
   outline: none; 
   border-color: var(--primary); 
@@ -238,8 +387,28 @@ tr:hover { background-color: #f8f9fa; }
 }
 .advanced-title::after { content: ""; flex: 1; height: 1px; background: transparent; }
 
-.modal-actions { margin-top: 24px; display: flex; gap: 12px; justify-content: flex-end; }
-.btn-cancel { background: #f1f3f5; color: var(--text-main); }
+.app-modal .checkbox-row {
+  gap: 14px;
+  margin: 0;
+  color: #111827;
+  font-size: 20px;
+  font-weight: 700;
+}
+.app-modal .checkbox-row input {
+  width: 26px;
+  height: 26px;
+  border: 1px solid #d1d8e0;
+}
+
+.modal-actions { margin-top: 42px; display: flex; gap: 20px; justify-content: flex-end; }
+.app-modal .modal-actions .btn {
+  min-width: 116px;
+  height: 64px;
+  border-radius: 8px;
+  font-size: 20px;
+  font-weight: 800;
+}
+.btn-cancel { background: #f8fafc; color: var(--text-main); border: 1px solid #d1d8e0; }
 .btn-cancel:hover { background: #e9ecef; }
 
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -264,6 +433,10 @@ tr:hover { background-color: #f8f9fa; }
 .toast-err { background: var(--danger); }
 
 .log-modal { width: 800px; }
+.log-modal h2 {
+  font-size: 1.25rem;
+  margin-bottom: 24px;
+}
 .log-content {
   background: #2d3436;
   color: #dfe6e9;
@@ -274,4 +447,86 @@ tr:hover { background-color: #f8f9fa; }
   line-height: 1.6;
   max-height: 500px;
   overflow-y: auto;
+}
+
+@media (max-width: 760px) {
+  body {
+    padding: 16px;
+  }
+
+  .app-modal {
+    padding: 28px 20px 24px;
+    max-width: 96vw;
+    border-radius: 14px;
+  }
+
+  .modal-header {
+    margin-bottom: 28px;
+  }
+
+  .modal h2 {
+    font-size: 1.5rem;
+  }
+
+  .modal-close {
+    width: 34px;
+    height: 34px;
+    font-size: 34px;
+  }
+
+  .form-line,
+  .form-line.no-label {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+
+  .form-line.no-label::before {
+    display: none;
+  }
+
+  .form-label,
+  .form-group .compact-label {
+    font-size: 16px;
+    flex-wrap: wrap;
+  }
+
+  .default-text {
+    font-size: 14px;
+    white-space: normal;
+  }
+
+  .split-row {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .form-line input,
+  .form-line select,
+  .form-group input,
+  .form-group select {
+    height: 52px;
+    font-size: 16px;
+  }
+
+  .form-line textarea,
+  .form-group textarea {
+    font-size: 16px;
+    min-height: 128px;
+  }
+
+  .command-options {
+    min-height: 28px;
+    margin-bottom: 10px;
+  }
+
+  .app-modal .checkbox-row {
+    font-size: 16px;
+  }
+
+  .app-modal .modal-actions .btn {
+    min-width: 92px;
+    height: 48px;
+    font-size: 16px;
+  }
 }

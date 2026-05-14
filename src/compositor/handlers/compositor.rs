@@ -53,6 +53,7 @@ impl CompositorHandler for Compositor {
             &self.space,
             surface,
             &mut self.taskbar_dirty,
+            &mut self.chrome_windowed_surfaces,
         );
         resize_grab::handle_commit(&mut self.space, surface);
 

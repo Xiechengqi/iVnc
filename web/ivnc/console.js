@@ -39,12 +39,24 @@ const I18N = {
         appType: 'App Type',
         autostart: 'Autostart',
         launchCommand: 'Launch Command',
-        launchCwd: 'Working Directory (Optional, default: current directory)',
-        launchTimeout: 'Wait Timeout (seconds, optional, default: 30)',
-        accessUrl: 'Access Address (Optional, default: none)',
-        launchEnv: 'Environment Variables (Optional, default: none)',
+        launchCwd: 'Working Directory',
+        launchCwdDefault: '(Optional, default: current directory)',
+        launchTimeout: 'Wait Timeout (seconds)',
+        launchTimeoutDefault: '(Optional, default: 30)',
+        accessUrl: 'Access Address',
+        accessUrlDefault: '(Optional, default: none)',
+        launchEnv: 'Environment Variables',
         exec: 'Launch Command',
-        env: 'Environment Variables (Optional, default: none)',
+        env: 'Environment Variables',
+        envDefault: '(Optional, default: none)',
+        nameInputPlaceholder: 'App display name',
+        backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
+        desktopCommandPlaceholder: 'Enter launch command, e.g. /usr/bin/code --no-sandbox',
+        cwdPlaceholder: 'Enter working directory, e.g. /workspace/app',
+        timeoutPlaceholder: 'Enter timeout, e.g. 30',
+        accessUrlPlaceholder: 'Enter access address, e.g. http://127.0.0.1:7860',
+        launchEnvPlaceholder: 'Enter environment variables, one per line, format: KEY=value\nKEY1=value1\nKEY2=value2',
+        envPlaceholder: 'Enter environment variables, one per line, format: KEY=value',
         cancel: 'Cancel',
         close: 'Close',
         logsTitle: 'App Logs',
@@ -108,12 +120,24 @@ const I18N = {
         appType: '应用类型',
         autostart: '开机启动',
         launchCommand: '启动命令',
-        launchCwd: '工作目录（可选，默认值：当前目录）',
-        launchTimeout: '等待超时（秒，可选，默认值：30）',
-        accessUrl: '访问地址（可选，默认值：无）',
-        launchEnv: '环境变量（可选，默认值：无）',
+        launchCwd: '工作目录',
+        launchCwdDefault: '（可选，默认值：当前目录）',
+        launchTimeout: '等待超时（秒）',
+        launchTimeoutDefault: '（可选，默认值：30）',
+        accessUrl: '访问地址',
+        accessUrlDefault: '（可选，默认值：无）',
+        launchEnv: '环境变量',
         exec: '启动命令',
-        env: '环境变量（可选，默认值：无）',
+        env: '环境变量',
+        envDefault: '（可选，默认值：无）',
+        nameInputPlaceholder: '应用显示名称',
+        backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
+        desktopCommandPlaceholder: '请输入启动命令，例如： /usr/bin/code --no-sandbox',
+        cwdPlaceholder: '请输入工作目录，例如： /workspace/app',
+        timeoutPlaceholder: '请输入超时时间，例如： 30',
+        accessUrlPlaceholder: '请输入访问地址，例如： http://127.0.0.1:7860',
+        launchEnvPlaceholder: '请输入环境变量，每行一个，格式：KEY=value\nKEY1=value1\nKEY2=value2',
+        envPlaceholder: '请输入环境变量，每行一个，格式：KEY=value',
         cancel: '取消',
         close: '关闭',
         logsTitle: '应用日志',
@@ -187,13 +211,27 @@ function applyTranslations() {
     document.getElementById('label-autostart').textContent = t('autostart');
     document.getElementById('label-launch-command').textContent = t('launchCommand');
     document.getElementById('label-launch-cwd').textContent = t('launchCwd');
+    document.getElementById('label-launch-cwd-default').textContent = t('launchCwdDefault');
     document.getElementById('label-launch-timeout').textContent = t('launchTimeout');
+    document.getElementById('label-launch-timeout-default').textContent = t('launchTimeoutDefault');
     document.getElementById('label-access-url').textContent = t('accessUrl');
+    document.getElementById('label-access-url-default').textContent = t('accessUrlDefault');
     document.getElementById('label-launch-env').textContent = t('launchEnv');
+    document.getElementById('label-launch-env-default').textContent = t('envDefault');
     document.getElementById('label-exec').textContent = t('exec');
     document.getElementById('label-env').textContent = t('env');
+    document.getElementById('label-env-default').textContent = t('envDefault');
     document.getElementById('modal-cancel').textContent = t('cancel');
     document.getElementById('log-close-btn').textContent = t('close');
+    document.getElementById('modal-close').setAttribute('aria-label', t('close'));
+    document.getElementById('f-name').placeholder = t('nameInputPlaceholder');
+    document.getElementById('f-launch-command').placeholder = t('backgroundCommandPlaceholder');
+    document.getElementById('f-exec').placeholder = t('desktopCommandPlaceholder');
+    document.getElementById('f-launch-cwd').placeholder = t('cwdPlaceholder');
+    document.getElementById('f-launch-timeout').placeholder = t('timeoutPlaceholder');
+    document.getElementById('f-url').placeholder = t('accessUrlPlaceholder');
+    document.getElementById('f-launch-env').placeholder = t('launchEnvPlaceholder');
+    document.getElementById('f-env').placeholder = t('envPlaceholder');
 
     if (!editId) {
         document.getElementById('modal-title').textContent = t('addModal');
@@ -544,6 +582,7 @@ document.addEventListener('DOMContentLoaded', () => {
         load();
     });
     document.getElementById('f-app-type').addEventListener('change', updateAppTypeVisibility);
+    document.getElementById('modal-close').addEventListener('click', hideModal);
 
     document.querySelectorAll('.btn-cancel').forEach(btn => {
         btn.addEventListener('click', (e) => {
