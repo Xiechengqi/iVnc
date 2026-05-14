@@ -170,7 +170,7 @@ const I18N = {
         logsFor: (name) => `日志: ${name}`,
         logLoadFailed: '加载失败: ',
         backgroundOption: '后台应用',
-        desktopOption: '桌面APP',
+        desktopOption: '桌面应用',
     }
 };
 

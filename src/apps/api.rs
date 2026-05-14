@@ -252,7 +252,7 @@ fn builtin_chrome_command() -> Result<String, String> {
     let data_dir = builtin_chrome_data_dir()?;
     let data_dir = shell_quote(&data_dir.to_string_lossy());
     Ok(format!(
-        "google-chrome --user-data-dir={} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
+        "google-chrome --user-data-dir={} --remote-debugging-host=0.0.0.0 --remote-debugging-port=9222 --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
         data_dir
     ))
 }

@@ -175,6 +175,7 @@ const MAIN_I18N = {
 const tt = (key, ...args) => t(MAIN_I18N, key, ...args);
 
 const _liveTitles = new Set();
+const _liveTexts = new Set();
 function setLiveTitle(el, key, ...args) {
 	if (!el) return;
 	el._titleKey = key;
@@ -182,10 +183,21 @@ function setLiveTitle(el, key, ...args) {
 	el.title = tt(key, ...args);
 	_liveTitles.add(el);
 }
+function setLiveText(el, key, ...args) {
+	if (!el) return;
+	el._textKey = key;
+	el._textArgs = args;
+	el.textContent = tt(key, ...args);
+	_liveTexts.add(el);
+}
 onLangChange(() => {
 	for (const el of Array.from(_liveTitles)) {
 		if (!el.isConnected) { _liveTitles.delete(el); continue; }
 		el.title = tt(el._titleKey, ...(el._titleArgs || []));
+	}
+	for (const el of Array.from(_liveTexts)) {
+		if (!el.isConnected) { _liveTexts.delete(el); continue; }
+		el.textContent = tt(el._textKey, ...(el._textArgs || []));
 	}
 });
 
@@ -966,6 +978,7 @@ function showChangePasswordModal() {
 	`;
 	overlay.appendChild(dialog);
 	document.body.appendChild(overlay);
+	const close = registerTransientOverlay(overlay);
 
 	const newInput = document.getElementById('pwd-new');
 	const confirmInput = document.getElementById('pwd-confirm');
@@ -978,7 +991,6 @@ function showChangePasswordModal() {
 
 	newInput.focus();
 
-	const close = () => overlay.remove();
 	overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 	cancelBtn.addEventListener('click', close);
 
@@ -1059,6 +1071,7 @@ function showForceUpdateModal() {
 	`;
 	overlay.appendChild(dialog);
 	document.body.appendChild(overlay);
+	const close = registerTransientOverlay(overlay);
 
 	const infoDiv = document.getElementById('update-info');
 	const progressDiv = document.getElementById('update-progress');
@@ -1072,11 +1085,11 @@ function showForceUpdateModal() {
 
 	let isUpdating = false;
 
-	const close = () => {
-		if (!isUpdating) overlay.remove();
+	const closeIfIdle = () => {
+		if (!isUpdating) close();
 	};
-	overlay.addEventListener('click', (e) => { if (e.target === overlay && !isUpdating) close(); });
-	cancelBtn.addEventListener('click', close);
+	overlay.addEventListener('click', (e) => { if (e.target === overlay && !isUpdating) closeIfIdle(); });
+	cancelBtn.addEventListener('click', closeIfIdle);
 	upgradeCheckbox.addEventListener('change', () => {
 		okBtn.textContent = upgradeCheckbox.checked ? tt('upgradeAndRestart') : tt('restartService');
 	});
@@ -1278,6 +1291,37 @@ function registerOverlayController(controller) {
 	return controller;
 }
 
+function unregisterOverlayController(controller) {
+	const controllers = window.__ivncOverlayControllers;
+	if (!controllers) return;
+	const index = controllers.indexOf(controller);
+	if (index >= 0) controllers.splice(index, 1);
+}
+
+function minimizeOverlayControllersExcept(activeController = null) {
+	const controllers = window.__ivncOverlayControllers || [];
+	controllers.forEach((controller) => {
+		if (controller !== activeController && controller.isOpen?.()) {
+			controller.minimize?.();
+		}
+	});
+}
+
+function registerTransientOverlay(overlay) {
+	let controller = null;
+	const close = () => {
+		overlay.remove();
+		unregisterOverlayController(controller);
+	};
+	controller = registerOverlayController({
+		minimize: close,
+		isOpen: () => overlay.isConnected,
+		contains: target => overlay.contains(target),
+	});
+	minimizeOverlayControllersExcept(controller);
+	return close;
+}
+
 function createWebTerminalController() {
 	installOverlayModalInputGuard();
 	let modal = null;
@@ -1293,6 +1337,7 @@ function createWebTerminalController() {
 	let reconnectTimer = null;
 	let reconnectAttempt = 0;
 	let socketGeneration = 0;
+	let controller = null;
 
 	const terminalSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
 
@@ -1421,6 +1466,7 @@ function createWebTerminalController() {
 	function show() {
 		ensureModal();
 		if (!modal) return;
+		minimizeOverlayControllersExcept(controller);
 		if (!intentionalRestart && (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING)) {
 			clearReconnectTimer();
 			connect();
@@ -1610,7 +1656,8 @@ function createWebTerminalController() {
 		return !!modal && modal.contains(target);
 	}
 
-	return registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
+	controller = registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
+	return controller;
 }
 
 function createConsoleModalController() {
@@ -1619,6 +1666,7 @@ function createConsoleModalController() {
 	let frame = null;
 	let consoleBtn = null;
 	let destroyed = false;
+	let controller = null;
 
 	const consoleSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
 
@@ -1646,6 +1694,9 @@ function createConsoleModalController() {
 		`;
 		document.body.appendChild(modal);
 		frame = modal.querySelector('.web-console-frame');
+		setLiveText(modal.querySelector('.web-terminal-title span'), 'consoleTitle');
+		setLiveTitle(modal.querySelector('#web-console-minimize'), 'minimize');
+		setLiveTitle(frame, 'consoleFrameTitle');
 		frame.src = `${getBasePath()}console`;
 		modal.querySelector('#web-console-minimize').addEventListener('click', (e) => {
 			e.stopPropagation();
@@ -1656,6 +1707,7 @@ function createConsoleModalController() {
 	function show() {
 		ensureModal();
 		if (!modal) return;
+		minimizeOverlayControllersExcept(controller);
 		updateOverlayModalScale();
 		modal.classList.remove('minimized');
 		consoleBtn?.classList.add('active');
@@ -1694,7 +1746,8 @@ function createConsoleModalController() {
 		return !!modal && modal.contains(target);
 	}
 
-	return registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
+	controller = registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
+	return controller;
 }
 
 function createProxyModalController() {
@@ -1703,6 +1756,7 @@ function createProxyModalController() {
 	let frame = null;
 	let proxyBtn = null;
 	let destroyed = false;
+	let controller = null;
 
 	const proxySvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
 
@@ -1730,6 +1784,9 @@ function createProxyModalController() {
 		`;
 		document.body.appendChild(modal);
 		frame = modal.querySelector('.web-console-frame');
+		setLiveText(modal.querySelector('.web-terminal-title span'), 'proxyTitle');
+		setLiveTitle(modal.querySelector('#web-proxy-minimize'), 'minimize');
+		setLiveTitle(frame, 'proxyFrameTitle');
 		frame.src = `${getBasePath()}proxy/`;
 		modal.querySelector('#web-proxy-minimize').addEventListener('click', (e) => {
 			e.stopPropagation();
@@ -1740,6 +1797,7 @@ function createProxyModalController() {
 	function show() {
 		ensureModal();
 		if (!modal) return;
+		minimizeOverlayControllersExcept(controller);
 		updateOverlayModalScale();
 		modal.classList.remove('minimized');
 		proxyBtn?.classList.add('active');
@@ -1778,7 +1836,8 @@ function createProxyModalController() {
 		return !!modal && modal.contains(target);
 	}
 
-	return registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
+	controller = registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains });
+	return controller;
 }
 
 export default function webrtc() {
