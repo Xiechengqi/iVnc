@@ -90,6 +90,21 @@ const MAIN_I18N = {
 		noAppRunning: '当前没有应用在运行',
 		// connection management
 		connectionMgmtTitle: '连接管理',
+		clientFeatures: '客户端浏览器特征',
+		clientFeatureBrowser: '浏览器',
+		clientFeaturePlatform: '平台',
+		clientFeatureLanguage: '语言',
+		clientFeatureViewport: '视口',
+		clientFeatureScreen: '屏幕',
+		clientFeatureDpr: 'DPR',
+		clientFeatureCpu: 'CPU 线程',
+		clientFeatureMemory: '内存',
+		clientFeatureTouch: '触控点',
+		clientFeatureTimezone: '时区',
+		clientFeatureNetwork: '网络',
+		clientFeatureOnline: '在线',
+		clientFeatureWebgl: 'WebGL',
+		clientFeatureUnknown: '未知',
 		networkQualityGood: '网络：优',
 		networkQualityFair: '网络：良',
 		networkQualityPoor: '网络：差',
@@ -100,9 +115,7 @@ const MAIN_I18N = {
 		connTime: '连接时间',
 		connDuration: '持续',
 		connType: '类型',
-		disconnectBtn: '断开连接',
 		noConnections: '暂无连接',
-		confirmDisconnect: '确定要断开此连接吗？',
 		durationHM: (h, m) => `${h}小时${m}分钟`,
 		durationM: m => `${m}分钟`,
 		// upload toast
@@ -161,6 +174,21 @@ const MAIN_I18N = {
 		waitingAppTitle: 'Waiting for App',
 		noAppRunning: 'No app is currently running',
 		connectionMgmtTitle: 'Connection Management',
+		clientFeatures: 'Client Browser Features',
+		clientFeatureBrowser: 'Browser',
+		clientFeaturePlatform: 'Platform',
+		clientFeatureLanguage: 'Language',
+		clientFeatureViewport: 'Viewport',
+		clientFeatureScreen: 'Screen',
+		clientFeatureDpr: 'DPR',
+		clientFeatureCpu: 'CPU threads',
+		clientFeatureMemory: 'Memory',
+		clientFeatureTouch: 'Touch points',
+		clientFeatureTimezone: 'Timezone',
+		clientFeatureNetwork: 'Network',
+		clientFeatureOnline: 'Online',
+		clientFeatureWebgl: 'WebGL',
+		clientFeatureUnknown: 'Unknown',
 		networkQualityGood: 'Network: Good',
 		networkQualityFair: 'Network: Fair',
 		networkQualityPoor: 'Network: Poor',
@@ -171,9 +199,7 @@ const MAIN_I18N = {
 		connTime: 'Connected at',
 		connDuration: 'Duration',
 		connType: 'Type',
-		disconnectBtn: 'Disconnect',
 		noConnections: 'No connections',
-		confirmDisconnect: 'Disconnect this connection?',
 		durationHM: (h, m) => `${h}h ${m}m`,
 		durationM: m => `${m}m`,
 		uploadFileTitle: 'Upload File',
@@ -949,18 +975,30 @@ function InitUI() {
 		gap: 12px;
 		flex-wrap: wrap;
 	}
-	.disconnect-btn {
-		background: #f44336;
-		color: #fff;
-		border: none;
-		padding: 6px 12px;
-		border-radius: 4px;
-		cursor: pointer;
-		font-size: 12px;
-		margin-top: 8px;
+	.client-features {
+		margin-top: 10px;
+		padding-top: 10px;
+		border-top: 1px solid rgba(255,255,255,0.08);
 	}
-	.disconnect-btn:hover {
-		background: #d32f2f;
+	.client-features-title {
+		margin-bottom: 8px;
+		font-size: 12px;
+		font-weight: 600;
+		color: rgba(255,255,255,0.86);
+	}
+	.client-features-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 6px 12px;
+		font-size: 12px;
+		color: rgba(255,255,255,0.72);
+	}
+	.client-feature-label {
+		color: rgba(255,255,255,0.48);
+		margin-right: 6px;
+	}
+	.client-feature-value {
+		word-break: break-word;
 	}
 	`;
   document.head.appendChild(style);
@@ -1912,6 +1950,63 @@ export default function webrtc() {
 		}
 	}
 
+	function escapeHtml(value) {
+		return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+			'&': '&amp;',
+			'<': '&lt;',
+			'>': '&gt;',
+			'"': '&quot;',
+			"'": '&#39;'
+		}[ch]));
+	}
+
+	function formatClientFeature(value) {
+		if (value === null || value === undefined || value === '') return tt('clientFeatureUnknown');
+		if (typeof value === 'boolean') return value ? 'true' : 'false';
+		if (Array.isArray(value)) return value.length ? value.join(', ') : tt('clientFeatureUnknown');
+		return String(value);
+	}
+
+	function renderClientFeatures(info) {
+		if (!info || typeof info !== 'object') return '';
+		const viewport = info.viewport ? `${info.viewport.width || 0}x${info.viewport.height || 0}` : '';
+		const screen = info.screen ? `${info.screen.width || 0}x${info.screen.height || 0}` : '';
+		const network = info.network ? [
+			info.network.effectiveType,
+			info.network.downlink ? `${info.network.downlink}Mbps` : '',
+			info.network.rtt ? `${info.network.rtt}ms` : ''
+		].filter(Boolean).join(' / ') : '';
+		const webgl = info.webgl ? [info.webgl.vendor, info.webgl.renderer].filter(Boolean).join(' / ') : '';
+		const fields = [
+			[tt('clientFeatureBrowser'), info.browser],
+			[tt('clientFeaturePlatform'), info.platform],
+			[tt('clientFeatureLanguage'), info.languages || info.language],
+			[tt('clientFeatureViewport'), viewport],
+			[tt('clientFeatureScreen'), screen],
+			[tt('clientFeatureDpr'), info.devicePixelRatio],
+			[tt('clientFeatureCpu'), info.hardwareConcurrency],
+			[tt('clientFeatureMemory'), info.deviceMemory ? `${info.deviceMemory}GB` : ''],
+			[tt('clientFeatureTouch'), info.maxTouchPoints],
+			[tt('clientFeatureTimezone'), info.timezone],
+			[tt('clientFeatureNetwork'), network],
+			[tt('clientFeatureOnline'), info.online],
+			[tt('clientFeatureWebgl'), webgl]
+		];
+		return `
+			<div class="client-features">
+				<div class="client-features-title">${tt('clientFeatures')}</div>
+				<div class="client-features-grid">
+					${fields.map(([label, value]) => `
+						<div>
+							<span class="client-feature-label">${escapeHtml(label)}:</span>
+							<span class="client-feature-value">${escapeHtml(formatClientFeature(value))}</span>
+						</div>
+					`).join('')}
+				</div>
+			</div>
+		`;
+	}
+
 	function renderConnections(connections) {
 		const page = document.getElementById('connect-page');
 		if (!page) return;
@@ -1932,7 +2027,7 @@ export default function webrtc() {
 						<span>${tt('connDuration')}: ${durationText}</span>
 						<span>${tt('connType')}: ${c.connection_type.toUpperCase()}</span>
 					</div>
-					<button class="disconnect-btn" onclick="disconnectConnection('${c.id}')">${tt('disconnectBtn')}</button>
+					${renderClientFeatures(c.client_info)}
 				</div>
 			`;
 		}).join('');
@@ -1946,16 +2041,6 @@ export default function webrtc() {
 			<div class="connection-list">${items || `<div style="color:rgba(255,255,255,0.5);">${tt('noConnections')}</div>`}</div>
 		`;
 	}
-
-	window.disconnectConnection = async function(id) {
-		if (!confirm(tt('confirmDisconnect'))) return;
-		try {
-			await fetch(`/api/connections/${id}/disconnect`, { method: 'POST' });
-			loadConnections();
-		} catch (err) {
-			console.error('Failed to disconnect:', err);
-		}
-	};
 
 	// Check if this is the connection management page
 	if (window.location.pathname === '/connect') {
@@ -2030,6 +2115,8 @@ export default function webrtc() {
 	let networkQualityPendingLevel = null;
 	let networkQualityPendingCount = 0;
 	let networkQualityFailures = 0;
+	let networkQualitySamples = [];
+	let networkQualityStartedAt = 0;
 
 	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1; // 64KiB, excluding a byte for prefix
 
@@ -2126,37 +2213,81 @@ export default function webrtc() {
 		networkQualityPendingLevel = null;
 		networkQualityPendingCount = 0;
 		networkQualityFailures = 0;
+		networkQualitySamples = [];
+		networkQualityStartedAt = 0;
 		setNetworkQuality(level, null);
 	}
 
 	function classifyNetworkSample(metrics) {
 		const rttMs = Number(metrics.rttMs) || 0;
 		const lossRatePct = Number(metrics.lossRatePct) || 0;
-		const fps = Number(metrics.fps) || 0;
 		const jitterMs = Number(metrics.jitterMs) || 0;
-		if (rttMs >= 180 || lossRatePct >= 3 || fps < 15 || jitterMs >= 120) return 'poor';
-		if (rttMs >= 80 || lossRatePct >= 1 || fps < 24 || jitterMs >= 50) return 'fair';
+		if (rttMs >= 300 || lossRatePct >= 5 || (rttMs >= 200 && lossRatePct >= 3)) return 'poor';
+		if (rttMs >= 120 || lossRatePct >= 1 || (rttMs >= 100 && jitterMs >= 150)) return 'fair';
 		return 'good';
 	}
 
 	function applyNetworkQualitySample(metrics) {
 		networkQualityFailures = 0;
-		const nextLevel = classifyNetworkSample(metrics);
+		if (!networkQualityStartedAt) networkQualityStartedAt = Date.now();
+		networkQualitySamples.push({
+			at: Date.now(),
+			received: Math.max(Number(metrics.deltaPacketsReceived) || 0, 0),
+			lost: Math.max(Number(metrics.deltaPacketsLost) || 0, 0)
+		});
+		const cutoff = Date.now() - 6000;
+		networkQualitySamples = networkQualitySamples.filter((sample) => sample.at >= cutoff);
+		const packets = networkQualitySamples.reduce((acc, sample) => {
+			acc.received += sample.received;
+			acc.lost += sample.lost;
+			return acc;
+		}, { received: 0, lost: 0 });
+		const totalPackets = packets.received + packets.lost;
+		const windowLossRatePct = totalPackets > 0 ? (packets.lost / totalPackets) * 100 : 0;
+		const smoothedMetrics = {
+			...metrics,
+			lossRatePct: windowLossRatePct
+		};
+
+		if (Date.now() - networkQualityStartedAt < 3000) {
+			setNetworkQuality('unknown', smoothedMetrics);
+			return;
+		}
+
+		const nextLevel = classifyNetworkSample(smoothedMetrics);
 		const rank = { unknown: 0, good: 1, fair: 2, poor: 3, offline: 4 };
 		const currentRank = rank[networkQualityLevel] ?? 0;
 		const nextRank = rank[nextLevel] ?? 0;
 
-		if (networkQualityLevel === 'unknown' || nextRank > currentRank) {
+		if (networkQualityLevel === 'unknown') {
 			networkQualityPendingLevel = null;
 			networkQualityPendingCount = 0;
-			setNetworkQuality(nextLevel, metrics);
+			setNetworkQuality(nextLevel, smoothedMetrics);
 			return;
 		}
 
 		if (nextLevel === networkQualityLevel) {
 			networkQualityPendingLevel = null;
 			networkQualityPendingCount = 0;
-			setNetworkQuality(nextLevel, metrics);
+			setNetworkQuality(nextLevel, smoothedMetrics);
+			return;
+		}
+
+		if (nextRank > currentRank) {
+			if (networkQualityPendingLevel === nextLevel) {
+				networkQualityPendingCount += 1;
+			} else {
+				networkQualityPendingLevel = nextLevel;
+				networkQualityPendingCount = 1;
+			}
+			if (networkQualityPendingCount >= 2) {
+				networkQualityPendingLevel = null;
+				networkQualityPendingCount = 0;
+				setNetworkQuality(nextLevel, smoothedMetrics);
+			} else {
+				networkQualityMetrics = smoothedMetrics;
+				renderNetworkQualityBadge();
+			}
 			return;
 		}
 
@@ -2167,12 +2298,12 @@ export default function webrtc() {
 				networkQualityPendingLevel = nextLevel;
 				networkQualityPendingCount = 1;
 			}
-			if (networkQualityPendingCount >= 2) {
+			if (networkQualityPendingCount >= 3) {
 				networkQualityPendingLevel = null;
 				networkQualityPendingCount = 0;
-				setNetworkQuality(nextLevel, metrics);
+				setNetworkQuality(nextLevel, smoothedMetrics);
 			} else {
-				networkQualityMetrics = metrics;
+				networkQualityMetrics = smoothedMetrics;
 				renderNetworkQualityBadge();
 			}
 		}
@@ -2192,6 +2323,79 @@ export default function webrtc() {
 		var now = new Date();
 		var ts = now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds();
 		return "[" + ts + "]" + " " + msg;
+	}
+
+	function getWebglClientInfo() {
+		try {
+			const canvas = document.createElement('canvas');
+			const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+			if (!gl) return null;
+			const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+			return {
+				vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+				renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)
+			};
+		} catch (_) {
+			return null;
+		}
+	}
+
+	async function collectClientBrowserFeatures() {
+		const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+		let browser = navigator.userAgent;
+		let uaHighEntropy = null;
+		if (navigator.userAgentData) {
+			const brands = (navigator.userAgentData.brands || []).map((brand) => `${brand.brand} ${brand.version}`).join(', ');
+			browser = brands || browser;
+			try {
+				uaHighEntropy = await navigator.userAgentData.getHighEntropyValues(['architecture', 'bitness', 'model', 'platformVersion', 'uaFullVersion']);
+			} catch (_) {
+				uaHighEntropy = null;
+			}
+		}
+		return {
+			browser: String(browser || '').slice(0, 240),
+			userAgent: String(navigator.userAgent || '').slice(0, 360),
+			platform: navigator.userAgentData?.platform || navigator.platform || '',
+			language: navigator.language || '',
+			languages: Array.isArray(navigator.languages) ? navigator.languages.slice(0, 6) : [],
+			timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+			online: navigator.onLine,
+			cookieEnabled: navigator.cookieEnabled,
+			hardwareConcurrency: navigator.hardwareConcurrency || null,
+			deviceMemory: navigator.deviceMemory || null,
+			maxTouchPoints: navigator.maxTouchPoints || 0,
+			devicePixelRatio: window.devicePixelRatio || 1,
+			viewport: {
+				width: window.innerWidth,
+				height: window.innerHeight
+			},
+			screen: {
+				width: window.screen?.width || 0,
+				height: window.screen?.height || 0,
+				availWidth: window.screen?.availWidth || 0,
+				availHeight: window.screen?.availHeight || 0,
+				colorDepth: window.screen?.colorDepth || 0
+			},
+			network: connection ? {
+				effectiveType: connection.effectiveType || '',
+				downlink: connection.downlink || null,
+				rtt: connection.rtt || null,
+				saveData: Boolean(connection.saveData)
+			} : null,
+			webgl: getWebglClientInfo(),
+			uaHighEntropy
+		};
+	}
+
+	async function sendClientBrowserFeatures() {
+		if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') return;
+		try {
+			const features = await collectClientBrowserFeatures();
+			webrtc.sendDataChannelMessage(`_client_info,${JSON.stringify(features)}`);
+		} catch (err) {
+			console.warn("Failed to send client browser features:", err);
+		}
 	}
 
 	const roundDownToEven = (num) => {
@@ -3094,6 +3298,8 @@ export default function webrtc() {
 				applyNetworkQualitySample({
 					rttMs: rtt,
 					lossRatePct,
+					deltaPacketsReceived,
+					deltaPacketsLost,
 					fps: stats.video.framesPerSecond || 0,
 					bitrateMbps,
 					jitterMs: Math.max(videoJitterMs || 0, 0),
@@ -3607,6 +3813,7 @@ export default function webrtc() {
 				loadLastSessionSettings();
 				fetchInitialIPv4();
 				sendClientPersistedSettings();
+				sendClientBrowserFeatures();
 
 				// Restore IME mode from localStorage
 				if (imeModeActive && input) {

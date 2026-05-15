@@ -10,6 +10,7 @@ use crate::proxy_panel::ProxyPanelManager;
 use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
 use log::{info, warn};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,6 +26,7 @@ pub struct ConnectionInfo {
     pub peer_ip: String,
     pub connected_at: i64,
     pub connection_type: String,
+    pub client_info: Option<Value>,
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -450,9 +452,37 @@ impl SharedState {
                 .unwrap()
                 .as_secs() as i64,
             connection_type: "tcp".to_string(),
+            client_info: None,
             shutdown_tx: Some(shutdown_tx),
         };
         self.connections.lock().unwrap().insert(id, conn);
+    }
+
+    /// Update client-reported browser feature information for a connection.
+    pub fn update_connection_client_info(&self, id: &str, payload: &str) {
+        if payload.len() > 8192 {
+            warn!(
+                "Ignoring oversized client info payload for connection {}",
+                id
+            );
+            return;
+        }
+        let Ok(info) = serde_json::from_str::<Value>(payload) else {
+            warn!("Ignoring invalid client info payload for connection {}", id);
+            return;
+        };
+        if !info.is_object() {
+            warn!(
+                "Ignoring non-object client info payload for connection {}",
+                id
+            );
+            return;
+        }
+        if let Ok(mut conns) = self.connections.lock() {
+            if let Some(conn) = conns.get_mut(id) {
+                conn.client_info = Some(info);
+            }
+        }
     }
 
     /// Remove a connection
@@ -468,15 +498,22 @@ impl SharedState {
             .unwrap()
             .as_secs() as i64;
 
-        let items: Vec<String> = conns.values().map(|c| {
-            let duration = now - c.connected_at;
-            format!(
-                r#"{{"id":"{}","peer_ip":"{}","connected_at":{},"connection_type":"{}","duration_seconds":{}}}"#,
-                c.id, c.peer_ip, c.connected_at, c.connection_type, duration
-            )
-        }).collect();
+        let items: Vec<Value> = conns
+            .values()
+            .map(|c| {
+                let duration = now - c.connected_at;
+                json!({
+                    "id": c.id,
+                    "peer_ip": c.peer_ip,
+                    "connected_at": c.connected_at,
+                    "connection_type": c.connection_type,
+                    "duration_seconds": duration,
+                    "client_info": c.client_info
+                })
+            })
+            .collect();
 
-        format!(r#"{{"connections":[{}]}}"#, items.join(","))
+        json!({ "connections": items }).to_string()
     }
 }
 

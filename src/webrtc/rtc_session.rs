@@ -631,6 +631,12 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         ctx.runtime_settings.apply_settings_json(payload);
         return;
     }
+    if text.starts_with("_client_info,") {
+        let payload = text.trim_start_matches("_client_info,");
+        ctx.shared_state
+            .update_connection_client_info(&session.id, payload);
+        return;
+    }
     if ctx.runtime_settings.handle_simple_message(text) {
         return;
     }
