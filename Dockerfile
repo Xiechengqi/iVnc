@@ -52,6 +52,8 @@ RUN apt-get update && \
     fonts-wqy-microhei \
     libgstreamer1.0-0 \
     libgstreamer-plugins-base1.0-0 \
+    libegl1 \
+    libgbm1 \
     libpixman-1-0 \
     libxkbcommon0 \
     libxcb1 \
