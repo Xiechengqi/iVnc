@@ -90,6 +90,12 @@ const MAIN_I18N = {
 		noAppRunning: '当前没有应用在运行',
 		// connection management
 		connectionMgmtTitle: '连接管理',
+		networkQualityGood: '网络：优',
+		networkQualityFair: '网络：良',
+		networkQualityPoor: '网络：差',
+		networkQualityOffline: '网络：断开',
+		networkQualityUnknown: '网络：检测中',
+		networkQualityTooltip: (rtt, loss, fps, bitrate, jitter, type) => `RTT: ${rtt}\n丢包: ${loss}\nFPS: ${fps}\n码率: ${bitrate}\n抖动: ${jitter}\n类型: ${type}`,
 		currentConnectionsCount: n => `当前连接数: ${n}`,
 		connTime: '连接时间',
 		connDuration: '持续',
@@ -155,6 +161,12 @@ const MAIN_I18N = {
 		waitingAppTitle: 'Waiting for App',
 		noAppRunning: 'No app is currently running',
 		connectionMgmtTitle: 'Connection Management',
+		networkQualityGood: 'Network: Good',
+		networkQualityFair: 'Network: Fair',
+		networkQualityPoor: 'Network: Poor',
+		networkQualityOffline: 'Network: Offline',
+		networkQualityUnknown: 'Network: Checking',
+		networkQualityTooltip: (rtt, loss, fps, bitrate, jitter, type) => `RTT: ${rtt}\nLoss: ${loss}\nFPS: ${fps}\nBitrate: ${bitrate}\nJitter: ${jitter}\nType: ${type}`,
 		currentConnectionsCount: n => `Current connections: ${n}`,
 		connTime: 'Connected at',
 		connDuration: 'Duration',
@@ -486,6 +498,45 @@ function InitUI() {
 		white-space: nowrap;
 		user-select: none;
 		pointer-events: none;
+	}
+	.taskbar-network-quality {
+		position: absolute;
+		right: 42px;
+		top: 6px;
+		height: 24px;
+		padding: 0 8px;
+		border-radius: 4px;
+		font-size: 11px;
+		line-height: 24px;
+		font-family: system-ui, sans-serif;
+		font-weight: 600;
+		white-space: nowrap;
+		user-select: none;
+		pointer-events: auto;
+		cursor: default;
+		color: rgba(255, 255, 255, 0.86);
+		background: rgba(148, 163, 184, 0.22);
+		border: 1px solid rgba(148, 163, 184, 0.35);
+	}
+	.taskbar-network-quality.good {
+		background: rgba(34, 197, 94, 0.22);
+		border-color: rgba(34, 197, 94, 0.45);
+		color: #bbf7d0;
+	}
+	.taskbar-network-quality.fair {
+		background: rgba(234, 179, 8, 0.22);
+		border-color: rgba(234, 179, 8, 0.45);
+		color: #fef3c7;
+	}
+	.taskbar-network-quality.poor {
+		background: rgba(239, 68, 68, 0.24);
+		border-color: rgba(239, 68, 68, 0.52);
+		color: #fecaca;
+	}
+	.taskbar-network-quality.offline {
+		background: rgba(107, 114, 128, 0.22);
+		border-color: rgba(107, 114, 128, 0.35);
+		color: rgba(255, 255, 255, 0.58);
 	}
 	.taskbar-trigger {
 		position: fixed;
@@ -1973,6 +2024,12 @@ export default function webrtc() {
 	var webrtc = null;
 	var input = null;
 	let useCssScaling = true;
+	let networkQualityBadge = null;
+	let networkQualityLevel = 'unknown';
+	let networkQualityMetrics = null;
+	let networkQualityPendingLevel = null;
+	let networkQualityPendingCount = 0;
+	let networkQualityFailures = 0;
 
 	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1; // 64KiB, excluding a byte for prefix
 
@@ -2026,6 +2083,109 @@ export default function webrtc() {
 				window.localStorage.setItem(prefixedKey, value.toString());
 		}
 	};
+
+	function formatNetworkMetric(value, suffix, digits = 0) {
+		if (value === null || value === undefined || !Number.isFinite(Number(value))) return 'NA';
+		return `${Number(value).toFixed(digits)}${suffix}`;
+	}
+
+	function renderNetworkQualityBadge() {
+		if (!networkQualityBadge) return;
+		const key = {
+			good: 'networkQualityGood',
+			fair: 'networkQualityFair',
+			poor: 'networkQualityPoor',
+			offline: 'networkQualityOffline',
+			unknown: 'networkQualityUnknown'
+		}[networkQualityLevel] || 'networkQualityUnknown';
+		networkQualityBadge.className = `taskbar-network-quality ${networkQualityLevel}`;
+		networkQualityBadge.textContent = tt(key);
+		const metrics = networkQualityMetrics;
+		if (metrics) {
+			networkQualityBadge.title = tt(
+				'networkQualityTooltip',
+				formatNetworkMetric(metrics.rttMs, 'ms'),
+				formatNetworkMetric(metrics.lossRatePct, '%', 1),
+				formatNetworkMetric(metrics.fps, ''),
+				formatNetworkMetric(metrics.bitrateMbps, 'Mbps', 2),
+				formatNetworkMetric(metrics.jitterMs, 'ms'),
+				metrics.connectionType || 'NA'
+			);
+		} else {
+			networkQualityBadge.title = tt(key);
+		}
+	}
+
+	function setNetworkQuality(level, metrics = null) {
+		networkQualityLevel = level || 'unknown';
+		networkQualityMetrics = metrics;
+		renderNetworkQualityBadge();
+	}
+
+	function resetNetworkQuality(level = 'unknown') {
+		networkQualityPendingLevel = null;
+		networkQualityPendingCount = 0;
+		networkQualityFailures = 0;
+		setNetworkQuality(level, null);
+	}
+
+	function classifyNetworkSample(metrics) {
+		const rttMs = Number(metrics.rttMs) || 0;
+		const lossRatePct = Number(metrics.lossRatePct) || 0;
+		const fps = Number(metrics.fps) || 0;
+		const jitterMs = Number(metrics.jitterMs) || 0;
+		if (rttMs >= 180 || lossRatePct >= 3 || fps < 15 || jitterMs >= 120) return 'poor';
+		if (rttMs >= 80 || lossRatePct >= 1 || fps < 24 || jitterMs >= 50) return 'fair';
+		return 'good';
+	}
+
+	function applyNetworkQualitySample(metrics) {
+		networkQualityFailures = 0;
+		const nextLevel = classifyNetworkSample(metrics);
+		const rank = { unknown: 0, good: 1, fair: 2, poor: 3, offline: 4 };
+		const currentRank = rank[networkQualityLevel] ?? 0;
+		const nextRank = rank[nextLevel] ?? 0;
+
+		if (networkQualityLevel === 'unknown' || nextRank > currentRank) {
+			networkQualityPendingLevel = null;
+			networkQualityPendingCount = 0;
+			setNetworkQuality(nextLevel, metrics);
+			return;
+		}
+
+		if (nextLevel === networkQualityLevel) {
+			networkQualityPendingLevel = null;
+			networkQualityPendingCount = 0;
+			setNetworkQuality(nextLevel, metrics);
+			return;
+		}
+
+		if (nextRank < currentRank) {
+			if (networkQualityPendingLevel === nextLevel) {
+				networkQualityPendingCount += 1;
+			} else {
+				networkQualityPendingLevel = nextLevel;
+				networkQualityPendingCount = 1;
+			}
+			if (networkQualityPendingCount >= 2) {
+				networkQualityPendingLevel = null;
+				networkQualityPendingCount = 0;
+				setNetworkQuality(nextLevel, metrics);
+			} else {
+				networkQualityMetrics = metrics;
+				renderNetworkQualityBadge();
+			}
+		}
+	}
+
+	function markNetworkQualitySampleFailed() {
+		networkQualityFailures += 1;
+		if (networkQualityFailures >= 3) {
+			resetNetworkQuality('offline');
+		}
+	}
+
+	onLangChange(renderNetworkQualityBadge);
 
 	// Function to add timestamp to logs.
 	var applyTimestamp = (msg) => {
@@ -2846,6 +3006,9 @@ export default function webrtc() {
 			var previousVideoJitterBufferEmittedCount = 0;
 			var previousAudioJitterBufferDelay = 0.0;
 			var previousAudioJitterBufferEmittedCount = 0;
+			var previousPacketsReceived = null;
+			var previousPacketsLost = null;
+			var previousNetworkVideoBytesReceived = null;
 			var statsStart = new Date().getTime() / 1000;
 			var lastSessionCount = null;
 			var sessionCountPending = false;
@@ -2872,6 +3035,7 @@ export default function webrtc() {
 				webrtc.getConnectionStats().then((stats) => {
 					statWatchEnabled = true;
 					var now = new Date().getTime() / 1000;
+					const intervalSeconds = Math.max(now - statsStart, 0.001);
 					connectionStat = {};
 
 				// Connection latency in milliseconds
@@ -2903,21 +3067,41 @@ export default function webrtc() {
 				connectionStat.connectionVideoDecoder = stats.video.decoder;
 				connectionStat.connectionResolution = stats.video.frameWidth + "x" + stats.video.frameHeight;
 				connectionStat.connectionFrameRate = stats.video.framesPerSecond;
-				connectionStat.connectionVideoBitrate = (((stats.video.bytesReceived - videoBytesReceivedStart) / (now - statsStart)) * 8 / 1e+6).toFixed(2);
+				connectionStat.connectionVideoBitrate = (((stats.video.bytesReceived - videoBytesReceivedStart) / intervalSeconds) * 8 / 1e+6).toFixed(2);
 				videoBytesReceivedStart = stats.video.bytesReceived;
 
 				// Audio stats
 				connectionStat.connectionAudioCodecName = stats.audio.codecName;
-				connectionStat.connectionAudioBitrate = (((stats.audio.bytesReceived - audioBytesReceivedStart) / (now - statsStart)) * 8 / 1e+3).toFixed(2);
+				connectionStat.connectionAudioBitrate = (((stats.audio.bytesReceived - audioBytesReceivedStart) / intervalSeconds) * 8 / 1e+3).toFixed(2);
 				audioBytesReceivedStart = stats.audio.bytesReceived;
 
 				// Latency stats
-				connectionStat.connectionVideoLatency = parseInt(Math.round(rtt + (1000.0 * (stats.video.jitterBufferDelay - previousVideoJitterBufferDelay) / (stats.video.jitterBufferEmittedCount - previousVideoJitterBufferEmittedCount) || 0)));
+				const videoJitterCountDelta = stats.video.jitterBufferEmittedCount - previousVideoJitterBufferEmittedCount;
+				const videoJitterMs = videoJitterCountDelta > 0 ? (1000.0 * (stats.video.jitterBufferDelay - previousVideoJitterBufferDelay) / videoJitterCountDelta) : 0;
+				connectionStat.connectionVideoLatency = parseInt(Math.round(rtt + (videoJitterMs || 0)));
 				previousVideoJitterBufferDelay = stats.video.jitterBufferDelay;
 				previousVideoJitterBufferEmittedCount = stats.video.jitterBufferEmittedCount;
 				connectionStat.connectionAudioLatency = parseInt(Math.round(rtt + (1000.0 * (stats.audio.jitterBufferDelay - previousAudioJitterBufferDelay) / (stats.audio.jitterBufferEmittedCount - previousAudioJitterBufferEmittedCount) || 0)));
 				previousAudioJitterBufferDelay = stats.audio.jitterBufferDelay;
 				previousAudioJitterBufferEmittedCount = stats.audio.jitterBufferEmittedCount;
+
+				const deltaPacketsReceived = previousPacketsReceived === null ? 0 : Math.max(stats.general.packetsReceived - previousPacketsReceived, 0);
+				const deltaPacketsLost = previousPacketsLost === null ? 0 : Math.max(stats.general.packetsLost - previousPacketsLost, 0);
+				const deltaPacketsTotal = deltaPacketsReceived + deltaPacketsLost;
+				const lossRatePct = deltaPacketsTotal > 0 ? (deltaPacketsLost / deltaPacketsTotal) * 100 : 0;
+				const deltaVideoBytes = previousNetworkVideoBytesReceived === null ? 0 : Math.max(stats.video.bytesReceived - previousNetworkVideoBytesReceived, 0);
+				const bitrateMbps = deltaVideoBytes * 8 / intervalSeconds / 1e+6;
+				applyNetworkQualitySample({
+					rttMs: rtt,
+					lossRatePct,
+					fps: stats.video.framesPerSecond || 0,
+					bitrateMbps,
+					jitterMs: Math.max(videoJitterMs || 0, 0),
+					connectionType: stats.general.connectionType || 'NA'
+				});
+				previousPacketsReceived = stats.general.packetsReceived;
+				previousPacketsLost = stats.general.packetsLost;
+				previousNetworkVideoBytesReceived = stats.video.bytesReceived;
 
 				// Format latency
 				connectionStat.connectionLatency =  Math.max(connectionStat.connectionVideoLatency, connectionStat.connectionAudioLatency);
@@ -2954,6 +3138,9 @@ export default function webrtc() {
 					};
 					webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(summary)}`);
 				}
+			}).catch((err) => {
+				markNetworkQualitySampleFailed();
+				if (debug) console.warn("[webrtc] Failed to collect connection stats:", err);
 			});
 		// Stats refresh interval (1000 ms)
 		}, 1000);
@@ -3224,6 +3411,11 @@ export default function webrtc() {
 				e.stopPropagation();
 				window.open('/connect', '_blank');
 			});
+			networkQualityBadge = document.createElement('div');
+			networkQualityBadge.className = 'taskbar-network-quality unknown';
+			networkQualityBadge.id = 'network-quality';
+			taskbar.appendChild(networkQualityBadge);
+			resetNetworkQuality('unknown');
 			taskbar.appendChild(connIndicator);
 
 			document.body.appendChild(taskbarTrigger);
@@ -3395,11 +3587,15 @@ export default function webrtc() {
 					if (!statWatchEnabled) {
 						enableStatWatch();
 					}
+					resetNetworkQuality('unknown');
 				} else if (videoConnected === "failed") {
 					// WebRTC connection died — reset and reconnect
 					console.log("[webrtc] Connection failed, resetting");
 					status = 'connecting';
+					resetNetworkQuality('offline');
 					webrtc.reset();
+				} else if (videoConnected === "disconnected" || videoConnected === "closed") {
+					resetNetworkQuality('offline');
 				}
 				updateStatusDisplay();
 			};
@@ -3434,6 +3630,7 @@ export default function webrtc() {
 			}
 
 			webrtc.ondatachannelclose = () => {
+				resetNetworkQuality('offline');
 				input.detach();
 				// Disable upload button
 				const uploadBtn = document.getElementById('upload-btn');
@@ -3735,6 +3932,8 @@ export default function webrtc() {
 			statWatchEnabled = false;
 			if (statsLoopId) { clearInterval(statsLoopId); statsLoopId = null; }
 			if (metricsLoopId) { clearInterval(metricsLoopId); metricsLoopId = null; }
+			resetNetworkQuality('unknown');
+			networkQualityBadge = null;
 			terminalController.destroy();
 			proxyController.destroy();
 			consoleController.destroy();
