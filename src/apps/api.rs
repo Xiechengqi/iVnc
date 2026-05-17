@@ -252,7 +252,15 @@ fn builtin_chrome_command() -> Result<String, String> {
     let data_dir = builtin_chrome_data_dir()?;
     let data_dir = shell_quote(&data_dir.to_string_lossy());
     Ok(format!(
-        "google-chrome --user-data-dir={} --remote-debugging-host=0.0.0.0 --remote-debugging-port=9222 --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
+        "proxy_arg=''; \
+for i in 1 2; do \
+  if curl --silent --show-error --max-time 5 -x socks5://127.0.0.1:1080 http://3.0.3.0 >/dev/null 2>&1; then \
+    proxy_arg='--proxy-server=socks5://127.0.0.1:1080'; \
+    break; \
+  fi; \
+  [ \"$i\" -lt 2 ] && sleep 1; \
+done; \
+exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir={} --remote-debugging-host=0.0.0.0 --remote-debugging-port=9222 --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
         data_dir
     ))
 }
