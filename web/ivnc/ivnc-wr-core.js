@@ -700,18 +700,19 @@ function InitUI() {
 		height: var(--ivnc-console-height, min(720px, calc(100vh - 96px)));
 		min-width: 360px;
 		min-height: 300px;
-		background: #f4f7f9;
+		background: #101214;
+		border-color: transparent;
 	}
 	.web-console-body {
 		padding: 0;
-		background: #f4f7f9;
+		background: #101214;
 	}
 	.web-console-frame {
 		width: 100%;
 		height: 100%;
 		border: 0;
 		display: block;
-		background: #f4f7f9;
+		background: #101214;
 	}
 	.pwd-overlay {
 		position: fixed;
