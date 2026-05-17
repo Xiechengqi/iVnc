@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MIAO_URL: &str =
-    "https://github.com/YUxiangLuo/miao/releases/download/v0.18.4/miao-rust-linux-amd64";
+    "https://github.com/iVnc-Org/miao/releases/download/latest/miao-rust-linux-amd64";
 const MIAO_BIN: &str = "miao-rust-linux-amd64";
 
 fn main() {
