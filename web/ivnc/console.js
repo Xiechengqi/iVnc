@@ -88,6 +88,8 @@ const I18N = {
         logLoadFailed: 'Load failed: ',
         backgroundOption: 'Background App',
         desktopOption: 'Desktop App',
+        accessUrlCopied: 'Access link copied',
+        accessUrlCopyFailed: 'Failed to copy access link',
     },
     zh: {
         pageTitle: 'VNC 应用控制台',
@@ -171,6 +173,8 @@ const I18N = {
         logLoadFailed: '加载失败: ',
         backgroundOption: '后台应用',
         desktopOption: '桌面应用',
+        accessUrlCopied: '访问链接已复制',
+        accessUrlCopyFailed: '复制访问链接失败',
     }
 };
 
@@ -314,7 +318,7 @@ async function load() {
 
             actionsCell.append(editBtn);
             if (a.app_type !== 'desktop' && a.url) {
-                actionsCell.append(createBtn(t('visit'), 'btn-visit btn-sm', () => window.open(a.url, '_blank')));
+                actionsCell.append(createBtn(t('visit'), 'btn-visit btn-sm', () => copyAccessUrl(a.url)));
             }
             actionsCell.append(logBtn, clearBtn, delBtn);
             fragment.appendChild(tr);
@@ -333,6 +337,41 @@ function createBtn(text, cls, onClick) {
     b.textContent = text;
     b.addEventListener('click', onClick);
     return b;
+}
+
+async function copyAccessUrl(url) {
+    try {
+        await copyText(url);
+        toast(t('accessUrlCopied'), 'ok');
+    } catch (e) {
+        console.warn('Failed to copy access URL:', e);
+        toast(t('accessUrlCopyFailed'), 'err');
+    }
+}
+
+async function copyText(text) {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+
+    const input = document.createElement('textarea');
+    input.value = text;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed';
+    input.style.top = '-9999px';
+    input.style.left = '-9999px';
+    document.body.appendChild(input);
+    input.focus();
+    input.select();
+
+    try {
+        if (!document.execCommand('copy')) {
+            throw new Error('execCommand copy returned false');
+        }
+    } finally {
+        input.remove();
+    }
 }
 
 function showAdd() {
