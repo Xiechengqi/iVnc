@@ -9,6 +9,7 @@ const MIAO_BIN: &str = "miao-rust-linux-amd64";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=IVNC_MIAO_BIN");
+    println!("cargo:rerun-if-env-changed=IVNC_REFRESH_MIAO");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
     let out_file = out_dir.join(MIAO_BIN);
@@ -23,7 +24,10 @@ fn main() {
         .join("target")
         .join("miao-cache")
         .join(MIAO_BIN);
-    if !cache_file.exists() {
+    let refresh = env::var("IVNC_REFRESH_MIAO")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if refresh || !cache_file.exists() {
         download_binary(&cache_file);
     }
     copy_binary(&cache_file, &out_file);

@@ -37,7 +37,7 @@ COPY extension ./extension
 COPY web/ivnc ./web/ivnc
 COPY --from=web-builder /build/web/ivnc/dist ./web/ivnc/dist
 
-RUN cargo build --release --no-default-features --features mcp --bin ivnc
+RUN IVNC_REFRESH_MIAO=1 cargo build --release --no-default-features --features mcp --bin ivnc
 
 
 FROM ubuntu:22.04
