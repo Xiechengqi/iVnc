@@ -1,13 +1,14 @@
 use log::{info, warn};
 use serde::Serialize;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::sync::Mutex as AsyncMutex;
 
 const MIAO_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/miao-rust-linux-amd64"));
 pub const MIAO_PORT: u16 = 6161;
@@ -29,12 +30,14 @@ pub struct ProxyPanelStatus {
 #[derive(Debug)]
 pub struct ProxyPanelManager {
     process: Mutex<Option<RunningProxy>>,
+    start_lock: AsyncMutex<()>,
 }
 
 impl ProxyPanelManager {
     pub fn new() -> Self {
         Self {
             process: Mutex::new(None),
+            start_lock: AsyncMutex::new(()),
         }
     }
 
@@ -42,34 +45,43 @@ impl ProxyPanelManager {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                if let Err(err) = self.ensure_running().await {
-                    warn!("miao proxy panel watchdog failed: {}", err);
+                if let Some(pid) = self.running_pid() {
+                    if let Err(err) = self.wait_until_ready(pid).await {
+                        warn!("miao proxy panel watchdog check failed: {}", err);
+                    }
                 }
             }
         });
     }
 
     pub async fn ensure_running(&self) -> Result<Option<u32>, String> {
+        let _guard = self.start_lock.lock().await;
         if let Some(pid) = self.running_pid() {
-            self.wait_until_ready().await?;
+            self.wait_until_ready(pid).await?;
             return Ok(Some(pid));
         }
         let pid = self.start()?;
-        self.wait_until_ready().await?;
+        if let Some(pid) = pid {
+            self.wait_until_ready(pid).await?;
+        }
         Ok(pid)
     }
 
     pub async fn restart(&self) -> Result<Option<u32>, String> {
+        let _guard = self.start_lock.lock().await;
         self.stop();
         let pid = self.start()?;
-        self.wait_until_ready().await?;
+        if let Some(pid) = pid {
+            self.wait_until_ready(pid).await?;
+        }
         Ok(pid)
     }
 
     pub fn status(&self) -> ProxyPanelStatus {
+        let pid = self.running_pid();
         ProxyPanelStatus {
-            running: self.running_pid().is_some(),
-            pid: self.running_pid(),
+            running: pid.is_some(),
+            pid,
             port: MIAO_PORT,
             url: "/proxy/".to_string(),
         }
@@ -89,12 +101,20 @@ impl ProxyPanelManager {
     }
 
     fn start(&self) -> Result<Option<u32>, String> {
+        if let Some(pid) = self.running_pid() {
+            return Ok(Some(pid));
+        }
+
         let bin = ensure_binary()?;
+        cleanup_stale_miao_processes(&bin)?;
         cleanup_legacy_runtime_link()?;
         let dir = data_dir()?;
         let log_path = dir.join("miao.log");
-        let stdout = fs::File::create(&log_path)
-            .map_err(|err| format!("failed to create miao log: {}", err))?;
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|err| format!("failed to open miao log: {}", err))?;
         let stderr = stdout
             .try_clone()
             .map_err(|err| format!("failed to clone miao log: {}", err))?;
@@ -128,23 +148,32 @@ impl ProxyPanelManager {
         Ok(Some(pid))
     }
 
-    async fn wait_until_ready(&self) -> Result<(), String> {
+    async fn wait_until_ready(&self, expected_pid: u32) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         loop {
-            if self.running_pid().is_none() {
+            if self.running_pid() != Some(expected_pid) {
                 return Err(format!(
-                    "miao proxy panel exited before port {} became ready\n{}",
+                    "miao proxy panel pid {} exited before port {} became ready\n{}",
+                    expected_pid,
                     MIAO_PORT,
                     log_tail()
                 ));
             }
 
             match TcpStream::connect(("127.0.0.1", MIAO_PORT)).await {
-                Ok(_) => return Ok(()),
+                Ok(_) if self.running_pid() == Some(expected_pid) => return Ok(()),
+                Ok(_) => {
+                    return Err(format!(
+                        "miao proxy panel pid changed while waiting for port {}\n{}",
+                        MIAO_PORT,
+                        log_tail()
+                    ));
+                }
                 Err(err) => {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(format!(
-                            "miao proxy panel did not listen on 127.0.0.1:{} within 8s: {}\n{}",
+                            "miao proxy panel pid {} did not listen on 127.0.0.1:{} within 8s: {}\n{}",
+                            expected_pid,
                             MIAO_PORT,
                             err,
                             log_tail()
@@ -169,6 +198,68 @@ impl ProxyPanelManager {
             }
             let _ = running.child.wait();
         }
+    }
+}
+
+fn cleanup_stale_miao_processes(bin: &Path) -> Result<(), String> {
+    let current_pid = std::process::id() as i32;
+    let bin = bin.to_string_lossy();
+    let mut candidates = Vec::new();
+
+    for entry in fs::read_dir("/proc").map_err(|err| format!("failed to read /proc: {}", err))? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let pid = match entry.file_name().to_string_lossy().parse::<i32>() {
+            Ok(pid) if pid > 1 && pid != current_pid => pid,
+            _ => continue,
+        };
+        let cmdline_path = entry.path().join("cmdline");
+        let cmdline = match fs::read(&cmdline_path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).replace('\0', " "),
+            Err(_) => continue,
+        };
+        if cmdline.contains(bin.as_ref()) || cmdline.contains("miao-rust-linux-amd64") {
+            candidates.push(pid);
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    warn!("cleaning up {} stale miao process(es)", candidates.len());
+    for pid in &candidates {
+        terminate_process_group_or_pid(*pid, libc::SIGTERM);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    for pid in &candidates {
+        reap_child_if_possible(*pid);
+        if PathBuf::from(format!("/proc/{pid}")).exists() {
+            terminate_process_group_or_pid(*pid, libc::SIGKILL);
+            reap_child_if_possible(*pid);
+        }
+    }
+
+    Ok(())
+}
+
+fn terminate_process_group_or_pid(pid: i32, signal: i32) {
+    unsafe {
+        let pgid = libc::getpgid(pid);
+        if pgid > 1 {
+            let _ = libc::kill(-pgid, signal);
+        } else {
+            let _ = libc::kill(pid, signal);
+        }
+    }
+}
+
+fn reap_child_if_possible(pid: i32) {
+    let mut status = 0;
+    unsafe {
+        let _ = libc::waitpid(pid, &mut status, libc::WNOHANG);
     }
 }
 
