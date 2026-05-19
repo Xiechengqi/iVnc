@@ -24,6 +24,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Resolve build metadata
+        id: build-meta
+        run: |
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "message<<EOF"
+            git log -1 --pretty=%s
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -84,6 +94,8 @@ jobs:
             -v "$(pwd)/output:/output" \
             -v "$(pwd)/docker-build.sh:/docker-build.sh" \
             -e ARCH=${{ matrix.arch }} \
+            -e IVNC_BUILD_GIT_COMMIT="${{ steps.build-meta.outputs.commit }}" \
+            -e IVNC_BUILD_GIT_MESSAGE="${{ steps.build-meta.outputs.message }}" \
             ubuntu:22.04 \
             /bin/bash /docker-build.sh
 
@@ -105,6 +117,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Resolve build metadata
+        id: build-meta
+        run: |
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "message<<EOF"
+            git log -1 --pretty=%s
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -135,6 +157,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
+            IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
 
   release:
     needs:

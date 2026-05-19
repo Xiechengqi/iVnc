@@ -8,8 +8,12 @@ const MIAO_URL: &str =
 const MIAO_BIN: &str = "miao-rust-linux-amd64";
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=IVNC_BUILD_GIT_COMMIT");
+    println!("cargo:rerun-if-env-changed=IVNC_BUILD_GIT_MESSAGE");
     println!("cargo:rerun-if-env-changed=IVNC_MIAO_BIN");
     println!("cargo:rerun-if-env-changed=IVNC_REFRESH_MIAO");
+
+    emit_build_metadata();
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
     let out_file = out_dir.join(MIAO_BIN);
@@ -31,6 +35,43 @@ fn main() {
         download_binary(&cache_file);
     }
     copy_binary(&cache_file, &out_file);
+}
+
+fn emit_build_metadata() {
+    let commit = env::var("IVNC_BUILD_GIT_COMMIT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| git_output(&["rev-parse", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
+    let message = env::var("IVNC_BUILD_GIT_MESSAGE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| git_output(&["log", "-1", "--pretty=%s"]))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    println!("cargo:rustc-env=IVNC_BUILD_GIT_COMMIT={}", commit.trim());
+    println!(
+        "cargo:rustc-env=IVNC_BUILD_GIT_MESSAGE={}",
+        first_line(message.trim())
+    );
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn first_line(value: &str) -> &str {
+    value.lines().next().unwrap_or(value)
 }
 
 fn copy_binary(src: &Path, dst: &Path) {

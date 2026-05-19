@@ -119,6 +119,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/index.html", get(index_handler))
         .route("/connect", get(index_handler))
         .route("/health", get(health_handler))
+        .route("/version", get(public_version_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
         .route("/ui-config", get(ui_config_handler))
@@ -523,6 +524,7 @@ async fn basic_auth_middleware(
 
     let path = req.uri().path();
     if path == "/health"
+        || path == "/version"
         || path == "/manifest.json"
         || path == "/sw.js"
         || path.starts_with("/icons/")
@@ -1113,6 +1115,15 @@ struct VersionInfo {
     download_url: String,
 }
 
+/// Public build version information
+#[derive(Serialize, Clone)]
+struct PublicVersionInfo {
+    version: String,
+    git_commit: String,
+    git_commit_short: String,
+    git_message: String,
+}
+
 /// Upgrade log entry for WebSocket streaming
 #[derive(Clone, Serialize)]
 struct UpgradeLogEntry {
@@ -1134,6 +1145,26 @@ struct GitHubRelease {
 #[derive(Deserialize)]
 struct WsAuthQuery {
     token: Option<String>,
+}
+
+/// GET /version - Public build version information
+async fn public_version_handler() -> axum::Json<PublicVersionInfo> {
+    let git_commit = option_env!("IVNC_BUILD_GIT_COMMIT")
+        .unwrap_or("unknown")
+        .to_string();
+    let git_commit_short = if git_commit.len() >= 7 {
+        git_commit[..7].to_string()
+    } else {
+        git_commit.clone()
+    };
+    axum::Json(PublicVersionInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_commit,
+        git_commit_short,
+        git_message: option_env!("IVNC_BUILD_GIT_MESSAGE")
+            .unwrap_or("unknown")
+            .to_string(),
+    })
 }
 
 /// GET /api/version - Check for updates
