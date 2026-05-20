@@ -475,6 +475,7 @@ fn run(
     let mut prev_cursor_name: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
     let mut prev_dc_open_count: u64 = 0;
+    let mut was_idle = false;
     // Non-blocking clipboard pipe read state
     let mut clipboard_pipe: Option<std::fs::File> = None;
     let mut clipboard_pipe_buf: Vec<u8> = Vec::new();
@@ -482,7 +483,35 @@ fn run(
     info!("Compositor loop starting at {} fps", target_fps);
 
     while running.load(Ordering::Relaxed) {
-        event_loop.dispatch(Some(Duration::from_millis(1)), &mut comp)?;
+        let has_viewers =
+            shared_state.webrtc_sessions() > 0 || shared_state.rtp_receiver_count() > 0;
+        let is_idle = !has_viewers;
+        if is_idle != was_idle {
+            if is_idle {
+                info!("Entering idle mode: no active viewers");
+            } else {
+                info!("Leaving idle mode: viewer connected");
+                backend.reset_damage();
+                comp.needs_redraw = true;
+                comp.taskbar_dirty = true;
+                pipeline.request_keyframe();
+                rtp_frame_buf.clear();
+                prev_rtp_ts = None;
+                last_rtp_sample = None;
+                in_keyframe = false;
+                keyframe_buf.clear();
+                last_frame = Instant::now();
+                last_render = Instant::now() - Duration::from_secs(1);
+            }
+            was_idle = is_idle;
+        }
+
+        let dispatch_timeout = if is_idle {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(1)
+        };
+        event_loop.dispatch(Some(dispatch_timeout), &mut comp)?;
         comp.space.refresh();
         comp.popups.cleanup();
         comp.display_handle.flush_clients().ok();
@@ -751,47 +780,48 @@ fn run(
 
         apply_runtime_settings(&runtime_settings, &pipeline);
 
-        // Send frame callbacks BEFORE sleep so clients have the full
-        // frame period to prepare and commit their next buffer.
-        backend.send_frame_callbacks(&comp);
-        comp.display_handle.flush_clients().ok();
+        if !is_idle {
+            // Send frame callbacks BEFORE sleep so clients have the full
+            // frame period to prepare and commit their next buffer.
+            backend.send_frame_callbacks(&comp);
+            comp.display_handle.flush_clients().ok();
 
-        // Frame timing — clients are working in parallel during this sleep
-        let elapsed = last_frame.elapsed();
-        if elapsed < frame_duration {
-            std::thread::sleep(frame_duration - elapsed);
-        }
-        last_frame = Instant::now();
+            // Frame timing — clients are working in parallel during this sleep
+            let elapsed = last_frame.elapsed();
+            if elapsed < frame_duration {
+                std::thread::sleep(frame_duration - elapsed);
+            }
+            last_frame = Instant::now();
 
-        // Quick dispatch to pick up commits that arrived during sleep
-        event_loop.dispatch(Some(Duration::ZERO), &mut comp)?;
-        comp.display_handle.flush_clients().ok();
+            // Quick dispatch to pick up commits that arrived during sleep
+            event_loop.dispatch(Some(Duration::ZERO), &mut comp)?;
+            comp.display_handle.flush_clients().ok();
 
-        // Render + encode if any client committed new content
-        // Also force periodic renders when sessions are active to ensure
-        // the browser always has decodable video frames.
-        let has_sessions = shared_state.rtp_receiver_count() > 0;
-        if !comp.needs_redraw && has_sessions && last_render.elapsed() >= Duration::from_secs(1) {
-            comp.needs_redraw = true;
-        }
-        if comp.needs_redraw {
-            comp.needs_redraw = false;
-            match backend.render_frame(&mut comp) {
-                Some(pixels) => {
-                    render_frames += 1;
-                    last_render = Instant::now();
-                    if let Err(e) = pipeline.push_frame(&pixels) {
-                        warn!("Failed to push frame: {}", e);
-                        continue;
+            // Render + encode if any client committed new content.
+            // Also force periodic renders when sessions are active to ensure
+            // the browser always has decodable video frames.
+            if !comp.needs_redraw && last_render.elapsed() >= Duration::from_secs(1) {
+                comp.needs_redraw = true;
+            }
+            if comp.needs_redraw {
+                comp.needs_redraw = false;
+                match backend.render_frame(&mut comp) {
+                    Some(pixels) => {
+                        render_frames += 1;
+                        last_render = Instant::now();
+                        if let Err(e) = pipeline.push_frame(&pixels) {
+                            warn!("Failed to push frame: {}", e);
+                            continue;
+                        }
+                        frame_count += 1;
+                        byte_count += pixels.len() as u64;
                     }
-                    frame_count += 1;
-                    byte_count += pixels.len() as u64;
-                }
-                None => {
-                    warn!(
-                        "render_frame returned None (windows={})",
-                        comp.space.elements().count()
-                    );
+                    None => {
+                        warn!(
+                            "render_frame returned None (windows={})",
+                            comp.space.elements().count()
+                        );
+                    }
                 }
             }
         }
@@ -813,16 +843,18 @@ fn run(
             }
         }
 
-        pull_and_broadcast_rtp(
-            &pipeline,
-            &shared_state,
-            &mut rtp_packets,
-            &mut keyframe_buf,
-            &mut in_keyframe,
-            &mut rtp_frame_buf,
-            &mut prev_rtp_ts,
-            &mut last_rtp_sample,
-        );
+        if !is_idle {
+            pull_and_broadcast_rtp(
+                &pipeline,
+                &shared_state,
+                &mut rtp_packets,
+                &mut keyframe_buf,
+                &mut in_keyframe,
+                &mut rtp_frame_buf,
+                &mut prev_rtp_ts,
+                &mut last_rtp_sample,
+            );
+        }
 
         if shared_state.take_keyframe_request() {
             pipeline.request_keyframe();
@@ -832,8 +864,15 @@ fn run(
             let secs = last_stats.elapsed().as_secs_f64();
             let windows = comp.space.elements().count();
             info!(
-                "Loop stats: windows={}, rendered={}, pushed={}, rtp_pkts={}, secs={:.1}",
-                windows, render_frames, frame_count, rtp_packets, secs
+                "Loop stats: idle={}, viewers={}, rtp_receivers={}, windows={}, rendered={}, pushed={}, rtp_pkts={}, secs={:.1}",
+                is_idle,
+                shared_state.webrtc_sessions(),
+                shared_state.rtp_receiver_count(),
+                windows,
+                render_frames,
+                frame_count,
+                rtp_packets,
+                secs
             );
             {
                 let mut stats = shared_state.stats.lock().unwrap();
