@@ -2399,6 +2399,62 @@ export default function webrtc() {
 		}
 	}
 
+	let clientActivityLoopId = null;
+	let lastClientActivityInputAt = 0;
+
+	function sendClientActivity(event = 'heartbeat', input = false) {
+		if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') return;
+		const payload = {
+			event,
+			visible: document.visibilityState !== 'hidden',
+			focused: document.hasFocus(),
+			input: Boolean(input),
+			ts: Date.now(),
+		};
+		if (input) {
+			lastClientActivityInputAt = payload.ts;
+		}
+		try {
+			webrtc.sendDataChannelMessage(`_client_activity,${JSON.stringify(payload)}`);
+		} catch (err) {
+			console.warn("Failed to send client activity:", err);
+		}
+	}
+
+	function sendClientInputActivity(event = 'input') {
+		const now = Date.now();
+		if (now - lastClientActivityInputAt < 1000) return;
+		sendClientActivity(event, true);
+	}
+
+	function startClientActivityReporting() {
+		sendClientActivity('open');
+		if (clientActivityLoopId) {
+			clearInterval(clientActivityLoopId);
+		}
+		clientActivityLoopId = setInterval(() => {
+			sendClientActivity('heartbeat');
+		}, 10000);
+	}
+
+	function stopClientActivityReporting() {
+		if (clientActivityLoopId) {
+			clearInterval(clientActivityLoopId);
+			clientActivityLoopId = null;
+		}
+	}
+
+	window.addEventListener('focus', () => sendClientActivity('focus'));
+	window.addEventListener('blur', () => sendClientActivity('blur'));
+	window.addEventListener('beforeunload', () => sendClientActivity('beforeunload'));
+	document.addEventListener('visibilitychange', () => sendClientActivity('visibilitychange'));
+	['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach((eventName) => {
+		window.addEventListener(eventName, () => sendClientInputActivity(eventName), {
+			capture: true,
+			passive: true,
+		});
+	});
+
 	const roundDownToEven = (num) => {
 		return Math.floor(num / 2) * 2;
 	};
@@ -3815,6 +3871,7 @@ export default function webrtc() {
 				fetchInitialIPv4();
 				sendClientPersistedSettings();
 				sendClientBrowserFeatures();
+				startClientActivityReporting();
 
 				// Restore IME mode from localStorage
 				if (imeModeActive && input) {
@@ -3839,6 +3896,7 @@ export default function webrtc() {
 
 			webrtc.ondatachannelclose = () => {
 				resetNetworkQuality('offline');
+				stopClientActivityReporting();
 				input.detach();
 				// Disable upload button
 				const uploadBtn = document.getElementById('upload-btn');

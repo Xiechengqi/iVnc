@@ -637,6 +637,12 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
             .update_connection_client_info(&session.id, payload);
         return;
     }
+    if text.starts_with("_client_activity,") {
+        let payload = text.trim_start_matches("_client_activity,");
+        ctx.shared_state
+            .update_connection_client_activity(&session.id, payload);
+        return;
+    }
     if ctx.runtime_settings.handle_simple_message(text) {
         return;
     }
@@ -711,6 +717,8 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
     // Fall through to input event parsing (mouse, keyboard, etc.)
     match InputDataChannel::parse_input_text(text) {
         Ok(event) => {
+            ctx.shared_state
+                .record_connection_input_activity(&session.id);
             let _ = ctx.input_tx.send(event);
         }
         Err(e) => {

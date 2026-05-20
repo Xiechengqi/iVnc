@@ -38,7 +38,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use web::shared::RenderState;
 use webrtc::SessionManager;
+
+const VIEWER_QUIET_IDLE_AFTER: Duration = Duration::from_secs(30);
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -457,6 +460,7 @@ fn run(
     let frame_duration = Duration::from_micros(1_000_000 / target_fps as u64);
     let mut last_frame = Instant::now();
     let mut last_stats = Instant::now();
+    let mut last_process_cpu_sample = read_process_cpu_ticks().map(|ticks| (Instant::now(), ticks));
     let mut frame_count: u64 = 0;
     let mut byte_count: u64 = 0;
 
@@ -475,7 +479,8 @@ fn run(
     let mut prev_cursor_name: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
     let mut prev_dc_open_count: u64 = 0;
-    let mut was_idle = false;
+    let mut render_state = RenderState::Active;
+    let mut last_visual_activity_at = Instant::now();
     // Non-blocking clipboard pipe read state
     let mut clipboard_pipe: Option<std::fs::File> = None;
     let mut clipboard_pipe_buf: Vec<u8> = Vec::new();
@@ -483,33 +488,11 @@ fn run(
     info!("Compositor loop starting at {} fps", target_fps);
 
     while running.load(Ordering::Relaxed) {
-        let has_viewers =
-            shared_state.webrtc_sessions() > 0 || shared_state.rtp_receiver_count() > 0;
-        let is_idle = !has_viewers;
-        if is_idle != was_idle {
-            if is_idle {
-                info!("Entering idle mode: no active viewers");
-            } else {
-                info!("Leaving idle mode: viewer connected");
-                backend.reset_damage();
-                comp.needs_redraw = true;
-                comp.taskbar_dirty = true;
-                pipeline.request_keyframe();
-                rtp_frame_buf.clear();
-                prev_rtp_ts = None;
-                last_rtp_sample = None;
-                in_keyframe = false;
-                keyframe_buf.clear();
-                last_frame = Instant::now();
-                last_render = Instant::now() - Duration::from_secs(1);
-            }
-            was_idle = is_idle;
-        }
-
-        let dispatch_timeout = if is_idle {
-            Duration::from_millis(50)
-        } else {
+        let dispatch_state = desired_render_state(&shared_state, last_visual_activity_at);
+        let dispatch_timeout = if dispatch_state == RenderState::Active {
             Duration::from_millis(1)
+        } else {
+            Duration::from_millis(50)
         };
         event_loop.dispatch(Some(dispatch_timeout), &mut comp)?;
         comp.space.refresh();
@@ -579,6 +562,7 @@ fn run(
                         // wl_data_source with stale content in response to our selection change.
                         comp.clipboard_suppress_until =
                             Some(Instant::now() + Duration::from_millis(500));
+                        last_visual_activity_at = Instant::now();
                         info!("Clipboard from browser: {} bytes", text.len());
                     }
                 }
@@ -586,13 +570,15 @@ fn run(
         }
         comp.display_handle.flush_clients().ok();
 
-        drain_input_events(
+        if drain_input_events(
             &mut input_rx,
             &mut comp,
             &shared_state,
             &mut prev_button_mask,
             &mut prev_cursor_pos,
-        );
+        ) {
+            last_visual_activity_at = Instant::now();
+        }
         comp.display_handle.flush_clients().ok(); // flush injected input events immediately
 
         // Read clipboard from Wayland client (remote → browser).
@@ -650,6 +636,7 @@ fn run(
             let msg = format!("cursor,{{\"override\":\"{}\"}}", cursor_name);
             shared_state.send_text(msg);
             prev_cursor_name = cursor_name;
+            last_visual_activity_at = Instant::now();
         }
 
         // Detect window changes and request keyframe so browsers can decode the new content
@@ -664,6 +651,7 @@ fn run(
             pipeline.request_keyframe();
             comp.needs_redraw = true;
             comp.taskbar_dirty = true;
+            last_visual_activity_at = Instant::now();
         }
 
         // Force taskbar resend when a new DataChannel opens
@@ -673,6 +661,7 @@ fn run(
         if cur_dc_open > prev_dc_open_count {
             prev_taskbar_json.clear();
             comp.taskbar_dirty = true;
+            last_visual_activity_at = Instant::now();
         }
         prev_dc_open_count = cur_dc_open;
 
@@ -727,6 +716,7 @@ fn run(
                 shared_state.send_text(msg);
                 // Cache for MCP list_windows tool
                 *shared_state.last_taskbar_json.lock().unwrap() = Some(json);
+                last_visual_activity_at = Instant::now();
             }
         }
 
@@ -775,12 +765,36 @@ fn run(
                     }
                     Err(e) => error!("Failed to create new pipeline: {}", e),
                 }
+                last_visual_activity_at = Instant::now();
             }
         }
 
+        if comp.needs_redraw {
+            last_visual_activity_at = Instant::now();
+        }
         apply_runtime_settings(&runtime_settings, &pipeline);
 
-        if !is_idle {
+        let next_render_state = desired_render_state(&shared_state, last_visual_activity_at);
+        if next_render_state != render_state {
+            handle_render_state_transition(
+                render_state,
+                next_render_state,
+                &mut backend,
+                &mut comp,
+                &pipeline,
+                &mut rtp_frame_buf,
+                &mut prev_rtp_ts,
+                &mut last_rtp_sample,
+                &mut in_keyframe,
+                &mut keyframe_buf,
+                &mut last_frame,
+                &mut last_render,
+            );
+            render_state = next_render_state;
+            shared_state.set_render_state(render_state);
+        }
+
+        if render_state == RenderState::Active {
             // Send frame callbacks BEFORE sleep so clients have the full
             // frame period to prepare and commit their next buffer.
             backend.send_frame_callbacks(&comp);
@@ -843,7 +857,7 @@ fn run(
             }
         }
 
-        if !is_idle {
+        if render_state == RenderState::Active {
             pull_and_broadcast_rtp(
                 &pipeline,
                 &shared_state,
@@ -865,7 +879,7 @@ fn run(
             let windows = comp.space.elements().count();
             info!(
                 "Loop stats: idle={}, viewers={}, rtp_receivers={}, windows={}, rendered={}, pushed={}, rtp_pkts={}, secs={:.1}",
-                is_idle,
+                render_state.as_str(),
                 shared_state.webrtc_sessions(),
                 shared_state.rtp_receiver_count(),
                 windows,
@@ -880,6 +894,22 @@ fn run(
                 stats.bandwidth = (byte_count as f64 * 8.0 / secs) as u64;
                 stats.total_frames += frame_count;
                 stats.total_bytes += byte_count;
+                if let Some((sample_at, ticks)) =
+                    read_process_cpu_ticks().map(|ticks| (Instant::now(), ticks))
+                {
+                    if let Some((prev_at, prev_ticks)) = last_process_cpu_sample {
+                        let elapsed = sample_at.duration_since(prev_at).as_secs_f64();
+                        if elapsed > 0.0 && ticks >= prev_ticks {
+                            let hz = clock_ticks_per_second();
+                            stats.cpu_percent =
+                                ((ticks - prev_ticks) as f64 / hz / elapsed) * 100.0;
+                        }
+                    }
+                    last_process_cpu_sample = Some((sample_at, ticks));
+                }
+                if let Some(mem_used) = read_process_rss_bytes() {
+                    stats.mem_used = mem_used;
+                }
             }
             shared_state.send_text(format!("stats,{}", shared_state.stats_json()));
             // Re-broadcast cursor state so newly connected sessions get it
@@ -908,10 +938,12 @@ fn drain_input_events(
     shared: &Arc<web::SharedState>,
     prev_button_mask: &mut u32,
     prev_cursor_pos: &mut (f64, f64),
-) {
+) -> bool {
     use smithay::utils::SERIAL_COUNTER;
 
+    let mut had_input = false;
     while let Ok(ev) = input_rx.try_recv() {
+        had_input = true;
         let serial = SERIAL_COUNTER.next_serial();
         // Use monotonic clock for Wayland event timestamps (milliseconds).
         // The frontend doesn't send timestamps for keyboard events, so
@@ -1088,6 +1120,7 @@ fn drain_input_events(
             _ => {}
         }
     }
+    had_input
 }
 
 fn inject_button(
@@ -1529,6 +1562,126 @@ fn apply_runtime_settings(
     }
 }
 
+fn desired_render_state(
+    shared: &web::SharedState,
+    last_visual_activity_at: Instant,
+) -> RenderState {
+    let has_transport_viewers = shared.webrtc_sessions() > 0 || shared.rtp_receiver_count() > 0;
+    if !has_transport_viewers {
+        return RenderState::NoViewerIdle;
+    }
+
+    let viewers = shared.client_viewer_summary();
+    if viewers.has_recent_client_wakeup {
+        return RenderState::Active;
+    }
+    if viewers.has_connections && viewers.all_clients_inactive {
+        return RenderState::NoViewerIdle;
+    }
+
+    if last_visual_activity_at.elapsed() >= VIEWER_QUIET_IDLE_AFTER {
+        return RenderState::ViewerQuietIdle;
+    }
+
+    RenderState::Active
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_render_state_transition(
+    previous: RenderState,
+    next: RenderState,
+    backend: &mut HeadlessBackend,
+    comp: &mut Compositor,
+    pipeline: &gstreamer::VideoPipeline,
+    rtp_frame_buf: &mut Vec<Vec<u8>>,
+    prev_rtp_ts: &mut Option<u32>,
+    last_rtp_sample: &mut Option<Instant>,
+    in_keyframe: &mut bool,
+    keyframe_buf: &mut Vec<Vec<u8>>,
+    last_frame: &mut Instant,
+    last_render: &mut Instant,
+) {
+    match (previous, next) {
+        (RenderState::Active, RenderState::ViewerQuietIdle) => {
+            info!("Entering viewer quiet idle: no window activity");
+        }
+        (RenderState::Active, RenderState::NoViewerIdle) => {
+            info!("Entering deep idle: no active viewers");
+        }
+        (_, RenderState::Active) => {
+            info!("Leaving render idle: active viewer or window activity detected");
+            backend.reset_damage();
+            comp.needs_redraw = true;
+            comp.taskbar_dirty = true;
+            pipeline.request_keyframe();
+            rtp_frame_buf.clear();
+            *prev_rtp_ts = None;
+            *last_rtp_sample = None;
+            *in_keyframe = false;
+            keyframe_buf.clear();
+            *last_frame = Instant::now();
+            *last_render = Instant::now() - Duration::from_secs(1);
+        }
+        (RenderState::ViewerQuietIdle, RenderState::NoViewerIdle) => {
+            info!("Entering deep idle: all viewers inactive");
+        }
+        (RenderState::NoViewerIdle, RenderState::ViewerQuietIdle) => {
+            info!("Leaving deep idle: viewer available, waiting for window activity");
+            backend.reset_damage();
+            comp.needs_redraw = true;
+            comp.taskbar_dirty = true;
+            pipeline.request_keyframe();
+            rtp_frame_buf.clear();
+            *prev_rtp_ts = None;
+            *last_rtp_sample = None;
+            *in_keyframe = false;
+            keyframe_buf.clear();
+            *last_frame = Instant::now();
+            *last_render = Instant::now() - Duration::from_secs(1);
+        }
+        _ => {}
+    }
+}
+
+fn read_process_cpu_ticks() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let after_comm = stat.rsplit_once(") ")?.1;
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    let utime = fields.get(11)?.parse::<u64>().ok()?;
+    let stime = fields.get(12)?.parse::<u64>().ok()?;
+    Some(utime + stime)
+}
+
+fn read_process_rss_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let rss_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    Some(rss_pages * page_size_bytes())
+}
+
+fn clock_ticks_per_second() -> f64 {
+    static HZ: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *HZ.get_or_init(|| unsafe {
+        let value = libc::sysconf(libc::_SC_CLK_TCK);
+        if value > 0 {
+            value as f64
+        } else {
+            100.0
+        }
+    })
+}
+
+fn page_size_bytes() -> u64 {
+    static PAGE_SIZE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *PAGE_SIZE.get_or_init(|| unsafe {
+        let value = libc::sysconf(libc::_SC_PAGESIZE);
+        if value > 0 {
+            value as u64
+        } else {
+            4096
+        }
+    })
+}
+
 async fn run_async_services(
     config: Config,
     shared: Arc<web::SharedState>,
@@ -1537,6 +1690,16 @@ async fn run_async_services(
     #[cfg(feature = "mcp")] mcp_stdio: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     shared.proxy_panel.clone().start_watchdog();
+    let proxy_startup = {
+        let proxy_panel = shared.proxy_panel.clone();
+        tokio::spawn(async move {
+            match proxy_panel.ensure_running().await {
+                Ok(Some(pid)) => info!("miao proxy panel startup completed: pid={}", pid),
+                Ok(None) => warn!("miao proxy panel startup completed without a running pid"),
+                Err(err) => warn!("miao proxy panel startup failed: {}", err),
+            }
+        })
+    };
 
     let upload_settings = file_upload::FileUploadSettings::from_config(&config);
 
@@ -1602,6 +1765,9 @@ async fn run_async_services(
             tokio::spawn(async move {
                 // Wait a bit for the system to stabilize
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                if let Err(err) = proxy_startup.await {
+                    log::warn!("miao proxy panel startup task failed: {}", err);
+                }
                 if let Err(e) = ps_clone.restore_running_state().await {
                     log::warn!("Failed to restore running apps: {}", e);
                 } else {

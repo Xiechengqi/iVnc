@@ -122,6 +122,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/version", get(public_version_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
+        .route("/api/render-status", get(render_status_handler))
         .route("/ui-config", get(ui_config_handler))
         .route("/ws-config", get(ws_config_handler))
         .route("/api/change-password", post(change_password_handler))
@@ -511,6 +512,25 @@ ivnc_proto_connections_total{{protocol="unknown"}} {}
         stats.proto_tls,
         stats.proto_unknown
     )
+}
+
+async fn render_status_handler(
+    State(state): State<Arc<SharedState>>,
+) -> axum::Json<serde_json::Value> {
+    let stats = state.stats.lock().unwrap().clone();
+    let client_viewers = state.client_viewer_summary();
+    axum::Json(serde_json::json!({
+        "render_state": state.render_state().as_str(),
+        "ivnc_cpu_percent": stats.cpu_percent,
+        "mem_used": stats.mem_used,
+        "viewer_count": state.webrtc_sessions(),
+        "rtp_receiver_count": state.rtp_receiver_count(),
+        "connections": state.connection_count(),
+        "has_active_viewer": client_viewers.has_active_viewer,
+        "all_clients_inactive": client_viewers.all_clients_inactive,
+        "has_recent_client_wakeup": client_viewers.has_recent_client_wakeup,
+        "uptime_seconds": state.uptime().as_secs_f64()
+    }))
 }
 
 async fn basic_auth_middleware(

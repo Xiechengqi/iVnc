@@ -10,6 +10,7 @@ use crate::proxy_panel::ProxyPanelManager;
 use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
 use log::{info, warn};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
@@ -27,7 +28,31 @@ pub struct ConnectionInfo {
     pub connected_at: i64,
     pub connection_type: String,
     pub client_info: Option<Value>,
+    pub client_visible: bool,
+    pub client_focused: bool,
+    pub last_client_input_ms: u64,
+    pub last_client_focus_ms: u64,
+    pub last_client_hidden_ms: u64,
+    pub last_client_heartbeat_ms: u64,
+    pub last_client_wakeup_ms: u64,
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ClientViewerSummary {
+    pub has_connections: bool,
+    pub has_active_viewer: bool,
+    pub all_clients_inactive: bool,
+    pub has_recent_client_wakeup: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientActivityReport {
+    visible: Option<bool>,
+    focused: Option<bool>,
+    input: Option<bool>,
+    #[allow(dead_code)]
+    event: Option<String>,
 }
 
 /// Shared state for the application
@@ -53,6 +78,9 @@ pub struct SharedState {
 
     /// Runtime stats
     pub stats: Arc<Mutex<RuntimeStats>>,
+
+    /// Current compositor/encoder render state.
+    render_state: Arc<AtomicU64>,
 
     /// UI configuration
     pub ui_config: Arc<UiConfig>,
@@ -149,6 +177,7 @@ impl SharedState {
             force_keyframe: Arc::new(AtomicBool::new(false)),
             pending_resize: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(RuntimeStats::default())),
+            render_state: Arc::new(AtomicU64::new(RenderState::Active as u64)),
             start_time: std::time::Instant::now(),
             webrtc_session_count: Arc::new(AtomicU64::new(0)),
             datachannel_open_count: Arc::new(AtomicU64::new(0)),
@@ -316,7 +345,7 @@ impl SharedState {
     pub fn stats_json(&self) -> String {
         let stats = self.stats.lock().unwrap().clone();
         format!(
-            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"ice_candidates_total":{},"ice_candidates_tcp":{}}}"#,
+            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"render_state":"{}","ice_candidates_total":{},"ice_candidates_tcp":{}}}"#,
             stats.fps,
             stats.bandwidth,
             stats.latency_ms,
@@ -325,9 +354,18 @@ impl SharedState {
             self.connection_count(),
             stats.cpu_percent,
             stats.mem_used,
+            self.render_state().as_str(),
             stats.ice_candidates_total,
             stats.ice_candidates_tcp
         )
+    }
+
+    pub fn set_render_state(&self, state: RenderState) {
+        self.render_state.store(state as u64, Ordering::Relaxed);
+    }
+
+    pub fn render_state(&self) -> RenderState {
+        RenderState::from_u64(self.render_state.load(Ordering::Relaxed))
     }
 
     /// Build UI configuration JSON payload
@@ -453,6 +491,13 @@ impl SharedState {
                 .as_secs() as i64,
             connection_type: "tcp".to_string(),
             client_info: None,
+            client_visible: true,
+            client_focused: true,
+            last_client_input_ms: now_millis(),
+            last_client_focus_ms: now_millis(),
+            last_client_hidden_ms: 0,
+            last_client_heartbeat_ms: now_millis(),
+            last_client_wakeup_ms: now_millis(),
             shutdown_tx: Some(shutdown_tx),
         };
         self.connections.lock().unwrap().insert(id, conn);
@@ -485,6 +530,125 @@ impl SharedState {
         }
     }
 
+    /// Update client page visibility/focus information for idle decisions.
+    pub fn update_connection_client_activity(&self, id: &str, payload: &str) {
+        if payload.len() > 2048 {
+            warn!(
+                "Ignoring oversized client activity payload for connection {}",
+                id
+            );
+            return;
+        }
+        let Ok(report) = serde_json::from_str::<ClientActivityReport>(payload) else {
+            warn!(
+                "Ignoring invalid client activity payload for connection {}",
+                id
+            );
+            return;
+        };
+        let now = now_millis();
+        if let Ok(mut conns) = self.connections.lock() {
+            if let Some(conn) = conns.get_mut(id) {
+                conn.last_client_heartbeat_ms = now;
+                if let Some(visible) = report.visible {
+                    if conn.client_visible != visible && !visible {
+                        conn.last_client_hidden_ms = now;
+                    }
+                    if visible && !conn.client_visible {
+                        conn.last_client_wakeup_ms = now;
+                    }
+                    conn.client_visible = visible;
+                }
+                if let Some(focused) = report.focused {
+                    if focused {
+                        conn.last_client_focus_ms = now;
+                        conn.last_client_wakeup_ms = now;
+                    }
+                    conn.client_focused = focused;
+                }
+                if report.input.unwrap_or(false) {
+                    conn.last_client_input_ms = now;
+                    conn.last_client_focus_ms = now;
+                    conn.last_client_wakeup_ms = now;
+                    conn.client_visible = true;
+                    conn.client_focused = true;
+                } else if report.event.as_deref() != Some("heartbeat") {
+                    conn.last_client_wakeup_ms = now;
+                }
+            }
+        }
+    }
+
+    pub fn record_connection_input_activity(&self, id: &str) {
+        let now = now_millis();
+        if let Ok(mut conns) = self.connections.lock() {
+            if let Some(conn) = conns.get_mut(id) {
+                conn.client_visible = true;
+                conn.client_focused = true;
+                conn.last_client_input_ms = now;
+                conn.last_client_focus_ms = now;
+                conn.last_client_heartbeat_ms = now;
+                conn.last_client_wakeup_ms = now;
+            }
+        }
+    }
+
+    pub fn client_viewer_summary(&self) -> ClientViewerSummary {
+        const HEARTBEAT_STALE_AFTER_MS: u64 = 30_000;
+        const HIDDEN_DEEP_IDLE_AFTER_MS: u64 = 30_000;
+        const UNFOCUSED_DEEP_IDLE_AFTER_MS: u64 = 5 * 60_000;
+        const RECENT_WAKEUP_AFTER_MS: u64 = 2_000;
+
+        let now = now_millis();
+        let Ok(conns) = self.connections.lock() else {
+            return ClientViewerSummary::default();
+        };
+        if conns.is_empty() {
+            return ClientViewerSummary::default();
+        }
+
+        let mut has_active_viewer = false;
+        let mut all_clients_inactive = true;
+        let mut has_recent_client_wakeup = false;
+
+        for conn in conns.values() {
+            let heartbeat_age = now.saturating_sub(conn.last_client_heartbeat_ms);
+            let input_age = now.saturating_sub(conn.last_client_input_ms);
+            let focus_age = now.saturating_sub(conn.last_client_focus_ms);
+            let wakeup_age = now.saturating_sub(conn.last_client_wakeup_ms);
+            let hidden_age = if conn.last_client_hidden_ms == 0 {
+                0
+            } else {
+                now.saturating_sub(conn.last_client_hidden_ms)
+            };
+
+            let stale = heartbeat_age > HEARTBEAT_STALE_AFTER_MS;
+            let hidden_inactive = !conn.client_visible && hidden_age >= HIDDEN_DEEP_IDLE_AFTER_MS;
+            let unfocused_inactive = conn.client_visible
+                && !conn.client_focused
+                && focus_age >= UNFOCUSED_DEEP_IDLE_AFTER_MS
+                && input_age >= UNFOCUSED_DEEP_IDLE_AFTER_MS;
+            let inactive = stale || hidden_inactive || unfocused_inactive;
+
+            if !inactive {
+                all_clients_inactive = false;
+            }
+            if !stale && conn.client_visible && conn.client_focused {
+                has_active_viewer = true;
+            }
+            if !stale && wakeup_age <= RECENT_WAKEUP_AFTER_MS {
+                has_recent_client_wakeup = true;
+            }
+        }
+
+        ClientViewerSummary {
+            has_connections: true,
+            has_active_viewer,
+            all_clients_inactive,
+            has_recent_client_wakeup,
+        }
+    }
+
     /// Remove a connection
     pub fn remove_connection(&self, id: &str) {
         self.connections.lock().unwrap().remove(id);
@@ -508,12 +672,53 @@ impl SharedState {
                     "connected_at": c.connected_at,
                     "connection_type": c.connection_type,
                     "duration_seconds": duration,
-                    "client_info": c.client_info
+                    "client_info": c.client_info,
+                    "client_activity": {
+                        "visible": c.client_visible,
+                        "focused": c.client_focused,
+                        "last_input_ms": c.last_client_input_ms,
+                        "last_focus_ms": c.last_client_focus_ms,
+                        "last_hidden_ms": c.last_client_hidden_ms,
+                        "last_heartbeat_ms": c.last_client_heartbeat_ms,
+                        "last_wakeup_ms": c.last_client_wakeup_ms
+                    }
                 })
             })
             .collect();
 
         json!({ "connections": items }).to_string()
+    }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderState {
+    Active = 0,
+    ViewerQuietIdle = 1,
+    NoViewerIdle = 2,
+}
+
+impl RenderState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::ViewerQuietIdle => "viewer_quiet_idle",
+            Self::NoViewerIdle => "no_viewer_idle",
+        }
+    }
+
+    fn from_u64(value: u64) -> Self {
+        match value {
+            1 => Self::ViewerQuietIdle,
+            2 => Self::NoViewerIdle,
+            _ => Self::Active,
+        }
     }
 }
 
