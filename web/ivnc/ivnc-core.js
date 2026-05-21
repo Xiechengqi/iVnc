@@ -76,7 +76,7 @@ function setStatusTitle(state, cpuPercent) {
 		return;
 	}
 	const cpu = Number.isFinite(cpuPercent) ? Math.round(cpuPercent) : 0;
-	document.title = label ? `${DEFAULT_TITLE} - ${label} - ${cpu}%` : `${DEFAULT_TITLE} - ${cpu}%`;
+	document.title = label ? `${DEFAULT_TITLE} - ${label} - ${cpu}% cpu` : `${DEFAULT_TITLE} - ${cpu}% cpu`;
 }
 
 async function updateBrowserStatus() {
