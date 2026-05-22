@@ -8,6 +8,13 @@ let currentLang = getLang();
 let activeSection = 'overview';
 let overviewCache = null;
 let providersCache = [];
+let agentDefaultProvider = null;
+let runsCache = [];
+let runsFilter = 'all';
+let runsSearchTerm = '';
+let lastOverviewAt = 0;
+let providerOriginalSettings = null;
+let apiKeyMode = 'stored';
 
 const I18N = {
     en: {
@@ -28,16 +35,16 @@ const I18N = {
         save: 'Save',
         saveApply: 'Save & Apply',
         refresh: 'Refresh',
+        reset: 'Reset',
         stopAgent: 'Stop Agent',
         providerStatus: 'Provider Status',
         agentStatus: 'Agent Status',
-        runtimeSettings: 'Connection Quality',
         requestKeyframe: 'Request Keyframe',
         paramTargetFps: 'Target FPS',
         paramTargetFpsHelp: 'Target video frame rate. Higher values are smoother but increase encoding and network load.',
-        paramVideoBitrate: 'Video bitrate (kbps)',
+        paramVideoBitrate: 'Video bitrate',
         paramVideoBitrateHelp: 'Video encoding bitrate. Higher values improve clarity but use more bandwidth.',
-        paramAudioBitrate: 'Audio bitrate (bps)',
+        paramAudioBitrate: 'Audio bitrate',
         paramAudioBitrateHelp: 'Audio encoding bitrate. 128000 is a common default.',
         paramBinaryClipboard: 'Binary clipboard',
         paramBinaryClipboardHelp: 'Allow clipboard sync for binary content such as images or file fragments.',
@@ -47,9 +54,9 @@ const I18N = {
         paramAgentProviderHelp: 'VLM provider used by new Agent runs by default.',
         paramAgentMaxSteps: 'Max steps',
         paramAgentMaxStepsHelp: 'Maximum decision steps for one task. The run stops when this limit is reached.',
-        paramAgentMaxWall: 'Max wall seconds',
+        paramAgentMaxWall: 'Max wall time',
         paramAgentMaxWallHelp: 'Maximum wall-clock seconds for one task. The run stops after this duration.',
-        paramAgentScreenshotBytes: 'Screenshot max bytes',
+        paramAgentScreenshotBytes: 'Screenshot max size',
         paramAgentScreenshotBytesHelp: 'Maximum encoded size for each screenshot sent to the model.',
         paramAgentRecordTrajectory: 'Record trajectory',
         paramAgentRecordTrajectoryHelp: 'Save Agent observations, actions, and results for debugging and review.',
@@ -60,15 +67,13 @@ const I18N = {
         paramProviderModel: 'Model',
         paramProviderModelHelp: 'Model name to call. It must be supported by the selected Provider.',
         paramProviderApiKey: 'API Key',
-        paramProviderApiKeyHelp: 'Provider credential. Leave empty to keep the saved key unchanged.',
-        paramProviderClearKey: 'Clear API Key',
-        paramProviderClearKeyHelp: 'Delete the saved API Key for this Provider when saving.',
+        paramProviderApiKeyHelp: 'Provider credential. When set, the value is masked; click "Replace" to enter a new key, or "Clear" to remove the saved key.',
         paramProviderCoordSpace: 'Coordinate space',
         paramProviderCoordSpaceHelp: 'Coordinate space returned by the Provider. Default uses the Provider built-in convention.',
         toggleEnabled: 'Enabled',
-        clearSavedApiKey: 'Clear saved API Key',
         defaultOption: 'Default',
         keepApiKeyPlaceholder: 'Leave empty to keep unchanged',
+        enterNewApiKey: 'Enter new API Key',
         agentDefaults: 'Agent Defaults',
         providerConfig: 'Provider Config',
         saved: 'Saved',
@@ -76,6 +81,8 @@ const I18N = {
         settingsSaved: 'Settings applied',
         agentSaved: 'Agent defaults saved',
         noRuns: 'No Agent runs yet.',
+        noRunsHint: 'Runs started from MCP or this console will appear here.',
+        noRunsMatch: 'No runs match the current filter.',
         configured: 'Configured',
         missingConfig: 'Missing config',
         langToggle: '中文',
@@ -160,6 +167,104 @@ const I18N = {
         desktopOption: 'Desktop App',
         accessUrlCopied: 'Access link copied',
         accessUrlCopyFailed: 'Failed to copy access link',
+
+        // overview groups
+        settingsStreamTitle: 'Stream Parameters',
+        settingsActionsTitle: 'Instant Actions',
+        settingsActionsHint: 'Applied immediately, no save required',
+        settingsHint: 'Changes apply instantly and persist as next-startup defaults.',
+        agentBudgetTitle: 'Run Budget',
+        agentBudgetHint: 'Caps the resources spent on a single Agent run',
+        agentBehaviorTitle: 'Provider & Behavior',
+        agentSaveHint: 'Defaults are used by subsequent runs started via MCP or this console.',
+        suffixFps: 'fps',
+        suffixKbps: 'kbps',
+        suffixBps: 'bps',
+        suffixSteps: 'steps',
+        suffixSeconds: 's',
+        suffixBytes: 'bytes',
+        dirtyIndicator: '● Unsaved changes',
+        metaLastRefresh: 'Last refresh',
+        metaJustNow: 'just now',
+        metaAutoRefresh: 'Auto-refresh 5s',
+        overviewAgentRaw: 'Raw data',
+        overviewJumpProviders: 'Configure →',
+        // overview tiles
+        tileVersion: 'Version',
+        tileDisplay: 'Display',
+        tileSessions: 'Sessions',
+        tileAgent: 'Agent',
+        tileFpsTarget: (fps) => `target ${fps} FPS`,
+        tileWebRTC: 'WebRTC',
+        tileMcpAgentAll: 'mcp · agent-all',
+        tileMcpAgent: 'mcp · agent',
+        tileNoFeatures: 'core only',
+        tileExclusive: 'exclusive',
+        tileIdle: 'idle',
+        tileStopRequested: 'stop requested',
+        tileRunning: 'running',
+        sessionsHelpNone: 'no viewer connected',
+        sessionsHelpOne: '1 viewer',
+        sessionsHelpMany: (n) => `${n} viewers`,
+        // agent card
+        agentTaskLabel: 'Current task',
+        agentNoTaskRunning: 'Agent is running without a task summary.',
+        agentNoTaskIdle: 'No active task. Start one via MCP or the Agent tab.',
+        agentMetricRun: 'Run ID',
+        agentMetricExclusive: 'Exclusive',
+        agentMetricStop: 'Stop',
+        agentStateRunning: 'Running',
+        agentStateIdle: 'Idle',
+        agentStateExclusive: 'Exclusive',
+        agentStateStopping: 'Stopping',
+        agentStateDisabled: 'Disabled',
+        yes: 'Yes',
+        no: 'No',
+        // quick actions
+        quickActionsTitle: 'Quick Actions',
+        quickApps: 'Apps',
+        quickAppsDesc: 'Add or manage desktop & background apps',
+        quickSettings: 'Connection',
+        quickSettingsDesc: 'Tune FPS, bitrate, clipboard',
+        quickAgent: 'MCP / Agent',
+        quickAgentDesc: 'Run budgets and Agent defaults',
+        quickRuns: 'Logs / Trajectories',
+        quickRunsDesc: 'Inspect recent Agent runs',
+        // provider list
+        providerEmptyText: 'Pick a Provider on the left to view or edit its configuration.',
+        providerDefaultBadge: 'Default',
+        providerEndpointHintDefault: (v) => `Default: ${v}`,
+        providerModelHintDefault: (v) => `Default: ${v}`,
+        providerNoneConfigured: 'No Provider configured yet. Set one up to enable Agent.',
+        apiKeyStatusSaved: 'Saved',
+        apiKeyStatusEmpty: 'Not set',
+        apiKeyReplace: 'Replace',
+        apiKeyClear: 'Clear',
+        apiKeyCancel: 'Cancel',
+        apiKeyUndoClear: 'Undo',
+        apiKeyPendingText: 'Saved API Key will be cleared on save',
+        // runs
+        runsSearchPlaceholder: 'Search by run ID or task',
+        runsFilterAll: 'All',
+        runState_running: 'Running',
+        runState_done: 'Done',
+        runState_failed: 'Failed',
+        runState_interrupted: 'Interrupted',
+        runState_ask: 'Awaiting Answer',
+        runState_safety: 'Safety',
+        runState_budget: 'Budget Exceeded',
+        runState_max_steps: 'Max Steps',
+        runState_provider_error: 'Provider Error',
+        runsMetricSteps: 'steps',
+        runsMetricTokens: 'tokens',
+        runsCopyId: 'Copy ID',
+        runsCopyPath: 'Copy trajectory path',
+        runsNoPath: 'No trajectory saved',
+        runsIdCopied: 'Run ID copied',
+        runsPathCopied: 'Trajectory path copied',
+        copyFailed: 'Copy failed',
+        emptyRunsTitle: 'No runs yet',
+        emptyRunsFilterTitle: 'No matching runs',
     },
     zh: {
         pageTitle: '管理控制台',
@@ -179,47 +284,45 @@ const I18N = {
         save: '保存',
         saveApply: '保存并应用',
         refresh: '刷新',
+        reset: '重置',
         stopAgent: '停止 Agent',
         providerStatus: 'Provider 状态',
         agentStatus: 'Agent 状态',
-        runtimeSettings: '连接质量',
         requestKeyframe: '请求关键帧',
         paramTargetFps: 'Target FPS',
         paramTargetFpsHelp: '目标画面帧率，越高越流畅但会增加编码和网络压力。',
-        paramVideoBitrate: 'Video bitrate (kbps)',
+        paramVideoBitrate: '视频码率',
         paramVideoBitrateHelp: '视频码率，越高越清晰但占用更多带宽。',
-        paramAudioBitrate: 'Audio bitrate (bps)',
+        paramAudioBitrate: '音频码率',
         paramAudioBitrateHelp: '音频编码码率，常用值为 128000。',
-        paramBinaryClipboard: 'Binary clipboard',
+        paramBinaryClipboard: '二进制剪贴板',
         paramBinaryClipboardHelp: '允许剪贴板同步二进制内容，例如图片或文件片段。',
-        paramKeyframe: 'Keyframe',
+        paramKeyframe: '关键帧',
         paramKeyframeHelp: '立即请求下一帧关键帧，画面花屏或恢复连接后可手动触发。',
-        paramAgentProvider: 'Default provider',
+        paramAgentProvider: '默认 Provider',
         paramAgentProviderHelp: '新建 Agent run 默认使用的 VLM Provider。',
-        paramAgentMaxSteps: 'Max steps',
+        paramAgentMaxSteps: '最大步数',
         paramAgentMaxStepsHelp: '单次任务允许的最大决策步数，达到后自动停止。',
-        paramAgentMaxWall: 'Max wall seconds',
+        paramAgentMaxWall: '最大时长',
         paramAgentMaxWallHelp: '单次任务的最长运行秒数，超过后自动结束。',
-        paramAgentScreenshotBytes: 'Screenshot max bytes',
+        paramAgentScreenshotBytes: '单张截图大小',
         paramAgentScreenshotBytesHelp: '发送给模型的单张截图最大字节数，用于控制请求体大小。',
-        paramAgentRecordTrajectory: 'Record trajectory',
+        paramAgentRecordTrajectory: '记录轨迹',
         paramAgentRecordTrajectoryHelp: '保存 Agent 的观察、动作和结果，便于复盘问题。',
-        paramAgentDryRun: 'Dry run',
+        paramAgentDryRun: '模拟模式',
         paramAgentDryRunHelp: '只生成计划和动作，不真正控制桌面，适合调试 Provider。',
         paramProviderEndpoint: 'Endpoint',
         paramProviderEndpointHelp: 'Provider 的 API 基础地址，留空使用内置默认值。',
         paramProviderModel: 'Model',
         paramProviderModelHelp: '调用的模型名称，需与所选 Provider 支持的模型一致。',
         paramProviderApiKey: 'API Key',
-        paramProviderApiKeyHelp: 'Provider 凭据。保持为空表示不修改已保存的密钥。',
-        paramProviderClearKey: 'Clear API Key',
-        paramProviderClearKeyHelp: '保存时删除该 Provider 已保存的 API Key。',
-        paramProviderCoordSpace: 'Coordinate space',
+        paramProviderApiKeyHelp: 'Provider 凭据。已配置时显示遮罩；点击"替换"输入新值，或"清除"删除已保存的密钥。',
+        paramProviderCoordSpace: '坐标空间',
         paramProviderCoordSpaceHelp: 'Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。',
         toggleEnabled: '启用',
-        clearSavedApiKey: '清除已保存 API Key',
         defaultOption: '默认',
         keepApiKeyPlaceholder: '保持为空表示不修改',
+        enterNewApiKey: '输入新的 API Key',
         agentDefaults: 'Agent 默认参数',
         providerConfig: 'Provider 配置',
         saved: '已保存',
@@ -227,6 +330,8 @@ const I18N = {
         settingsSaved: '设置已应用',
         agentSaved: 'Agent 默认参数已保存',
         noRuns: '暂无 Agent run。',
+        noRunsHint: '通过 MCP 或控制台启动的 Agent run 会出现在这里。',
+        noRunsMatch: '当前筛选下没有匹配的 run。',
         configured: '已配置',
         missingConfig: '未配置',
         langToggle: 'English',
@@ -238,7 +343,7 @@ const I18N = {
         thData: '数据',
         thActions: '操作',
         loading: '加载中...',
-        empty: '暂无应用，点击“添加应用”创建。',
+        empty: '暂无应用，点击"添加应用"创建。',
         desktop: '桌面',
         background: '后台',
         running: '运行中',
@@ -311,6 +416,104 @@ const I18N = {
         desktopOption: '桌面应用',
         accessUrlCopied: '访问链接已复制',
         accessUrlCopyFailed: '复制访问链接失败',
+
+        // overview groups
+        settingsStreamTitle: '串流参数',
+        settingsActionsTitle: '即时操作',
+        settingsActionsHint: '立即生效，无需保存',
+        settingsHint: '改动会立即应用并保存为下次启动的默认值。',
+        agentBudgetTitle: '运行限额',
+        agentBudgetHint: '控制单次 Agent run 的最大资源消耗',
+        agentBehaviorTitle: 'Provider 与行为',
+        agentSaveHint: '默认值会用于后续通过 MCP 或控制台启动的 Agent run。',
+        suffixFps: 'fps',
+        suffixKbps: 'kbps',
+        suffixBps: 'bps',
+        suffixSteps: '步',
+        suffixSeconds: '秒',
+        suffixBytes: '字节',
+        dirtyIndicator: '● 未保存改动',
+        metaLastRefresh: '最后刷新',
+        metaJustNow: '刚刚',
+        metaAutoRefresh: '自动刷新 5s',
+        overviewAgentRaw: '原始数据',
+        overviewJumpProviders: '配置 →',
+        // overview tiles
+        tileVersion: '版本',
+        tileDisplay: '画面',
+        tileSessions: '连接',
+        tileAgent: 'Agent',
+        tileFpsTarget: (fps) => `目标 ${fps} FPS`,
+        tileWebRTC: 'WebRTC',
+        tileMcpAgentAll: 'mcp · agent-all',
+        tileMcpAgent: 'mcp · agent',
+        tileNoFeatures: '仅核心',
+        tileExclusive: '独占',
+        tileIdle: '空闲',
+        tileStopRequested: '请求停止',
+        tileRunning: '运行中',
+        sessionsHelpNone: '当前无观看者',
+        sessionsHelpOne: '1 位观看者',
+        sessionsHelpMany: (n) => `${n} 位观看者`,
+        // agent card
+        agentTaskLabel: '当前任务',
+        agentNoTaskRunning: 'Agent 正在运行（无任务摘要）',
+        agentNoTaskIdle: '当前无任务。通过 MCP 或 Agent 页发起新任务。',
+        agentMetricRun: 'Run ID',
+        agentMetricExclusive: '独占模式',
+        agentMetricStop: '停止请求',
+        agentStateRunning: '运行中',
+        agentStateIdle: '空闲',
+        agentStateExclusive: '独占',
+        agentStateStopping: '停止中',
+        agentStateDisabled: '未启用',
+        yes: '是',
+        no: '否',
+        // quick actions
+        quickActionsTitle: '快捷入口',
+        quickApps: '应用',
+        quickAppsDesc: '添加或管理桌面应用与后台应用',
+        quickSettings: '连接质量',
+        quickSettingsDesc: '调整 FPS、码率与剪贴板',
+        quickAgent: 'MCP / Agent',
+        quickAgentDesc: '运行限额与 Agent 默认参数',
+        quickRuns: '日志 / 轨迹',
+        quickRunsDesc: '查看最近的 Agent run',
+        // provider list
+        providerEmptyText: '从左侧选择一个 Provider 查看或编辑配置',
+        providerDefaultBadge: '默认',
+        providerEndpointHintDefault: (v) => `默认值：${v}`,
+        providerModelHintDefault: (v) => `默认值：${v}`,
+        providerNoneConfigured: '暂无已配置的 Provider，配置一个以启用 Agent。',
+        apiKeyStatusSaved: '已保存',
+        apiKeyStatusEmpty: '未设置',
+        apiKeyReplace: '替换',
+        apiKeyClear: '清除',
+        apiKeyCancel: '取消',
+        apiKeyUndoClear: '撤销',
+        apiKeyPendingText: '将在保存时清除已存 API Key',
+        // runs
+        runsSearchPlaceholder: '按 run ID 或任务搜索',
+        runsFilterAll: '全部',
+        runState_running: '运行中',
+        runState_done: '完成',
+        runState_failed: '失败',
+        runState_interrupted: '已中断',
+        runState_ask: '等待回答',
+        runState_safety: '安全检查',
+        runState_budget: '超出预算',
+        runState_max_steps: '达到步数上限',
+        runState_provider_error: 'Provider 错误',
+        runsMetricSteps: '步',
+        runsMetricTokens: 'tokens',
+        runsCopyId: '复制 ID',
+        runsCopyPath: '复制轨迹路径',
+        runsNoPath: '未保存轨迹',
+        runsIdCopied: 'Run ID 已复制',
+        runsPathCopied: '轨迹路径已复制',
+        copyFailed: '复制失败',
+        emptyRunsTitle: '暂无 Agent run',
+        emptyRunsFilterTitle: '无匹配 run',
     }
 };
 
@@ -319,7 +522,7 @@ function t(key) {
 }
 
 function esc(s) {
-    return String(s)
+    return String(s ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -337,27 +540,69 @@ function getHash(data) {
     })));
 }
 
+function setTextById(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+}
+
 function setText(id, key) {
-    document.getElementById(id).textContent = t(key);
+    setTextById(id, t(key));
+}
+
+function setPlaceholderById(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.placeholder = value;
 }
 
 function applyTranslations() {
     document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
     document.title = t('pageTitle');
-    document.getElementById('page-title').textContent = t('pageTitle');
-    document.getElementById('console-subtitle').textContent = t('subtitle');
-    document.getElementById('nav-overview').textContent = t('navOverview');
-    document.getElementById('nav-apps').textContent = t('navApps');
-    document.getElementById('nav-settings').textContent = t('navSettings');
-    document.getElementById('nav-agent').textContent = t('navAgent');
-    document.getElementById('nav-providers').textContent = t('navProviders');
-    document.getElementById('nav-runs').textContent = t('navRuns');
-    document.getElementById('overview-providers-title').textContent = t('providerStatus');
-    document.getElementById('overview-agent-title').textContent = t('agentStatus');
-    document.getElementById('overview-agent-stop').textContent = t('stopAgent');
-    document.getElementById('settings-runtime-title').textContent = t('runtimeSettings');
-    document.getElementById('settings-save').textContent = t('saveApply');
-    document.getElementById('request-keyframe').textContent = t('requestKeyframe');
+    setText('page-title', 'pageTitle');
+    setText('console-subtitle', 'subtitle');
+    setText('nav-overview', 'navOverview');
+    setText('nav-apps', 'navApps');
+    setText('nav-settings', 'navSettings');
+    setText('nav-agent', 'navAgent');
+    setText('nav-providers', 'navProviders');
+    setText('nav-runs', 'navRuns');
+    setText('overview-providers-title', 'providerStatus');
+    setText('overview-agent-title', 'agentStatus');
+    setText('overview-agent-stop', 'stopAgent');
+    setText('overview-jump-providers', 'overviewJumpProviders');
+    setText('overview-meta-auto', 'metaAutoRefresh');
+    setText('overview-agent-raw-summary', 'overviewAgentRaw');
+
+    setText('settings-stream-title', 'settingsStreamTitle');
+    setText('settings-actions-title', 'settingsActionsTitle');
+    setText('settings-actions-hint', 'settingsActionsHint');
+    setText('settings-hint', 'settingsHint');
+    setText('settings-save', 'saveApply');
+    setText('settings-dirty', 'dirtyIndicator');
+    setText('request-keyframe', 'requestKeyframe');
+
+    setText('agent-budget-title', 'agentBudgetTitle');
+    setText('agent-budget-hint', 'agentBudgetHint');
+    setText('agent-behavior-title', 'agentBehaviorTitle');
+    setText('agent-save-hint', 'agentSaveHint');
+    setText('agent-save', 'save');
+    setText('agent-dirty', 'dirtyIndicator');
+
+    setText('providers-title', 'navProviders');
+    setText('provider-editor-title', 'providerConfig');
+    setText('provider-empty-text', 'providerEmptyText');
+    setText('provider-default-badge', 'providerDefaultBadge');
+    setText('provider-save', 'save');
+    setText('provider-reset', 'reset');
+    setText('provider-dirty', 'dirtyIndicator');
+    setText('api-key-replace', 'apiKeyReplace');
+    setText('api-key-clear', 'apiKeyClear');
+    setText('api-key-cancel', 'apiKeyCancel');
+    setText('api-key-undo-clear', 'apiKeyUndoClear');
+    setText('api-key-pending-text', 'apiKeyPendingText');
+
+    setText('runs-refresh', 'refresh');
+    setPlaceholderById('runs-search', t('runsSearchPlaceholder'));
+
     [
         ['label-target-fps', 'paramTargetFps'],
         ['help-target-fps', 'paramTargetFpsHelp'],
@@ -387,74 +632,82 @@ function applyTranslations() {
         ['help-provider-model', 'paramProviderModelHelp'],
         ['label-provider-api-key', 'paramProviderApiKey'],
         ['help-provider-api-key', 'paramProviderApiKeyHelp'],
-        ['label-provider-clear-key', 'paramProviderClearKey'],
-        ['help-provider-clear-key', 'paramProviderClearKeyHelp'],
         ['label-provider-coord-space', 'paramProviderCoordSpace'],
         ['help-provider-coord-space', 'paramProviderCoordSpaceHelp'],
         ['toggle-binary-clipboard', 'toggleEnabled'],
         ['toggle-agent-record-trajectory', 'toggleEnabled'],
         ['toggle-agent-dry-run', 'toggleEnabled'],
-        ['toggle-provider-clear-key', 'clearSavedApiKey'],
+        ['suffix-target-fps', 'suffixFps'],
+        ['suffix-video-bitrate', 'suffixKbps'],
+        ['suffix-audio-bitrate', 'suffixBps'],
+        ['suffix-agent-max-steps', 'suffixSteps'],
+        ['suffix-agent-max-wall', 'suffixSeconds'],
+        ['suffix-agent-screenshot-bytes', 'suffixBytes'],
     ].forEach(([id, key]) => setText(id, key));
-    document.querySelector('#provider-coord-space option[value=""]').textContent = t('defaultOption');
-    document.getElementById('provider-api-key').placeholder = t('keepApiKeyPlaceholder');
-    document.getElementById('agent-defaults-title').textContent = t('agentDefaults');
-    document.getElementById('agent-save').textContent = t('save');
-    document.getElementById('providers-title').textContent = t('navProviders');
-    document.getElementById('provider-editor-title').textContent = t('providerConfig');
-    document.getElementById('provider-save').textContent = t('save');
-    document.getElementById('runs-title').textContent = t('navRuns');
-    document.getElementById('runs-refresh').textContent = t('refresh');
-    document.getElementById('lang-toggle').textContent = t('langToggle');
-    document.getElementById('add-app-btn').textContent = t('addApp');
-    document.getElementById('th-name').textContent = t('thName');
-    document.getElementById('th-type').textContent = t('thType');
-    document.getElementById('th-config').textContent = t('thConfig');
-    document.getElementById('th-status').textContent = t('thStatus');
-    document.getElementById('th-data').textContent = t('thData');
-    document.getElementById('th-actions').textContent = t('thActions');
-    document.getElementById('label-name').textContent = t('name');
-    document.getElementById('f-name').placeholder = t('namePlaceholder');
-    document.getElementById('label-app-type').textContent = t('appType');
-    document.querySelector('#f-app-type option[value="background"]').textContent = t('backgroundOption');
-    document.querySelector('#f-app-type option[value="desktop"]').textContent = t('desktopOption');
-    document.getElementById('label-autostart').textContent = t('autostart');
-    document.getElementById('label-launch-command').textContent = t('launchCommand');
-    document.getElementById('label-launch-command-help').textContent = t('launchCommandHelp');
-    document.getElementById('label-launch-cwd').textContent = t('launchCwd');
-    document.getElementById('label-launch-cwd-default').textContent = t('launchCwdDefault');
-    document.getElementById('label-launch-timeout').textContent = t('launchTimeout');
-    document.getElementById('label-launch-timeout-default').textContent = t('launchTimeoutDefault');
-    document.getElementById('label-access-url').textContent = t('accessUrl');
-    document.getElementById('label-access-url-default').textContent = t('accessUrlDefault');
-    document.getElementById('label-launch-env').textContent = t('launchEnv');
-    document.getElementById('label-launch-env-default').textContent = t('envDefault');
-    document.getElementById('label-exec').textContent = t('exec');
-    document.getElementById('label-exec-help').textContent = t('execHelp');
-    document.getElementById('label-env').textContent = t('env');
-    document.getElementById('label-env-default').textContent = t('envDefault');
-    document.getElementById('modal-cancel').textContent = t('cancel');
-    document.getElementById('log-close-btn').textContent = t('close');
-    document.getElementById('modal-close').setAttribute('aria-label', t('close'));
-    document.getElementById('f-name').placeholder = t('nameInputPlaceholder');
-    document.getElementById('f-launch-command').placeholder = t('backgroundCommandPlaceholder');
-    document.getElementById('f-exec').placeholder = t('desktopCommandPlaceholder');
-    document.getElementById('f-launch-cwd').placeholder = t('cwdPlaceholder');
-    document.getElementById('f-launch-timeout').placeholder = t('timeoutPlaceholder');
-    document.getElementById('f-url').placeholder = t('accessUrlPlaceholder');
-    document.getElementById('f-launch-env').placeholder = t('launchEnvPlaceholder');
-    document.getElementById('f-env').placeholder = t('envPlaceholder');
+
+    const coordDefault = document.querySelector('#provider-coord-space option[value=""]');
+    if (coordDefault) coordDefault.textContent = t('defaultOption');
+    refreshApiKeyPlaceholder();
+
+    setText('lang-toggle', 'langToggle');
+    setText('add-app-btn', 'addApp');
+    setText('th-name', 'thName');
+    setText('th-type', 'thType');
+    setText('th-config', 'thConfig');
+    setText('th-status', 'thStatus');
+    setText('th-data', 'thData');
+    setText('th-actions', 'thActions');
+    setText('label-name', 'name');
+    setPlaceholderById('f-name', t('namePlaceholder'));
+    setText('label-app-type', 'appType');
+    const bgOpt = document.querySelector('#f-app-type option[value="background"]');
+    const dtOpt = document.querySelector('#f-app-type option[value="desktop"]');
+    if (bgOpt) bgOpt.textContent = t('backgroundOption');
+    if (dtOpt) dtOpt.textContent = t('desktopOption');
+    setText('label-autostart', 'autostart');
+    setText('label-launch-command', 'launchCommand');
+    setText('label-launch-command-help', 'launchCommandHelp');
+    setText('label-launch-cwd', 'launchCwd');
+    setText('label-launch-cwd-default', 'launchCwdDefault');
+    setText('label-launch-timeout', 'launchTimeout');
+    setText('label-launch-timeout-default', 'launchTimeoutDefault');
+    setText('label-access-url', 'accessUrl');
+    setText('label-access-url-default', 'accessUrlDefault');
+    setText('label-launch-env', 'launchEnv');
+    setText('label-launch-env-default', 'envDefault');
+    setText('label-exec', 'exec');
+    setText('label-exec-help', 'execHelp');
+    setText('label-env', 'env');
+    setText('label-env-default', 'envDefault');
+    setText('modal-cancel', 'cancel');
+    setText('log-close-btn', 'close');
+    document.getElementById('modal-close')?.setAttribute('aria-label', t('close'));
+    setPlaceholderById('f-name', t('nameInputPlaceholder'));
+    setPlaceholderById('f-launch-command', t('backgroundCommandPlaceholder'));
+    setPlaceholderById('f-exec', t('desktopCommandPlaceholder'));
+    setPlaceholderById('f-launch-cwd', t('cwdPlaceholder'));
+    setPlaceholderById('f-launch-timeout', t('timeoutPlaceholder'));
+    setPlaceholderById('f-url', t('accessUrlPlaceholder'));
+    setPlaceholderById('f-launch-env', t('launchEnvPlaceholder'));
+    setPlaceholderById('f-env', t('envPlaceholder'));
 
     if (!editId) {
-        document.getElementById('modal-title').textContent = t('addModal');
-        document.getElementById('modal-save').textContent = t('addSave');
+        setText('modal-title', 'addModal');
+        setText('modal-save', 'addSave');
     }
 
     const logTitle = document.getElementById('log-title');
-    if (!logTitle.dataset.appName) {
+    if (logTitle && !logTitle.dataset.appName) {
         logTitle.textContent = t('logsTitle');
     }
     updateSectionHeader();
+    renderRunsFilterChips();
+    if (activeSection === 'overview') {
+        updateOverviewMeta();
+        renderOverviewProviders(overviewCache?.providers || []);
+        renderOverviewAgent(overviewCache?.agent || {});
+        renderQuickActions();
+    }
 }
 
 function updateSectionHeader() {
@@ -474,8 +727,8 @@ function updateSectionHeader() {
         providers: 'sectionProvidersDesc',
         runs: 'sectionRunsDesc'
     };
-    document.getElementById('section-title').textContent = t(titleMap[activeSection]);
-    document.getElementById('section-description').textContent = t(descMap[activeSection]);
+    setTextById('section-title', t(titleMap[activeSection]));
+    setTextById('section-description', t(descMap[activeSection]));
 }
 
 function switchSection(section) {
@@ -575,40 +828,236 @@ async function load() {
     }
 }
 
+// ---------- Overview ----------
+
 async function loadOverview() {
     try {
         const d = await fetchJson(`${CONSOLE_API}/overview`);
         overviewCache = d;
-        const grid = document.getElementById('overview-grid');
-        grid.innerHTML = '';
-        [
-            ['Version', d.version, d.build?.features?.agent_all ? 'mcp, agent-all' : ''],
-            ['Display', `${d.display.width}x${d.display.height}`, `${d.runtime.target_fps} FPS target`],
-            ['Sessions', d.connections.webrtc_sessions, 'WebRTC'],
-            ['Agent', d.agent.running_run_id || (d.agent.exclusive ? 'exclusive' : 'idle'), d.agent.stop_requested ? 'stop requested' : ''],
-        ].forEach(([label, value, help]) => {
-            const tile = document.createElement('div');
-            tile.className = 'summary-tile';
-            tile.innerHTML = `<div class="summary-label">${esc(label)}</div><div class="summary-value">${esc(value)}</div><div class="summary-help">${esc(help || '')}</div>`;
-            grid.appendChild(tile);
-        });
+        lastOverviewAt = Date.now();
+        renderOverviewTiles(d);
         renderOverviewProviders(d.providers || []);
-        document.getElementById('overview-agent-json').textContent = JSON.stringify(d.agent, null, 2);
+        renderOverviewAgent(d.agent || {});
+        renderQuickActions();
+        updateOverviewMeta();
+        const rawEl = document.getElementById('overview-agent-json');
+        if (rawEl) rawEl.textContent = JSON.stringify(d.agent, null, 2);
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
 }
 
+function renderOverviewTiles(d) {
+    const grid = document.getElementById('overview-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+
+    const features = d.build?.features || {};
+    let versionHelp;
+    if (features.agent_all) versionHelp = t('tileMcpAgentAll');
+    else if (features.agent || features.mcp) versionHelp = features.agent && features.mcp ? t('tileMcpAgent') : (features.mcp ? 'mcp' : 'agent');
+    else versionHelp = t('tileNoFeatures');
+
+    const sessions = d.connections?.webrtc_sessions ?? 0;
+    let sessionsHelp;
+    if (sessions === 0) sessionsHelp = t('sessionsHelpNone');
+    else if (sessions === 1) sessionsHelp = t('sessionsHelpOne');
+    else sessionsHelp = t('sessionsHelpMany')(sessions);
+
+    const agent = d.agent || {};
+    const agentRunning = !!agent.running_run_id;
+    const stopRequested = !!agent.stop_requested;
+    const exclusive = !!agent.exclusive;
+    let agentValue, agentHelp, agentTone;
+    if (stopRequested) {
+        agentValue = t('agentStateStopping');
+        agentHelp = t('tileStopRequested');
+        agentTone = 'tone-warn';
+    } else if (agentRunning) {
+        agentValue = t('tileRunning');
+        agentHelp = exclusive ? t('tileExclusive') : '';
+        agentTone = 'tone-info';
+    } else if (exclusive) {
+        agentValue = t('agentStateExclusive');
+        agentHelp = '';
+        agentTone = 'tone-warn';
+    } else {
+        agentValue = t('tileIdle');
+        agentHelp = '';
+        agentTone = 'tone-muted';
+    }
+
+    const tiles = [
+        {
+            label: t('tileVersion'),
+            value: d.version || '—',
+            help: versionHelp,
+            tone: 'tone-info',
+        },
+        {
+            label: t('tileDisplay'),
+            value: `${d.display?.width || 0}×${d.display?.height || 0}`,
+            help: t('tileFpsTarget')(d.runtime?.target_fps ?? 0),
+            tone: 'tone-muted',
+        },
+        {
+            label: t('tileSessions'),
+            value: String(sessions),
+            help: sessionsHelp,
+            tone: sessions > 0 ? 'tone-ok' : 'tone-muted',
+        },
+        {
+            label: t('tileAgent'),
+            value: agentValue,
+            help: agentHelp,
+            tone: agentTone,
+        },
+    ];
+
+    tiles.forEach(({ label, value, help, tone }) => {
+        const tile = document.createElement('div');
+        tile.className = `summary-tile ${tone}`;
+        tile.innerHTML = `
+            <div class="summary-label">${esc(label)}</div>
+            <div class="summary-value">${esc(value)}</div>
+            <div class="summary-help">${help ? `<span class="summary-dot"></span>${esc(help)}` : ''}</div>`;
+        grid.appendChild(tile);
+    });
+}
+
 function renderOverviewProviders(providers) {
     const box = document.getElementById('overview-providers');
+    if (!box) return;
     box.innerHTML = '';
+    if (!providers.length) {
+        const empty = document.createElement('div');
+        empty.className = 'muted-hint';
+        empty.textContent = t('providerNoneConfigured');
+        box.appendChild(empty);
+        return;
+    }
     providers.forEach(p => {
         const row = document.createElement('div');
         row.className = 'list-row';
-        row.innerHTML = `<div><strong>${esc(p.name)}</strong><small>${esc(p.default_model || '')}</small></div><span class="${p.configured ? 'badge-ok' : 'badge-warn'}">${p.configured ? esc(t('configured')) : esc(t('missingConfig'))}</span>`;
+        const model = p.settings?.model || p.default_model || '';
+        const isDefault = agentDefaultProvider && p.name === agentDefaultProvider;
+        const badges = [];
+        if (isDefault) badges.push(`<span class="badge-default">${esc(t('providerDefaultBadge'))}</span>`);
+        badges.push(p.configured
+            ? `<span class="badge-ok">${esc(t('configured'))}</span>`
+            : `<span class="badge-warn">${esc(t('missingConfig'))}</span>`);
+        row.innerHTML = `<div><strong>${esc(p.name)}</strong><small>${esc(model)}</small></div><div class="provider-row-tags">${badges.join('')}</div>`;
         box.appendChild(row);
     });
 }
+
+function renderOverviewAgent(agent) {
+    const card = document.getElementById('overview-agent-card');
+    if (!card) return;
+    const running = !!agent.running_run_id;
+    const stopping = !!agent.stop_requested;
+    const exclusive = !!agent.exclusive;
+    const disabled = agent.enabled === false;
+
+    let stateLabel, stateClass;
+    if (disabled) {
+        stateLabel = t('agentStateDisabled'); stateClass = 'state-disabled';
+    } else if (stopping) {
+        stateLabel = t('agentStateStopping'); stateClass = 'state-stopping';
+    } else if (running) {
+        stateLabel = t('agentStateRunning'); stateClass = 'state-running';
+    } else if (exclusive) {
+        stateLabel = t('agentStateExclusive'); stateClass = 'state-exclusive';
+    } else {
+        stateLabel = t('agentStateIdle'); stateClass = 'state-idle';
+    }
+
+    const taskText = agent.task || (running ? t('agentNoTaskRunning') : t('agentNoTaskIdle'));
+    const runIdShort = agent.running_run_id
+        ? String(agent.running_run_id).slice(0, 8)
+        : '—';
+
+    card.innerHTML = `
+        <div class="agent-card">
+            <div class="agent-card-state">
+                <span class="agent-state-pill ${stateClass}">${esc(stateLabel)}</span>
+            </div>
+            <div class="agent-card-task">
+                <span class="label">${esc(t('agentTaskLabel'))}</span>
+                <span>${esc(taskText)}</span>
+            </div>
+            <div class="agent-card-metrics">
+                <div class="agent-metric">
+                    <div class="agent-metric-label">${esc(t('agentMetricRun'))}</div>
+                    <div class="agent-metric-value" title="${esc(agent.running_run_id || '')}">${esc(runIdShort)}</div>
+                </div>
+                <div class="agent-metric">
+                    <div class="agent-metric-label">${esc(t('agentMetricExclusive'))}</div>
+                    <div class="agent-metric-value">${esc(exclusive ? t('yes') : t('no'))}</div>
+                </div>
+                <div class="agent-metric">
+                    <div class="agent-metric-label">${esc(t('agentMetricStop'))}</div>
+                    <div class="agent-metric-value">${esc(stopping ? t('yes') : t('no'))}</div>
+                </div>
+            </div>
+        </div>`;
+
+    const stopBtn = document.getElementById('overview-agent-stop');
+    if (stopBtn) stopBtn.disabled = !running || stopping;
+}
+
+function renderQuickActions() {
+    const box = document.getElementById('overview-quick-actions');
+    if (!box) return;
+    const cards = [
+        { jump: 'apps', icon: '⊞', label: t('quickApps'), desc: t('quickAppsDesc') },
+        { jump: 'settings', icon: '⚙', label: t('quickSettings'), desc: t('quickSettingsDesc') },
+        { jump: 'agent', icon: '✦', label: t('quickAgent'), desc: t('quickAgentDesc') },
+        { jump: 'runs', icon: '☰', label: t('quickRuns'), desc: t('quickRunsDesc') },
+    ];
+    box.innerHTML = cards.map(c => `
+        <button type="button" class="quick-card" data-jump="${esc(c.jump)}">
+            <span class="quick-icon" aria-hidden="true">${esc(c.icon)}</span>
+            <div>
+                <strong>${esc(c.label)}</strong>
+                <small>${esc(c.desc)}</small>
+            </div>
+        </button>`).join('');
+}
+
+function updateOverviewMeta() {
+    const el = document.getElementById('overview-meta-text');
+    if (!el) return;
+    const rel = lastOverviewAt ? formatRelative(lastOverviewAt) : t('metaJustNow');
+    el.textContent = `${t('metaLastRefresh')} ${rel}`;
+}
+
+function formatRelative(ms) {
+    const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+    if (sec < 5) return t('metaJustNow');
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m`;
+    const hr = Math.floor(min / 60);
+    return `${hr}h`;
+}
+
+function formatDuration(ms) {
+    if (!ms || ms < 0) return '0s';
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60), r = s % 60;
+    return r ? `${m}m ${r}s` : `${m}m`;
+}
+
+function formatNumber(n) {
+    if (!Number.isFinite(n)) return '0';
+    if (n >= 1000) return n.toLocaleString();
+    return String(n);
+}
+
+// ---------- Settings ----------
 
 async function loadSettings() {
     try {
@@ -617,7 +1066,10 @@ async function loadSettings() {
         setValue('set-target-fps', current.target_fps ?? d.current?.target_fps ?? 60);
         setValue('set-video-bitrate', current.video_bitrate_kbps ?? d.current?.video_bitrate_kbps ?? 8000);
         setValue('set-audio-bitrate', current.audio_bitrate ?? d.current?.audio_bitrate ?? 128000);
-        document.getElementById('set-binary-clipboard').checked = !!(current.binary_clipboard_enabled ?? d.current?.binary_clipboard_enabled);
+        const binChk = document.getElementById('set-binary-clipboard');
+        if (binChk) binChk.checked = !!(current.binary_clipboard_enabled ?? d.current?.binary_clipboard_enabled);
+        snapshotDirtyGroup('settings');
+        markDirty('settings', false);
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
@@ -632,6 +1084,8 @@ async function saveSettings() {
     };
     await putJson(`${CONSOLE_API}/settings`, body);
     toast(t('settingsSaved'), 'ok');
+    snapshotDirtyGroup('settings');
+    markDirty('settings', false);
     loadOverview();
 }
 
@@ -640,6 +1094,8 @@ async function requestKeyframe() {
     toast(t('requestKeyframe'), 'ok');
 }
 
+// ---------- Agent config ----------
+
 async function loadAgentConfig() {
     try {
         const [cfg, providers] = await Promise.all([
@@ -647,16 +1103,23 @@ async function loadAgentConfig() {
             fetchJson(`${CONSOLE_API}/providers`)
         ]);
         providersCache = providers.providers || [];
+        agentDefaultProvider = cfg.default_provider || null;
         const select = document.getElementById('agent-provider');
-        select.innerHTML = providersCache.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
-        select.value = cfg.default_provider || 'local';
+        if (select) {
+            select.innerHTML = providersCache.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+            select.value = cfg.default_provider || (providersCache[0]?.name || 'local');
+        }
         const opt = cfg.options || {};
         const budget = opt.budget || {};
         setValue('agent-max-steps', budget.max_steps ?? 50);
         setValue('agent-max-wall', budget.max_wall_seconds ?? 300);
         setValue('agent-screenshot-bytes', opt.screenshot_max_bytes ?? 800000);
-        document.getElementById('agent-record-trajectory').checked = opt.record_trajectory !== false;
-        document.getElementById('agent-dry-run').checked = !!opt.dry_run;
+        const rec = document.getElementById('agent-record-trajectory');
+        const dry = document.getElementById('agent-dry-run');
+        if (rec) rec.checked = opt.record_trajectory !== false;
+        if (dry) dry.checked = !!opt.dry_run;
+        snapshotDirtyGroup('agent');
+        markDirty('agent', false);
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
@@ -686,16 +1149,30 @@ async function saveAgentConfig() {
         }
     };
     await putJson(`${CONSOLE_API}/agent-config`, body);
+    agentDefaultProvider = body.default_provider;
     toast(t('agentSaved'), 'ok');
+    snapshotDirtyGroup('agent');
+    markDirty('agent', false);
 }
+
+// ---------- Providers ----------
 
 async function loadProviders() {
     try {
-        const d = await fetchJson(`${CONSOLE_API}/providers`);
+        const [d, cfg] = await Promise.all([
+            fetchJson(`${CONSOLE_API}/providers`),
+            fetchJson(`${CONSOLE_API}/agent-config`).catch(() => ({}))
+        ]);
         providersCache = d.providers || [];
+        agentDefaultProvider = cfg.default_provider || agentDefaultProvider;
         renderProviders();
-        if (providersCache.length && !document.getElementById('provider-name').value) {
+        const selectedName = document.getElementById('provider-name')?.value;
+        if (selectedName && providersCache.find(p => p.name === selectedName)) {
+            selectProvider(selectedName);
+        } else if (providersCache.length) {
             selectProvider(providersCache[0].name);
+        } else {
+            showProviderEmpty();
         }
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
@@ -704,29 +1181,124 @@ async function loadProviders() {
 
 function renderProviders() {
     const list = document.getElementById('provider-list');
-    const selected = document.getElementById('provider-name').value;
+    if (!list) return;
+    const selected = document.getElementById('provider-name')?.value;
     list.innerHTML = '';
+    const countEl = document.getElementById('provider-count');
+    if (countEl) countEl.textContent = String(providersCache.length);
     providersCache.forEach(p => {
         const row = document.createElement('button');
         row.type = 'button';
         row.className = 'list-row provider-row' + (p.name === selected ? ' active' : '');
-        row.innerHTML = `<div><strong>${esc(p.name)}</strong><small>${esc(p.settings?.model || p.default_model || '')}</small></div><span class="${p.configured ? 'badge-ok' : 'badge-warn'}">${p.configured ? esc(t('configured')) : esc(t('missingConfig'))}</span>`;
+        const model = p.settings?.model || p.default_model || '';
+        const isDefault = agentDefaultProvider && p.name === agentDefaultProvider;
+        const badges = [];
+        if (isDefault) badges.push(`<span class="badge-default">${esc(t('providerDefaultBadge'))}</span>`);
+        badges.push(p.configured
+            ? `<span class="badge-ok">${esc(t('configured'))}</span>`
+            : `<span class="badge-warn">${esc(t('missingConfig'))}</span>`);
+        row.innerHTML = `
+            <div class="provider-row-main">
+                <strong>${esc(p.name)}</strong>
+                <small>${esc(model)}</small>
+            </div>
+            <div class="provider-row-tags">${badges.join('')}</div>`;
         row.addEventListener('click', () => selectProvider(p.name));
         list.appendChild(row);
     });
 }
 
+function showProviderEmpty() {
+    const empty = document.getElementById('provider-empty');
+    const editor = document.getElementById('provider-editor');
+    if (empty) empty.hidden = false;
+    if (editor) editor.hidden = true;
+}
+
 function selectProvider(name) {
     const p = providersCache.find(item => item.name === name);
     if (!p) return;
+    const empty = document.getElementById('provider-empty');
+    const editor = document.getElementById('provider-editor');
+    if (empty) empty.hidden = true;
+    if (editor) editor.hidden = false;
+
+    const endpoint = p.settings?.endpoint || '';
+    const model = p.settings?.model || '';
+    const coord = p.settings?.coord_space || '';
+
     document.getElementById('provider-name').value = p.name;
-    document.getElementById('provider-endpoint').value = p.settings?.endpoint || p.default_endpoint || '';
-    document.getElementById('provider-model').value = p.settings?.model || p.default_model || '';
+    document.getElementById('provider-endpoint').value = endpoint;
+    document.getElementById('provider-model').value = model;
     document.getElementById('provider-api-key').value = '';
-    document.getElementById('provider-api-key').placeholder = p.settings?.api_key_configured ? '********' : t('keepApiKeyPlaceholder');
-    document.getElementById('provider-clear-key').checked = false;
-    document.getElementById('provider-coord-space').value = p.settings?.coord_space || '';
+    document.getElementById('provider-coord-space').value = coord;
+    document.getElementById('provider-clear-key').value = '';
+
+    setTextById('provider-endpoint-hint', p.default_endpoint ? t('providerEndpointHintDefault')(p.default_endpoint) : '');
+    setTextById('provider-model-hint', p.default_model ? t('providerModelHintDefault')(p.default_model) : '');
+
+    const badge = document.getElementById('provider-default-badge');
+    if (badge) badge.hidden = !(agentDefaultProvider && p.name === agentDefaultProvider);
+
+    providerOriginalSettings = {
+        name: p.name,
+        endpoint,
+        model,
+        coord,
+        keyConfigured: !!p.settings?.api_key_configured,
+    };
+
+    setApiKeyMode(providerOriginalSettings.keyConfigured ? 'stored' : 'input');
     renderProviders();
+    snapshotDirtyGroup('provider');
+    markDirty('provider', false);
+}
+
+function setApiKeyMode(mode) {
+    apiKeyMode = mode;
+    const stored = document.getElementById('api-key-stored');
+    const inputWrap = document.getElementById('api-key-input-wrap');
+    const pending = document.getElementById('api-key-pending');
+    const cancelBtn = document.getElementById('api-key-cancel');
+    const input = document.getElementById('provider-api-key');
+    const clearField = document.getElementById('provider-clear-key');
+    const statusEl = document.getElementById('api-key-status');
+
+    if (statusEl) {
+        statusEl.textContent = providerOriginalSettings?.keyConfigured ? t('apiKeyStatusSaved') : t('apiKeyStatusEmpty');
+    }
+
+    if (mode === 'stored') {
+        if (stored) stored.hidden = false;
+        if (inputWrap) inputWrap.hidden = true;
+        if (pending) pending.hidden = true;
+        if (input) input.value = '';
+        if (clearField) clearField.value = '';
+    } else if (mode === 'input') {
+        if (stored) stored.hidden = true;
+        if (inputWrap) inputWrap.hidden = false;
+        if (pending) pending.hidden = true;
+        if (cancelBtn) cancelBtn.hidden = !providerOriginalSettings?.keyConfigured;
+        if (clearField) clearField.value = '';
+        refreshApiKeyPlaceholder();
+        setTimeout(() => input?.focus(), 0);
+    } else if (mode === 'pending-clear') {
+        if (stored) stored.hidden = true;
+        if (inputWrap) inputWrap.hidden = true;
+        if (pending) pending.hidden = false;
+        if (input) input.value = '';
+        if (clearField) clearField.value = 'true';
+    }
+}
+
+function refreshApiKeyPlaceholder() {
+    const input = document.getElementById('provider-api-key');
+    if (!input) return;
+    if (apiKeyMode === 'input' && providerOriginalSettings?.keyConfigured) {
+        input.placeholder = t('enterNewApiKey');
+    } else {
+        input.placeholder = t('keepApiKeyPlaceholder');
+    }
 }
 
 async function saveProvider() {
@@ -736,35 +1308,158 @@ async function saveProvider() {
         endpoint: document.getElementById('provider-endpoint').value.trim(),
         model: document.getElementById('provider-model').value.trim(),
         api_key: document.getElementById('provider-api-key').value.trim(),
-        clear_api_key: document.getElementById('provider-clear-key').checked,
+        clear_api_key: document.getElementById('provider-clear-key').value === 'true',
         coord_space: document.getElementById('provider-coord-space').value
     };
     await putJson(`${CONSOLE_API}/providers/${encodeURIComponent(name)}`, body);
     toast(t('providerSaved'), 'ok');
     document.getElementById('provider-name').value = name;
     await loadProviders();
-    selectProvider(name);
 }
+
+function resetProvider() {
+    if (!providerOriginalSettings) return;
+    selectProvider(providerOriginalSettings.name);
+}
+
+// ---------- Runs ----------
 
 async function loadRuns() {
     try {
         const d = await fetchJson(`${CONSOLE_API}/agent-runs`);
-        const list = document.getElementById('runs-list');
-        list.innerHTML = '';
-        if (!d.runs || !d.runs.length) {
-            list.innerHTML = `<div class="empty">${esc(t('noRuns'))}</div>`;
-            return;
-        }
-        d.runs.forEach(run => {
-            const row = document.createElement('div');
-            row.className = 'list-row';
-            row.innerHTML = `<div><strong>${esc(run.run_id)}</strong><small>${esc(run.task || '')}</small><small>${esc(run.trajectory_path || '')}</small></div><span class="badge-ok">${esc(run.finish_reason?.kind || 'running')}</span>`;
-            list.appendChild(row);
-        });
+        runsCache = d.runs || [];
+        renderRunsFilterChips();
+        renderRunsList();
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
 }
+
+function runStateClass(run) {
+    const reason = run.finish_reason || { kind: 'running' };
+    if (reason.kind === 'running') return 'running';
+    if (reason.kind === 'done') return reason.success === false ? 'failed' : 'done';
+    if (reason.kind === 'ask') return 'ask';
+    if (reason.kind === 'safety') return 'safety';
+    if (reason.kind === 'interrupted') return 'interrupted';
+    if (reason.kind === 'budget_exceeded') return 'budget';
+    if (reason.kind === 'max_steps_reached') return 'max-steps';
+    if (reason.kind === 'provider_error') return 'provider-error';
+    return 'interrupted';
+}
+
+function runStateLabel(run) {
+    const cls = runStateClass(run);
+    return t('runState_' + cls.replace(/-/g, '_'));
+}
+
+function renderRunsFilterChips() {
+    const container = document.getElementById('runs-filter-chips');
+    if (!container) return;
+    const counts = { all: runsCache.length };
+    runsCache.forEach(r => {
+        const cls = runStateClass(r);
+        counts[cls] = (counts[cls] || 0) + 1;
+    });
+    const order = ['all', 'running', 'done', 'failed', 'ask', 'safety', 'interrupted', 'budget', 'max-steps', 'provider-error'];
+    container.innerHTML = order
+        .filter(k => k === 'all' || (counts[k] || 0) > 0)
+        .map(k => {
+            const label = k === 'all' ? t('runsFilterAll') : t('runState_' + k.replace(/-/g, '_'));
+            const count = counts[k] || 0;
+            const active = k === runsFilter;
+            return `<button type="button" class="runs-filter-chip${active ? ' active' : ''}" data-filter="${esc(k)}">
+                ${esc(label)}<span class="chip-count">${count}</span>
+            </button>`;
+        })
+        .join('');
+    container.querySelectorAll('.runs-filter-chip').forEach(btn => {
+        btn.addEventListener('click', () => {
+            runsFilter = btn.dataset.filter;
+            renderRunsFilterChips();
+            renderRunsList();
+        });
+    });
+}
+
+function renderRunsList() {
+    const list = document.getElementById('runs-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    const search = runsSearchTerm.trim().toLowerCase();
+    const filtered = runsCache.filter(r => {
+        if (runsFilter !== 'all' && runStateClass(r) !== runsFilter) return false;
+        if (search) {
+            const hay = `${r.run_id || ''} ${r.task || ''}`.toLowerCase();
+            if (!hay.includes(search)) return false;
+        }
+        return true;
+    });
+
+    if (!filtered.length) {
+        const isFiltering = runsFilter !== 'all' || !!search;
+        list.innerHTML = `<div class="empty-block">
+            <div class="empty-icon" aria-hidden="true">∅</div>
+            <strong>${esc(isFiltering ? t('emptyRunsFilterTitle') : t('emptyRunsTitle'))}</strong>
+            <div>${esc(isFiltering ? t('noRunsMatch') : t('noRunsHint'))}</div>
+        </div>`;
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    filtered.forEach(run => renderRunCard(run, fragment));
+    list.appendChild(fragment);
+}
+
+function renderRunCard(run, parent) {
+    const card = document.createElement('div');
+    card.className = 'run-card';
+    const cls = runStateClass(run);
+    const stateLabel = runStateLabel(run);
+    const idShort = (run.run_id || '').slice(0, 12);
+    const taskText = run.task || '—';
+    const wall = formatDuration(run.wall_ms);
+    const steps = run.steps_taken ?? 0;
+    const tokenIn = run.tokens_in ?? 0;
+    const tokenOut = run.tokens_out ?? 0;
+    const path = run.trajectory_path || '';
+
+    card.innerHTML = `
+        <div class="run-card-status">
+            <span class="run-state-pill state-${esc(cls)}">${esc(stateLabel)}</span>
+        </div>
+        <div class="run-card-main">
+            <span class="run-card-id" title="${esc(run.run_id || '')}" data-action="copy-id">
+                <span aria-hidden="true">⧉</span>${esc(idShort)}
+            </span>
+            <div class="run-card-task">${esc(taskText)}</div>
+            <div class="run-card-meta">
+                <span>⏱ ${esc(wall)}</span>
+                <span>↻ ${esc(formatNumber(steps))} ${esc(t('runsMetricSteps'))}</span>
+                <span>⇅ ${esc(formatNumber(tokenIn))} / ${esc(formatNumber(tokenOut))} ${esc(t('runsMetricTokens'))}</span>
+            </div>
+        </div>
+        <div class="run-card-actions">
+            ${path
+                ? `<button type="button" class="btn-link" data-action="copy-path" title="${esc(path)}">${esc(t('runsCopyPath'))}</button>`
+                : `<span class="muted-hint">${esc(t('runsNoPath'))}</span>`}
+        </div>`;
+
+    card.querySelector('[data-action="copy-id"]')?.addEventListener('click', async () => {
+        try { await copyText(run.run_id || ''); toast(t('runsIdCopied'), 'ok'); }
+        catch { toast(t('copyFailed'), 'err'); }
+    });
+    if (path) {
+        card.querySelector('[data-action="copy-path"]')?.addEventListener('click', async () => {
+            try { await copyText(path); toast(t('runsPathCopied'), 'ok'); }
+            catch { toast(t('copyFailed'), 'err'); }
+        });
+    }
+    parent.appendChild(card);
+}
+
+// ---------- Misc ----------
 
 async function stopAgent() {
     try {
@@ -808,7 +1503,8 @@ async function parseJsonResponse(response) {
 }
 
 function setValue(id, value) {
-    document.getElementById(id).value = value ?? '';
+    const el = document.getElementById(id);
+    if (el) el.value = value ?? '';
 }
 
 function numberValue(id) {
@@ -822,6 +1518,50 @@ function createBtn(text, cls, onClick) {
     b.textContent = text;
     b.addEventListener('click', onClick);
     return b;
+}
+
+// ---------- Dirty tracking ----------
+
+const dirtySnapshots = new Map();
+
+function snapshotDirtyGroup(group) {
+    const snap = {};
+    document.querySelectorAll(`[data-dirty-group="${group}"]`).forEach(el => {
+        snap[el.id] = inputSignature(el);
+    });
+    dirtySnapshots.set(group, snap);
+}
+
+function inputSignature(el) {
+    if (el.type === 'checkbox') return el.checked ? '1' : '0';
+    return el.value ?? '';
+}
+
+function markDirty(group, isDirty) {
+    const el = document.getElementById(group + '-dirty');
+    if (el) el.hidden = !isDirty;
+}
+
+function reconcileDirty(group) {
+    const snap = dirtySnapshots.get(group);
+    if (!snap) return;
+    let dirty = false;
+    document.querySelectorAll(`[data-dirty-group="${group}"]`).forEach(el => {
+        if (inputSignature(el) !== (snap[el.id] ?? '')) dirty = true;
+    });
+    markDirty(group, dirty);
+}
+
+function bindDirtyTracking() {
+    ['settings', 'agent', 'provider'].forEach(group => {
+        document.querySelectorAll(`[data-dirty-group="${group}"]`).forEach(el => {
+            const evt = el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input';
+            el.addEventListener(evt, () => reconcileDirty(group));
+            if (el.type !== 'checkbox' && el.tagName !== 'SELECT') {
+                el.addEventListener('change', () => reconcileDirty(group));
+            }
+        });
+    });
 }
 
 async function copyAccessUrl(url) {
@@ -1050,8 +1790,9 @@ async function clearData(id, name) {
     }
 }
 
-function toast(msg, type) {
+function toast(msg, type = 'info') {
     const tEl = document.getElementById('toast');
+    if (!tEl) return;
     tEl.textContent = msg;
     tEl.className = 'toast show toast-' + type;
     setTimeout(() => tEl.classList.remove('show'), 2500);
@@ -1127,7 +1868,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('.btn-cancel').forEach(btn => {
         btn.addEventListener('click', (e) => {
             if (e.target.closest('#log-modal')) hideLogModal();
-            else hideModal();
+            else if (e.target.closest('#modal')) hideModal();
         });
     });
 
@@ -1136,13 +1877,43 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('request-keyframe').addEventListener('click', () => requestKeyframe().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('agent-save').addEventListener('click', () => saveAgentConfig().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('provider-save').addEventListener('click', () => saveProvider().catch(e => toast(t('actionFailed') + e, 'err')));
+    document.getElementById('provider-reset')?.addEventListener('click', resetProvider);
     document.getElementById('runs-refresh').addEventListener('click', loadRuns);
+    document.getElementById('runs-search')?.addEventListener('input', (e) => {
+        runsSearchTerm = e.target.value;
+        renderRunsList();
+    });
     document.getElementById('overview-agent-stop').addEventListener('click', stopAgent);
 
+    // Quick action / overview jump buttons
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-jump]');
+        if (btn) switchSection(btn.dataset.jump);
+    });
+
+    // API key control
+    document.getElementById('api-key-replace')?.addEventListener('click', () => setApiKeyMode('input'));
+    document.getElementById('api-key-clear')?.addEventListener('click', () => {
+        setApiKeyMode('pending-clear');
+        reconcileDirty('provider');
+    });
+    document.getElementById('api-key-cancel')?.addEventListener('click', () => {
+        setApiKeyMode('stored');
+        reconcileDirty('provider');
+    });
+    document.getElementById('api-key-undo-clear')?.addEventListener('click', () => {
+        setApiKeyMode('stored');
+        reconcileDirty('provider');
+    });
+
+    bindDirtyTracking();
     applyTranslations();
     loadSection();
     setInterval(() => {
         if (activeSection === 'apps') load();
         if (activeSection === 'overview') loadOverview();
     }, 5000);
+    setInterval(() => {
+        if (activeSection === 'overview') updateOverviewMeta();
+    }, 1000);
 });

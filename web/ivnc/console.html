@@ -36,10 +36,17 @@
 
             <section class="section active" id="section-overview">
                 <div class="summary-grid" id="overview-grid"></div>
+                <div class="overview-meta">
+                    <span class="meta-pulse" aria-hidden="true"></span>
+                    <span id="overview-meta-text">最后刷新 刚刚</span>
+                    <span class="meta-sep">·</span>
+                    <span id="overview-meta-auto">自动刷新 5s</span>
+                </div>
                 <div class="two-column">
                     <div class="panel">
                         <div class="panel-header">
                             <h2 id="overview-providers-title">Provider 状态</h2>
+                            <button class="btn-link" data-jump="providers" type="button" id="overview-jump-providers">配置 →</button>
                         </div>
                         <div class="compact-list" id="overview-providers"></div>
                     </div>
@@ -48,9 +55,14 @@
                             <h2 id="overview-agent-title">Agent 状态</h2>
                             <button class="btn btn-stop btn-sm" id="overview-agent-stop" type="button">停止 Agent</button>
                         </div>
-                        <pre class="json-box" id="overview-agent-json">{}</pre>
+                        <div id="overview-agent-card"></div>
+                        <details class="raw-json-details">
+                            <summary id="overview-agent-raw-summary">原始数据</summary>
+                            <pre class="json-box" id="overview-agent-json">{}</pre>
+                        </details>
                     </div>
                 </div>
+                <div class="quick-actions" id="overview-quick-actions"></div>
             </section>
 
             <section class="section" id="section-apps">
@@ -78,132 +90,180 @@
 
             <section class="section" id="section-settings">
                 <div class="panel">
-                    <div class="panel-header">
-                        <h2 id="settings-runtime-title">连接质量</h2>
-                        <button class="btn btn-save" id="settings-save" type="button">保存并应用</button>
+                    <div class="panel-section">
+                        <div class="panel-section-header">
+                            <h3 id="settings-stream-title">串流参数</h3>
+                            <span class="dirty-indicator" id="settings-dirty" hidden>● 未保存改动</span>
+                        </div>
+                        <div class="settings-grid">
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-target-fps">Target FPS</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-target-fps">目标画面帧率，越高越流畅但会增加编码和网络压力。</span>
+                                    </span>
+                                </label>
+                                <div class="input-suffix">
+                                    <input id="set-target-fps" type="number" min="1" max="240" data-dirty-group="settings">
+                                    <span class="suffix" id="suffix-target-fps">fps</span>
+                                </div>
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-video-bitrate">Video bitrate</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-video-bitrate">视频码率，越高越清晰但占用更多带宽。</span>
+                                    </span>
+                                </label>
+                                <div class="input-suffix">
+                                    <input id="set-video-bitrate" type="number" min="1" data-dirty-group="settings">
+                                    <span class="suffix" id="suffix-video-bitrate">kbps</span>
+                                </div>
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-audio-bitrate">Audio bitrate</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-audio-bitrate">音频编码码率，常用值为 128000。</span>
+                                    </span>
+                                </label>
+                                <div class="input-suffix">
+                                    <input id="set-audio-bitrate" type="number" min="1" data-dirty-group="settings">
+                                    <span class="suffix" id="suffix-audio-bitrate">bps</span>
+                                </div>
+                            </div>
+                            <div class="form-line param-check">
+                                <label class="form-label info-label">
+                                    <span id="label-binary-clipboard">Binary clipboard</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-binary-clipboard">允许剪贴板同步二进制内容，例如图片或文件片段。</span>
+                                    </span>
+                                </label>
+                                <label class="checkbox-row settings-checkbox"><input id="set-binary-clipboard" type="checkbox" data-dirty-group="settings"><span id="toggle-binary-clipboard">启用</span></label>
+                            </div>
+                        </div>
+                        <div class="panel-section-footer">
+                            <span class="muted-hint" id="settings-hint">改动会立即应用并保存为下次启动的默认值。</span>
+                            <button class="btn btn-save" id="settings-save" type="button">保存并应用</button>
+                        </div>
                     </div>
-                    <div class="settings-grid">
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-target-fps">Target FPS</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-target-fps">目标画面帧率，越高越流畅但会增加编码和网络压力。</span>
-                                </span>
-                            </label>
-                            <input id="set-target-fps" type="number" min="1" max="240">
+
+                    <div class="panel-divider" aria-hidden="true"></div>
+
+                    <div class="panel-section">
+                        <div class="panel-section-header">
+                            <h3 id="settings-actions-title">即时操作</h3>
+                            <span class="muted-hint" id="settings-actions-hint">立即生效，无需保存</span>
                         </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-video-bitrate">Video bitrate (kbps)</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-video-bitrate">视频码率，越高越清晰但占用更多带宽。</span>
-                                </span>
-                            </label>
-                            <input id="set-video-bitrate" type="number" min="1">
-                        </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-audio-bitrate">Audio bitrate (bps)</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-audio-bitrate">音频编码码率，常用值为 128000。</span>
-                                </span>
-                            </label>
-                            <input id="set-audio-bitrate" type="number" min="1">
-                        </div>
-                        <div class="form-line param-check">
-                            <label class="form-label info-label">
-                                <span id="label-binary-clipboard">Binary clipboard</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-binary-clipboard">允许剪贴板同步二进制内容，例如图片或文件片段。</span>
-                                </span>
-                            </label>
-                            <label class="checkbox-row settings-checkbox"><input id="set-binary-clipboard" type="checkbox"><span id="toggle-binary-clipboard">启用</span></label>
-                        </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-keyframe">Keyframe</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-keyframe">立即请求下一帧关键帧，画面花屏或恢复连接后可手动触发。</span>
-                                </span>
-                            </label>
-                            <button class="btn btn-clear" id="request-keyframe" type="button">请求关键帧</button>
+                        <div class="action-cards">
+                            <div class="action-card">
+                                <div class="action-card-body">
+                                    <strong id="label-keyframe">Keyframe</strong>
+                                    <small id="help-keyframe">立即请求下一帧关键帧，画面花屏或恢复连接后可手动触发。</small>
+                                </div>
+                                <button class="btn btn-action" id="request-keyframe" type="button">请求关键帧</button>
+                            </div>
                         </div>
                     </div>
-                    <div class="hint-line" id="settings-hint">这些设置会立即应用并保存为下次启动的控制台默认值。</div>
                 </div>
             </section>
 
             <section class="section" id="section-agent">
                 <div class="panel">
-                    <div class="panel-header">
-                        <h2 id="agent-defaults-title">Agent 默认参数</h2>
-                        <button class="btn btn-save" id="agent-save" type="button">保存</button>
+                    <div class="panel-section">
+                        <div class="panel-section-header">
+                            <h3 id="agent-budget-title">运行限额</h3>
+                            <span class="muted-hint" id="agent-budget-hint">控制单次 Agent run 的最大资源消耗</span>
+                        </div>
+                        <div class="settings-grid">
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-agent-max-steps">Max steps</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-agent-max-steps">单次任务允许的最大决策步数，达到后自动停止。</span>
+                                    </span>
+                                </label>
+                                <div class="input-suffix">
+                                    <input id="agent-max-steps" type="number" min="1" data-dirty-group="agent">
+                                    <span class="suffix" id="suffix-agent-max-steps">步</span>
+                                </div>
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-agent-max-wall">Max wall time</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-agent-max-wall">单次任务的最长运行秒数，超过后自动结束。</span>
+                                    </span>
+                                </label>
+                                <div class="input-suffix">
+                                    <input id="agent-max-wall" type="number" min="1" data-dirty-group="agent">
+                                    <span class="suffix" id="suffix-agent-max-wall">秒</span>
+                                </div>
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-agent-screenshot-bytes">Screenshot max size</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-agent-screenshot-bytes">发送给模型的单张截图最大字节数，用于控制请求体大小。</span>
+                                    </span>
+                                </label>
+                                <div class="input-suffix">
+                                    <input id="agent-screenshot-bytes" type="number" min="10000" data-dirty-group="agent">
+                                    <span class="suffix" id="suffix-agent-screenshot-bytes">字节</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="settings-grid">
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-agent-provider">Default provider</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-agent-provider">新建 Agent run 默认使用的 VLM Provider。</span>
-                                </span>
-                            </label>
-                            <select id="agent-provider"></select>
+
+                    <div class="panel-divider" aria-hidden="true"></div>
+
+                    <div class="panel-section">
+                        <div class="panel-section-header">
+                            <h3 id="agent-behavior-title">Provider 与行为</h3>
+                            <span class="dirty-indicator" id="agent-dirty" hidden>● 未保存改动</span>
                         </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-agent-max-steps">Max steps</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-agent-max-steps">单次任务允许的最大决策步数，达到后自动停止。</span>
-                                </span>
-                            </label>
-                            <input id="agent-max-steps" type="number" min="1">
+                        <div class="settings-grid">
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-agent-provider">Default provider</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-agent-provider">新建 Agent run 默认使用的 VLM Provider。</span>
+                                    </span>
+                                </label>
+                                <select id="agent-provider" data-dirty-group="agent"></select>
+                            </div>
+                            <div class="form-line param-check">
+                                <label class="form-label info-label">
+                                    <span id="label-agent-record-trajectory">Record trajectory</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-agent-record-trajectory">保存 Agent 的观察、动作和结果，便于复盘问题。</span>
+                                    </span>
+                                </label>
+                                <label class="checkbox-row settings-checkbox"><input id="agent-record-trajectory" type="checkbox" data-dirty-group="agent"><span id="toggle-agent-record-trajectory">启用</span></label>
+                            </div>
+                            <div class="form-line param-check">
+                                <label class="form-label info-label">
+                                    <span id="label-agent-dry-run">Dry run</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-agent-dry-run">只生成计划和动作，不真正控制桌面，适合调试 Provider。</span>
+                                    </span>
+                                </label>
+                                <label class="checkbox-row settings-checkbox"><input id="agent-dry-run" type="checkbox" data-dirty-group="agent"><span id="toggle-agent-dry-run">启用</span></label>
+                            </div>
                         </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-agent-max-wall">Max wall seconds</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-agent-max-wall">单次任务的最长运行秒数，超过后自动结束。</span>
-                                </span>
-                            </label>
-                            <input id="agent-max-wall" type="number" min="1">
-                        </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-agent-screenshot-bytes">Screenshot max bytes</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-agent-screenshot-bytes">发送给模型的单张截图最大字节数，用于控制请求体大小。</span>
-                                </span>
-                            </label>
-                            <input id="agent-screenshot-bytes" type="number" min="10000">
-                        </div>
-                        <div class="form-line param-check">
-                            <label class="form-label info-label">
-                                <span id="label-agent-record-trajectory">Record trajectory</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-agent-record-trajectory">保存 Agent 的观察、动作和结果，便于复盘问题。</span>
-                                </span>
-                            </label>
-                            <label class="checkbox-row settings-checkbox"><input id="agent-record-trajectory" type="checkbox"><span id="toggle-agent-record-trajectory">启用</span></label>
-                        </div>
-                        <div class="form-line param-check">
-                            <label class="form-label info-label">
-                                <span id="label-agent-dry-run">Dry run</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-agent-dry-run">只生成计划和动作，不真正控制桌面，适合调试 Provider。</span>
-                                </span>
-                            </label>
-                            <label class="checkbox-row settings-checkbox"><input id="agent-dry-run" type="checkbox"><span id="toggle-agent-dry-run">启用</span></label>
+                        <div class="panel-section-footer">
+                            <span class="muted-hint" id="agent-save-hint">默认值会用于后续通过 MCP 或控制台启动的 Agent run。</span>
+                            <button class="btn btn-save" id="agent-save" type="button">保存</button>
                         </div>
                     </div>
                 </div>
@@ -212,64 +272,90 @@
             <section class="section" id="section-providers">
                 <div class="provider-layout">
                     <div class="panel">
-                        <div class="panel-header"><h2 id="providers-title">Provider</h2></div>
+                        <div class="panel-header">
+                            <h2 id="providers-title">Provider</h2>
+                            <span class="provider-count" id="provider-count"></span>
+                        </div>
                         <div class="provider-list" id="provider-list"></div>
                     </div>
-                    <div class="panel">
-                        <div class="panel-header">
-                            <h2 id="provider-editor-title">Provider 配置</h2>
-                            <button class="btn btn-save" id="provider-save" type="button">保存</button>
+                    <div class="panel provider-editor-panel">
+                        <div class="provider-editor-empty" id="provider-empty" hidden>
+                            <div class="empty-icon" aria-hidden="true">←</div>
+                            <p id="provider-empty-text">从左侧选择一个 Provider 查看或编辑配置</p>
                         </div>
-                        <input type="hidden" id="provider-name">
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-provider-endpoint">Endpoint</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-provider-endpoint">Provider 的 API 基础地址，留空使用内置默认值。</span>
-                                </span>
-                            </label>
-                            <input id="provider-endpoint" type="text">
-                        </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-provider-model">Model</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-provider-model">调用的模型名称，需与所选 Provider 支持的模型一致。</span>
-                                </span>
-                            </label>
-                            <input id="provider-model" type="text">
-                        </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-provider-api-key">API Key</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-provider-api-key">Provider 凭据。保持为空表示不修改已保存的密钥。</span>
-                                </span>
-                            </label>
-                            <input id="provider-api-key" type="password" placeholder="保持为空表示不修改">
-                        </div>
-                        <div class="form-line param-check">
-                            <label class="form-label info-label">
-                                <span id="label-provider-clear-key">Clear API Key</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-provider-clear-key">保存时删除该 Provider 已保存的 API Key。</span>
-                                </span>
-                            </label>
-                            <label class="checkbox-row"><input id="provider-clear-key" type="checkbox"><span id="toggle-provider-clear-key">清除已保存 API Key</span></label>
-                        </div>
-                        <div class="form-line">
-                            <label class="form-label info-label">
-                                <span id="label-provider-coord-space">Coordinate space</span>
-                                <span class="info-tip">
-                                    <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                    <span class="default-text" id="help-provider-coord-space">Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。</span>
-                                </span>
-                            </label>
-                            <select id="provider-coord-space"><option value="">默认</option><option value="image">image</option><option value="screen">screen</option><option value="normalized">normalized</option></select>
+                        <div class="provider-editor" id="provider-editor">
+                            <div class="panel-header">
+                                <div class="provider-editor-title-row">
+                                    <h2 id="provider-editor-title">Provider 配置</h2>
+                                    <span class="badge-default" id="provider-default-badge" hidden>默认</span>
+                                </div>
+                                <span class="dirty-indicator" id="provider-dirty" hidden>● 未保存改动</span>
+                            </div>
+                            <input type="hidden" id="provider-name">
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-provider-endpoint">Endpoint</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-provider-endpoint">Provider 的 API 基础地址，留空使用内置默认值。</span>
+                                    </span>
+                                </label>
+                                <input id="provider-endpoint" type="text" data-dirty-group="provider">
+                                <span class="field-hint" id="provider-endpoint-hint"></span>
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-provider-model">Model</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-provider-model">调用的模型名称，需与所选 Provider 支持的模型一致。</span>
+                                    </span>
+                                </label>
+                                <input id="provider-model" type="text" data-dirty-group="provider">
+                                <span class="field-hint" id="provider-model-hint"></span>
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-provider-api-key">API Key</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-provider-api-key">Provider 凭据。已配置时显示遮罩；点击"替换"输入新值，或"清除"删除已保存的密钥。</span>
+                                    </span>
+                                </label>
+                                <div class="api-key-control" id="api-key-control">
+                                    <div class="api-key-stored" id="api-key-stored" hidden>
+                                        <span class="api-key-mask">••••••••••••</span>
+                                        <span class="api-key-status" id="api-key-status">已保存</span>
+                                        <div class="api-key-actions">
+                                            <button type="button" class="btn-link" id="api-key-replace">替换</button>
+                                            <button type="button" class="btn-link btn-link-danger" id="api-key-clear">清除</button>
+                                        </div>
+                                    </div>
+                                    <div class="api-key-input" id="api-key-input-wrap">
+                                        <input id="provider-api-key" type="password" placeholder="保持为空表示不修改" data-dirty-group="provider">
+                                        <button type="button" class="btn-link" id="api-key-cancel" hidden>取消</button>
+                                    </div>
+                                    <div class="api-key-pending" id="api-key-pending" hidden>
+                                        <span class="badge-warn-pill" id="api-key-pending-text">将在保存时清除已存 API Key</span>
+                                        <button type="button" class="btn-link" id="api-key-undo-clear">撤销</button>
+                                    </div>
+                                </div>
+                                <input type="hidden" id="provider-clear-key">
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
+                                    <span id="label-provider-coord-space">Coordinate space</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-provider-coord-space">Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。</span>
+                                    </span>
+                                </label>
+                                <select id="provider-coord-space" data-dirty-group="provider"><option value="">默认</option><option value="image">image</option><option value="screen">screen</option><option value="normalized">normalized</option></select>
+                            </div>
+                            <div class="panel-section-footer">
+                                <button class="btn btn-cancel" id="provider-reset" type="button">重置</button>
+                                <button class="btn btn-save" id="provider-save" type="button">保存</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -277,9 +363,14 @@
 
             <section class="section" id="section-runs">
                 <div class="panel">
-                    <div class="panel-header">
-                        <h2 id="runs-title">Agent runs</h2>
-                        <button class="btn btn-clear btn-sm" id="runs-refresh" type="button">刷新</button>
+                    <div class="runs-toolbar">
+                        <div class="runs-filter-group" id="runs-filter-chips"></div>
+                        <div class="runs-toolbar-right">
+                            <div class="search-box">
+                                <input id="runs-search" type="search" placeholder="按 run ID 或任务搜索">
+                            </div>
+                            <button class="btn btn-cancel btn-sm" id="runs-refresh" type="button">刷新</button>
+                        </div>
                     </div>
                     <div class="runs-list" id="runs-list"></div>
                 </div>
