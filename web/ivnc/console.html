@@ -316,6 +316,19 @@
                             </div>
                             <div class="form-line">
                                 <label class="form-label info-label">
+                                    <span id="label-provider-api-format">API format</span>
+                                    <span class="info-tip">
+                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                                        <span class="default-text" id="help-provider-api-format">Provider 使用的 OpenAI 接口协议。Responses 会请求 /responses，Chat Completions 会请求 /chat/completions。</span>
+                                    </span>
+                                </label>
+                                <select id="provider-api-format" data-dirty-group="provider">
+                                    <option value="">Chat Completions</option>
+                                    <option value="responses">Responses</option>
+                                </select>
+                            </div>
+                            <div class="form-line">
+                                <label class="form-label info-label">
                                     <span id="label-provider-api-key">API Key</span>
                                     <span class="info-tip">
                                         <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>

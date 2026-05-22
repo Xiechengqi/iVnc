@@ -1,4 +1,6 @@
-use super::openai_compat::{default_system_prompt, OpenAiCompatConfig, OpenAiCompatibleProvider};
+use super::openai_compat::{
+    default_system_prompt, OpenAiApiFormat, OpenAiCompatConfig, OpenAiCompatibleProvider,
+};
 use crate::agent::types::CoordinateSpace;
 
 pub const HOLO3_PROVIDER_NAME: &str = "holo3";
@@ -18,10 +20,12 @@ pub fn build_holo3_provider(model: Option<String>) -> OpenAiCompatibleProvider {
         .endpoint
         .or_else(|| std::env::var(HOLO3_ENDPOINT_ENV).ok())
         .unwrap_or_else(|| HOLO3_DEFAULT_ENDPOINT.to_string());
+    let api_format = OpenAiApiFormat::from_config(saved.api_format.as_deref());
     OpenAiCompatibleProvider::new(OpenAiCompatConfig {
         provider_name: HOLO3_PROVIDER_NAME,
         endpoint,
         model,
+        api_format,
         api_key: saved
             .api_key
             .or_else(|| std::env::var(HOLO3_API_KEY_ENV).ok()),

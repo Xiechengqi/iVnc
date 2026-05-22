@@ -1,10 +1,13 @@
-use super::openai_compat::{default_system_prompt, OpenAiCompatConfig, OpenAiCompatibleProvider};
+use super::openai_compat::{
+    default_system_prompt, OpenAiApiFormat, OpenAiCompatConfig, OpenAiCompatibleProvider,
+};
 use crate::agent::types::CoordinateSpace;
 
 pub const LOCAL_PROVIDER_NAME: &str = "local";
 pub const LOCAL_MODEL_ENV: &str = "LOCAL_VLM_MODEL";
 pub const LOCAL_ENDPOINT_ENV: &str = "LOCAL_VLM_URL";
 pub const LOCAL_API_KEY_ENV: &str = "LOCAL_VLM_API_KEY";
+pub const LOCAL_API_FORMAT_ENV: &str = "LOCAL_VLM_API_FORMAT";
 pub const LOCAL_COORD_SPACE_ENV: &str = "LOCAL_VLM_COORD_SPACE";
 pub const LOCAL_SYSTEM_PROMPT_ENV: &str = "LOCAL_VLM_SYSTEM_PROMPT";
 pub const LOCAL_DEFAULT_MODEL: &str = "local-vlm";
@@ -24,10 +27,14 @@ pub fn build_local_provider(model: Option<String>) -> OpenAiCompatibleProvider {
         .system_prompt
         .or_else(|| std::env::var(LOCAL_SYSTEM_PROMPT_ENV).ok())
         .unwrap_or_else(default_system_prompt);
+    let api_format = saved
+        .api_format
+        .or_else(|| std::env::var(LOCAL_API_FORMAT_ENV).ok());
     OpenAiCompatibleProvider::new(OpenAiCompatConfig {
         provider_name: LOCAL_PROVIDER_NAME,
         endpoint,
         model,
+        api_format: OpenAiApiFormat::from_config(api_format.as_deref()),
         api_key: saved
             .api_key
             .or_else(|| std::env::var(LOCAL_API_KEY_ENV).ok()),

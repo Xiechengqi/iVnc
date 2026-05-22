@@ -1154,6 +1154,7 @@ async fn console_providers_get_handler() -> Response {
                 "settings": {
                     "endpoint": cfg.endpoint,
                     "model": cfg.model,
+                    "api_format": cfg.api_format,
                     "api_key_configured": cfg.api_key.as_ref().is_some_and(|v| !v.is_empty())
                         || preset.api_key_env.is_some_and(|env| std::env::var_os(env).is_some()),
                     "coord_space": cfg.coord_space,
@@ -1175,6 +1176,7 @@ async fn console_providers_get_handler() -> Response {
 struct ProviderConsoleUpdate {
     endpoint: Option<String>,
     model: Option<String>,
+    api_format: Option<String>,
     api_key: Option<String>,
     clear_api_key: Option<bool>,
     coord_space: Option<String>,
@@ -1197,6 +1199,7 @@ async fn console_provider_put_handler(
     let entry = config.providers.entry(name).or_default();
     entry.endpoint = clean_optional(body.endpoint);
     entry.model = clean_optional(body.model);
+    entry.api_format = clean_optional(body.api_format);
     entry.coord_space = clean_optional(body.coord_space);
     if body.system_prompt.is_some() {
         entry.system_prompt = clean_optional(body.system_prompt);

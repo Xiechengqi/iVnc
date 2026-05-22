@@ -66,6 +66,8 @@ const I18N = {
         paramProviderEndpointHelp: 'Provider API base URL. Leave empty to use the built-in default.',
         paramProviderModel: 'Model',
         paramProviderModelHelp: 'Model name to call. It must be supported by the selected Provider.',
+        paramProviderApiFormat: 'API format',
+        paramProviderApiFormatHelp: 'OpenAI wire API used by this Provider. Responses calls /responses; Chat Completions calls /chat/completions.',
         paramProviderApiKey: 'API Key',
         paramProviderApiKeyHelp: 'Provider credential. When set, the value is masked; click "Replace" to enter a new key, or "Clear" to remove the saved key.',
         paramProviderCoordSpace: 'Coordinate space',
@@ -315,6 +317,8 @@ const I18N = {
         paramProviderEndpointHelp: 'Provider 的 API 基础地址，留空使用内置默认值。',
         paramProviderModel: 'Model',
         paramProviderModelHelp: '调用的模型名称，需与所选 Provider 支持的模型一致。',
+        paramProviderApiFormat: 'API 格式',
+        paramProviderApiFormatHelp: 'Provider 使用的 OpenAI 接口协议。Responses 请求 /responses；Chat Completions 请求 /chat/completions。',
         paramProviderApiKey: 'API Key',
         paramProviderApiKeyHelp: 'Provider 凭据。已配置时显示遮罩；点击"替换"输入新值，或"清除"删除已保存的密钥。',
         paramProviderCoordSpace: '坐标空间',
@@ -630,6 +634,8 @@ function applyTranslations() {
         ['help-provider-endpoint', 'paramProviderEndpointHelp'],
         ['label-provider-model', 'paramProviderModel'],
         ['help-provider-model', 'paramProviderModelHelp'],
+        ['label-provider-api-format', 'paramProviderApiFormat'],
+        ['help-provider-api-format', 'paramProviderApiFormatHelp'],
         ['label-provider-api-key', 'paramProviderApiKey'],
         ['help-provider-api-key', 'paramProviderApiKeyHelp'],
         ['label-provider-coord-space', 'paramProviderCoordSpace'],
@@ -1225,11 +1231,13 @@ function selectProvider(name) {
 
     const endpoint = p.settings?.endpoint || '';
     const model = p.settings?.model || '';
+    const apiFormat = p.settings?.api_format || '';
     const coord = p.settings?.coord_space || '';
 
     document.getElementById('provider-name').value = p.name;
     document.getElementById('provider-endpoint').value = endpoint;
     document.getElementById('provider-model').value = model;
+    document.getElementById('provider-api-format').value = apiFormat;
     document.getElementById('provider-api-key').value = '';
     document.getElementById('provider-coord-space').value = coord;
     document.getElementById('provider-clear-key').value = '';
@@ -1244,6 +1252,7 @@ function selectProvider(name) {
         name: p.name,
         endpoint,
         model,
+        apiFormat,
         coord,
         keyConfigured: !!p.settings?.api_key_configured,
     };
@@ -1307,6 +1316,7 @@ async function saveProvider() {
     const body = {
         endpoint: document.getElementById('provider-endpoint').value.trim(),
         model: document.getElementById('provider-model').value.trim(),
+        api_format: document.getElementById('provider-api-format').value,
         api_key: document.getElementById('provider-api-key').value.trim(),
         clear_api_key: document.getElementById('provider-clear-key').value === 'true',
         coord_space: document.getElementById('provider-coord-space').value

@@ -18,10 +18,38 @@ pub struct OpenAiCompatConfig {
     pub provider_name: &'static str,
     pub endpoint: String,
     pub model: String,
+    pub api_format: OpenAiApiFormat,
     pub api_key: Option<String>,
     pub api_key_env: Option<&'static str>,
     pub coordinate_space: CoordinateSpace,
     pub system_prompt: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiApiFormat {
+    ChatCompletions,
+    Responses,
+}
+
+impl OpenAiApiFormat {
+    pub fn from_config(value: Option<&str>) -> Self {
+        match value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "responses" | "openai_responses" | "openai-responses" | "response" => Self::Responses,
+            _ => Self::ChatCompletions,
+        }
+    }
+
+    fn endpoint_path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses => "responses",
+        }
+    }
 }
 
 pub struct OpenAiCompatibleProvider {
@@ -95,6 +123,44 @@ impl OpenAiCompatibleProvider {
         }))
     }
 
+    fn responses_request_body(
+        &self,
+        task: &str,
+        observation: &Observation,
+        history: &History,
+    ) -> Result<Value, ProviderError> {
+        let image_url = Self::image_data_url(observation)?;
+        let display = &observation.display;
+        let history_text = history_text(history);
+        Ok(json!({
+            "model": self.cfg.model,
+            "instructions": self.cfg.system_prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": format!(
+                                "Task: {}\nScreenshot image size: {}x{}.\nReturn actions in this image coordinate space.\n{}",
+                                task,
+                                display.image_width,
+                                display.image_height,
+                                history_text
+                            )
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": image_url
+                        }
+                    ]
+                }
+            ],
+            "tools": responses_tool_schema(),
+            "tool_choice": "auto"
+        }))
+    }
+
     fn parse_response(
         &self,
         body: Value,
@@ -113,26 +179,7 @@ impl OpenAiCompatibleProvider {
         let mut actions = Vec::new();
         if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
             for call in tool_calls {
-                let function = call.get("function").unwrap_or(call);
-                let name = function
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        ProviderError::InvalidResponse("tool call missing name".into())
-                    })?;
-                let args = match function.get("arguments") {
-                    Some(Value::String(s)) => serde_json::from_str(s).map_err(|e| {
-                        ProviderError::InvalidResponse(format!("invalid tool arguments: {}", e))
-                    })?,
-                    Some(value) => value.clone(),
-                    None => Value::Object(Default::default()),
-                };
-                actions.push(tool_call_to_action(
-                    name,
-                    &args,
-                    display,
-                    self.cfg.coordinate_space,
-                )?);
+                actions.push(self.parse_tool_call(call, display)?);
             }
         }
 
@@ -156,6 +203,93 @@ impl OpenAiCompatibleProvider {
             pending_safety_checks: Vec::new(),
             provider_response_id: response_id,
         })
+    }
+
+    fn parse_responses_response(
+        &self,
+        body: Value,
+        display: &DisplayMetadata,
+        elapsed_ms: u64,
+    ) -> Result<ProviderTurn, ProviderError> {
+        let response_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let usage = parse_usage(body.get("usage"), elapsed_ms);
+        let output = body
+            .get("output")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ProviderError::InvalidResponse("missing output".into()))?;
+
+        let mut actions = Vec::new();
+        let mut text = String::new();
+        for item in output {
+            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                actions.push(self.parse_tool_call(item, display)?);
+                continue;
+            }
+            if let Some(content) = item.get("content").and_then(Value::as_array) {
+                for part in content {
+                    if matches!(
+                        part.get("type").and_then(Value::as_str),
+                        Some("output_text" | "summary_text" | "text")
+                    ) {
+                        if let Some(part_text) = part.get("text").and_then(Value::as_str) {
+                            text.push_str(part_text);
+                            text.push('\n');
+                        }
+                    }
+                }
+            }
+            if let Some(item_text) = item.get("text").and_then(Value::as_str) {
+                text.push_str(item_text);
+                text.push('\n');
+            }
+        }
+        if text.is_empty() {
+            if let Some(output_text) = body.get("output_text").and_then(Value::as_str) {
+                text.push_str(output_text);
+            }
+        }
+
+        if actions.is_empty() && !text.trim().is_empty() {
+            actions = text_action_parser::parse_text_actions(text.trim()).map_err(|e| {
+                ProviderError::InvalidResponse(format!("could not parse text action: {}", e))
+            })?;
+        }
+
+        if actions.is_empty() {
+            return Err(ProviderError::InvalidResponse(
+                "provider returned no actions".to_string(),
+            ));
+        }
+
+        Ok(ProviderTurn {
+            actions,
+            usage,
+            pending_safety_checks: Vec::new(),
+            provider_response_id: response_id,
+        })
+    }
+
+    fn parse_tool_call(
+        &self,
+        call: &Value,
+        display: &DisplayMetadata,
+    ) -> Result<Action, ProviderError> {
+        let function = call.get("function").unwrap_or(call);
+        let name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ProviderError::InvalidResponse("tool call missing name".into()))?;
+        let args = match function.get("arguments") {
+            Some(Value::String(s)) => serde_json::from_str(s).map_err(|e| {
+                ProviderError::InvalidResponse(format!("invalid tool arguments: {}", e))
+            })?,
+            Some(value) => value.clone(),
+            None => Value::Object(Default::default()),
+        };
+        tool_call_to_action(name, &args, display, self.cfg.coordinate_space)
     }
 }
 
@@ -186,11 +320,17 @@ impl BrainProvider for OpenAiCompatibleProvider {
         _session: &mut ProviderSession,
     ) -> Result<ProviderTurn, ProviderError> {
         let started = Instant::now();
+        let use_responses_api = self.cfg.api_format == OpenAiApiFormat::Responses;
         let url = format!(
-            "{}/chat/completions",
-            self.cfg.endpoint.trim_end_matches('/')
+            "{}/{}",
+            self.cfg.endpoint.trim_end_matches('/'),
+            self.cfg.api_format.endpoint_path()
         );
-        let body = self.request_body(task, observation, history)?;
+        let body = if use_responses_api {
+            self.responses_request_body(task, observation, history)?
+        } else {
+            self.request_body(task, observation, history)?
+        };
         let mut request = self
             .client
             .post(url)
@@ -228,11 +368,19 @@ impl BrainProvider for OpenAiCompatibleProvider {
             .json()
             .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
-        self.parse_response(
-            body,
-            &observation.display,
-            started.elapsed().as_millis() as u64,
-        )
+        if use_responses_api {
+            self.parse_responses_response(
+                body,
+                &observation.display,
+                started.elapsed().as_millis() as u64,
+            )
+        } else {
+            self.parse_response(
+                body,
+                &observation.display,
+                started.elapsed().as_millis() as u64,
+            )
+        }
     }
 }
 
@@ -545,6 +693,73 @@ fn tool_schema() -> Value {
     ])
 }
 
+fn responses_tool_schema() -> Value {
+    json!([
+        responses_function_schema(
+            "click",
+            json!({
+                "type":"object",
+                "properties":{
+                    "x":{"type":"number"},"y":{"type":"number"},
+                    "button":{"type":"string","enum":["left","middle","right"]},
+                    "click_count":{"type":"integer","minimum":1,"maximum":3},
+                    "label":{"type":"string"}
+                },
+                "required":["x","y"]
+            })
+        ),
+        responses_function_schema(
+            "move",
+            json!({
+                "type":"object",
+                "properties":{"x":{"type":"number"},"y":{"type":"number"},"label":{"type":"string"}},
+                "required":["x","y"]
+            })
+        ),
+        responses_function_schema(
+            "scroll",
+            json!({
+                "type":"object",
+                "properties":{"x":{"type":"number"},"y":{"type":"number"},"dx":{"type":"integer"},"dy":{"type":"integer"},"label":{"type":"string"}},
+                "required":["dy"]
+            })
+        ),
+        responses_function_schema(
+            "type",
+            json!({
+                "type":"object",
+                "properties":{"text":{"type":"string"},"press_enter":{"type":"boolean"}},
+                "required":["text"]
+            })
+        ),
+        responses_function_schema(
+            "key",
+            json!({
+                "type":"object",
+                "properties":{"combo":{"type":"string"}},
+                "required":["combo"]
+            })
+        ),
+        responses_function_schema(
+            "wait",
+            json!({
+                "type":"object",
+                "properties":{"ms":{"type":"integer","minimum":0}},
+                "required":["ms"]
+            })
+        ),
+        responses_function_schema("screenshot", json!({"type":"object","properties":{}})),
+        responses_function_schema(
+            "done",
+            json!({
+                "type":"object",
+                "properties":{"success":{"type":"boolean"},"reason":{"type":"string"}},
+                "required":["success"]
+            })
+        )
+    ])
+}
+
 fn function_schema(name: &str, parameters: Value) -> Value {
     json!({
         "type": "function",
@@ -553,6 +768,15 @@ fn function_schema(name: &str, parameters: Value) -> Value {
             "description": format!("iVnc computer action: {}", name),
             "parameters": parameters
         }
+    })
+}
+
+fn responses_function_schema(name: &str, parameters: Value) -> Value {
+    json!({
+        "type": "function",
+        "name": name,
+        "description": format!("iVnc computer action: {}", name),
+        "parameters": parameters
     })
 }
 
@@ -611,5 +835,62 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(action, Action::MouseMove { x: 480, y: 270, .. }));
+    }
+
+    #[test]
+    fn api_format_is_explicit_config_not_model_name() {
+        assert_eq!(
+            OpenAiApiFormat::from_config(Some("responses")),
+            OpenAiApiFormat::Responses
+        );
+        assert_eq!(
+            OpenAiApiFormat::from_config(Some("openai_responses")),
+            OpenAiApiFormat::Responses
+        );
+        assert_eq!(
+            OpenAiApiFormat::from_config(Some("chat")),
+            OpenAiApiFormat::ChatCompletions
+        );
+        assert_eq!(OpenAiApiFormat::from_config(None), OpenAiApiFormat::ChatCompletions);
+    }
+
+    #[test]
+    fn parses_responses_function_call() {
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatConfig {
+            provider_name: "test",
+            endpoint: "https://example.com/v1".to_string(),
+            model: "future-model".to_string(),
+            api_format: OpenAiApiFormat::Responses,
+            api_key: None,
+            api_key_env: None,
+            coordinate_space: CoordinateSpace::ImagePixels,
+            system_prompt: default_system_prompt(),
+        });
+        let turn = provider
+            .parse_responses_response(
+                json!({
+                    "id": "resp_1",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "name": "done",
+                            "arguments": "{\"success\":true,\"reason\":\"visible\"}"
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2
+                    }
+                }),
+                &display(),
+                123,
+            )
+            .unwrap();
+        assert_eq!(turn.provider_response_id.as_deref(), Some("resp_1"));
+        assert_eq!(turn.usage.as_ref().unwrap().input_tokens, 10);
+        assert!(matches!(
+            turn.actions.first(),
+            Some(Action::Done { success: true, .. })
+        ));
     }
 }

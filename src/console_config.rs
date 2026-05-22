@@ -37,6 +37,8 @@ pub struct ProviderConsoleConfig {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub api_format: Option<String>,
+    #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
     pub coord_space: Option<String>,
