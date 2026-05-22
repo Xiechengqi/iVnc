@@ -10,6 +10,10 @@
 
 use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::shared::SharedState;
+#[cfg(feature = "agent")]
+use axum::extract::Path;
+#[cfg(feature = "agent")]
+use axum::routing::put;
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::ws::{Message as AxumWsMessage, WebSocket as AxumWebSocket},
@@ -139,6 +143,27 @@ pub async fn run_http_server_with_webrtc(
         .route("/proxy/{*path}", any(proxy_panel_handler))
         .route("/proxy-ws/{*path}", get(proxy_panel_ws_handler))
         .route("/terminal/ws", get(terminal_ws_handler));
+
+    #[cfg(feature = "agent")]
+    {
+        app = app
+            .route("/api/console/overview", get(console_overview_handler))
+            .route(
+                "/api/console/settings",
+                get(console_settings_get_handler).put(console_settings_put_handler),
+            )
+            .route(
+                "/api/console/agent-config",
+                get(console_agent_get_handler).put(console_agent_put_handler),
+            )
+            .route("/api/console/agent-stop", post(console_agent_stop_handler))
+            .route("/api/console/providers", get(console_providers_get_handler))
+            .route(
+                "/api/console/providers/{name}",
+                put(console_provider_put_handler),
+            )
+            .route("/api/console/agent-runs", get(console_agent_runs_handler));
+    }
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(ref manager) = session_manager {
@@ -801,12 +826,264 @@ async fn console_handler(State(_state): State<Arc<SharedState>>) -> Response {
     }
 }
 
+#[cfg(feature = "agent")]
+async fn console_overview_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let (screen_width, screen_height) = state.display_size();
+    let stats = state.stats.lock().unwrap().clone();
+    let running_run_id = state.agent_runs.running_run_id();
+    json_response(
+        StatusCode::OK,
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "build": {
+                "commit": option_env!("IVNC_BUILD_GIT_COMMIT").unwrap_or("unknown"),
+                "message": option_env!("IVNC_BUILD_GIT_MESSAGE").unwrap_or("unknown"),
+                "features": {
+                    "mcp": cfg!(feature = "mcp"),
+                    "agent": cfg!(feature = "agent"),
+                    "agent_all": cfg!(feature = "agent-all"),
+                }
+            },
+            "endpoints": {
+                "mcp": "/mcp",
+                "console": "/console",
+                "desktop": "/",
+            },
+            "display": {
+                "width": screen_width,
+                "height": screen_height,
+                "configured_width": state.config.display.width,
+                "configured_height": state.config.display.height,
+                "refresh_rate": state.config.display.refresh_rate,
+            },
+            "runtime": {
+                "fps": stats.fps,
+                "bandwidth_bps": stats.bandwidth,
+                "cpu_percent": stats.cpu_percent,
+                "mem_bytes": stats.mem_used,
+                "target_fps": state.runtime_settings.target_fps(),
+                "video_bitrate_kbps": state.runtime_settings.video_bitrate_kbps(),
+                "audio_bitrate": state.runtime_settings.audio_bitrate(),
+                "keyframe_interval": state.runtime_settings.keyframe_interval(),
+            },
+            "connections": {
+                "webrtc_sessions": state.webrtc_sessions(),
+            },
+            "agent": {
+                "exclusive": state.agent_exclusive(),
+                "stop_requested": state.agent_stop_requested(),
+                "running_run_id": running_run_id,
+            },
+            "providers": crate::agent::registry::provider_infos(),
+            "config_path": crate::console_config::config_path(),
+        }),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_settings_get_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let saved = crate::console_config::load().runtime;
+    json_response(
+        StatusCode::OK,
+        json!({
+            "saved": saved,
+            "current": {
+                "target_fps": state.runtime_settings.target_fps(),
+                "video_bitrate_kbps": state.runtime_settings.video_bitrate_kbps(),
+                "audio_bitrate": state.runtime_settings.audio_bitrate(),
+                "keyframe_interval": state.runtime_settings.keyframe_interval(),
+                "binary_clipboard_enabled": state.runtime_settings.binary_clipboard_enabled(),
+            },
+            "restart_required_fields": [
+                "http.host",
+                "http.port",
+                "display.width",
+                "display.height",
+                "tls",
+                "web_root",
+                "features"
+            ]
+        }),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_settings_put_handler(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Json(body): axum::extract::Json<crate::console_config::RuntimeConsoleConfig>,
+) -> Response {
+    if let Some(fps) = body.target_fps {
+        state.runtime_settings.set_target_fps(fps);
+    }
+    if let Some(bitrate) = body.video_bitrate_kbps {
+        state.runtime_settings.set_video_bitrate_kbps(bitrate);
+    }
+    if let Some(bitrate) = body.audio_bitrate {
+        state.runtime_settings.set_audio_bitrate(bitrate);
+    }
+    if let Some(interval) = body.keyframe_interval {
+        state.runtime_settings.set_keyframe_interval(interval);
+    }
+    if let Some(enabled) = body.binary_clipboard_enabled {
+        state
+            .runtime_settings
+            .apply_settings_json(&json!({"enable_binary_clipboard": enabled}).to_string());
+    }
+
+    let mut config = crate::console_config::load();
+    config.runtime = body;
+    match crate::console_config::save(&config) {
+        Ok(()) => json_response(StatusCode::OK, json!({"ok": true, "applied": "runtime"})),
+        Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": err})),
+    }
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_get_handler() -> Response {
+    json_response(
+        StatusCode::OK,
+        json!(crate::console_config::agent_defaults()),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_put_handler(
+    axum::extract::Json(body): axum::extract::Json<crate::console_config::AgentConsoleConfig>,
+) -> Response {
+    if body.default_provider.trim().is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "default_provider is required"}),
+        );
+    }
+    if body.options.budget.max_steps == 0 || body.options.max_actions_per_step == 0 {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "max_steps and max_actions_per_step must be greater than 0"}),
+        );
+    }
+    let mut config = crate::console_config::load();
+    config.agent = body;
+    match crate::console_config::save(&config) {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            json!({"ok": true, "applies": "next_agent_run"}),
+        ),
+        Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": err})),
+    }
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_stop_handler(State(state): State<Arc<SharedState>>) -> Response {
+    state.request_agent_stop();
+    state.agent_runs.mark_interrupted(None);
+    json_response(StatusCode::OK, json!({"ok": true}))
+}
+
+#[cfg(feature = "agent")]
+async fn console_providers_get_handler() -> Response {
+    let saved = crate::console_config::load();
+    let providers: Vec<_> = crate::agent::registry::provider_presets()
+        .into_iter()
+        .map(|preset| {
+            let cfg = saved.providers.get(preset.name).cloned().unwrap_or_default();
+            json!({
+                "name": preset.name,
+                "default_model": preset.default_model,
+                "default_endpoint": preset.default_endpoint,
+                "api_key_env": preset.api_key_env,
+                "configured": crate::agent::registry::provider_infos().iter().any(|p| p.name == preset.name),
+                "capabilities": preset.capabilities,
+                "settings": {
+                    "endpoint": cfg.endpoint,
+                    "model": cfg.model,
+                    "api_key_configured": cfg.api_key.as_ref().is_some_and(|v| !v.is_empty())
+                        || preset.api_key_env.is_some_and(|env| std::env::var_os(env).is_some()),
+                    "coord_space": cfg.coord_space,
+                    "system_prompt": cfg.system_prompt,
+                }
+            })
+        })
+        .collect();
+    json_response(StatusCode::OK, json!({ "providers": providers }))
+}
+
+#[cfg(feature = "agent")]
+#[derive(Debug, Deserialize)]
+struct ProviderConsoleUpdate {
+    endpoint: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    clear_api_key: Option<bool>,
+    coord_space: Option<String>,
+    system_prompt: Option<String>,
+}
+
+#[cfg(feature = "agent")]
+async fn console_provider_put_handler(
+    Path(name): Path<String>,
+    axum::extract::Json(body): axum::extract::Json<ProviderConsoleUpdate>,
+) -> Response {
+    let known = crate::agent::registry::provider_presets()
+        .into_iter()
+        .any(|preset| preset.name == name);
+    if !known {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "unknown provider"}));
+    }
+
+    let mut config = crate::console_config::load();
+    let entry = config.providers.entry(name).or_default();
+    entry.endpoint = clean_optional(body.endpoint);
+    entry.model = clean_optional(body.model);
+    entry.coord_space = clean_optional(body.coord_space);
+    entry.system_prompt = clean_optional(body.system_prompt);
+    if body.clear_api_key.unwrap_or(false) {
+        entry.api_key = None;
+    } else if let Some(api_key) = clean_optional(body.api_key) {
+        if api_key != "********" {
+            entry.api_key = Some(api_key);
+        }
+    }
+
+    match crate::console_config::save(&config) {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            json!({"ok": true, "applies": "next_agent_run"}),
+        ),
+        Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": err})),
+    }
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_runs_handler(State(state): State<Arc<SharedState>>) -> Response {
+    json_response(StatusCode::OK, json!({ "runs": state.agent_runs.list() }))
+}
+
 fn proxy_json_response(status: StatusCode, body: serde_json::Value) -> Response {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
 }
 
 async fn proxy_status_handler(State(state): State<Arc<SharedState>>) -> Response {

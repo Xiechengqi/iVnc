@@ -38,6 +38,16 @@ impl RuntimeSettings {
         self.video_bitrate_kbps.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
+    pub fn target_fps(&self) -> u32 {
+        self.target_fps.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)]
+    pub fn audio_bitrate(&self) -> u32 {
+        self.audio_bitrate.load(Ordering::Relaxed)
+    }
+
     pub fn keyframe_interval(&self) -> u32 {
         self.keyframe_interval.load(Ordering::Relaxed)
     }

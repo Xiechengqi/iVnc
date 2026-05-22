@@ -2,12 +2,16 @@
 //!
 //! Wayland compositor + WebRTC streaming using smithay and GStreamer.
 
+#[cfg(feature = "agent")]
+mod agent;
 mod apps;
 mod args;
 mod audio;
 mod clipboard;
 mod compositor;
 mod config;
+#[cfg(feature = "agent")]
+mod console_config;
 mod file_upload;
 mod gstreamer;
 mod input;

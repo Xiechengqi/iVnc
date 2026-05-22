@@ -1859,6 +1859,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 name = "ivnc"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "bitflags 2.11.0",
@@ -1893,11 +1894,13 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "smithay",
  "str0m",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
+ "tokio-util",
  "toml",
  "tower 0.4.13",
  "tower-http 0.5.2",

@@ -7,30 +7,148 @@
     <link rel="stylesheet" href="./console.css">
 </head>
 <body>
-    <div class="page-header">
-        <h1 id="page-title">VNC 应用控制台</h1>
-        <div class="toolbar">
-            <button class="lang-toggle" id="lang-toggle" type="button">English</button>
-            <button class="btn btn-add" id="add-app-btn">+ 添加应用</button>
-        </div>
-    </div>
-    
-    <div class="card">
-        <table>
-            <thead>
-                <tr>
-                    <th id="th-name">名称</th>
-                    <th id="th-type">类型</th>
-                    <th id="th-config">配置</th>
-                    <th id="th-status">状态</th>
-                    <th id="th-data">数据</th>
-                    <th id="th-actions">操作</th>
-                </tr>
-            </thead>
-            <tbody id="app-list">
-                <tr><td colspan="6" class="empty" id="loading-text">加载中...</td></tr>
-            </tbody>
-        </table>
+    <div class="console-shell">
+        <aside class="console-sidebar">
+            <div class="brand-block">
+                <div class="brand-title" id="page-title">iVnc Console</div>
+                <div class="brand-subtitle" id="console-subtitle">管理应用、运行参数和 Agent</div>
+            </div>
+            <nav class="nav-list" aria-label="Console sections">
+                <button class="nav-item active" data-section="overview" id="nav-overview" type="button">概览</button>
+                <button class="nav-item" data-section="apps" id="nav-apps" type="button">应用</button>
+                <button class="nav-item" data-section="settings" id="nav-settings" type="button">iVnc 设置</button>
+                <button class="nav-item" data-section="agent" id="nav-agent" type="button">MCP / Agent</button>
+                <button class="nav-item" data-section="providers" id="nav-providers" type="button">Provider</button>
+                <button class="nav-item" data-section="runs" id="nav-runs" type="button">日志 / 轨迹</button>
+            </nav>
+        </aside>
+
+        <main class="console-main">
+            <div class="page-header">
+                <div>
+                    <h1 id="section-title">概览</h1>
+                    <p class="section-description" id="section-description">当前 iVnc 运行状态和快捷入口。</p>
+                </div>
+                <div class="toolbar">
+                    <button class="lang-toggle" id="lang-toggle" type="button">English</button>
+                    <button class="btn btn-add section-app-only" id="add-app-btn">+ 添加应用</button>
+                </div>
+            </div>
+
+            <section class="section active" id="section-overview">
+                <div class="summary-grid" id="overview-grid"></div>
+                <div class="two-column">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 id="overview-providers-title">Provider 状态</h2>
+                        </div>
+                        <div class="compact-list" id="overview-providers"></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 id="overview-agent-title">Agent 状态</h2>
+                            <button class="btn btn-stop btn-sm" id="overview-agent-stop" type="button">停止 Agent</button>
+                        </div>
+                        <pre class="json-box" id="overview-agent-json">{}</pre>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section" id="section-apps">
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th id="th-name">名称</th>
+                                <th id="th-type">类型</th>
+                                <th id="th-config">配置</th>
+                                <th id="th-status">状态</th>
+                                <th id="th-data">数据</th>
+                                <th id="th-actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="app-list">
+                            <tr><td colspan="6" class="empty" id="loading-text">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="section" id="section-settings">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 id="settings-runtime-title">运行时设置</h2>
+                        <button class="btn btn-save" id="settings-save" type="button">保存并应用</button>
+                    </div>
+                    <div class="settings-grid">
+                        <label class="form-group"><span>Target FPS</span><input id="set-target-fps" type="number" min="1" max="240"></label>
+                        <label class="form-group"><span>Video bitrate (kbps)</span><input id="set-video-bitrate" type="number" min="1"></label>
+                        <label class="form-group"><span>Audio bitrate</span><input id="set-audio-bitrate" type="number" min="1"></label>
+                        <label class="form-group"><span>Keyframe interval</span><input id="set-keyframe-interval" type="number" min="1"></label>
+                        <label class="checkbox-row settings-checkbox"><input id="set-binary-clipboard" type="checkbox"><span>Binary clipboard</span></label>
+                    </div>
+                    <div class="hint-line" id="settings-hint">这些设置会立即应用并保存为下次启动的控制台默认值。</div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header"><h2 id="settings-restart-title">重启后生效参数</h2></div>
+                    <div class="readonly-grid" id="restart-fields"></div>
+                </div>
+            </section>
+
+            <section class="section" id="section-agent">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 id="agent-defaults-title">Agent 默认参数</h2>
+                        <button class="btn btn-save" id="agent-save" type="button">保存</button>
+                    </div>
+                    <div class="settings-grid">
+                        <label class="form-group"><span>Default provider</span><select id="agent-provider"></select></label>
+                        <label class="form-group"><span>Max steps</span><input id="agent-max-steps" type="number" min="1"></label>
+                        <label class="form-group"><span>Max wall seconds</span><input id="agent-max-wall" type="number" min="1"></label>
+                        <label class="form-group"><span>Max screenshots</span><input id="agent-max-screenshots" type="number" min="1"></label>
+                        <label class="form-group"><span>Screenshot max bytes</span><input id="agent-screenshot-bytes" type="number" min="10000"></label>
+                        <label class="form-group"><span>Action settle ms</span><input id="agent-settle-ms" type="number" min="0"></label>
+                        <label class="form-group"><span>Max actions / step</span><input id="agent-max-actions" type="number" min="1"></label>
+                        <label class="checkbox-row settings-checkbox"><input id="agent-record-trajectory" type="checkbox"><span>Record trajectory</span></label>
+                        <label class="checkbox-row settings-checkbox"><input id="agent-record-frames" type="checkbox"><span>Record frames to disk</span></label>
+                        <label class="checkbox-row settings-checkbox"><input id="agent-dry-run" type="checkbox"><span>Dry run</span></label>
+                        <label class="checkbox-row settings-checkbox"><input id="agent-allow-destructive" type="checkbox"><span>Allow destructive actions</span></label>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section" id="section-providers">
+                <div class="provider-layout">
+                    <div class="panel">
+                        <div class="panel-header"><h2 id="providers-title">Provider</h2></div>
+                        <div class="provider-list" id="provider-list"></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 id="provider-editor-title">Provider 配置</h2>
+                            <button class="btn btn-save" id="provider-save" type="button">保存</button>
+                        </div>
+                        <input type="hidden" id="provider-name">
+                        <div class="form-line"><label class="form-label">Endpoint</label><input id="provider-endpoint" type="text"></div>
+                        <div class="form-line"><label class="form-label">Model</label><input id="provider-model" type="text"></div>
+                        <div class="form-line"><label class="form-label">API Key</label><input id="provider-api-key" type="password" placeholder="保持为空表示不修改"></div>
+                        <label class="checkbox-row"><input id="provider-clear-key" type="checkbox"><span>清除已保存 API Key</span></label>
+                        <div class="form-line"><label class="form-label">Coordinate space</label><select id="provider-coord-space"><option value="">默认</option><option value="image">image</option><option value="screen">screen</option><option value="normalized">normalized</option></select></div>
+                        <div class="form-line"><label class="form-label">System prompt</label><textarea id="provider-system-prompt" rows="6"></textarea></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section" id="section-runs">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 id="runs-title">Agent runs</h2>
+                        <button class="btn btn-clear btn-sm" id="runs-refresh" type="button">刷新</button>
+                    </div>
+                    <div class="runs-list" id="runs-list"></div>
+                </div>
+            </section>
+        </main>
     </div>
 
     <!-- 模态框：添加/编辑 -->

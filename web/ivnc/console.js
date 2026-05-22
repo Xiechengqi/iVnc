@@ -1,13 +1,47 @@
 import { getLang, setLang, onLangChange } from './lib/i18n.js?v=1';
 
 const API = '/api/apps';
+const CONSOLE_API = '/api/console';
 let editId = null;
 let lastDataHash = '';
 let currentLang = getLang();
+let activeSection = 'overview';
+let overviewCache = null;
+let providersCache = [];
 
 const I18N = {
     en: {
         pageTitle: 'VNC App Console',
+        subtitle: 'Manage apps, runtime settings, and Agent',
+        navOverview: 'Overview',
+        navApps: 'Apps',
+        navSettings: 'iVnc Settings',
+        navAgent: 'MCP / Agent',
+        navProviders: 'Provider',
+        navRuns: 'Logs / Trajectories',
+        sectionOverviewDesc: 'Current iVnc status and quick checks.',
+        sectionAppsDesc: 'Manage desktop and background applications.',
+        sectionSettingsDesc: 'Runtime controls and restart-scoped settings.',
+        sectionAgentDesc: 'Default parameters for MCP Agent runs.',
+        sectionProvidersDesc: 'Provider endpoint, model, and credential settings.',
+        sectionRunsDesc: 'Recent Agent runs and trajectory paths.',
+        save: 'Save',
+        saveApply: 'Save & Apply',
+        refresh: 'Refresh',
+        stopAgent: 'Stop Agent',
+        providerStatus: 'Provider Status',
+        agentStatus: 'Agent Status',
+        runtimeSettings: 'Runtime Settings',
+        restartSettings: 'Restart Required',
+        agentDefaults: 'Agent Defaults',
+        providerConfig: 'Provider Config',
+        saved: 'Saved',
+        providerSaved: 'Provider saved',
+        settingsSaved: 'Settings applied',
+        agentSaved: 'Agent defaults saved',
+        noRuns: 'No Agent runs yet.',
+        configured: 'Configured',
+        missingConfig: 'Missing config',
         langToggle: '中文',
         addApp: '+ Add App',
         thName: 'Name',
@@ -93,6 +127,36 @@ const I18N = {
     },
     zh: {
         pageTitle: 'VNC 应用控制台',
+        subtitle: '管理应用、运行参数和 Agent',
+        navOverview: '概览',
+        navApps: '应用',
+        navSettings: 'iVnc 设置',
+        navAgent: 'MCP / Agent',
+        navProviders: 'Provider',
+        navRuns: '日志 / 轨迹',
+        sectionOverviewDesc: '当前 iVnc 运行状态和快捷入口。',
+        sectionAppsDesc: '管理桌面应用和后台应用。',
+        sectionSettingsDesc: '运行时控制和需要重启的参数。',
+        sectionAgentDesc: '配置 MCP Agent run 的默认参数。',
+        sectionProvidersDesc: '配置 Provider 的 endpoint、模型和凭据。',
+        sectionRunsDesc: '查看最近 Agent run 和轨迹路径。',
+        save: '保存',
+        saveApply: '保存并应用',
+        refresh: '刷新',
+        stopAgent: '停止 Agent',
+        providerStatus: 'Provider 状态',
+        agentStatus: 'Agent 状态',
+        runtimeSettings: '运行时设置',
+        restartSettings: '重启后生效参数',
+        agentDefaults: 'Agent 默认参数',
+        providerConfig: 'Provider 配置',
+        saved: '已保存',
+        providerSaved: 'Provider 已保存',
+        settingsSaved: '设置已应用',
+        agentSaved: 'Agent 默认参数已保存',
+        noRuns: '暂无 Agent run。',
+        configured: '已配置',
+        missingConfig: '未配置',
         langToggle: 'English',
         addApp: '+ 添加应用',
         thName: '名称',
@@ -205,6 +269,26 @@ function applyTranslations() {
     document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
     document.title = t('pageTitle');
     document.getElementById('page-title').textContent = t('pageTitle');
+    document.getElementById('console-subtitle').textContent = t('subtitle');
+    document.getElementById('nav-overview').textContent = t('navOverview');
+    document.getElementById('nav-apps').textContent = t('navApps');
+    document.getElementById('nav-settings').textContent = t('navSettings');
+    document.getElementById('nav-agent').textContent = t('navAgent');
+    document.getElementById('nav-providers').textContent = t('navProviders');
+    document.getElementById('nav-runs').textContent = t('navRuns');
+    document.getElementById('overview-providers-title').textContent = t('providerStatus');
+    document.getElementById('overview-agent-title').textContent = t('agentStatus');
+    document.getElementById('overview-agent-stop').textContent = t('stopAgent');
+    document.getElementById('settings-runtime-title').textContent = t('runtimeSettings');
+    document.getElementById('settings-save').textContent = t('saveApply');
+    document.getElementById('settings-restart-title').textContent = t('restartSettings');
+    document.getElementById('agent-defaults-title').textContent = t('agentDefaults');
+    document.getElementById('agent-save').textContent = t('save');
+    document.getElementById('providers-title').textContent = t('navProviders');
+    document.getElementById('provider-editor-title').textContent = t('providerConfig');
+    document.getElementById('provider-save').textContent = t('save');
+    document.getElementById('runs-title').textContent = t('navRuns');
+    document.getElementById('runs-refresh').textContent = t('refresh');
     document.getElementById('lang-toggle').textContent = t('langToggle');
     document.getElementById('add-app-btn').textContent = t('addApp');
     document.getElementById('th-name').textContent = t('thName');
@@ -254,6 +338,50 @@ function applyTranslations() {
     if (!logTitle.dataset.appName) {
         logTitle.textContent = t('logsTitle');
     }
+    updateSectionHeader();
+}
+
+function updateSectionHeader() {
+    const titleMap = {
+        overview: 'navOverview',
+        apps: 'navApps',
+        settings: 'navSettings',
+        agent: 'navAgent',
+        providers: 'navProviders',
+        runs: 'navRuns'
+    };
+    const descMap = {
+        overview: 'sectionOverviewDesc',
+        apps: 'sectionAppsDesc',
+        settings: 'sectionSettingsDesc',
+        agent: 'sectionAgentDesc',
+        providers: 'sectionProvidersDesc',
+        runs: 'sectionRunsDesc'
+    };
+    document.getElementById('section-title').textContent = t(titleMap[activeSection]);
+    document.getElementById('section-description').textContent = t(descMap[activeSection]);
+}
+
+function switchSection(section) {
+    activeSection = section;
+    document.body.dataset.section = section;
+    document.querySelectorAll('.nav-item').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.section === section);
+    });
+    document.querySelectorAll('.section').forEach(el => {
+        el.classList.toggle('active', el.id === `section-${section}`);
+    });
+    updateSectionHeader();
+    loadSection(section);
+}
+
+async function loadSection(section = activeSection) {
+    if (section === 'overview') await loadOverview();
+    if (section === 'apps') await load();
+    if (section === 'settings') await loadSettings();
+    if (section === 'agent') await loadAgentConfig();
+    if (section === 'providers') await loadProviders();
+    if (section === 'runs') await loadRuns();
 }
 
 async function load() {
@@ -329,6 +457,246 @@ async function load() {
     } catch (e) {
         console.error('Load failed:', e);
     }
+}
+
+async function loadOverview() {
+    try {
+        const d = await fetchJson(`${CONSOLE_API}/overview`);
+        overviewCache = d;
+        const grid = document.getElementById('overview-grid');
+        grid.innerHTML = '';
+        [
+            ['Version', d.version, d.build?.features?.agent_all ? 'mcp, agent-all' : ''],
+            ['Display', `${d.display.width}x${d.display.height}`, `${d.runtime.target_fps} FPS target`],
+            ['Sessions', d.connections.webrtc_sessions, 'WebRTC'],
+            ['Agent', d.agent.running_run_id || (d.agent.exclusive ? 'exclusive' : 'idle'), d.agent.stop_requested ? 'stop requested' : ''],
+        ].forEach(([label, value, help]) => {
+            const tile = document.createElement('div');
+            tile.className = 'summary-tile';
+            tile.innerHTML = `<div class="summary-label">${esc(label)}</div><div class="summary-value">${esc(value)}</div><div class="summary-help">${esc(help || '')}</div>`;
+            grid.appendChild(tile);
+        });
+        renderOverviewProviders(d.providers || []);
+        document.getElementById('overview-agent-json').textContent = JSON.stringify(d.agent, null, 2);
+    } catch (e) {
+        toast(t('fetchFailed') + e, 'err');
+    }
+}
+
+function renderOverviewProviders(providers) {
+    const box = document.getElementById('overview-providers');
+    box.innerHTML = '';
+    providers.forEach(p => {
+        const row = document.createElement('div');
+        row.className = 'list-row';
+        row.innerHTML = `<div><strong>${esc(p.name)}</strong><small>${esc(p.default_model || '')}</small></div><span class="${p.configured ? 'badge-ok' : 'badge-warn'}">${p.configured ? esc(t('configured')) : esc(t('missingConfig'))}</span>`;
+        box.appendChild(row);
+    });
+}
+
+async function loadSettings() {
+    try {
+        const d = await fetchJson(`${CONSOLE_API}/settings`);
+        const current = d.saved || d.current || {};
+        setValue('set-target-fps', current.target_fps ?? d.current?.target_fps ?? 60);
+        setValue('set-video-bitrate', current.video_bitrate_kbps ?? d.current?.video_bitrate_kbps ?? 8000);
+        setValue('set-audio-bitrate', current.audio_bitrate ?? d.current?.audio_bitrate ?? 128000);
+        setValue('set-keyframe-interval', current.keyframe_interval ?? d.current?.keyframe_interval ?? 60);
+        document.getElementById('set-binary-clipboard').checked = !!(current.binary_clipboard_enabled ?? d.current?.binary_clipboard_enabled);
+        const restart = document.getElementById('restart-fields');
+        restart.innerHTML = '';
+        (d.restart_required_fields || []).forEach(name => {
+            const item = document.createElement('div');
+            item.className = 'readonly-item';
+            item.textContent = name;
+            restart.appendChild(item);
+        });
+    } catch (e) {
+        toast(t('fetchFailed') + e, 'err');
+    }
+}
+
+async function saveSettings() {
+    const body = {
+        target_fps: numberValue('set-target-fps'),
+        video_bitrate_kbps: numberValue('set-video-bitrate'),
+        audio_bitrate: numberValue('set-audio-bitrate'),
+        keyframe_interval: numberValue('set-keyframe-interval'),
+        binary_clipboard_enabled: document.getElementById('set-binary-clipboard').checked
+    };
+    await putJson(`${CONSOLE_API}/settings`, body);
+    toast(t('settingsSaved'), 'ok');
+    loadOverview();
+}
+
+async function loadAgentConfig() {
+    try {
+        const [cfg, providers] = await Promise.all([
+            fetchJson(`${CONSOLE_API}/agent-config`),
+            fetchJson(`${CONSOLE_API}/providers`)
+        ]);
+        providersCache = providers.providers || [];
+        const select = document.getElementById('agent-provider');
+        select.innerHTML = providersCache.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+        select.value = cfg.default_provider || 'local';
+        const opt = cfg.options || {};
+        const budget = opt.budget || {};
+        setValue('agent-max-steps', budget.max_steps ?? 50);
+        setValue('agent-max-wall', budget.max_wall_seconds ?? 300);
+        setValue('agent-max-screenshots', budget.max_screenshots ?? 60);
+        setValue('agent-screenshot-bytes', opt.screenshot_max_bytes ?? 800000);
+        setValue('agent-settle-ms', opt.action_settle_ms ?? 250);
+        setValue('agent-max-actions', opt.max_actions_per_step ?? 30);
+        document.getElementById('agent-record-trajectory').checked = opt.record_trajectory !== false;
+        document.getElementById('agent-record-frames').checked = !!opt.record_frames_to_disk;
+        document.getElementById('agent-dry-run').checked = !!opt.dry_run;
+        document.getElementById('agent-allow-destructive').checked = !!opt.allow_destructive;
+    } catch (e) {
+        toast(t('fetchFailed') + e, 'err');
+    }
+}
+
+async function saveAgentConfig() {
+    const body = {
+        default_provider: document.getElementById('agent-provider').value,
+        options: {
+            budget: {
+                max_steps: numberValue('agent-max-steps'),
+                max_input_tokens: 200000,
+                max_output_tokens: 20000,
+                max_wall_seconds: numberValue('agent-max-wall'),
+                max_screenshots: numberValue('agent-max-screenshots')
+            },
+            action_settle_ms: numberValue('agent-settle-ms'),
+            max_actions_per_step: numberValue('agent-max-actions'),
+            max_history_images: 3,
+            allow_destructive: document.getElementById('agent-allow-destructive').checked,
+            require_confirmation_for: [],
+            screenshot_format: 'Jpeg',
+            screenshot_max_bytes: numberValue('agent-screenshot-bytes'),
+            record_trajectory: document.getElementById('agent-record-trajectory').checked,
+            record_frames_to_disk: document.getElementById('agent-record-frames').checked,
+            dry_run: document.getElementById('agent-dry-run').checked
+        }
+    };
+    await putJson(`${CONSOLE_API}/agent-config`, body);
+    toast(t('agentSaved'), 'ok');
+}
+
+async function loadProviders() {
+    try {
+        const d = await fetchJson(`${CONSOLE_API}/providers`);
+        providersCache = d.providers || [];
+        renderProviders();
+        if (providersCache.length && !document.getElementById('provider-name').value) {
+            selectProvider(providersCache[0].name);
+        }
+    } catch (e) {
+        toast(t('fetchFailed') + e, 'err');
+    }
+}
+
+function renderProviders() {
+    const list = document.getElementById('provider-list');
+    const selected = document.getElementById('provider-name').value;
+    list.innerHTML = '';
+    providersCache.forEach(p => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'list-row provider-row' + (p.name === selected ? ' active' : '');
+        row.innerHTML = `<div><strong>${esc(p.name)}</strong><small>${esc(p.settings?.model || p.default_model || '')}</small></div><span class="${p.configured ? 'badge-ok' : 'badge-warn'}">${p.configured ? esc(t('configured')) : esc(t('missingConfig'))}</span>`;
+        row.addEventListener('click', () => selectProvider(p.name));
+        list.appendChild(row);
+    });
+}
+
+function selectProvider(name) {
+    const p = providersCache.find(item => item.name === name);
+    if (!p) return;
+    document.getElementById('provider-name').value = p.name;
+    document.getElementById('provider-endpoint').value = p.settings?.endpoint || p.default_endpoint || '';
+    document.getElementById('provider-model').value = p.settings?.model || p.default_model || '';
+    document.getElementById('provider-api-key').value = '';
+    document.getElementById('provider-api-key').placeholder = p.settings?.api_key_configured ? '********' : '保持为空表示不修改';
+    document.getElementById('provider-clear-key').checked = false;
+    document.getElementById('provider-coord-space').value = p.settings?.coord_space || '';
+    document.getElementById('provider-system-prompt').value = p.settings?.system_prompt || '';
+    renderProviders();
+}
+
+async function saveProvider() {
+    const name = document.getElementById('provider-name').value;
+    if (!name) return;
+    const body = {
+        endpoint: document.getElementById('provider-endpoint').value.trim(),
+        model: document.getElementById('provider-model').value.trim(),
+        api_key: document.getElementById('provider-api-key').value.trim(),
+        clear_api_key: document.getElementById('provider-clear-key').checked,
+        coord_space: document.getElementById('provider-coord-space').value,
+        system_prompt: document.getElementById('provider-system-prompt').value.trim()
+    };
+    await putJson(`${CONSOLE_API}/providers/${encodeURIComponent(name)}`, body);
+    toast(t('providerSaved'), 'ok');
+    document.getElementById('provider-name').value = name;
+    await loadProviders();
+    selectProvider(name);
+}
+
+async function loadRuns() {
+    try {
+        const d = await fetchJson(`${CONSOLE_API}/agent-runs`);
+        const list = document.getElementById('runs-list');
+        list.innerHTML = '';
+        if (!d.runs || !d.runs.length) {
+            list.innerHTML = `<div class="empty">${esc(t('noRuns'))}</div>`;
+            return;
+        }
+        d.runs.forEach(run => {
+            const row = document.createElement('div');
+            row.className = 'list-row';
+            row.innerHTML = `<div><strong>${esc(run.run_id)}</strong><small>${esc(run.task || '')}</small><small>${esc(run.trajectory_path || '')}</small></div><span class="badge-ok">${esc(run.finish_reason?.kind || 'running')}</span>`;
+            list.appendChild(row);
+        });
+    } catch (e) {
+        toast(t('fetchFailed') + e, 'err');
+    }
+}
+
+async function stopAgent() {
+    try {
+        await fetchJson(`${CONSOLE_API}/agent-stop`, { method: 'POST' });
+        toast(t('stopAgent'), 'ok');
+        loadOverview();
+    } catch (e) {
+        toast(t('actionFailed') + e, 'err');
+    }
+}
+
+async function fetchJson(url, options = {}) {
+    const r = await fetch(url, { cache: 'no-store', ...options });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    return d;
+}
+
+async function putJson(url, body) {
+    const r = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    return d;
+}
+
+function setValue(id, value) {
+    document.getElementById(id).value = value ?? '';
+}
+
+function numberValue(id) {
+    const value = Number(document.getElementById(id).value);
+    return Number.isFinite(value) ? value : 0;
 }
 
 function createBtn(text, cls, onClick) {
@@ -622,6 +990,10 @@ function updateAppTypeVisibility() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    document.body.dataset.section = activeSection;
+    document.querySelectorAll('.nav-item').forEach(btn => {
+        btn.addEventListener('click', () => switchSection(btn.dataset.section));
+    });
     document.getElementById('add-app-btn').addEventListener('click', showAdd);
     document.getElementById('lang-toggle').addEventListener('click', () => {
         setLang(currentLang === 'en' ? 'zh' : 'en');
@@ -630,7 +1002,7 @@ document.addEventListener('DOMContentLoaded', () => {
         currentLang = lang;
         lastDataHash = '';
         applyTranslations();
-        load();
+        loadSection();
     });
     document.getElementById('f-app-type').addEventListener('change', updateAppTypeVisibility);
     document.getElementById('modal-close').addEventListener('click', hideModal);
@@ -643,8 +1015,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('modal-save').addEventListener('click', saveApp);
+    document.getElementById('settings-save').addEventListener('click', () => saveSettings().catch(e => toast(t('actionFailed') + e, 'err')));
+    document.getElementById('agent-save').addEventListener('click', () => saveAgentConfig().catch(e => toast(t('actionFailed') + e, 'err')));
+    document.getElementById('provider-save').addEventListener('click', () => saveProvider().catch(e => toast(t('actionFailed') + e, 'err')));
+    document.getElementById('runs-refresh').addEventListener('click', loadRuns);
+    document.getElementById('overview-agent-stop').addEventListener('click', stopAgent);
 
     applyTranslations();
-    load();
-    setInterval(load, 5000);
+    loadSection();
+    setInterval(() => {
+        if (activeSection === 'apps') load();
+        if (activeSection === 'overview') loadOverview();
+    }, 5000);
 });

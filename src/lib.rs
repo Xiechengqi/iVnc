@@ -2,11 +2,15 @@
 //!
 //! A high-performance WebRTC streaming solution using smithay Wayland compositor and GStreamer.
 
+#[cfg(feature = "agent")]
+pub mod agent;
 pub mod apps;
 pub mod audio;
 pub mod clipboard;
 pub mod compositor;
 pub mod config;
+#[cfg(feature = "agent")]
+pub mod console_config;
 pub mod file_upload;
 pub mod gstreamer;
 pub mod input;

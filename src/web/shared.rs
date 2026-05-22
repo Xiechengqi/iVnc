@@ -14,10 +14,14 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
+#[cfg(feature = "agent")]
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+#[cfg(feature = "agent")]
+use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh64::xxh64;
 
 /// Connection information for a WebRTC session
@@ -64,6 +68,17 @@ pub struct SharedState {
     /// Input event sender
     pub input_sender: mpsc::UnboundedSender<InputEventData>,
 
+    /// Agent input ownership guard: 0 = shared, 1 = MCP/agent exclusive.
+    #[cfg(feature = "agent")]
+    pub agent_control: Arc<AtomicU8>,
+
+    /// Cooperative cancellation for in-process agent runs.
+    #[cfg(feature = "agent")]
+    pub agent_cancel: Arc<Mutex<CancellationToken>>,
+
+    #[cfg(feature = "agent")]
+    pub agent_runs: crate::agent::run_store::RunStore,
+
     /// Display dimensions
     pub display_size: Arc<Mutex<(u32, u32)>>,
 
@@ -105,6 +120,7 @@ pub struct SharedState {
     pub last_clipboard_write_hash: Arc<Mutex<Option<u64>>>,
 
     /// Flag: browser sent new clipboard content, compositor should pick it up
+    #[allow(dead_code)]
     pub clipboard_incoming_dirty: Arc<AtomicBool>,
 
     /// Channel for browser→compositor clipboard content (replaces dirty flag for new data)
@@ -172,6 +188,12 @@ impl SharedState {
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
             input_sender,
+            #[cfg(feature = "agent")]
+            agent_control: Arc::new(AtomicU8::new(0)),
+            #[cfg(feature = "agent")]
+            agent_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            #[cfg(feature = "agent")]
+            agent_runs: crate::agent::run_store::RunStore::default(),
             display_size,
             clipboard: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
@@ -242,6 +264,54 @@ impl SharedState {
             Err(err) => warn!("Failed to launch command '{}': {}", cmd, err),
         }
         true
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn request_agent_stop(&self) {
+        self.agent_cancel.lock().unwrap().cancel();
+        self.agent_control.store(0, Ordering::SeqCst);
+        self.send_text("mcp_control,{\"active\":false,\"reason\":\"user_interrupt\"}".to_string());
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn reset_agent_stop(&self) {
+        let mut token = self.agent_cancel.lock().unwrap();
+        if token.is_cancelled() {
+            *token = CancellationToken::new();
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn agent_stop_requested(&self) -> bool {
+        self.agent_cancel.lock().unwrap().is_cancelled()
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn agent_cancel_token(&self) -> CancellationToken {
+        self.agent_cancel.lock().unwrap().clone()
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn set_agent_exclusive(&self, active: bool, reason: &str) {
+        self.agent_control
+            .store(if active { 1 } else { 0 }, Ordering::SeqCst);
+        self.send_text(format!(
+            "mcp_control,{{\"active\":{},\"reason\":\"{}\"}}",
+            active, reason
+        ));
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn agent_exclusive(&self) -> bool {
+        self.agent_control.load(Ordering::SeqCst) == 1
+    }
+
+    #[cfg(feature = "agent")]
+    pub fn clipboard_preview(&self, max_chars: usize) -> Option<String> {
+        let b64 = self.clipboard.lock().unwrap().clone()?;
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+        let text = String::from_utf8_lossy(&decoded);
+        Some(text.chars().take(max_chars).collect())
     }
 
     /// Send a text message to all sessions.

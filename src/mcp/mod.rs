@@ -4,12 +4,17 @@
 //! window management) via the MCP protocol over stdio or Streamable HTTP.
 
 pub mod frame_capture;
+pub mod input_exec;
 pub mod keyboard;
 pub mod tools;
 
-use crate::input::{InputEvent, InputEventData};
 use crate::web::SharedState;
 use base64::Engine;
+use input_exec::{
+    guard_mcp_action_allowed, key_chord, mouse_click as exec_mouse_click,
+    mouse_move as exec_mouse_move, mouse_scroll as exec_mouse_scroll, type_text, validate_coords,
+    window_close as exec_window_close, window_focus as exec_window_focus, McpActionKind,
+};
 use rmcp::{
     handler::server::tool::ToolCallContext,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
@@ -31,67 +36,148 @@ impl McpServer {
     pub fn new(state: Arc<SharedState>) -> Self {
         Self {
             state,
-            tool_router: Self::tool_router(),
+            tool_router: Self::combined_tool_router(),
         }
     }
-}
 
-// Helper methods (not tools)
-impl McpServer {
-    fn validate_coords(&self, x: i32, y: i32) -> Result<(), McpError> {
-        let (w, h) = self.state.display_size();
-        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-            return Err(McpError::invalid_params(
-                format!("coordinates ({}, {}) out of bounds ({}x{})", x, y, w, h),
+    #[cfg(feature = "agent")]
+    async fn start_agent_run(
+        &self,
+        params: AgentStartParams,
+        wait: bool,
+    ) -> Result<crate::agent::types::RunReport, McpError> {
+        let mut options = crate::console_config::agent_defaults().options;
+        if let Some(explicit) = params.options {
+            options = explicit;
+        }
+        if let Some(budget) = params.budget {
+            options.budget = budget;
+        }
+        if let Some(active_run_id) = self.state.agent_runs.running_run_id() {
+            return Err(McpError::invalid_request(
+                format!("agent_run_already_active: {}", active_run_id),
                 None,
             ));
         }
-        Ok(())
-    }
-
-    fn send_key(&self, keysym: u32, pressed: bool) {
-        let _ = self.state.input_sender.send(InputEventData {
-            event_type: InputEvent::Keyboard,
-            keysym,
-            key_pressed: pressed,
-            ..Default::default()
-        });
-    }
-
-    async fn type_char(&self, c: char) {
-        let needs_shift = keyboard::char_needs_shift(c);
-        let base = if needs_shift {
-            keyboard::get_unshifted_char(c)
-        } else {
-            c
+        let run_id = format!("run_{}", uuid::Uuid::new_v4());
+        let replay_actions = match (params.replay_actions, params.replay_path) {
+            (Some(actions), _) => Some(actions),
+            (None, Some(path)) => Some(load_replay_actions(&path)?),
+            (None, None) => None,
         };
-        let sym = keyboard::char_to_keysym(base);
-        if needs_shift {
-            self.send_key(0xffe1, true);
-        }
-        self.send_key(sym, true);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        self.send_key(sym, false);
-        if needs_shift {
-            self.send_key(0xffe1, false);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    }
-
-    fn send_text_input(&self, text: &str) {
-        let _ = self.state.input_sender.send(InputEventData {
-            event_type: InputEvent::TextInput,
-            text: text.to_string(),
-            ..Default::default()
+        let provider =
+            crate::agent::registry::build_provider(&params.provider, params.model, replay_actions)
+                .ok_or_else(|| {
+                    McpError::invalid_params(
+                        format!(
+                            "provider '{}' is not available in this build",
+                            params.provider
+                        ),
+                        None,
+                    )
+                })?;
+        let state = self.state.clone();
+        let task = params.task.clone();
+        let run_id_for_task = run_id.clone();
+        let options_for_task = options.clone();
+        let initial = crate::agent::types::RunReport {
+            run_id: run_id.clone(),
+            task: params.task,
+            success: None,
+            finish_reason: crate::agent::types::FinishReason::Running,
+            steps_taken: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            wall_ms: 0,
+            trajectory_path: options
+                .record_trajectory
+                .then(|| crate::agent::trajectory::default_trajectory_path(&run_id)),
+            pending_question: None,
+            pending_safety_checks: Vec::new(),
+            last_action: None,
+            last_result: None,
+        };
+        self.state.agent_runs.insert(initial.clone());
+        let handle = tokio::spawn(async move {
+            let result = crate::agent::run_agent(
+                state.clone(),
+                provider,
+                task,
+                options_for_task,
+                run_id_for_task.clone(),
+            )
+            .await;
+            match result {
+                Ok(report) => report,
+                Err(crate::agent::r#loop::RunError::Interrupted(report))
+                | Err(crate::agent::r#loop::RunError::BudgetExceeded(report))
+                | Err(crate::agent::r#loop::RunError::MaxStepsReached(report)) => report,
+                Err(crate::agent::r#loop::RunError::Provider(err)) => {
+                    let mut report = state.agent_runs.get(&run_id_for_task).unwrap_or_else(|| {
+                        crate::agent::types::RunReport {
+                            run_id: run_id_for_task.clone(),
+                            task: String::new(),
+                            success: None,
+                            finish_reason: crate::agent::types::FinishReason::ProviderError,
+                            steps_taken: 0,
+                            tokens_in: 0,
+                            tokens_out: 0,
+                            wall_ms: 0,
+                            trajectory_path: None,
+                            pending_question: None,
+                            pending_safety_checks: Vec::new(),
+                            last_action: None,
+                            last_result: None,
+                        }
+                    });
+                    report.finish_reason = crate::agent::types::FinishReason::ProviderError;
+                    report.pending_question = Some(err.to_string());
+                    state.agent_runs.update(report.clone());
+                    report
+                }
+                Err(crate::agent::r#loop::RunError::Capture(err)) => {
+                    let mut report = state.agent_runs.get(&run_id_for_task).unwrap_or_else(|| {
+                        crate::agent::types::RunReport {
+                            run_id: run_id_for_task.clone(),
+                            task: String::new(),
+                            success: None,
+                            finish_reason: crate::agent::types::FinishReason::ProviderError,
+                            steps_taken: 0,
+                            tokens_in: 0,
+                            tokens_out: 0,
+                            wall_ms: 0,
+                            trajectory_path: None,
+                            pending_question: None,
+                            pending_safety_checks: Vec::new(),
+                            last_action: None,
+                            last_result: None,
+                        }
+                    });
+                    report.finish_reason = crate::agent::types::FinishReason::ProviderError;
+                    report.pending_question = Some(err);
+                    state.agent_runs.update(report.clone());
+                    report
+                }
+            }
         });
+        if wait {
+            handle
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        } else {
+            Ok(initial)
+        }
     }
 
-    fn text_is_ascii_typeable(text: &str) -> bool {
-        text.chars().all(|c| c.is_ascii() && !c.is_ascii_control())
+    fn combined_tool_router() -> ToolRouter<Self> {
+        let router = Self::base_tool_router();
+        #[cfg(feature = "agent")]
+        let router = router + Self::agent_tool_router();
+        router
     }
 }
 
-#[tool_router]
+#[tool_router(router = base_tool_router)]
 impl McpServer {
     #[tool(
         description = "Capture the current desktop as a JPEG image. Use delay_ms to wait for UI updates before capturing."
@@ -122,13 +208,9 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<MouseMoveParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.validate_coords(params.x, params.y)?;
-        let _ = self.state.input_sender.send(InputEventData {
-            event_type: InputEvent::MouseMove,
-            mouse_x: params.x,
-            mouse_y: params.y,
-            ..Default::default()
-        });
+        guard_mcp_action_allowed(&self.state, McpActionKind::Mouse)?;
+        validate_coords(&self.state, params.x, params.y)?;
+        exec_mouse_move(&self.state, params.x, params.y).await;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Moved to ({}, {})",
             params.x, params.y
@@ -142,50 +224,10 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<MouseClickParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.validate_coords(params.x, params.y)?;
-        // Move cursor to click position first — the compositor button handler
-        // uses the pointer's current location, not the event coordinates.
-        let _ = self.state.input_sender.send(InputEventData {
-            event_type: InputEvent::MouseMove,
-            mouse_x: params.x,
-            mouse_y: params.y,
-            ..Default::default()
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let button: u8 = match params.button.as_str() {
-            "left" => 0,
-            "middle" => 1,
-            "right" => 2,
-            other => {
-                return Err(McpError::invalid_params(
-                    format!("unknown button: {}", other),
-                    None,
-                ))
-            }
-        };
+        guard_mcp_action_allowed(&self.state, McpActionKind::Mouse)?;
+        validate_coords(&self.state, params.x, params.y)?;
         let clicks = if params.double { 2 } else { 1 };
-        for i in 0..clicks {
-            if i > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            let _ = self.state.input_sender.send(InputEventData {
-                event_type: InputEvent::MouseButton,
-                mouse_x: params.x,
-                mouse_y: params.y,
-                mouse_button: button,
-                button_pressed: true,
-                ..Default::default()
-            });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let _ = self.state.input_sender.send(InputEventData {
-                event_type: InputEvent::MouseButton,
-                mouse_x: params.x,
-                mouse_y: params.y,
-                mouse_button: button,
-                button_pressed: false,
-                ..Default::default()
-            });
-        }
+        exec_mouse_click(&self.state, params.x, params.y, &params.button, clicks).await?;
         let action = if params.double {
             "Double-clicked"
         } else {
@@ -202,12 +244,8 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<MouseScrollParams>,
     ) -> Result<CallToolResult, McpError> {
-        let _ = self.state.input_sender.send(InputEventData {
-            event_type: InputEvent::MouseWheel,
-            wheel_delta_x: params.dx,
-            wheel_delta_y: params.dy,
-            ..Default::default()
-        });
+        guard_mcp_action_allowed(&self.state, McpActionKind::Mouse)?;
+        exec_mouse_scroll(&self.state, params.dx, params.dy);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Scrolled dx={} dy={}",
             params.dx, params.dy
@@ -221,19 +259,8 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<KeyboardTypeParams>,
     ) -> Result<CallToolResult, McpError> {
-        if Self::text_is_ascii_typeable(&params.text) {
-            for c in params.text.chars() {
-                self.type_char(c).await;
-            }
-        } else {
-            self.send_text_input(&params.text);
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        if params.enter {
-            self.send_key(0xff0d, true);
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            self.send_key(0xff0d, false);
-        }
+        guard_mcp_action_allowed(&self.state, McpActionKind::Keyboard)?;
+        type_text(&self.state, &params.text, params.enter).await;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Typed {} chars{}",
             params.text.chars().count(),
@@ -250,17 +277,8 @@ impl McpServer {
     ) -> Result<CallToolResult, McpError> {
         let count = params.lines.len();
         for (i, line) in params.lines.iter().enumerate() {
-            if Self::text_is_ascii_typeable(line) {
-                for c in line.chars() {
-                    self.type_char(c).await;
-                }
-            } else {
-                self.send_text_input(line);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            self.send_key(0xff0d, true);
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            self.send_key(0xff0d, false);
+            guard_mcp_action_allowed(&self.state, McpActionKind::Keyboard)?;
+            type_text(&self.state, line, true).await;
             if i < count - 1 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
@@ -278,19 +296,8 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<KeyboardKeyParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (modifiers, main_sym) = keyboard::parse_key_combo(&params.key)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        for &m in &modifiers {
-            self.send_key(m, true);
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        self.send_key(main_sym, true);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        self.send_key(main_sym, false);
-        for &m in modifiers.iter().rev() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            self.send_key(m, false);
-        }
+        guard_mcp_action_allowed(&self.state, McpActionKind::Keyboard)?;
+        key_chord(&self.state, &params.key).await?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Pressed {}",
             params.key
@@ -319,6 +326,7 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<ClipboardWriteParams>,
     ) -> Result<CallToolResult, McpError> {
+        guard_mcp_action_allowed(&self.state, McpActionKind::ClipboardWrite)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(params.text.as_bytes());
         let _ = self.state.clipboard_incoming_tx.send(b64);
         self.state
@@ -365,11 +373,8 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<WindowIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let _ = self.state.input_sender.send(InputEventData {
-            event_type: InputEvent::WindowFocus,
-            window_id: params.window_id,
-            ..Default::default()
-        });
+        guard_mcp_action_allowed(&self.state, McpActionKind::WindowFocus)?;
+        exec_window_focus(&self.state, params.window_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Focused window {}",
             params.window_id
@@ -381,16 +386,164 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<WindowIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let _ = self.state.input_sender.send(InputEventData {
-            event_type: InputEvent::WindowClose,
-            window_id: params.window_id,
-            ..Default::default()
-        });
+        guard_mcp_action_allowed(&self.state, McpActionKind::WindowClose)?;
+        exec_window_close(&self.state, params.window_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Closed window {}",
             params.window_id
         ))]))
     }
+}
+
+#[cfg(feature = "agent")]
+#[tool_router(router = agent_tool_router)]
+impl McpServer {
+    #[tool(description = "Start an in-process VLM agent run. Returns immediately with a run_id.")]
+    pub async fn agent_start(
+        &self,
+        Parameters(params): Parameters<AgentStartParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self.start_agent_run(params, false).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&report).unwrap(),
+        )]))
+    }
+
+    #[tool(
+        description = "Run an in-process VLM agent and wait for completion. Prefer agent_start for long tasks."
+    )]
+    pub async fn agent_run(
+        &self,
+        Parameters(params): Parameters<AgentRunParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = AgentStartParams {
+            task: params.task,
+            provider: params.provider,
+            model: params.model,
+            budget: params.budget,
+            options: params.options,
+            replay_actions: params.replay_actions,
+            replay_path: params.replay_path,
+        };
+        let report = self.start_agent_run(params, true).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&report).unwrap(),
+        )]))
+    }
+
+    #[tool(description = "Get the status of an agent run.")]
+    pub async fn agent_status(
+        &self,
+        Parameters(params): Parameters<AgentStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self
+            .state
+            .agent_runs
+            .get(&params.run_id)
+            .ok_or_else(|| McpError::invalid_params("unknown run_id".to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&report).unwrap(),
+        )]))
+    }
+
+    #[tool(description = "Stop the active agent run and return control to the user.")]
+    pub async fn agent_stop(
+        &self,
+        Parameters(params): Parameters<AgentStopParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.state.request_agent_stop();
+        self.state
+            .agent_runs
+            .mark_interrupted(params.run_id.as_deref());
+        Ok(CallToolResult::success(vec![Content::text(
+            "Agent stop requested",
+        )]))
+    }
+
+    #[tool(description = "List compiled and currently configured agent providers.")]
+    pub async fn provider_list(&self) -> Result<CallToolResult, McpError> {
+        let providers = crate::agent::registry::provider_infos();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&providers).unwrap(),
+        )]))
+    }
+
+    #[tool(description = "Read the recorded JSONL trajectory for an agent run.")]
+    pub async fn agent_history_get(
+        &self,
+        Parameters(params): Parameters<AgentHistoryGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self
+            .state
+            .agent_runs
+            .get(&params.run_id)
+            .ok_or_else(|| McpError::invalid_params("unknown run_id".to_string(), None))?;
+        let path = report.trajectory_path.ok_or_else(|| {
+            McpError::invalid_params("run has no trajectory_path".to_string(), None)
+        })?;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| McpError::internal_error(format!("read trajectory: {}", e), None))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Report local configuration health for an agent provider.")]
+    pub async fn provider_health(
+        &self,
+        Parameters(params): Parameters<ProviderHealthParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let provider = crate::agent::registry::provider_presets()
+            .into_iter()
+            .find(|p| p.name == params.provider)
+            .ok_or_else(|| McpError::invalid_params("unknown provider".to_string(), None))?;
+        let configured = crate::agent::registry::provider_infos()
+            .iter()
+            .any(|p| p.name == provider.name);
+        let info = serde_json::json!({
+            "name": provider.name,
+            "configured": configured,
+            "api_key_env": provider.api_key_env,
+            "api_key_present": provider.api_key_env.map(|env| std::env::var_os(env).is_some()),
+            "default_endpoint": provider.default_endpoint,
+            "default_model": provider.default_model,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&info).unwrap(),
+        )]))
+    }
+}
+
+#[cfg(feature = "agent")]
+fn load_replay_actions(path: &str) -> Result<Vec<crate::agent::types::Action>, McpError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| McpError::invalid_params(format!("replay_path read failed: {}", e), None))?;
+    let mut actions = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            McpError::invalid_params(
+                format!("invalid replay jsonl at line {}: {}", idx + 1, e),
+                None,
+            )
+        })?;
+        let action_value = value.get("action").cloned().unwrap_or(value);
+        let action = serde_json::from_value(action_value).map_err(|e| {
+            McpError::invalid_params(
+                format!("invalid replay action at line {}: {}", idx + 1, e),
+                None,
+            )
+        })?;
+        actions.push(action);
+    }
+    if actions.is_empty() {
+        return Err(McpError::invalid_params(
+            "replay_path did not contain any actions".to_string(),
+            None,
+        ));
+    }
+    Ok(actions)
 }
 
 impl ServerHandler for McpServer {
