@@ -11,17 +11,17 @@ let providersCache = [];
 
 const I18N = {
     en: {
-        pageTitle: 'VNC App Console',
+        pageTitle: 'Management Console',
         subtitle: 'Manage apps, runtime settings, and Agent',
         navOverview: 'Overview',
         navApps: 'Apps',
-        navSettings: 'iVnc Settings',
+        navSettings: 'Connection',
         navAgent: 'MCP / Agent',
         navProviders: 'Provider',
         navRuns: 'Logs / Trajectories',
         sectionOverviewDesc: 'Current iVnc status and quick checks.',
         sectionAppsDesc: 'Manage desktop and background applications.',
-        sectionSettingsDesc: 'Runtime controls and restart-scoped settings.',
+        sectionSettingsDesc: 'Common runtime controls for stream quality.',
         sectionAgentDesc: 'Default parameters for MCP Agent runs.',
         sectionProvidersDesc: 'Provider endpoint, model, and credential settings.',
         sectionRunsDesc: 'Recent Agent runs and trajectory paths.',
@@ -31,8 +31,44 @@ const I18N = {
         stopAgent: 'Stop Agent',
         providerStatus: 'Provider Status',
         agentStatus: 'Agent Status',
-        runtimeSettings: 'Runtime Settings',
-        restartSettings: 'Restart Required',
+        runtimeSettings: 'Connection Quality',
+        requestKeyframe: 'Request Keyframe',
+        paramTargetFps: 'Target FPS',
+        paramTargetFpsHelp: 'Target video frame rate. Higher values are smoother but increase encoding and network load.',
+        paramVideoBitrate: 'Video bitrate (kbps)',
+        paramVideoBitrateHelp: 'Video encoding bitrate. Higher values improve clarity but use more bandwidth.',
+        paramAudioBitrate: 'Audio bitrate (bps)',
+        paramAudioBitrateHelp: 'Audio encoding bitrate. 128000 is a common default.',
+        paramBinaryClipboard: 'Binary clipboard',
+        paramBinaryClipboardHelp: 'Allow clipboard sync for binary content such as images or file fragments.',
+        paramKeyframe: 'Keyframe',
+        paramKeyframeHelp: 'Request the next video keyframe immediately, useful after visual artifacts or reconnects.',
+        paramAgentProvider: 'Default provider',
+        paramAgentProviderHelp: 'VLM provider used by new Agent runs by default.',
+        paramAgentMaxSteps: 'Max steps',
+        paramAgentMaxStepsHelp: 'Maximum decision steps for one task. The run stops when this limit is reached.',
+        paramAgentMaxWall: 'Max wall seconds',
+        paramAgentMaxWallHelp: 'Maximum wall-clock seconds for one task. The run stops after this duration.',
+        paramAgentScreenshotBytes: 'Screenshot max bytes',
+        paramAgentScreenshotBytesHelp: 'Maximum encoded size for each screenshot sent to the model.',
+        paramAgentRecordTrajectory: 'Record trajectory',
+        paramAgentRecordTrajectoryHelp: 'Save Agent observations, actions, and results for debugging and review.',
+        paramAgentDryRun: 'Dry run',
+        paramAgentDryRunHelp: 'Generate plans and actions without controlling the desktop. Useful for Provider debugging.',
+        paramProviderEndpoint: 'Endpoint',
+        paramProviderEndpointHelp: 'Provider API base URL. Leave empty to use the built-in default.',
+        paramProviderModel: 'Model',
+        paramProviderModelHelp: 'Model name to call. It must be supported by the selected Provider.',
+        paramProviderApiKey: 'API Key',
+        paramProviderApiKeyHelp: 'Provider credential. Leave empty to keep the saved key unchanged.',
+        paramProviderClearKey: 'Clear API Key',
+        paramProviderClearKeyHelp: 'Delete the saved API Key for this Provider when saving.',
+        paramProviderCoordSpace: 'Coordinate space',
+        paramProviderCoordSpaceHelp: 'Coordinate space returned by the Provider. Default uses the Provider built-in convention.',
+        toggleEnabled: 'Enabled',
+        clearSavedApiKey: 'Clear saved API Key',
+        defaultOption: 'Default',
+        keepApiKeyPlaceholder: 'Leave empty to keep unchanged',
         agentDefaults: 'Agent Defaults',
         providerConfig: 'Provider Config',
         saved: 'Saved',
@@ -126,17 +162,17 @@ const I18N = {
         accessUrlCopyFailed: 'Failed to copy access link',
     },
     zh: {
-        pageTitle: 'VNC 应用控制台',
+        pageTitle: '管理控制台',
         subtitle: '管理应用、运行参数和 Agent',
         navOverview: '概览',
         navApps: '应用',
-        navSettings: 'iVnc 设置',
+        navSettings: '连接质量',
         navAgent: 'MCP / Agent',
         navProviders: 'Provider',
         navRuns: '日志 / 轨迹',
         sectionOverviewDesc: '当前 iVnc 运行状态和快捷入口。',
         sectionAppsDesc: '管理桌面应用和后台应用。',
-        sectionSettingsDesc: '运行时控制和需要重启的参数。',
+        sectionSettingsDesc: '调整常用的实时串流质量参数。',
         sectionAgentDesc: '配置 MCP Agent run 的默认参数。',
         sectionProvidersDesc: '配置 Provider 的 endpoint、模型和凭据。',
         sectionRunsDesc: '查看最近 Agent run 和轨迹路径。',
@@ -146,8 +182,44 @@ const I18N = {
         stopAgent: '停止 Agent',
         providerStatus: 'Provider 状态',
         agentStatus: 'Agent 状态',
-        runtimeSettings: '运行时设置',
-        restartSettings: '重启后生效参数',
+        runtimeSettings: '连接质量',
+        requestKeyframe: '请求关键帧',
+        paramTargetFps: 'Target FPS',
+        paramTargetFpsHelp: '目标画面帧率，越高越流畅但会增加编码和网络压力。',
+        paramVideoBitrate: 'Video bitrate (kbps)',
+        paramVideoBitrateHelp: '视频码率，越高越清晰但占用更多带宽。',
+        paramAudioBitrate: 'Audio bitrate (bps)',
+        paramAudioBitrateHelp: '音频编码码率，常用值为 128000。',
+        paramBinaryClipboard: 'Binary clipboard',
+        paramBinaryClipboardHelp: '允许剪贴板同步二进制内容，例如图片或文件片段。',
+        paramKeyframe: 'Keyframe',
+        paramKeyframeHelp: '立即请求下一帧关键帧，画面花屏或恢复连接后可手动触发。',
+        paramAgentProvider: 'Default provider',
+        paramAgentProviderHelp: '新建 Agent run 默认使用的 VLM Provider。',
+        paramAgentMaxSteps: 'Max steps',
+        paramAgentMaxStepsHelp: '单次任务允许的最大决策步数，达到后自动停止。',
+        paramAgentMaxWall: 'Max wall seconds',
+        paramAgentMaxWallHelp: '单次任务的最长运行秒数，超过后自动结束。',
+        paramAgentScreenshotBytes: 'Screenshot max bytes',
+        paramAgentScreenshotBytesHelp: '发送给模型的单张截图最大字节数，用于控制请求体大小。',
+        paramAgentRecordTrajectory: 'Record trajectory',
+        paramAgentRecordTrajectoryHelp: '保存 Agent 的观察、动作和结果，便于复盘问题。',
+        paramAgentDryRun: 'Dry run',
+        paramAgentDryRunHelp: '只生成计划和动作，不真正控制桌面，适合调试 Provider。',
+        paramProviderEndpoint: 'Endpoint',
+        paramProviderEndpointHelp: 'Provider 的 API 基础地址，留空使用内置默认值。',
+        paramProviderModel: 'Model',
+        paramProviderModelHelp: '调用的模型名称，需与所选 Provider 支持的模型一致。',
+        paramProviderApiKey: 'API Key',
+        paramProviderApiKeyHelp: 'Provider 凭据。保持为空表示不修改已保存的密钥。',
+        paramProviderClearKey: 'Clear API Key',
+        paramProviderClearKeyHelp: '保存时删除该 Provider 已保存的 API Key。',
+        paramProviderCoordSpace: 'Coordinate space',
+        paramProviderCoordSpaceHelp: 'Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。',
+        toggleEnabled: '启用',
+        clearSavedApiKey: '清除已保存 API Key',
+        defaultOption: '默认',
+        keepApiKeyPlaceholder: '保持为空表示不修改',
         agentDefaults: 'Agent 默认参数',
         providerConfig: 'Provider 配置',
         saved: '已保存',
@@ -265,6 +337,10 @@ function getHash(data) {
     })));
 }
 
+function setText(id, key) {
+    document.getElementById(id).textContent = t(key);
+}
+
 function applyTranslations() {
     document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
     document.title = t('pageTitle');
@@ -281,7 +357,47 @@ function applyTranslations() {
     document.getElementById('overview-agent-stop').textContent = t('stopAgent');
     document.getElementById('settings-runtime-title').textContent = t('runtimeSettings');
     document.getElementById('settings-save').textContent = t('saveApply');
-    document.getElementById('settings-restart-title').textContent = t('restartSettings');
+    document.getElementById('request-keyframe').textContent = t('requestKeyframe');
+    [
+        ['label-target-fps', 'paramTargetFps'],
+        ['help-target-fps', 'paramTargetFpsHelp'],
+        ['label-video-bitrate', 'paramVideoBitrate'],
+        ['help-video-bitrate', 'paramVideoBitrateHelp'],
+        ['label-audio-bitrate', 'paramAudioBitrate'],
+        ['help-audio-bitrate', 'paramAudioBitrateHelp'],
+        ['label-binary-clipboard', 'paramBinaryClipboard'],
+        ['help-binary-clipboard', 'paramBinaryClipboardHelp'],
+        ['label-keyframe', 'paramKeyframe'],
+        ['help-keyframe', 'paramKeyframeHelp'],
+        ['label-agent-provider', 'paramAgentProvider'],
+        ['help-agent-provider', 'paramAgentProviderHelp'],
+        ['label-agent-max-steps', 'paramAgentMaxSteps'],
+        ['help-agent-max-steps', 'paramAgentMaxStepsHelp'],
+        ['label-agent-max-wall', 'paramAgentMaxWall'],
+        ['help-agent-max-wall', 'paramAgentMaxWallHelp'],
+        ['label-agent-screenshot-bytes', 'paramAgentScreenshotBytes'],
+        ['help-agent-screenshot-bytes', 'paramAgentScreenshotBytesHelp'],
+        ['label-agent-record-trajectory', 'paramAgentRecordTrajectory'],
+        ['help-agent-record-trajectory', 'paramAgentRecordTrajectoryHelp'],
+        ['label-agent-dry-run', 'paramAgentDryRun'],
+        ['help-agent-dry-run', 'paramAgentDryRunHelp'],
+        ['label-provider-endpoint', 'paramProviderEndpoint'],
+        ['help-provider-endpoint', 'paramProviderEndpointHelp'],
+        ['label-provider-model', 'paramProviderModel'],
+        ['help-provider-model', 'paramProviderModelHelp'],
+        ['label-provider-api-key', 'paramProviderApiKey'],
+        ['help-provider-api-key', 'paramProviderApiKeyHelp'],
+        ['label-provider-clear-key', 'paramProviderClearKey'],
+        ['help-provider-clear-key', 'paramProviderClearKeyHelp'],
+        ['label-provider-coord-space', 'paramProviderCoordSpace'],
+        ['help-provider-coord-space', 'paramProviderCoordSpaceHelp'],
+        ['toggle-binary-clipboard', 'toggleEnabled'],
+        ['toggle-agent-record-trajectory', 'toggleEnabled'],
+        ['toggle-agent-dry-run', 'toggleEnabled'],
+        ['toggle-provider-clear-key', 'clearSavedApiKey'],
+    ].forEach(([id, key]) => setText(id, key));
+    document.querySelector('#provider-coord-space option[value=""]').textContent = t('defaultOption');
+    document.getElementById('provider-api-key').placeholder = t('keepApiKeyPlaceholder');
     document.getElementById('agent-defaults-title').textContent = t('agentDefaults');
     document.getElementById('agent-save').textContent = t('save');
     document.getElementById('providers-title').textContent = t('navProviders');
@@ -501,16 +617,7 @@ async function loadSettings() {
         setValue('set-target-fps', current.target_fps ?? d.current?.target_fps ?? 60);
         setValue('set-video-bitrate', current.video_bitrate_kbps ?? d.current?.video_bitrate_kbps ?? 8000);
         setValue('set-audio-bitrate', current.audio_bitrate ?? d.current?.audio_bitrate ?? 128000);
-        setValue('set-keyframe-interval', current.keyframe_interval ?? d.current?.keyframe_interval ?? 60);
         document.getElementById('set-binary-clipboard').checked = !!(current.binary_clipboard_enabled ?? d.current?.binary_clipboard_enabled);
-        const restart = document.getElementById('restart-fields');
-        restart.innerHTML = '';
-        (d.restart_required_fields || []).forEach(name => {
-            const item = document.createElement('div');
-            item.className = 'readonly-item';
-            item.textContent = name;
-            restart.appendChild(item);
-        });
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
@@ -521,12 +628,16 @@ async function saveSettings() {
         target_fps: numberValue('set-target-fps'),
         video_bitrate_kbps: numberValue('set-video-bitrate'),
         audio_bitrate: numberValue('set-audio-bitrate'),
-        keyframe_interval: numberValue('set-keyframe-interval'),
         binary_clipboard_enabled: document.getElementById('set-binary-clipboard').checked
     };
     await putJson(`${CONSOLE_API}/settings`, body);
     toast(t('settingsSaved'), 'ok');
     loadOverview();
+}
+
+async function requestKeyframe() {
+    await fetchJson(`${CONSOLE_API}/keyframe`, { method: 'POST' });
+    toast(t('requestKeyframe'), 'ok');
 }
 
 async function loadAgentConfig() {
@@ -543,14 +654,9 @@ async function loadAgentConfig() {
         const budget = opt.budget || {};
         setValue('agent-max-steps', budget.max_steps ?? 50);
         setValue('agent-max-wall', budget.max_wall_seconds ?? 300);
-        setValue('agent-max-screenshots', budget.max_screenshots ?? 60);
         setValue('agent-screenshot-bytes', opt.screenshot_max_bytes ?? 800000);
-        setValue('agent-settle-ms', opt.action_settle_ms ?? 250);
-        setValue('agent-max-actions', opt.max_actions_per_step ?? 30);
         document.getElementById('agent-record-trajectory').checked = opt.record_trajectory !== false;
-        document.getElementById('agent-record-frames').checked = !!opt.record_frames_to_disk;
         document.getElementById('agent-dry-run').checked = !!opt.dry_run;
-        document.getElementById('agent-allow-destructive').checked = !!opt.allow_destructive;
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
@@ -565,17 +671,17 @@ async function saveAgentConfig() {
                 max_input_tokens: 200000,
                 max_output_tokens: 20000,
                 max_wall_seconds: numberValue('agent-max-wall'),
-                max_screenshots: numberValue('agent-max-screenshots')
+                max_screenshots: Math.max(numberValue('agent-max-steps') + 10, 60)
             },
-            action_settle_ms: numberValue('agent-settle-ms'),
-            max_actions_per_step: numberValue('agent-max-actions'),
+            action_settle_ms: 250,
+            max_actions_per_step: 30,
             max_history_images: 3,
-            allow_destructive: document.getElementById('agent-allow-destructive').checked,
+            allow_destructive: false,
             require_confirmation_for: [],
             screenshot_format: 'Jpeg',
             screenshot_max_bytes: numberValue('agent-screenshot-bytes'),
             record_trajectory: document.getElementById('agent-record-trajectory').checked,
-            record_frames_to_disk: document.getElementById('agent-record-frames').checked,
+            record_frames_to_disk: false,
             dry_run: document.getElementById('agent-dry-run').checked
         }
     };
@@ -617,10 +723,9 @@ function selectProvider(name) {
     document.getElementById('provider-endpoint').value = p.settings?.endpoint || p.default_endpoint || '';
     document.getElementById('provider-model').value = p.settings?.model || p.default_model || '';
     document.getElementById('provider-api-key').value = '';
-    document.getElementById('provider-api-key').placeholder = p.settings?.api_key_configured ? '********' : '保持为空表示不修改';
+    document.getElementById('provider-api-key').placeholder = p.settings?.api_key_configured ? '********' : t('keepApiKeyPlaceholder');
     document.getElementById('provider-clear-key').checked = false;
     document.getElementById('provider-coord-space').value = p.settings?.coord_space || '';
-    document.getElementById('provider-system-prompt').value = p.settings?.system_prompt || '';
     renderProviders();
 }
 
@@ -632,8 +737,7 @@ async function saveProvider() {
         model: document.getElementById('provider-model').value.trim(),
         api_key: document.getElementById('provider-api-key').value.trim(),
         clear_api_key: document.getElementById('provider-clear-key').checked,
-        coord_space: document.getElementById('provider-coord-space').value,
-        system_prompt: document.getElementById('provider-system-prompt').value.trim()
+        coord_space: document.getElementById('provider-coord-space').value
     };
     await putJson(`${CONSOLE_API}/providers/${encodeURIComponent(name)}`, body);
     toast(t('providerSaved'), 'ok');
@@ -674,7 +778,7 @@ async function stopAgent() {
 
 async function fetchJson(url, options = {}) {
     const r = await fetch(url, { cache: 'no-store', ...options });
-    const d = await r.json();
+    const d = await parseJsonResponse(r);
     if (!r.ok || d.error) throw new Error(d.error || r.statusText);
     return d;
 }
@@ -685,9 +789,22 @@ async function putJson(url, body) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
     });
-    const d = await r.json();
+    const d = await parseJsonResponse(r);
     if (!r.ok || d.error) throw new Error(d.error || r.statusText);
     return d;
+}
+
+async function parseJsonResponse(response) {
+    const text = await response.text();
+    if (!text) return {};
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        const message = response.ok
+            ? `Invalid JSON response: ${text.slice(0, 160)}`
+            : `${response.status} ${response.statusText}: ${text.slice(0, 160)}`;
+        return { error: message };
+    }
 }
 
 function setValue(id, value) {
@@ -1016,6 +1133,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('modal-save').addEventListener('click', saveApp);
     document.getElementById('settings-save').addEventListener('click', () => saveSettings().catch(e => toast(t('actionFailed') + e, 'err')));
+    document.getElementById('request-keyframe').addEventListener('click', () => requestKeyframe().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('agent-save').addEventListener('click', () => saveAgentConfig().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('provider-save').addEventListener('click', () => saveProvider().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('runs-refresh').addEventListener('click', loadRuns);

@@ -152,6 +152,7 @@ pub async fn run_http_server_with_webrtc(
                 "/api/console/settings",
                 get(console_settings_get_handler).put(console_settings_put_handler),
             )
+            .route("/api/console/keyframe", post(console_keyframe_handler))
             .route(
                 "/api/console/agent-config",
                 get(console_agent_get_handler).put(console_agent_put_handler),
@@ -939,6 +940,12 @@ async fn console_settings_put_handler(
 }
 
 #[cfg(feature = "agent")]
+async fn console_keyframe_handler(State(state): State<Arc<SharedState>>) -> Response {
+    state.runtime_settings.request_keyframe();
+    json_response(StatusCode::OK, json!({"ok": true}))
+}
+
+#[cfg(feature = "agent")]
 async fn console_agent_get_handler() -> Response {
     json_response(
         StatusCode::OK,
@@ -1036,7 +1043,9 @@ async fn console_provider_put_handler(
     entry.endpoint = clean_optional(body.endpoint);
     entry.model = clean_optional(body.model);
     entry.coord_space = clean_optional(body.coord_space);
-    entry.system_prompt = clean_optional(body.system_prompt);
+    if body.system_prompt.is_some() {
+        entry.system_prompt = clean_optional(body.system_prompt);
+    }
     if body.clear_api_key.unwrap_or(false) {
         entry.api_key = None;
     } else if let Some(api_key) = clean_optional(body.api_key) {
