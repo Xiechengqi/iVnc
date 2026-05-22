@@ -157,7 +157,7 @@ impl OpenAiCompatibleProvider {
                 }
             ],
             "tools": responses_tool_schema(),
-            "tool_choice": "auto"
+            "tool_choice": "required"
         }))
     }
 
@@ -219,7 +219,12 @@ impl OpenAiCompatibleProvider {
         let output = body
             .get("output")
             .and_then(Value::as_array)
-            .ok_or_else(|| ProviderError::InvalidResponse("missing output".into()))?;
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse(format!(
+                    "missing output; response keys: {}",
+                    json_keys(&body).join(",")
+                ))
+            })?;
 
         let mut actions = Vec::new();
         let mut text = String::new();
@@ -369,11 +374,14 @@ impl BrainProvider for OpenAiCompatibleProvider {
             .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
         if use_responses_api {
-            self.parse_responses_response(
-                body,
-                &observation.display,
-                started.elapsed().as_millis() as u64,
-            )
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            if body.get("output").is_some() {
+                self.parse_responses_response(body, &observation.display, elapsed_ms)
+            } else if body.pointer("/choices/0/message").is_some() {
+                self.parse_response(body, &observation.display, elapsed_ms)
+            } else {
+                self.parse_responses_response(body, &observation.display, elapsed_ms)
+            }
         } else {
             self.parse_response(
                 body,
@@ -419,6 +427,13 @@ fn parse_usage(value: Option<&Value>, elapsed_ms: u64) -> Option<ProviderUsage> 
         provider_latency_ms: elapsed_ms,
         cost_usd_micros: None,
     })
+}
+
+fn json_keys(value: &Value) -> Vec<String> {
+    value
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn point_arg(
