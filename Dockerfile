@@ -43,7 +43,7 @@ ARG IVNC_BUILD_GIT_MESSAGE=unknown
 RUN IVNC_REFRESH_MIAO=1 \
     IVNC_BUILD_GIT_COMMIT="$IVNC_BUILD_GIT_COMMIT" \
     IVNC_BUILD_GIT_MESSAGE="$IVNC_BUILD_GIT_MESSAGE" \
-    cargo build --release --no-default-features --features mcp --bin ivnc
+    cargo build --release --no-default-features --features mcp,agent-all --bin ivnc
 
 
 FROM ubuntu:22.04

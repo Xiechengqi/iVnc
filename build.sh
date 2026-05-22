@@ -7,7 +7,7 @@ DIST_DIR="$WEB_DIR/dist"
 
 # ── Parse arguments ─────────────────────────────────────────
 BUILD_MODE="release"
-CARGO_FEATURES="mcp"
+CARGO_FEATURES="mcp,agent-all"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

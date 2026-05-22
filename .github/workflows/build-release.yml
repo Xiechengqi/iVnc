@@ -81,7 +81,7 @@ jobs:
           npm ci
           npm run build
           cd /workspace
-          cargo build --release --features mcp --bin ivnc
+          cargo build --release --features mcp,agent-all --bin ivnc
           cp target/release/ivnc /output/ivnc-linux-$ARCH
           BUILDSCRIPT
 

@@ -12,7 +12,6 @@ use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::shared::SharedState;
 #[cfg(feature = "agent")]
 use axum::extract::Path;
-#[cfg(feature = "agent")]
 use axum::routing::put;
 use axum::{
     body::{to_bytes, Body, Bytes},
@@ -144,27 +143,24 @@ pub async fn run_http_server_with_webrtc(
         .route("/proxy-ws/{*path}", get(proxy_panel_ws_handler))
         .route("/terminal/ws", get(terminal_ws_handler));
 
-    #[cfg(feature = "agent")]
-    {
-        app = app
-            .route("/api/console/overview", get(console_overview_handler))
-            .route(
-                "/api/console/settings",
-                get(console_settings_get_handler).put(console_settings_put_handler),
-            )
-            .route("/api/console/keyframe", post(console_keyframe_handler))
-            .route(
-                "/api/console/agent-config",
-                get(console_agent_get_handler).put(console_agent_put_handler),
-            )
-            .route("/api/console/agent-stop", post(console_agent_stop_handler))
-            .route("/api/console/providers", get(console_providers_get_handler))
-            .route(
-                "/api/console/providers/{name}",
-                put(console_provider_put_handler),
-            )
-            .route("/api/console/agent-runs", get(console_agent_runs_handler));
-    }
+    app = app
+        .route("/api/console/overview", get(console_overview_handler))
+        .route(
+            "/api/console/settings",
+            get(console_settings_get_handler).put(console_settings_put_handler),
+        )
+        .route("/api/console/keyframe", post(console_keyframe_handler))
+        .route(
+            "/api/console/agent-config",
+            get(console_agent_get_handler).put(console_agent_put_handler),
+        )
+        .route("/api/console/agent-stop", post(console_agent_stop_handler))
+        .route("/api/console/providers", get(console_providers_get_handler))
+        .route(
+            "/api/console/providers/{name}",
+            put(console_provider_put_handler),
+        )
+        .route("/api/console/agent-runs", get(console_agent_runs_handler));
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(ref manager) = session_manager {
@@ -881,6 +877,70 @@ async fn console_overview_handler(State(state): State<Arc<SharedState>>) -> Resp
     )
 }
 
+#[cfg(not(feature = "agent"))]
+async fn console_overview_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let (screen_width, screen_height) = state.display_size();
+    let stats = state.stats.lock().unwrap().clone();
+    json_response(
+        StatusCode::OK,
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "build": {
+                "commit": option_env!("IVNC_BUILD_GIT_COMMIT").unwrap_or("unknown"),
+                "message": option_env!("IVNC_BUILD_GIT_MESSAGE").unwrap_or("unknown"),
+                "features": {
+                    "mcp": cfg!(feature = "mcp"),
+                    "agent": false,
+                    "agent_all": false,
+                }
+            },
+            "endpoints": {
+                "mcp": if cfg!(feature = "mcp") { "/mcp" } else { "" },
+                "console": "/console",
+                "desktop": "/",
+            },
+            "display": {
+                "width": screen_width,
+                "height": screen_height,
+                "configured_width": state.config.display.width,
+                "configured_height": state.config.display.height,
+                "refresh_rate": state.config.display.refresh_rate,
+            },
+            "runtime": {
+                "fps": stats.fps,
+                "bandwidth_bps": stats.bandwidth,
+                "cpu_percent": stats.cpu_percent,
+                "mem_bytes": stats.mem_used,
+                "target_fps": state.runtime_settings.target_fps(),
+                "video_bitrate_kbps": state.runtime_settings.video_bitrate_kbps(),
+                "audio_bitrate": state.runtime_settings.audio_bitrate(),
+                "keyframe_interval": state.runtime_settings.keyframe_interval(),
+            },
+            "connections": {
+                "webrtc_sessions": state.webrtc_sessions(),
+            },
+            "agent": {
+                "enabled": false,
+                "exclusive": false,
+                "stop_requested": false,
+                "running_run_id": null,
+            },
+            "providers": [],
+            "config_path": null,
+        }),
+    )
+}
+
+#[cfg(not(feature = "agent"))]
+#[derive(Debug, Deserialize)]
+struct RuntimeConsoleUpdate {
+    video_bitrate_kbps: Option<u32>,
+    audio_bitrate: Option<u32>,
+    keyframe_interval: Option<u32>,
+    target_fps: Option<u32>,
+    binary_clipboard_enabled: Option<bool>,
+}
+
 #[cfg(feature = "agent")]
 async fn console_settings_get_handler(State(state): State<Arc<SharedState>>) -> Response {
     let saved = crate::console_config::load().runtime;
@@ -904,6 +964,25 @@ async fn console_settings_get_handler(State(state): State<Arc<SharedState>>) -> 
                 "web_root",
                 "features"
             ]
+        }),
+    )
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_settings_get_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let current = json!({
+        "target_fps": state.runtime_settings.target_fps(),
+        "video_bitrate_kbps": state.runtime_settings.video_bitrate_kbps(),
+        "audio_bitrate": state.runtime_settings.audio_bitrate(),
+        "keyframe_interval": state.runtime_settings.keyframe_interval(),
+        "binary_clipboard_enabled": state.runtime_settings.binary_clipboard_enabled(),
+    });
+    json_response(
+        StatusCode::OK,
+        json!({
+            "saved": current,
+            "current": current,
+            "restart_required_fields": [],
         }),
     )
 }
@@ -939,7 +1018,39 @@ async fn console_settings_put_handler(
     }
 }
 
+#[cfg(not(feature = "agent"))]
+async fn console_settings_put_handler(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Json(body): axum::extract::Json<RuntimeConsoleUpdate>,
+) -> Response {
+    if let Some(fps) = body.target_fps {
+        state.runtime_settings.set_target_fps(fps);
+    }
+    if let Some(bitrate) = body.video_bitrate_kbps {
+        state.runtime_settings.set_video_bitrate_kbps(bitrate);
+    }
+    if let Some(bitrate) = body.audio_bitrate {
+        state.runtime_settings.set_audio_bitrate(bitrate);
+    }
+    if let Some(interval) = body.keyframe_interval {
+        state.runtime_settings.set_keyframe_interval(interval);
+    }
+    if let Some(enabled) = body.binary_clipboard_enabled {
+        state
+            .runtime_settings
+            .apply_settings_json(&json!({"enable_binary_clipboard": enabled}).to_string());
+    }
+
+    json_response(StatusCode::OK, json!({"ok": true, "applied": "runtime"}))
+}
+
 #[cfg(feature = "agent")]
+async fn console_keyframe_handler(State(state): State<Arc<SharedState>>) -> Response {
+    state.runtime_settings.request_keyframe();
+    json_response(StatusCode::OK, json!({"ok": true}))
+}
+
+#[cfg(not(feature = "agent"))]
 async fn console_keyframe_handler(State(state): State<Arc<SharedState>>) -> Response {
     state.runtime_settings.request_keyframe();
     json_response(StatusCode::OK, json!({"ok": true}))
@@ -950,6 +1061,29 @@ async fn console_agent_get_handler() -> Response {
     json_response(
         StatusCode::OK,
         json!(crate::console_config::agent_defaults()),
+    )
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_agent_get_handler() -> Response {
+    json_response(
+        StatusCode::OK,
+        json!({
+            "default_provider": "",
+            "options": {
+                "budget": {
+                    "max_steps": 50,
+                    "max_input_tokens": 200000,
+                    "max_output_tokens": 20000,
+                    "max_wall_seconds": 300,
+                    "max_screenshots": 60,
+                },
+                "screenshot_max_bytes": 800000,
+                "record_trajectory": true,
+                "dry_run": false,
+            },
+            "disabled": true,
+        }),
     )
 }
 
@@ -980,11 +1114,27 @@ async fn console_agent_put_handler(
     }
 }
 
+#[cfg(not(feature = "agent"))]
+async fn console_agent_put_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
 #[cfg(feature = "agent")]
 async fn console_agent_stop_handler(State(state): State<Arc<SharedState>>) -> Response {
     state.request_agent_stop();
     state.agent_runs.mark_interrupted(None);
     json_response(StatusCode::OK, json!({"ok": true}))
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_agent_stop_handler() -> Response {
+    json_response(
+        StatusCode::OK,
+        json!({"ok": false, "disabled": true, "reason": "agent feature is not enabled"}),
+    )
 }
 
 #[cfg(feature = "agent")]
@@ -1013,6 +1163,11 @@ async fn console_providers_get_handler() -> Response {
         })
         .collect();
     json_response(StatusCode::OK, json!({ "providers": providers }))
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_providers_get_handler() -> Response {
+    json_response(StatusCode::OK, json!({ "providers": [] }))
 }
 
 #[cfg(feature = "agent")]
@@ -1063,9 +1218,22 @@ async fn console_provider_put_handler(
     }
 }
 
+#[cfg(not(feature = "agent"))]
+async fn console_provider_put_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
 #[cfg(feature = "agent")]
 async fn console_agent_runs_handler(State(state): State<Arc<SharedState>>) -> Response {
     json_response(StatusCode::OK, json!({ "runs": state.agent_runs.list() }))
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_agent_runs_handler() -> Response {
+    json_response(StatusCode::OK, json!({ "runs": [] }))
 }
 
 fn proxy_json_response(status: StatusCode, body: serde_json::Value) -> Response {
