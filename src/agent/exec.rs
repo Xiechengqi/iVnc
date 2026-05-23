@@ -20,8 +20,16 @@ pub async fn execute(
     }
     if let Some(kind) = destructive_kind(action) {
         if !options.allow_destructive || options.require_confirmation_for.contains(&kind) {
+            let tag = match kind {
+                super::types::DestructiveKind::KeyboardCombo => "keyboard_combo",
+                super::types::DestructiveKind::WindowClose => "window_close",
+                super::types::DestructiveKind::ClipboardWriteOverwrite => {
+                    "clipboard_write_overwrite"
+                }
+                super::types::DestructiveKind::TypeIntoPasswordField => "type_into_password_field",
+            };
             return ActionResult::ExecutorError {
-                message: "destructive_blocked".to_string(),
+                message: format!("destructive_blocked:{}", tag),
             };
         }
     }

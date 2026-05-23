@@ -4,7 +4,7 @@ use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
 #[cfg(feature = "agent")]
-use crate::agent::types::{Action, Budget, RunOptions};
+use crate::agent::types::{Action, Budget, DestructiveKind, RunOptions};
 
 // ── Screenshot ──────────────────────────────────────────────────────
 
@@ -158,4 +158,44 @@ pub struct AgentHistoryGetParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProviderHealthParams {
     pub provider: String,
+}
+
+#[cfg(feature = "agent")]
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentStepParams {
+    /// A single agent Action to execute in the current desktop.
+    pub action: Action,
+    /// Whether destructive actions are permitted (default: false).
+    #[serde(default)]
+    pub allow_destructive: bool,
+    /// Destructive kinds that still require explicit confirmation even when
+    /// `allow_destructive` is true.
+    #[serde(default)]
+    pub require_confirmation_for: Vec<DestructiveKind>,
+    /// Capture a fresh observation digest after the action completes.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub capture_observation: bool,
+}
+
+#[cfg(feature = "agent")]
+fn default_true() -> bool {
+    true
+}
+
+#[cfg(feature = "agent")]
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentHistoryReplayParams {
+    /// Inline list of actions to replay. Either this or `replay_path` is required.
+    #[serde(default)]
+    pub actions: Option<Vec<Action>>,
+    /// Path to a JSONL trajectory or action list. Either this or `actions` is required.
+    #[serde(default)]
+    pub replay_path: Option<String>,
+    /// Task label for the resulting RunReport (informational).
+    #[serde(default)]
+    pub task: Option<String>,
+    /// Optional run options. Defaults mirror agent_run.
+    #[serde(default)]
+    pub options: Option<RunOptions>,
 }

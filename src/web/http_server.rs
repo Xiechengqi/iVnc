@@ -1149,7 +1149,7 @@ async fn console_providers_get_handler() -> Response {
                 "default_model": preset.default_model,
                 "default_endpoint": preset.default_endpoint,
                 "api_key_env": preset.api_key_env,
-                "configured": crate::agent::registry::provider_infos().iter().any(|p| p.name == preset.name),
+                "configured": crate::agent::registry::provider_infos().iter().find(|p| p.name == preset.name).map(|p| p.configured).unwrap_or(false),
                 "capabilities": preset.capabilities,
                 "settings": {
                     "endpoint": cfg.endpoint,

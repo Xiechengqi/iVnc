@@ -171,7 +171,7 @@ impl OpenAiCompatibleProvider {
             .get("id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        let usage = parse_usage(body.get("usage"), elapsed_ms);
+        let usage = parse_usage(body.get("usage"), elapsed_ms, self.cfg.provider_name, &self.cfg.model);
         let message = body
             .pointer("/choices/0/message")
             .ok_or_else(|| ProviderError::InvalidResponse("missing choices[0].message".into()))?;
@@ -213,7 +213,7 @@ impl OpenAiCompatibleProvider {
             .get("id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        let usage = parse_usage(body.get("usage"), elapsed_ms);
+        let usage = parse_usage(body.get("usage"), elapsed_ms, self.cfg.provider_name, &self.cfg.model);
         let output = body
             .get("output")
             .and_then(Value::as_array)
@@ -407,9 +407,14 @@ fn history_text(history: &History) -> String {
     out
 }
 
-fn parse_usage(value: Option<&Value>, elapsed_ms: u64) -> Option<ProviderUsage> {
+fn parse_usage(
+    value: Option<&Value>,
+    elapsed_ms: u64,
+    provider_name: &str,
+    model: &str,
+) -> Option<ProviderUsage> {
     let usage = value?;
-    Some(ProviderUsage {
+    let mut parsed = ProviderUsage {
         input_tokens: usage
             .get("prompt_tokens")
             .or_else(|| usage.get("input_tokens"))
@@ -422,7 +427,10 @@ fn parse_usage(value: Option<&Value>, elapsed_ms: u64) -> Option<ProviderUsage> 
             .unwrap_or(0),
         provider_latency_ms: elapsed_ms,
         cost_usd_micros: None,
-    })
+    };
+    parsed.cost_usd_micros =
+        super::super::budget::estimate_cost_usd_micros(provider_name, model, &parsed);
+    Some(parsed)
 }
 
 fn parse_text_actions(text: &str) -> Result<Vec<Action>, ProviderError> {

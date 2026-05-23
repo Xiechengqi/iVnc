@@ -216,6 +216,10 @@ pub async fn run_agent(
             } else {
                 exec::execute(&state, &observation.display, &action, &options).await
             };
+            let destructive_blocked = matches!(
+                &result,
+                ActionResult::ExecutorError { message } if message.starts_with("destructive_blocked")
+            );
             consecutive_out_of_bounds = if matches!(result, ActionResult::OutOfBounds { .. }) {
                 consecutive_out_of_bounds.saturating_add(1)
             } else {
@@ -223,6 +227,15 @@ pub async fn run_agent(
             };
             let force_observe = matches!(action, Action::Screenshot);
             let needs_settle = action_needs_settle(&action);
+            let blocked_message = if destructive_blocked {
+                if let ActionResult::ExecutorError { message } = &result {
+                    Some(message.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let step = Step {
                 observation: digest.clone(),
                 action,
@@ -247,6 +260,24 @@ pub async fn run_agent(
                 trajectory_path.clone(),
             );
             state.agent_runs.update(report.clone());
+
+            if let Some(message) = blocked_message {
+                report = build_report(
+                    &run_id,
+                    &task,
+                    &history,
+                    started_ms,
+                    FinishReason::Ask,
+                    trajectory_path.clone(),
+                );
+                report.pending_question = Some(format!(
+                    "Destructive action blocked ({}). Re-run with allow_destructive=true or remove the kind from require_confirmation_for to proceed.",
+                    message
+                ));
+                state.agent_runs.update(report.clone());
+                state.set_agent_exclusive(false, "destructive_blocked");
+                return Ok(report);
+            }
 
             if consecutive_out_of_bounds >= 3 {
                 report = build_report(

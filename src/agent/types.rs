@@ -268,9 +268,16 @@ impl History {
             .iter()
             .filter_map(|s| s.provider_usage.as_ref().map(|u| u.output_tokens))
             .sum();
+        let cost_micros: u64 = self
+            .steps
+            .iter()
+            .filter_map(|s| s.provider_usage.as_ref().and_then(|u| u.cost_usd_micros))
+            .sum();
+        let cost_ceiling = self.budget.max_cost_usd_micros.unwrap_or(u64::MAX);
         self.steps.len() as u32 >= self.budget.max_steps
             || tokens_in > self.budget.max_input_tokens
             || tokens_out > self.budget.max_output_tokens
+            || cost_micros > cost_ceiling
             || self.observations_seen > self.budget.max_screenshots
             || now_ms().saturating_sub(started_ms) / 1000 > self.budget.max_wall_seconds
     }
@@ -306,6 +313,11 @@ pub struct Budget {
     pub max_wall_seconds: u64,
     #[serde(default = "default_max_screenshots")]
     pub max_screenshots: u32,
+    /// Optional ceiling on aggregate provider cost (micro-USD, i.e. 1e-6 USD).
+    /// `None` means unlimited. Only providers that populate
+    /// `ProviderUsage.cost_usd_micros` contribute toward this ceiling.
+    #[serde(default)]
+    pub max_cost_usd_micros: Option<u64>,
 }
 
 impl Default for Budget {
@@ -316,6 +328,7 @@ impl Default for Budget {
             max_output_tokens: default_max_output_tokens(),
             max_wall_seconds: default_max_wall_seconds(),
             max_screenshots: default_max_screenshots(),
+            max_cost_usd_micros: None,
         }
     }
 }
@@ -495,5 +508,49 @@ mod tests {
             (480, 270)
         );
         assert_eq!(display.image_to_screen((480, 270)), (960, 540));
+    }
+
+    fn step_with_cost(cost: u64) -> Step {
+        Step {
+            observation: ObservationDigest {
+                screen_width: 0,
+                screen_height: 0,
+                image_width: 0,
+                image_height: 0,
+                sha256: String::new(),
+                frame_path: None,
+            },
+            action: Action::Wait { ms: 0 },
+            result: ActionResult::Ok,
+            elapsed_ms: 0,
+            provider_usage: Some(ProviderUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                provider_latency_ms: 0,
+                cost_usd_micros: Some(cost),
+            }),
+        }
+    }
+
+    #[test]
+    fn over_budget_enforces_cost_ceiling() {
+        let mut budget = Budget::default();
+        budget.max_cost_usd_micros = Some(1_000);
+        let mut history = History::new("t".to_string(), budget);
+        history.push(step_with_cost(600));
+        assert!(!history.over_budget(now_ms()));
+        history.push(step_with_cost(600));
+        // sum = 1_200 > 1_000 → over budget
+        assert!(history.over_budget(now_ms()));
+    }
+
+    #[test]
+    fn over_budget_ignores_cost_when_unlimited() {
+        let mut budget = Budget::default();
+        budget.max_cost_usd_micros = None;
+        let mut history = History::new("t".to_string(), budget);
+        history.push(step_with_cost(u64::MAX / 2));
+        history.push(step_with_cost(u64::MAX / 2));
+        assert!(!history.over_budget(now_ms()));
     }
 }

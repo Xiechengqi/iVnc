@@ -498,6 +498,81 @@ impl McpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(
+        description = "Execute a single agent Action against the live desktop, honoring the same destructive-action guard as agent_run. Returns the ActionResult and a fresh observation digest."
+    )]
+    pub async fn agent_step(
+        &self,
+        Parameters(params): Parameters<AgentStepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let defaults = crate::console_config::agent_defaults().options;
+        let options = crate::agent::types::RunOptions {
+            allow_destructive: params.allow_destructive,
+            require_confirmation_for: params.require_confirmation_for,
+            screenshot_format: defaults.screenshot_format,
+            screenshot_max_bytes: defaults.screenshot_max_bytes,
+            ..crate::agent::types::RunOptions::default()
+        };
+        let observation = crate::mcp::frame_capture::capture_observation(
+            &self.state,
+            80,
+            options.screenshot_max_bytes,
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("capture: {}", e), None))?;
+        let result =
+            crate::agent::exec::execute(&self.state, &observation.display, &params.action, &options)
+                .await;
+        let digest = if params.capture_observation {
+            crate::mcp::frame_capture::capture_observation(
+                &self.state,
+                80,
+                options.screenshot_max_bytes,
+            )
+            .await
+            .ok()
+            .map(|o| o.digest())
+        } else {
+            None
+        };
+        let body = serde_json::json!({
+            "action": &params.action,
+            "result": result,
+            "observation": digest,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&body).unwrap(),
+        )]))
+    }
+
+    #[tool(
+        description = "Deterministically replay a list of agent Actions through the replay provider. Returns a RunReport."
+    )]
+    pub async fn agent_history_replay(
+        &self,
+        Parameters(params): Parameters<AgentHistoryReplayParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.actions.is_none() && params.replay_path.is_none() {
+            return Err(McpError::invalid_params(
+                "either `actions` or `replay_path` must be provided".to_string(),
+                None,
+            ));
+        }
+        let start = AgentStartParams {
+            task: params.task.unwrap_or_else(|| "replay".to_string()),
+            provider: "replay".to_string(),
+            model: None,
+            budget: None,
+            options: params.options,
+            replay_actions: params.actions,
+            replay_path: params.replay_path,
+        };
+        let report = self.start_agent_run(start, true).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&report).unwrap(),
+        )]))
+    }
+
     #[tool(description = "Report local configuration health for an agent provider.")]
     pub async fn provider_health(
         &self,
@@ -509,7 +584,9 @@ impl McpServer {
             .ok_or_else(|| McpError::invalid_params("unknown provider".to_string(), None))?;
         let configured = crate::agent::registry::provider_infos()
             .iter()
-            .any(|p| p.name == provider.name);
+            .find(|p| p.name == provider.name)
+            .map(|p| p.configured)
+            .unwrap_or(false);
         let info = serde_json::json!({
             "name": provider.name,
             "configured": configured,

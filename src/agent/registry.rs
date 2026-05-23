@@ -66,7 +66,6 @@ pub fn provider_infos() -> Vec<ProviderInfo> {
                 configured,
             }
         })
-        .filter(|p| p.configured)
         .collect()
 }
 
