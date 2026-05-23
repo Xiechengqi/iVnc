@@ -826,7 +826,17 @@ pub fn default_system_prompt() -> String {
      verifiable steps and finish with done(success, reason) when the task is complete. \
      If the API gateway or model cannot emit native tool calls, return exactly one fallback \
      action line such as: Action: done(success=true, reason='complete') or \
-     Action: click(x=100, y=200). Do not return explanatory prose without an action."
+     Action: click(x=100, y=200). Do not return explanatory prose without an action. \
+     Anti-loop rule: if your previous action did not visibly change the screenshot, do NOT \
+     repeat the same action. Switch strategy — try different coordinates, a different key \
+     combination, scroll, take a screenshot to re-orient, or call done(success=false, \
+     reason='stuck: <what failed>') after at most 2 unproductive attempts on the same target. \
+     Synthesis bias: when the current screenshot already contains enough information to answer \
+     the task, call done immediately. Every extra exploration step costs budget you may need \
+     later; prefer done over 'one more search'. CRITICAL: 'enough information' means the \
+     literal answer text is VISIBLE in the current screenshot — do NOT call done based on \
+     prior knowledge, page titles, or search result snippets alone. If the answer requires \
+     opening a linked page, navigate to it first."
         .to_string()
 }
 
