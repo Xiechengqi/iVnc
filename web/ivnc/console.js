@@ -267,6 +267,29 @@ const I18N = {
         copyFailed: 'Copy failed',
         emptyRunsTitle: 'No runs yet',
         emptyRunsFilterTitle: 'No matching runs',
+        runsStartedAt: 'started',
+        runDetailBack: 'Back',
+        runDetailLoading: 'Loading trajectory…',
+        runDetailEmpty: 'No step records on disk',
+        runDetailEmptyHint: 'Trajectory file not found or empty. Enable record_trajectory to capture steps.',
+        runDetailStarted: 'Started',
+        runDetailFinished: 'Finished',
+        runDetailDuration: 'Duration',
+        runDetailSteps: 'Steps',
+        runDetailTokens: 'Tokens (in / out)',
+        runDetailCost: 'Cost',
+        runDetailReason: 'Result',
+        runDetailFilterAll: 'All actions',
+        stepLatency: 'latency',
+        stepGap: 'gap',
+        stepTokens: 'tokens',
+        stepCost: 'cost',
+        stepResultOk: 'ok',
+        stepCopyJson: 'Copy JSON',
+        stepJsonCopied: 'Step JSON copied',
+        stepFrame: 'screenshot',
+        stepNoFrame: 'no screenshot',
+        stepCumulative: 'cumulative',
     },
     zh: {
         pageTitle: '管理控制台',
@@ -518,6 +541,29 @@ const I18N = {
         copyFailed: '复制失败',
         emptyRunsTitle: '暂无 Agent run',
         emptyRunsFilterTitle: '无匹配 run',
+        runsStartedAt: '开始于',
+        runDetailBack: '返回',
+        runDetailLoading: '正在加载轨迹…',
+        runDetailEmpty: '磁盘上没有步骤记录',
+        runDetailEmptyHint: '未找到轨迹文件或文件为空。开启 record_trajectory 才会记录每一步。',
+        runDetailStarted: '开始时间',
+        runDetailFinished: '结束时间',
+        runDetailDuration: '总时长',
+        runDetailSteps: '步数',
+        runDetailTokens: 'Tokens（入 / 出）',
+        runDetailCost: '成本',
+        runDetailReason: '结束原因',
+        runDetailFilterAll: '全部动作',
+        stepLatency: '延迟',
+        stepGap: '间隔',
+        stepTokens: 'tokens',
+        stepCost: '成本',
+        stepResultOk: '成功',
+        stepCopyJson: '复制 JSON',
+        stepJsonCopied: '步骤 JSON 已复制',
+        stepFrame: '截图',
+        stepNoFrame: '无截图',
+        stepCumulative: '累计',
     }
 };
 
@@ -606,6 +652,7 @@ function applyTranslations() {
 
     setText('runs-refresh', 'refresh');
     setPlaceholderById('runs-search', t('runsSearchPlaceholder'));
+    setText('run-detail-back-label', 'runDetailBack');
 
     [
         ['label-target-fps', 'paramTargetFps'],
@@ -1063,6 +1110,41 @@ function formatNumber(n) {
     return String(n);
 }
 
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// Absolute local datetime, e.g. "2026-05-23 14:08:31"
+function formatDateTime(ms) {
+    if (!ms) return '—';
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ` +
+        `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+// Compact local date+time for cards, e.g. "05-23 14:08"
+function formatDateTimeShort(ms) {
+    if (!ms) return '—';
+    const d = new Date(ms);
+    return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+// Offset from a base, e.g. "+12.4s" / "+1m 03s"
+function formatOffset(ms) {
+    if (ms == null || ms < 0) return '+0s';
+    if (ms < 1000) return `+${Math.round(ms)}ms`;
+    const s = ms / 1000;
+    if (s < 60) return `+${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60), r = Math.round(s % 60);
+    return `+${m}m ${pad2(r)}s`;
+}
+
+function formatCostMicros(micros) {
+    if (micros == null) return '—';
+    const usd = micros / 1e6;
+    if (usd === 0) return '$0';
+    if (usd < 0.01) return `$${usd.toFixed(4)}`;
+    return `$${usd.toFixed(2)}`;
+}
+
 // ---------- Settings ----------
 
 async function loadSettings() {
@@ -1424,7 +1506,9 @@ function renderRunsList() {
 
 function renderRunCard(run, parent) {
     const card = document.createElement('div');
-    card.className = 'run-card';
+    card.className = 'run-card run-card-clickable';
+    card.setAttribute('role', 'button');
+    card.tabIndex = 0;
     const cls = runStateClass(run);
     const stateLabel = runStateLabel(run);
     const idShort = (run.run_id || '').slice(0, 12);
@@ -1434,6 +1518,9 @@ function renderRunCard(run, parent) {
     const tokenIn = run.tokens_in ?? 0;
     const tokenOut = run.tokens_out ?? 0;
     const path = run.trajectory_path || '';
+    const startedMs = run.started_at_ms || 0;
+    const startedShort = startedMs ? formatDateTimeShort(startedMs) : '';
+    const startedFull = startedMs ? formatDateTime(startedMs) : '';
 
     card.innerHTML = `
         <div class="run-card-status">
@@ -1445,6 +1532,7 @@ function renderRunCard(run, parent) {
             </span>
             <div class="run-card-task">${esc(taskText)}</div>
             <div class="run-card-meta">
+                ${startedShort ? `<span title="${esc(t('runsStartedAt'))} ${esc(startedFull)}">🕐 ${esc(startedShort)}</span>` : ''}
                 <span>⏱ ${esc(wall)}</span>
                 <span>↻ ${esc(formatNumber(steps))} ${esc(t('runsMetricSteps'))}</span>
                 <span>⇅ ${esc(formatNumber(tokenIn))} / ${esc(formatNumber(tokenOut))} ${esc(t('runsMetricTokens'))}</span>
@@ -1456,17 +1544,276 @@ function renderRunCard(run, parent) {
                 : `<span class="muted-hint">${esc(t('runsNoPath'))}</span>`}
         </div>`;
 
-    card.querySelector('[data-action="copy-id"]')?.addEventListener('click', async () => {
+    card.querySelector('[data-action="copy-id"]')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
         try { await copyText(run.run_id || ''); toast(t('runsIdCopied'), 'ok'); }
         catch { toast(t('copyFailed'), 'err'); }
     });
     if (path) {
-        card.querySelector('[data-action="copy-path"]')?.addEventListener('click', async () => {
+        card.querySelector('[data-action="copy-path"]')?.addEventListener('click', async (e) => {
+            e.stopPropagation();
             try { await copyText(path); toast(t('runsPathCopied'), 'ok'); }
             catch { toast(t('copyFailed'), 'err'); }
         });
     }
+    card.addEventListener('click', () => openRunDetail(run));
+    card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openRunDetail(run); }
+    });
     parent.appendChild(card);
+}
+
+// ---------- Run detail ----------
+
+let runDetailRun = null;
+let runDetailSteps = [];
+let runDetailActionFilter = 'all';
+
+function truncate(s, n) {
+    s = String(s ?? '');
+    return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+function frameBasename(p) {
+    const parts = String(p).split(/[\\/]/);
+    return parts[parts.length - 1] || '';
+}
+
+function actionKind(a) { return (a && a.kind) || 'unknown'; }
+
+function actionCategory(kind) {
+    if (kind && kind.startsWith('mouse_')) return 'pointer';
+    if (kind && kind.startsWith('window_')) return 'window';
+    if (['type_text', 'key_chord', 'key_hold', 'clipboard_write', 'clipboard_read'].includes(kind)) return 'input';
+    if (['scroll', 'zoom', 'wait', 'screenshot'].includes(kind)) return 'view';
+    if (kind === 'done') return 'done';
+    if (kind === 'ask') return 'ask';
+    return 'other';
+}
+
+function actionBrief(a) {
+    if (!a) return '—';
+    switch (a.kind) {
+        case 'mouse_move': return `(${a.x}, ${a.y})${a.label ? ' · ' + a.label : ''}`;
+        case 'mouse_click': return `${a.button || ''} (${a.x}, ${a.y})${a.click_count > 1 ? ' ×' + a.click_count : ''}${a.label ? ' · ' + a.label : ''}`;
+        case 'mouse_down': return `${a.button || ''} (${a.x}, ${a.y})`;
+        case 'mouse_up': return `${a.button || ''} (${a.x}, ${a.y})`;
+        case 'mouse_drag': return `${(a.path || []).length} pts`;
+        case 'scroll': return `dx=${a.dx} dy=${a.dy}`;
+        case 'zoom': return `Δ${a.level_delta}`;
+        case 'type_text': return `"${truncate(a.text, 80)}"${a.press_enter ? ' ⏎' : ''}`;
+        case 'key_chord': return a.combo || '';
+        case 'key_hold': return `${a.key} ${a.ms}ms`;
+        case 'clipboard_write': return `"${truncate(a.text, 40)}"`;
+        case 'clipboard_read': return '';
+        case 'window_focus': return `#${a.id}`;
+        case 'window_close': return `#${a.id}`;
+        case 'wait': return `${a.ms}ms`;
+        case 'screenshot': return '';
+        case 'done': return `${a.success ? '✓' : '✗'}${a.reason ? ' · ' + truncate(a.reason, 100) : ''}`;
+        case 'ask': return `"${truncate(a.question, 100)}"`;
+        default: return '';
+    }
+}
+
+function resultInfo(r) {
+    if (!r) return { ok: true, text: t('stepResultOk') };
+    switch (r.kind) {
+        case 'ok': return { ok: true, text: t('stepResultOk') };
+        case 'out_of_bounds': return { ok: false, text: `out of bounds (${r.x}, ${r.y})` };
+        case 'unsupported_action': return { ok: false, text: 'unsupported: ' + truncate(r.message, 60) };
+        case 'executor_error': return { ok: false, text: 'error: ' + truncate(r.message, 60) };
+        default: return { ok: false, text: r.kind };
+    }
+}
+
+async function openRunDetail(run) {
+    runDetailRun = run;
+    runDetailSteps = [];
+    runDetailActionFilter = 'all';
+    const overlay = document.getElementById('run-detail-overlay');
+    if (!overlay) return;
+    renderRunDetailHeader(run);
+    renderRunDetailSummary(run);
+    document.getElementById('run-detail-filter').innerHTML = '';
+    const stepsEl = document.getElementById('run-detail-steps');
+    stepsEl.innerHTML = `<div class="run-detail-loading">${esc(t('runDetailLoading'))}</div>`;
+    overlay.classList.add('show');
+    try {
+        const d = await fetchJson(`${CONSOLE_API}/agent-runs/${encodeURIComponent(run.run_id)}/steps`);
+        runDetailSteps = d.steps || [];
+        if (d.report) {
+            runDetailRun = d.report;
+            renderRunDetailHeader(d.report);
+        }
+        renderRunDetailSummary(runDetailRun);
+        renderRunDetailFilter();
+        renderRunDetailSteps();
+    } catch (e) {
+        stepsEl.innerHTML = `<div class="empty-block">
+            <div class="empty-icon" aria-hidden="true">∅</div>
+            <strong>${esc(t('runDetailEmpty'))}</strong>
+            <div>${esc(t('runDetailEmptyHint'))}</div>
+        </div>`;
+    }
+}
+
+function closeRunDetail() {
+    document.getElementById('run-detail-overlay')?.classList.remove('show');
+    runDetailRun = null;
+    runDetailSteps = [];
+}
+
+function renderRunDetailHeader(run) {
+    const pill = document.getElementById('run-detail-pill');
+    if (pill) {
+        pill.className = 'run-state-pill state-' + runStateClass(run);
+        pill.textContent = runStateLabel(run);
+    }
+    const task = document.getElementById('run-detail-task');
+    if (task) {
+        task.textContent = run.task || '—';
+        task.title = `${run.run_id || ''}`;
+    }
+}
+
+function renderRunDetailSummary(run) {
+    const el = document.getElementById('run-detail-summary');
+    if (!el) return;
+    const startedMs = run.started_at_ms || 0;
+    const running = run.finish_reason && run.finish_reason.kind === 'running';
+    const finishedMs = startedMs ? startedMs + (run.wall_ms || 0) : 0;
+    let costMicros = null;
+    if (runDetailSteps.length && runDetailSteps.some(s => s.provider_usage && s.provider_usage.cost_usd_micros != null)) {
+        costMicros = runDetailSteps.reduce((a, s) => a + ((s.provider_usage && s.provider_usage.cost_usd_micros) || 0), 0);
+    }
+    const items = [
+        [t('runDetailStarted'), startedMs ? formatDateTime(startedMs) : '—'],
+        [t('runDetailFinished'), running || !finishedMs ? '—' : formatDateTime(finishedMs)],
+        [t('runDetailDuration'), formatDuration(run.wall_ms)],
+        [t('runDetailSteps'), formatNumber(run.steps_taken ?? runDetailSteps.length)],
+        [t('runDetailTokens'), `${formatNumber(run.tokens_in || 0)} / ${formatNumber(run.tokens_out || 0)}`],
+        [t('runDetailCost'), costMicros == null ? '—' : formatCostMicros(costMicros)],
+    ];
+    el.innerHTML = items.map(([k, v]) =>
+        `<div class="rd-stat"><span class="rd-stat-k">${esc(k)}</span><span class="rd-stat-v">${esc(v)}</span></div>`
+    ).join('');
+}
+
+function renderRunDetailFilter() {
+    const el = document.getElementById('run-detail-filter');
+    if (!el) return;
+    const counts = { all: runDetailSteps.length };
+    runDetailSteps.forEach(s => {
+        const k = actionKind(s.action);
+        counts[k] = (counts[k] || 0) + 1;
+    });
+    const kinds = ['all', ...Object.keys(counts).filter(k => k !== 'all').sort()];
+    el.innerHTML = kinds.map(k => {
+        const label = k === 'all' ? t('runDetailFilterAll') : k;
+        const active = k === runDetailActionFilter;
+        return `<button type="button" class="runs-filter-chip${active ? ' active' : ''}" data-akind="${esc(k)}">${esc(label)}<span class="chip-count">${counts[k] || 0}</span></button>`;
+    }).join('');
+    el.querySelectorAll('[data-akind]').forEach(b => b.addEventListener('click', () => {
+        runDetailActionFilter = b.dataset.akind;
+        renderRunDetailFilter();
+        renderRunDetailSteps();
+    }));
+}
+
+function renderRunDetailSteps() {
+    const el = document.getElementById('run-detail-steps');
+    if (!el) return;
+    if (!runDetailSteps.length) {
+        el.innerHTML = `<div class="empty-block">
+            <div class="empty-icon" aria-hidden="true">∅</div>
+            <strong>${esc(t('runDetailEmpty'))}</strong>
+            <div>${esc(t('runDetailEmptyHint'))}</div>
+        </div>`;
+        return;
+    }
+    const startMs = runDetailRun?.started_at_ms || runDetailSteps[0]?.ts_ms || 0;
+    let cumIn = 0, cumOut = 0, cumCost = 0, prevTs = startMs;
+    const rows = runDetailSteps.map((s, idx) => {
+        const u = s.provider_usage || {};
+        cumIn += u.input_tokens || 0;
+        cumOut += u.output_tokens || 0;
+        cumCost += u.cost_usd_micros || 0;
+        const gap = prevTs ? (s.ts_ms - prevTs) : 0;
+        prevTs = s.ts_ms;
+        return renderStepRow(s, idx, { startMs, cumIn, cumOut, cumCost, gap });
+    });
+    el.innerHTML = rows.filter(Boolean).join('');
+
+    el.querySelectorAll('.step-row-head').forEach(h => h.addEventListener('click', () => {
+        h.closest('.step-row')?.classList.toggle('expanded');
+    }));
+    el.querySelectorAll('[data-copy-step]').forEach(b => b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = +b.dataset.copyStep;
+        copyText(JSON.stringify(runDetailSteps[idx], null, 2))
+            .then(() => toast(t('stepJsonCopied'), 'ok'))
+            .catch(() => toast(t('copyFailed'), 'err'));
+    }));
+    el.querySelectorAll('[data-frame]').forEach(img => img.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openFrameLightbox(img.dataset.frame);
+    }));
+}
+
+function renderStepRow(s, idx, ctx) {
+    if (runDetailActionFilter !== 'all' && actionKind(s.action) !== runDetailActionFilter) return '';
+    const offset = ctx.startMs ? formatOffset(s.ts_ms - ctx.startMs) : '';
+    const absTime = formatDateTime(s.ts_ms);
+    const ak = actionKind(s.action);
+    const brief = actionBrief(s.action);
+    const res = resultInfo(s.result);
+    const u = s.provider_usage || {};
+    const obs = s.observation || {};
+    const sha = (obs.sha256 || '').slice(0, 8);
+    const frameName = obs.frame_path ? frameBasename(obs.frame_path) : null;
+    const frameUrl = frameName && runDetailRun?.run_id
+        ? `${CONSOLE_API}/agent-runs/${encodeURIComponent(runDetailRun.run_id)}/frames/${encodeURIComponent(frameName)}`
+        : null;
+    const rawJson = esc(JSON.stringify(s, null, 2));
+    return `<div class="step-row${res.ok ? '' : ' step-row-err'}">
+        <div class="step-row-head">
+            <span class="step-idx">#${esc(s.step ?? idx)}</span>
+            <span class="step-time" title="${esc(absTime)}">${esc(offset)}</span>
+            <span class="step-action-badge cat-${esc(actionCategory(ak))}">${esc(ak)}</span>
+            <span class="step-brief">${esc(brief)}</span>
+            <span class="step-result ${res.ok ? 'ok' : 'err'}">${esc(res.text)}</span>
+            <span class="step-chevron" aria-hidden="true">▸</span>
+        </div>
+        <div class="step-row-body">
+            ${frameUrl ? `<div class="step-frame"><img data-frame="${esc(frameUrl)}" src="${esc(frameUrl)}" loading="lazy" alt="frame"></div>` : ''}
+            <div class="step-info">
+                <div class="step-metrics">
+                    <span title="provider latency">⚡ ${esc(t('stepLatency'))} ${esc(formatDuration(u.provider_latency_ms || 0))}</span>
+                    <span title="step elapsed">⏲ ${esc(formatDuration(s.elapsed_ms || 0))}</span>
+                    <span title="wall gap">⌛ ${esc(t('stepGap'))} ${esc(formatDuration(ctx.gap))}</span>
+                    <span title="tokens in/out">⇅ ${esc(formatNumber(u.input_tokens || 0))} / ${esc(formatNumber(u.output_tokens || 0))}</span>
+                    ${u.cost_usd_micros != null ? `<span>💲 ${esc(formatCostMicros(u.cost_usd_micros))}</span>` : ''}
+                    ${sha ? `<span class="step-sha" title="screen sha256">⌗ ${esc(sha)}</span>` : ''}
+                </div>
+                <div class="step-cumulative">${esc(t('stepCumulative'))}: ⇅ ${esc(formatNumber(ctx.cumIn))} / ${esc(formatNumber(ctx.cumOut))}${ctx.cumCost ? ` · ${esc(formatCostMicros(ctx.cumCost))}` : ''}</div>
+                <button type="button" class="btn-link step-copy" data-copy-step="${esc(idx)}">${esc(t('stepCopyJson'))}</button>
+                <pre class="step-json">${rawJson}</pre>
+            </div>
+        </div>
+    </div>`;
+}
+
+function openFrameLightbox(url) {
+    const lb = document.getElementById('frame-lightbox');
+    const img = document.getElementById('frame-lightbox-img');
+    if (!lb || !img) return;
+    img.src = url;
+    lb.classList.add('show');
+}
+
+function closeFrameLightbox() {
+    document.getElementById('frame-lightbox')?.classList.remove('show');
 }
 
 // ---------- Misc ----------
@@ -1892,6 +2239,19 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('runs-search')?.addEventListener('input', (e) => {
         runsSearchTerm = e.target.value;
         renderRunsList();
+    });
+    document.getElementById('run-detail-back')?.addEventListener('click', closeRunDetail);
+    document.getElementById('run-detail-close')?.addEventListener('click', closeRunDetail);
+    document.getElementById('run-detail-overlay')?.addEventListener('click', (e) => {
+        if (e.target.id === 'run-detail-overlay') closeRunDetail();
+    });
+    document.getElementById('frame-lightbox')?.addEventListener('click', closeFrameLightbox);
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        const lb = document.getElementById('frame-lightbox');
+        if (lb?.classList.contains('show')) { closeFrameLightbox(); return; }
+        const ov = document.getElementById('run-detail-overlay');
+        if (ov?.classList.contains('show')) closeRunDetail();
     });
     document.getElementById('overview-agent-stop').addEventListener('click', stopAgent);
 

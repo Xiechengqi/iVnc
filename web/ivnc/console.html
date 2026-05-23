@@ -391,6 +391,30 @@
         </main>
     </div>
 
+    <!-- 轨迹详情覆盖层 -->
+    <div class="run-detail-overlay" id="run-detail-overlay">
+        <div class="run-detail-panel">
+            <div class="run-detail-header">
+                <button class="run-detail-back" id="run-detail-back" type="button" aria-label="返回">
+                    <span aria-hidden="true">←</span><span id="run-detail-back-label">返回</span>
+                </button>
+                <span class="run-state-pill" id="run-detail-pill"></span>
+                <div class="run-detail-title" id="run-detail-task"></div>
+                <button class="modal-close" id="run-detail-close" type="button" aria-label="关闭">×</button>
+            </div>
+            <div class="run-detail-summary" id="run-detail-summary"></div>
+            <div class="run-detail-toolbar">
+                <div class="run-detail-filter" id="run-detail-filter"></div>
+            </div>
+            <div class="run-detail-steps" id="run-detail-steps"></div>
+        </div>
+    </div>
+
+    <!-- 截图灯箱 -->
+    <div class="frame-lightbox" id="frame-lightbox">
+        <img id="frame-lightbox-img" alt="screenshot">
+    </div>
+
     <!-- 模态框：添加/编辑 -->
     <div class="modal-bg" id="modal">
         <div class="modal app-modal">
