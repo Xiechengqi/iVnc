@@ -97,6 +97,8 @@ impl McpServer {
             pending_safety_checks: Vec::new(),
             last_action: None,
             last_result: None,
+            output: None,
+            warnings: Vec::new(),
         };
         self.state.agent_runs.insert(initial.clone());
         let handle = tokio::spawn(async move {
@@ -130,6 +132,8 @@ impl McpServer {
                             pending_safety_checks: Vec::new(),
                             last_action: None,
                             last_result: None,
+                            output: None,
+                            warnings: Vec::new(),
                         }
                     });
                     report.finish_reason = crate::agent::types::FinishReason::ProviderError;
@@ -154,6 +158,8 @@ impl McpServer {
                             pending_safety_checks: Vec::new(),
                             last_action: None,
                             last_result: None,
+                            output: None,
+                            warnings: Vec::new(),
                         }
                     });
                     report.finish_reason = crate::agent::types::FinishReason::ProviderError;

@@ -134,9 +134,15 @@ fn parse_candidate(candidate: &str) -> Result<Option<Action>, String> {
             ms: parse_optional_i32(body, &["ms"]).unwrap_or(1000).max(0) as u32,
         })),
         "screenshot" => Ok(Some(Action::Screenshot)),
+        "launch_app" | "open_app" | "launch" | "open" => Ok(Some(Action::LaunchApp {
+            app: parse_string_arg(body, &["app", "name", "id"]).unwrap_or_default(),
+            url: parse_string_arg(body, &["url", "address"]),
+        })),
         "done" | "finish" => Ok(Some(Action::Done {
             success: parse_bool_arg(body, &["success"]).unwrap_or(true),
             reason: parse_string_arg(body, &["reason"]).unwrap_or_default(),
+            output: parse_string_arg(body, &["output", "result", "answer", "deliverable"])
+                .unwrap_or_default(),
         })),
         _ => Ok(None),
     }
@@ -297,9 +303,15 @@ fn json_action_to_action(name: &str, args: &Value) -> Result<Action, String> {
             ms: json_i32(args, &["ms"]).unwrap_or(1000).max(0) as u32,
         }),
         "screenshot" => Ok(Action::Screenshot),
+        "launch_app" | "open_app" | "launch" | "open" => Ok(Action::LaunchApp {
+            app: json_string(args, &["app", "name", "id"]).unwrap_or_default(),
+            url: json_string(args, &["url", "address"]),
+        }),
         "done" | "finish" => Ok(Action::Done {
             success: json_bool(args, &["success"]).unwrap_or(true),
             reason: json_string(args, &["reason"]).unwrap_or_default(),
+            output: json_string(args, &["output", "result", "answer", "deliverable"])
+                .unwrap_or_default(),
         }),
         _ => Err(format!("unsupported provider action JSON: {}", name)),
     }
@@ -529,7 +541,8 @@ mod tests {
             actions[0],
             Action::Done {
                 success: true,
-                ref reason
+                ref reason,
+                ..
             } if reason == "visible"
         ));
     }

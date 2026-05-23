@@ -209,10 +209,21 @@ pub enum Action {
         ms: u32,
     },
     Screenshot,
+    /// Launch a managed desktop app (e.g. the built-in Chrome) by id or name.
+    /// An optional URL is appended to the launch command so the app can open it directly.
+    LaunchApp {
+        app: String,
+        #[serde(default)]
+        url: Option<String>,
+    },
     Done {
         success: bool,
         #[serde(default)]
         reason: String,
+        /// The deliverable produced by the task (the actual answer/result the
+        /// user asked for), not just a status sentence.
+        #[serde(default)]
+        output: String,
     },
     Ask {
         question: String,
@@ -460,6 +471,13 @@ pub struct RunReport {
     pub pending_safety_checks: Vec<SafetyCheck>,
     pub last_action: Option<Action>,
     pub last_result: Option<ActionResult>,
+    /// The deliverable the agent produced via `done.output`, if any.
+    #[serde(default)]
+    pub output: Option<String>,
+    /// Non-fatal warnings surfaced by the run (e.g. a success claim that was
+    /// not backed by any substantive on-screen work).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

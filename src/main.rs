@@ -1799,6 +1799,9 @@ async fn run_async_services(
     // HTTP server
     let port = config.http.port;
     info!("Starting HTTP server on port {}", port);
+    if let Some(ps) = &apps_state {
+        shared.set_apps_state(ps.clone());
+    }
     web::run_http_server_with_webrtc(
         port,
         shared.clone(),

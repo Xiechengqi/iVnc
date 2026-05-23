@@ -49,6 +49,7 @@ impl BrainProvider for ReplayProvider {
         let action = self.actions.lock().unwrap().pop().unwrap_or(Action::Done {
             success: true,
             reason: "replay complete".to_string(),
+            output: String::new(),
         });
         Ok(ProviderTurn::actions(vec![action]))
     }

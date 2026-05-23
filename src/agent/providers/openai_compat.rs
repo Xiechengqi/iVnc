@@ -567,9 +567,15 @@ fn tool_call_to_action(
             ms: optional_i32_arg(args, &["ms"]).unwrap_or(1000).max(0) as u32,
         }),
         "screenshot" => Ok(Action::Screenshot),
+        "launch_app" | "open_app" => Ok(Action::LaunchApp {
+            app: string_arg(args, &["app", "name", "id"]).unwrap_or_default(),
+            url: string_arg(args, &["url", "address"]),
+        }),
         "done" | "finish" => Ok(Action::Done {
             success: args.get("success").and_then(Value::as_bool).unwrap_or(true),
             reason: string_arg(args, &["reason"]).unwrap_or_default(),
+            output: string_arg(args, &["output", "result", "answer", "deliverable"])
+                .unwrap_or_default(),
         }),
         other => Err(ProviderError::InvalidResponse(format!(
             "unknown tool action: {}",
@@ -722,10 +728,25 @@ fn tool_schema() -> Value {
         ),
         function_schema("screenshot", json!({"type":"object","properties":{}})),
         function_schema(
+            "launch_app",
+            json!({
+                "type":"object",
+                "properties":{
+                    "app":{"type":"string","description":"App id or name to launch, e.g. 'chrome'"},
+                    "url":{"type":"string","description":"Optional URL/address to open in the app"}
+                },
+                "required":["app"]
+            })
+        ),
+        function_schema(
             "done",
             json!({
                 "type":"object",
-                "properties":{"success":{"type":"boolean"},"reason":{"type":"string"}},
+                "properties":{
+                    "success":{"type":"boolean"},
+                    "reason":{"type":"string"},
+                    "output":{"type":"string","description":"The deliverable/answer the task asked for (not just a status line)"}
+                },
                 "required":["success"]
             })
         )
@@ -789,10 +810,25 @@ fn responses_tool_schema() -> Value {
         ),
         responses_function_schema("screenshot", json!({"type":"object","properties":{}})),
         responses_function_schema(
+            "launch_app",
+            json!({
+                "type":"object",
+                "properties":{
+                    "app":{"type":"string","description":"App id or name to launch, e.g. 'chrome'"},
+                    "url":{"type":"string","description":"Optional URL/address to open in the app"}
+                },
+                "required":["app"]
+            })
+        ),
+        responses_function_schema(
             "done",
             json!({
                 "type":"object",
-                "properties":{"success":{"type":"boolean"},"reason":{"type":"string"}},
+                "properties":{
+                    "success":{"type":"boolean"},
+                    "reason":{"type":"string"},
+                    "output":{"type":"string","description":"The deliverable/answer the task asked for (not just a status line)"}
+                },
                 "required":["success"]
             })
         )
@@ -823,20 +859,33 @@ pub fn default_system_prompt() -> String {
     "You are an autonomous computer-use agent controlling a Linux desktop through iVnc. \
      Inspect the screenshot and return one or more tool calls. Coordinates must be in the \
      screenshot image pixel coordinate space, not browser or CSS coordinates. Prefer small, \
-     verifiable steps and finish with done(success, reason) when the task is complete. \
+     verifiable steps and finish with done(success, reason, output) when the task is complete. \
      If the API gateway or model cannot emit native tool calls, return exactly one fallback \
      action line such as: Action: done(success=true, reason='complete') or \
      Action: click(x=100, y=200). Do not return explanatory prose without an action. \
+     A fresh screenshot of the current screen is attached to EVERY turn automatically — never \
+     spend a turn calling screenshot just to look; only act, and observe the next turn's image. \
+     Starting state: if the screen is blank or no relevant application is open, do NOT give up \
+     and do NOT claim success — use launch_app(app='chrome', url='<address>') to open what you \
+     need (a browser, a page) before acting. \
      Anti-loop rule: if your previous action did not visibly change the screenshot, do NOT \
      repeat the same action. Switch strategy — try different coordinates, a different key \
-     combination, scroll, take a screenshot to re-orient, or call done(success=false, \
-     reason='stuck: <what failed>') after at most 2 unproductive attempts on the same target. \
+     combination, scroll, or call done(success=false, reason='stuck: <what failed>') after at \
+     most 2 unproductive attempts on the same target. \
+     Honesty rule (CRITICAL): only call done(success=true) when the task's goal is actually \
+     achieved and the evidence is VISIBLE in the current screenshot. Never report success=true \
+     based on prior knowledge, page titles, snippets, or an empty/unchanged screen. If you were \
+     blocked, ran out of options, or never actually did the work, you MUST call \
+     done(success=false, reason='<why>') — a truthful failure is far more useful than a false \
+     success. \
+     Deliverable: when the task asks for information, an answer, or an analysis, put the actual \
+     result in done(output='<the real answer/content>'). 'reason' is a short status line; \
+     'output' is the deliverable the user asked for. Do not leave output empty for tasks that \
+     have an answer. \
      Synthesis bias: when the current screenshot already contains enough information to answer \
-     the task, call done immediately. Every extra exploration step costs budget you may need \
-     later; prefer done over 'one more search'. CRITICAL: 'enough information' means the \
-     literal answer text is VISIBLE in the current screenshot — do NOT call done based on \
-     prior knowledge, page titles, or search result snippets alone. If the answer requires \
-     opening a linked page, navigate to it first."
+     the task, call done immediately rather than taking one more exploration step — but only if \
+     the literal answer is visible (see the Honesty rule). If the answer requires opening a \
+     linked page, navigate to it first."
         .to_string()
 }
 

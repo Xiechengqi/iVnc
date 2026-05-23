@@ -106,6 +106,7 @@ pub fn build_provider(
                 vec![Action::Done {
                     success: true,
                     reason: "empty replay".to_string(),
+                    output: String::new(),
                 }]
             }),
         ))),

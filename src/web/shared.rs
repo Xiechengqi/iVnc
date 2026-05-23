@@ -162,6 +162,10 @@ pub struct SharedState {
 
     /// Built-in miao proxy panel process manager
     pub proxy_panel: Arc<ProxyPanelManager>,
+
+    /// Managed-apps manager, attached after construction (apps subsystem is
+    /// built later in startup than SharedState). Lets the agent launch apps.
+    apps_state: std::sync::OnceLock<Arc<crate::apps::api::AppsState>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -231,7 +235,18 @@ impl SharedState {
             connections: Arc::new(Mutex::new(HashMap::new())),
             ipv4_address: Arc::new(RwLock::new(String::new())),
             proxy_panel: Arc::new(ProxyPanelManager::new()),
+            apps_state: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attach the apps manager once it has been constructed during startup.
+    pub fn set_apps_state(&self, apps: Arc<crate::apps::api::AppsState>) {
+        let _ = self.apps_state.set(apps);
+    }
+
+    /// The apps manager, if it has been attached.
+    pub fn apps_state(&self) -> Option<&Arc<crate::apps::api::AppsState>> {
+        self.apps_state.get()
     }
 
     pub fn update_webrtc_stats(&self, kind: &str, payload: &str) {

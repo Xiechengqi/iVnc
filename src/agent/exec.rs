@@ -169,6 +169,21 @@ async fn execute_inner(
         Action::Zoom { .. } => {
             return Err(ActionResult::UnsupportedAction { message: "zoom".to_string() })
         }
+        Action::LaunchApp { app, url } => {
+            let Some(apps) = state.apps_state() else {
+                return Err(ActionResult::ExecutorError {
+                    message: "launch_app_unavailable: apps manager not initialized".to_string(),
+                });
+            };
+            match apps.launch_named(app, url.as_deref()).await {
+                Ok(_) => {}
+                Err(message) => {
+                    return Err(ActionResult::ExecutorError {
+                        message: format!("launch_app_failed: {}", message),
+                    })
+                }
+            }
+        }
         Action::Done { .. } | Action::Ask { .. } => {}
     }
     Ok(())

@@ -36,6 +36,7 @@ pub async fn run_agent(
         .record_trajectory
         .then(|| super::trajectory::default_trajectory_path(&run_id));
     let mut consecutive_out_of_bounds = 0u8;
+    let mut substantive = false;
     if let Err(err) = provider.reset(&task).await {
         state.set_agent_exclusive(false, "provider_error");
         return Err(RunError::Provider(err));
@@ -181,6 +182,17 @@ pub async fn run_agent(
                     FinishReason::Done { success },
                     trajectory_path.clone(),
                 );
+                if success
+                    && !substantive
+                    && report
+                        .output
+                        .as_deref()
+                        .map_or(true, |o| o.trim().is_empty())
+                {
+                    report.warnings.push(
+                        "reported success=true without taking any substantive action or providing an output deliverable — result is likely unverified".to_string(),
+                    );
+                }
                 state.agent_runs.update(report.clone());
                 state.set_agent_exclusive(false, "done");
                 return Ok(report);
@@ -236,6 +248,9 @@ pub async fn run_agent(
             };
             let force_observe = matches!(action, Action::Screenshot);
             let needs_settle = action_needs_settle(&action);
+            if matches!(result, ActionResult::Ok) && is_substantive_action(&action) {
+                substantive = true;
+            }
             let blocked_message = if destructive_blocked {
                 if let ActionResult::ExecutorError { message } = &result {
                     Some(message.clone())
@@ -343,6 +358,28 @@ fn action_needs_settle(action: &Action) -> bool {
     !matches!(action, Action::Wait { .. } | Action::Screenshot)
 }
 
+/// Whether an action represents substantive work that can change the environment
+/// (as opposed to passive observation/cursor moves). Used to detect runs that
+/// claim success without having actually done anything.
+fn is_substantive_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::MouseClick { .. }
+            | Action::MouseDown { .. }
+            | Action::MouseUp { .. }
+            | Action::MouseDrag { .. }
+            | Action::Scroll { .. }
+            | Action::Zoom { .. }
+            | Action::TypeText { .. }
+            | Action::KeyChord { .. }
+            | Action::KeyHold { .. }
+            | Action::ClipboardWrite { .. }
+            | Action::WindowFocus { .. }
+            | Action::WindowClose { .. }
+            | Action::LaunchApp { .. }
+    )
+}
+
 fn build_report(
     run_id: &str,
     task: &str,
@@ -365,6 +402,10 @@ fn build_report(
         FinishReason::Done { success } => Some(success),
         _ => None,
     };
+    let output = history.steps.last().and_then(|s| match &s.action {
+        Action::Done { output, .. } if !output.trim().is_empty() => Some(output.clone()),
+        _ => None,
+    });
     RunReport {
         run_id: run_id.to_string(),
         task: task.to_string(),
@@ -380,6 +421,8 @@ fn build_report(
         pending_safety_checks: Vec::new(),
         last_action: history.steps.last().map(|s| s.action.clone()),
         last_result: history.steps.last().map(|s| s.result.clone()),
+        output,
+        warnings: Vec::new(),
     }
 }
 
@@ -455,6 +498,9 @@ fn canonical_action(a: &Action) -> String {
         Action::ClipboardRead => "clipread".to_string(),
         Action::MouseDrag { path, button, .. } => {
             format!("drag:{}:{:?}:{:?}", path.len(), button, path.first())
+        }
+        Action::LaunchApp { app, url } => {
+            format!("launch:{}:{}", app.to_ascii_lowercase(), url.as_deref().unwrap_or(""))
         }
         Action::Wait { .. } | Action::Screenshot | Action::Done { .. } | Action::Ask { .. } => {
             String::new()

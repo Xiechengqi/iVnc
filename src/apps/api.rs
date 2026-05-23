@@ -133,6 +133,52 @@ impl AppsState {
         }
     }
 
+    /// Launch a managed app selected by id or (case-insensitive) name. When a
+    /// non-empty `url` is supplied it is appended to the desktop launch command
+    /// (single-quoted) so e.g. Chrome opens directly at that address.
+    ///
+    /// Returns the started pid when available; if the app is already running the
+    /// existing pid is returned instead of erroring.
+    pub async fn launch_named(
+        &self,
+        query: &str,
+        url: Option<&str>,
+    ) -> Result<Option<u32>, String> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Err("empty app name".to_string());
+        }
+        let apps = self.store.list()?;
+        let ql = q.to_lowercase();
+        let mut app = apps
+            .iter()
+            .find(|a| a.id.eq_ignore_ascii_case(q) || a.name.eq_ignore_ascii_case(q))
+            .or_else(|| {
+                apps.iter()
+                    .find(|a| a.name.to_lowercase().contains(&ql) || a.id.to_lowercase().contains(&ql))
+            })
+            .cloned()
+            .ok_or_else(|| {
+                let available: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
+                format!("no app matching {:?}; available: {}", query, available.join(", "))
+            })?;
+
+        if let Some(url) = url.map(str::trim).filter(|u| !u.is_empty()) {
+            if app.app_type == AppType::DesktopApp {
+                if let Some(cmd) = app.exec_command.as_mut() {
+                    cmd.push(' ');
+                    cmd.push_str(&shell_single_quote(url));
+                }
+            }
+        }
+
+        match self.start_app_processes(&app).await {
+            Ok(pid) => Ok(pid),
+            Err(e) if e == "App is already running" => Ok(self.app_pid(&app)),
+            Err(e) => Err(e),
+        }
+    }
+
     fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
         match app.app_type {
             AppType::DesktopApp => self.process.stop(&app.id),
@@ -158,6 +204,22 @@ impl AppsState {
             AppType::BackgroundApp => self.service.pid(&app.id),
         }
     }
+}
+
+/// Wrap a string in single quotes for safe inclusion in a `sh -c` command line,
+/// escaping any embedded single quotes. Prevents shell injection via URLs/args.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
