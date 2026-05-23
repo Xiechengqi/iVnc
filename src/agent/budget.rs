@@ -72,6 +72,26 @@ fn price_for(provider: &str, model: &str) -> Option<Price> {
             input_micros_per_million: 1_000_000,
             output_micros_per_million: 5_000_000,
         },
+        "gemini-2.0-flash" | "gemini-2.0-flash-001" => Price {
+            input_micros_per_million: 100_000,
+            output_micros_per_million: 400_000,
+        },
+        "gemini-2.5-flash" => Price {
+            input_micros_per_million: 300_000,
+            output_micros_per_million: 2_500_000,
+        },
+        "gemini-2.5-pro" => Price {
+            input_micros_per_million: 1_250_000,
+            output_micros_per_million: 10_000_000,
+        },
+        "gemini-1.5-flash" => Price {
+            input_micros_per_million: 75_000,
+            output_micros_per_million: 300_000,
+        },
+        "gemini-1.5-pro" => Price {
+            input_micros_per_million: 1_250_000,
+            output_micros_per_million: 5_000_000,
+        },
         _ => return None,
     };
     Some(p)
