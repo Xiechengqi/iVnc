@@ -374,6 +374,7 @@ fn build_report(
         tokens_in,
         tokens_out,
         wall_ms: now_ms().saturating_sub(started_ms),
+        started_at_ms: started_ms,
         trajectory_path,
         pending_question: None,
         pending_safety_checks: Vec::new(),

@@ -89,6 +89,7 @@ impl McpServer {
             tokens_in: 0,
             tokens_out: 0,
             wall_ms: 0,
+            started_at_ms: crate::agent::types::now_ms(),
             trajectory_path: options
                 .record_trajectory
                 .then(|| crate::agent::trajectory::default_trajectory_path(&run_id)),
@@ -123,6 +124,7 @@ impl McpServer {
                             tokens_in: 0,
                             tokens_out: 0,
                             wall_ms: 0,
+                            started_at_ms: crate::agent::types::now_ms(),
                             trajectory_path: None,
                             pending_question: None,
                             pending_safety_checks: Vec::new(),
@@ -146,6 +148,7 @@ impl McpServer {
                             tokens_in: 0,
                             tokens_out: 0,
                             wall_ms: 0,
+                            started_at_ms: crate::agent::types::now_ms(),
                             trajectory_path: None,
                             pending_question: None,
                             pending_safety_checks: Vec::new(),

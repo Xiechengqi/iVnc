@@ -452,6 +452,9 @@ pub struct RunReport {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub wall_ms: u64,
+    /// Unix epoch millis when the run started. 0 if unknown.
+    #[serde(default)]
+    pub started_at_ms: u64,
     pub trajectory_path: Option<PathBuf>,
     pub pending_question: Option<String>,
     pub pending_safety_checks: Vec<SafetyCheck>,

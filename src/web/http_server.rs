@@ -160,7 +160,15 @@ pub async fn run_http_server_with_webrtc(
             "/api/console/providers/{name}",
             put(console_provider_put_handler),
         )
-        .route("/api/console/agent-runs", get(console_agent_runs_handler));
+        .route("/api/console/agent-runs", get(console_agent_runs_handler))
+        .route(
+            "/api/console/agent-runs/{run_id}/steps",
+            get(console_agent_run_steps_handler),
+        )
+        .route(
+            "/api/console/agent-runs/{run_id}/frames/{name}",
+            get(console_agent_run_frame_handler),
+        );
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(ref manager) = session_manager {
@@ -1237,6 +1245,76 @@ async fn console_agent_runs_handler(State(state): State<Arc<SharedState>>) -> Re
 #[cfg(not(feature = "agent"))]
 async fn console_agent_runs_handler() -> Response {
     json_response(StatusCode::OK, json!({ "runs": [] }))
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_run_steps_handler(
+    State(state): State<Arc<SharedState>>,
+    Path(run_id): Path<String>,
+) -> Response {
+    let report = state.agent_runs.get(&run_id);
+    let path = report
+        .as_ref()
+        .and_then(|r| r.trajectory_path.clone())
+        .unwrap_or_else(|| crate::agent::trajectory::default_trajectory_path(&run_id));
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => {
+            let steps: Vec<serde_json::Value> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .collect();
+            json_response(
+                StatusCode::OK,
+                json!({ "run_id": run_id, "report": report, "steps": steps }),
+            )
+        }
+        Err(_) => json_response(
+            StatusCode::NOT_FOUND,
+            json!({ "run_id": run_id, "report": report, "steps": [], "error": "trajectory not found" }),
+        ),
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_agent_run_steps_handler(Path(_run_id): Path<String>) -> Response {
+    json_response(StatusCode::OK, json!({ "steps": [] }))
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_run_frame_handler(Path((run_id, name)): Path<(String, String)>) -> Response {
+    // Only allow a bare image basename — reject any path traversal.
+    let safe = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && !name.contains("..");
+    if !safe || name.is_empty() {
+        return json_response(StatusCode::BAD_REQUEST, json!({ "error": "invalid frame name" }));
+    }
+    let frame_dir = crate::agent::trajectory::default_trajectory_path(&run_id)
+        .with_file_name(format!("{}_frames", run_id));
+    let path = frame_dir.join(&name);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let ctype = if name.ends_with(".png") {
+                "image/png"
+            } else {
+                "image/jpeg"
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ctype)
+                .header(header::CACHE_CONTROL, "private, max-age=86400")
+                .body(Body::from(bytes))
+                .unwrap()
+        }
+        Err(_) => json_response(StatusCode::NOT_FOUND, json!({ "error": "frame not found" })),
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_agent_run_frame_handler(Path((_run_id, _name)): Path<(String, String)>) -> Response {
+    json_response(StatusCode::NOT_FOUND, json!({ "error": "agent feature is not enabled" }))
 }
 
 fn proxy_json_response(status: StatusCode, body: serde_json::Value) -> Response {

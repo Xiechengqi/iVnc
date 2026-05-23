@@ -196,7 +196,11 @@ impl SharedState {
             #[cfg(feature = "agent")]
             agent_cancel: Arc::new(Mutex::new(CancellationToken::new())),
             #[cfg(feature = "agent")]
-            agent_runs: crate::agent::run_store::RunStore::default(),
+            agent_runs: {
+                let store = crate::agent::run_store::RunStore::default();
+                store.load_from_disk();
+                store
+            },
             display_size,
             clipboard: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),

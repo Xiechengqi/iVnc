@@ -1,4 +1,4 @@
-use super::types::{now_ms, Step};
+use super::types::{now_ms, RunReport, Step};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
@@ -12,12 +12,59 @@ struct TrajectoryLine<'a> {
     data: &'a Step,
 }
 
-pub fn default_trajectory_path(run_id: &str) -> PathBuf {
-    let base = dirs::data_local_dir()
+fn trajectories_dir() -> PathBuf {
+    dirs::data_local_dir()
         .unwrap_or_else(|| std::env::temp_dir())
         .join("ivnc")
-        .join("trajectories");
-    base.join(format!("{}.jsonl", sanitize_run_id(run_id)))
+        .join("trajectories")
+}
+
+pub fn default_trajectory_path(run_id: &str) -> PathBuf {
+    trajectories_dir().join(format!("{}.jsonl", sanitize_run_id(run_id)))
+}
+
+/// Sidecar path holding the serialized `RunReport` for a run, so the run list
+/// survives process restarts.
+pub fn report_path(run_id: &str) -> PathBuf {
+    trajectories_dir().join(format!("{}.report.json", sanitize_run_id(run_id)))
+}
+
+/// Best-effort synchronous write of a run report sidecar. Errors are ignored —
+/// losing a sidecar only degrades the run list, never correctness.
+pub fn write_report_sync(report: &RunReport) {
+    let path = report_path(&report.run_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(report) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Load every persisted run report from disk (best-effort).
+pub fn load_all_reports() -> Vec<RunReport> {
+    let dir = trajectories_dir();
+    let mut reports = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return reports,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with(".report.json"))
+            .unwrap_or(false)
+        {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(report) = serde_json::from_str::<RunReport>(&content) {
+                    reports.push(report);
+                }
+            }
+        }
+    }
+    reports
 }
 
 pub async fn append_step(
