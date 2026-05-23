@@ -451,6 +451,16 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<AgentStopParams>,
     ) -> Result<CallToolResult, McpError> {
+        let already_terminal = params
+            .run_id
+            .as_deref()
+            .map(|id| self.state.agent_runs.is_terminal(id))
+            .unwrap_or(false);
+        if already_terminal {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Agent run already terminal; no-op",
+            )]));
+        }
         self.state.request_agent_stop();
         self.state
             .agent_runs

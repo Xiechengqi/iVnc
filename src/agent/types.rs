@@ -290,8 +290,8 @@ pub struct Step {
 pub enum ActionResult {
     Ok,
     OutOfBounds { x: i32, y: i32, w: u32, h: u32 },
-    UnsupportedAction(String),
-    ExecutorError(String),
+    UnsupportedAction { message: String },
+    ExecutorError { message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

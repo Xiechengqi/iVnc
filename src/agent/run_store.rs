@@ -42,7 +42,9 @@ impl RunStore {
         let mut inner = self.inner.lock().unwrap();
         if let Some(run_id) = run_id {
             if let Some(report) = inner.get_mut(run_id) {
-                report.finish_reason = FinishReason::Interrupted;
+                if matches!(report.finish_reason, FinishReason::Running) {
+                    report.finish_reason = FinishReason::Interrupted;
+                }
             }
         } else {
             for report in inner.values_mut() {
@@ -51,5 +53,14 @@ impl RunStore {
                 }
             }
         }
+    }
+
+    pub fn is_terminal(&self, run_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(run_id)
+            .map(|r| !matches!(r.finish_reason, FinishReason::Running))
+            .unwrap_or(false)
     }
 }

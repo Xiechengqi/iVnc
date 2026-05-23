@@ -12,11 +12,15 @@ pub async fn execute(
     options: &RunOptions,
 ) -> ActionResult {
     if state.agent_stop_requested() {
-        return ActionResult::ExecutorError("interrupted_by_user".to_string());
+        return ActionResult::ExecutorError {
+            message: "interrupted_by_user".to_string(),
+        };
     }
     if let Some(kind) = destructive_kind(action) {
         if !options.allow_destructive || options.require_confirmation_for.contains(&kind) {
-            return ActionResult::ExecutorError("destructive_blocked".to_string());
+            return ActionResult::ExecutorError {
+                message: "destructive_blocked".to_string(),
+            };
         }
     }
     match execute_inner(state, display, action).await {
@@ -45,13 +49,15 @@ async fn execute_inner(
             let (sx, sy) = to_screen(display, *x, *y)?;
             input_exec::mouse_click(state, sx, sy, button_name(*button), *click_count)
                 .await
-                .map_err(|e| ActionResult::ExecutorError(e.to_string()))?;
+                .map_err(|e| ActionResult::ExecutorError {
+                    message: e.to_string(),
+                })?;
         }
         Action::MouseDown { x, y, button, .. } => {
             let (sx, sy) = to_screen(display, *x, *y)?;
             input_exec::mouse_move(state, sx, sy).await;
             let button = input_exec::mouse_button_id(button_name(*button))
-                .map_err(|e| ActionResult::ExecutorError(e.to_string()))?;
+                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
             let _ = state.input_sender.send(crate::input::InputEventData {
                 event_type: crate::input::InputEvent::MouseButton,
                 mouse_x: sx,
@@ -65,7 +71,7 @@ async fn execute_inner(
             let (sx, sy) = to_screen(display, *x, *y)?;
             input_exec::mouse_move(state, sx, sy).await;
             let button = input_exec::mouse_button_id(button_name(*button))
-                .map_err(|e| ActionResult::ExecutorError(e.to_string()))?;
+                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
             let _ = state.input_sender.send(crate::input::InputEventData {
                 event_type: crate::input::InputEvent::MouseButton,
                 mouse_x: sx,
@@ -77,15 +83,15 @@ async fn execute_inner(
         }
         Action::MouseDrag { path, button, .. } => {
             let Some(first) = path.first().copied() else {
-                return Err(ActionResult::ExecutorError("empty_drag_path".to_string()));
+                return Err(ActionResult::ExecutorError { message: "empty_drag_path".to_string() });
             };
             let Some(last) = path.last().copied() else {
-                return Err(ActionResult::ExecutorError("empty_drag_path".to_string()));
+                return Err(ActionResult::ExecutorError { message: "empty_drag_path".to_string() });
             };
             let (first_x, first_y) = to_screen(display, first.0, first.1)?;
             input_exec::mouse_move(state, first_x, first_y).await;
             let button_id = input_exec::mouse_button_id(button_name(*button))
-                .map_err(|e| ActionResult::ExecutorError(e.to_string()))?;
+                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
             let _ = state.input_sender.send(crate::input::InputEventData {
                 event_type: crate::input::InputEvent::MouseButton,
                 mouse_x: first_x,
@@ -123,15 +129,15 @@ async fn execute_inner(
         Action::KeyChord { combo } => {
             input_exec::key_chord(state, combo)
                 .await
-                .map_err(|e| ActionResult::ExecutorError(e.to_string()))?;
+                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
         }
         Action::KeyHold { key, ms } => {
-            let (mods, sym) =
-                crate::mcp::keyboard::parse_key_combo(key).map_err(ActionResult::ExecutorError)?;
+            let (mods, sym) = crate::mcp::keyboard::parse_key_combo(key)
+                .map_err(|message| ActionResult::ExecutorError { message })?;
             if !mods.is_empty() {
-                return Err(ActionResult::UnsupportedAction(
-                    "KeyHold does not support modifier combos".to_string(),
-                ));
+                return Err(ActionResult::UnsupportedAction {
+                    message: "KeyHold does not support modifier combos".to_string(),
+                });
             }
             input_exec::send_key(state, sym, true);
             tokio::time::sleep(Duration::from_millis(*ms as u64)).await;
@@ -146,7 +152,9 @@ async fn execute_inner(
         Action::WindowClose { id } => input_exec::window_close(state, *id),
         Action::Wait { ms } => tokio::time::sleep(Duration::from_millis(*ms as u64)).await,
         Action::Screenshot | Action::ClipboardRead => {}
-        Action::Zoom { .. } => return Err(ActionResult::UnsupportedAction("zoom".to_string())),
+        Action::Zoom { .. } => {
+            return Err(ActionResult::UnsupportedAction { message: "zoom".to_string() })
+        }
         Action::Done { .. } | Action::Ask { .. } => {}
     }
     Ok(())
@@ -175,4 +183,23 @@ fn button_name(button: MouseButton) -> &'static str {
 
 fn clamp_i16(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_result_error_variants_serialize() {
+        let cases = [
+            ActionResult::Ok,
+            ActionResult::OutOfBounds { x: -1, y: 2, w: 1920, h: 1080 },
+            ActionResult::UnsupportedAction { message: "zoom".into() },
+            ActionResult::ExecutorError { message: "destructive_blocked".into() },
+        ];
+        for r in cases {
+            let v = serde_json::to_value(&r).expect("ActionResult must serialize");
+            assert!(v.get("kind").is_some(), "missing kind tag: {v}");
+        }
+    }
 }
