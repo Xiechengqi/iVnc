@@ -5,6 +5,8 @@ use rmcp::ErrorData as McpError;
 use std::sync::Arc;
 use std::time::Duration;
 
+const AUTOMATION_WAKEUP: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy)]
 pub enum McpActionKind {
     Mouse,
@@ -64,6 +66,7 @@ pub fn mouse_button_id(button: &str) -> Result<u8, McpError> {
 }
 
 pub fn send_key(state: &Arc<SharedState>, keysym: u32, pressed: bool) {
+    state.request_automation_wakeup(AUTOMATION_WAKEUP);
     let _ = state.input_sender.send(InputEventData {
         event_type: InputEvent::Keyboard,
         keysym,
@@ -93,6 +96,7 @@ pub async fn type_char(state: &Arc<SharedState>, c: char) {
 }
 
 pub fn send_text_input(state: &Arc<SharedState>, text: &str) {
+    state.request_automation_wakeup(AUTOMATION_WAKEUP);
     let _ = state.input_sender.send(InputEventData {
         event_type: InputEvent::TextInput,
         text: text.to_string(),
@@ -138,6 +142,7 @@ pub async fn key_chord(state: &Arc<SharedState>, combo: &str) -> Result<(), McpE
 }
 
 pub async fn mouse_move(state: &Arc<SharedState>, x: i32, y: i32) {
+    state.request_automation_wakeup(AUTOMATION_WAKEUP);
     let _ = state.input_sender.send(InputEventData {
         event_type: InputEvent::MouseMove,
         mouse_x: x,
@@ -182,6 +187,7 @@ pub async fn mouse_click(
 }
 
 pub fn mouse_scroll(state: &Arc<SharedState>, dx: i16, dy: i16) {
+    state.request_automation_wakeup(AUTOMATION_WAKEUP);
     let _ = state.input_sender.send(InputEventData {
         event_type: InputEvent::MouseWheel,
         wheel_delta_x: dx,
@@ -191,6 +197,7 @@ pub fn mouse_scroll(state: &Arc<SharedState>, dx: i16, dy: i16) {
 }
 
 pub fn window_focus(state: &Arc<SharedState>, window_id: u32) {
+    state.request_automation_wakeup(AUTOMATION_WAKEUP);
     let _ = state.input_sender.send(InputEventData {
         event_type: InputEvent::WindowFocus,
         window_id,
@@ -199,6 +206,7 @@ pub fn window_focus(state: &Arc<SharedState>, window_id: u32) {
 }
 
 pub fn window_close(state: &Arc<SharedState>, window_id: u32) {
+    state.request_automation_wakeup(AUTOMATION_WAKEUP);
     let _ = state.input_sender.send(InputEventData {
         event_type: InputEvent::WindowClose,
         window_id,

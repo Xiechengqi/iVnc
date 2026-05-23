@@ -185,9 +185,7 @@ impl OpenAiCompatibleProvider {
 
         if actions.is_empty() {
             if let Some(content) = message.get("content").and_then(Value::as_str) {
-                actions = text_action_parser::parse_text_actions(content).map_err(|e| {
-                    ProviderError::InvalidResponse(format!("could not parse text action: {}", e))
-                })?;
+                actions = parse_text_actions(content)?;
             }
         }
 
@@ -258,9 +256,7 @@ impl OpenAiCompatibleProvider {
         }
 
         if actions.is_empty() && !text.trim().is_empty() {
-            actions = text_action_parser::parse_text_actions(text.trim()).map_err(|e| {
-                ProviderError::InvalidResponse(format!("could not parse text action: {}", e))
-            })?;
+            actions = parse_text_actions(text.trim())?;
         }
 
         if actions.is_empty() {
@@ -427,6 +423,26 @@ fn parse_usage(value: Option<&Value>, elapsed_ms: u64) -> Option<ProviderUsage> 
         provider_latency_ms: elapsed_ms,
         cost_usd_micros: None,
     })
+}
+
+fn parse_text_actions(text: &str) -> Result<Vec<Action>, ProviderError> {
+    text_action_parser::parse_text_actions(text).map_err(|e| {
+        ProviderError::InvalidResponse(format!(
+            "could not parse text action: {}; text preview: {}",
+            e,
+            text_preview(text)
+        ))
+    })
+}
+
+fn text_preview(text: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if preview.chars().count() > MAX_CHARS {
+        preview = preview.chars().take(MAX_CHARS).collect::<String>();
+        preview.push_str("...");
+    }
+    preview
 }
 
 fn json_keys(value: &Value) -> Vec<String> {
@@ -799,7 +815,10 @@ pub fn default_system_prompt() -> String {
     "You are an autonomous computer-use agent controlling a Linux desktop through iVnc. \
      Inspect the screenshot and return one or more tool calls. Coordinates must be in the \
      screenshot image pixel coordinate space, not browser or CSS coordinates. Prefer small, \
-     verifiable steps and finish with done(success, reason) when the task is complete."
+     verifiable steps and finish with done(success, reason) when the task is complete. \
+     If the API gateway or model cannot emit native tool calls, return exactly one fallback \
+     action line such as: Action: done(success=true, reason='complete') or \
+     Action: click(x=100, y=200). Do not return explanatory prose without an action."
         .to_string()
 }
 
@@ -866,7 +885,10 @@ mod tests {
             OpenAiApiFormat::from_config(Some("chat")),
             OpenAiApiFormat::ChatCompletions
         );
-        assert_eq!(OpenAiApiFormat::from_config(None), OpenAiApiFormat::ChatCompletions);
+        assert_eq!(
+            OpenAiApiFormat::from_config(None),
+            OpenAiApiFormat::ChatCompletions
+        );
     }
 
     #[test]

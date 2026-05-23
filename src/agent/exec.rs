@@ -5,6 +5,8 @@ use crate::web::SharedState;
 use std::sync::Arc;
 use std::time::Duration;
 
+const AUTOMATION_WAKEUP: Duration = Duration::from_secs(5);
+
 pub async fn execute(
     state: &Arc<SharedState>,
     display: &DisplayMetadata,
@@ -54,6 +56,7 @@ async fn execute_inner(
                 })?;
         }
         Action::MouseDown { x, y, button, .. } => {
+            state.request_automation_wakeup(AUTOMATION_WAKEUP);
             let (sx, sy) = to_screen(display, *x, *y)?;
             input_exec::mouse_move(state, sx, sy).await;
             let button = input_exec::mouse_button_id(button_name(*button))
@@ -68,6 +71,7 @@ async fn execute_inner(
             });
         }
         Action::MouseUp { x, y, button, .. } => {
+            state.request_automation_wakeup(AUTOMATION_WAKEUP);
             let (sx, sy) = to_screen(display, *x, *y)?;
             input_exec::mouse_move(state, sx, sy).await;
             let button = input_exec::mouse_button_id(button_name(*button))
@@ -82,6 +86,7 @@ async fn execute_inner(
             });
         }
         Action::MouseDrag { path, button, .. } => {
+            state.request_automation_wakeup(AUTOMATION_WAKEUP);
             let Some(first) = path.first().copied() else {
                 return Err(ActionResult::ExecutorError { message: "empty_drag_path".to_string() });
             };
@@ -146,6 +151,7 @@ async fn execute_inner(
         Action::ClipboardWrite { text } => {
             let b64 =
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, text.as_bytes());
+            state.set_clipboard(b64.clone());
             let _ = state.clipboard_incoming_tx.send(b64);
         }
         Action::WindowFocus { id } => input_exec::window_focus(state, *id),
@@ -188,6 +194,56 @@ fn clamp_i16(v: i32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ui::UiConfig, Config};
+    use crate::input::InputEventData;
+    use crate::runtime_settings::RuntimeSettings;
+
+    fn test_state() -> Arc<SharedState> {
+        let config = Config::default();
+        let ui_config = UiConfig::from_env(&config);
+        let runtime_settings = Arc::new(RuntimeSettings::new(&config));
+        let (input_sender, _input_rx) = tokio::sync::mpsc::unbounded_channel::<InputEventData>();
+        Arc::new(SharedState::new(
+            config,
+            ui_config,
+            input_sender,
+            runtime_settings,
+        ))
+    }
+
+    fn test_display() -> DisplayMetadata {
+        DisplayMetadata {
+            screen_width: 1920,
+            screen_height: 1080,
+            image_width: 1920,
+            image_height: 1080,
+            image_to_screen_scale_x: 1.0,
+            image_to_screen_scale_y: 1.0,
+            client_dpr: None,
+            monitors: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn clipboard_write_updates_read_cache() {
+        let state = test_state();
+        let text = "agent clipboard roundtrip";
+
+        execute_inner(
+            &state,
+            &test_display(),
+            &Action::ClipboardWrite {
+                text: text.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let encoded = state.clipboard.lock().unwrap().clone().unwrap();
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), text);
+    }
 
     #[test]
     fn action_result_error_variants_serialize() {

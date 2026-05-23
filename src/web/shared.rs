@@ -97,6 +97,9 @@ pub struct SharedState {
     /// Current compositor/encoder render state.
     render_state: Arc<AtomicU64>,
 
+    /// Keep the compositor active briefly after MCP/agent input injection.
+    automation_wakeup_until_ms: Arc<AtomicU64>,
+
     /// UI configuration
     pub ui_config: Arc<UiConfig>,
 
@@ -200,6 +203,7 @@ impl SharedState {
             pending_resize: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(RuntimeStats::default())),
             render_state: Arc::new(AtomicU64::new(RenderState::Active as u64)),
+            automation_wakeup_until_ms: Arc::new(AtomicU64::new(0)),
             start_time: std::time::Instant::now(),
             webrtc_session_count: Arc::new(AtomicU64::new(0)),
             datachannel_open_count: Arc::new(AtomicU64::new(0)),
@@ -436,6 +440,26 @@ impl SharedState {
 
     pub fn render_state(&self) -> RenderState {
         RenderState::from_u64(self.render_state.load(Ordering::Relaxed))
+    }
+
+    pub fn request_automation_wakeup(&self, duration: std::time::Duration) {
+        let until = now_millis().saturating_add(duration.as_millis() as u64);
+        let mut current = self.automation_wakeup_until_ms.load(Ordering::Relaxed);
+        while until > current {
+            match self.automation_wakeup_until_ms.compare_exchange_weak(
+                current,
+                until,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn automation_wakeup_active(&self) -> bool {
+        now_millis() <= self.automation_wakeup_until_ms.load(Ordering::Relaxed)
     }
 
     /// Build UI configuration JSON payload

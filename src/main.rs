@@ -1570,6 +1570,10 @@ fn desired_render_state(
     shared: &web::SharedState,
     last_visual_activity_at: Instant,
 ) -> RenderState {
+    if shared.automation_wakeup_active() {
+        return RenderState::Active;
+    }
+
     let has_transport_viewers = shared.webrtc_sessions() > 0 || shared.rtp_receiver_count() > 0;
     if !has_transport_viewers {
         return RenderState::NoViewerIdle;

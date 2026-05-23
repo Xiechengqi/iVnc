@@ -328,6 +328,7 @@ impl McpServer {
     ) -> Result<CallToolResult, McpError> {
         guard_mcp_action_allowed(&self.state, McpActionKind::ClipboardWrite)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(params.text.as_bytes());
+        self.state.set_clipboard(b64.clone());
         let _ = self.state.clipboard_incoming_tx.send(b64);
         self.state
             .clipboard_incoming_dirty
@@ -596,5 +597,46 @@ impl ServerHandler for McpServer {
     ) -> Result<CallToolResult, McpError> {
         let ctx = ToolCallContext::new(self, request, context);
         self.tool_router.call(ctx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ui::UiConfig, Config};
+    use crate::input::InputEventData;
+    use crate::runtime_settings::RuntimeSettings;
+    use std::sync::Arc;
+
+    fn test_state() -> Arc<SharedState> {
+        let config = Config::default();
+        let ui_config = UiConfig::from_env(&config);
+        let runtime_settings = Arc::new(RuntimeSettings::new(&config));
+        let (input_sender, _input_rx) = tokio::sync::mpsc::unbounded_channel::<InputEventData>();
+        Arc::new(SharedState::new(
+            config,
+            ui_config,
+            input_sender,
+            runtime_settings,
+        ))
+    }
+
+    #[tokio::test]
+    async fn clipboard_write_updates_read_cache() {
+        let server = McpServer::new(test_state());
+        let text = "mcp clipboard roundtrip";
+
+        server
+            .clipboard_write(Parameters(ClipboardWriteParams {
+                text: text.to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let encoded = server.state.clipboard.lock().unwrap().clone().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), text);
     }
 }
