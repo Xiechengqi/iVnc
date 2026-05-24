@@ -1174,6 +1174,8 @@ struct AgentStartHttpRequest {
     budget: Option<crate::agent::types::Budget>,
     #[serde(default)]
     options: Option<crate::agent::types::RunOptions>,
+    #[serde(default)]
+    replay_actions: Option<Vec<crate::agent::types::Action>>,
 }
 
 #[cfg(feature = "agent")]
@@ -1203,7 +1205,7 @@ async fn console_agent_start_handler(
         model: body.model,
         budget: body.budget,
         options: body.options,
-        replay_actions: None,
+        replay_actions: body.replay_actions,
         source: None,
     };
     match crate::agent::launch::launch_agent_run(state.clone(), req, false).await {

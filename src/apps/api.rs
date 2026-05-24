@@ -345,8 +345,9 @@ fn shell_quote(value: &str) -> String {
 fn builtin_chrome_command() -> Result<String, String> {
     let data_dir = builtin_chrome_data_dir()?;
     let data_dir = shell_quote(&data_dir.to_string_lossy());
+    let debug_port = chrome_devtools_port();
     Ok(format!(
-        "profile_dir={}; \
+        "profile_dir={data_dir}; \
 rm -f \"$profile_dir/SingletonLock\" \"$profile_dir/SingletonSocket\" \"$profile_dir/SingletonCookie\"; \
 proxy_arg=''; \
 for i in 1 2; do \
@@ -356,14 +357,19 @@ for i in 1 2; do \
   fi; \
   [ \"$i\" -lt 2 ] && sleep 1; \
 done; \
-exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port=9222 --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
-        data_dir
+exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
     ))
 }
 
 /// DevTools remote-debugging port the built-in Chrome is launched with
-/// (see `builtin_chrome_command`).
-const CHROME_DEVTOOLS_PORT: u16 = 9222;
+/// (see `builtin_chrome_command`). Overridable via `IVNC_CHROME_DEBUG_PORT`
+/// so multiple instances (or a sandboxed test instance) don't collide on 9222.
+fn chrome_devtools_port() -> u16 {
+    std::env::var("IVNC_CHROME_DEBUG_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(9222)
+}
 
 /// Open `url` in a new tab of the already-running built-in Chrome via its
 /// DevTools HTTP endpoint, so a second `launch_app` actually navigates instead
@@ -374,7 +380,10 @@ async fn chrome_open_url_in_existing(url: &str) -> Result<(), String> {
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("build devtools client: {e}"))?;
-    let endpoint = format!("http://127.0.0.1:{CHROME_DEVTOOLS_PORT}/json/new?{url}");
+    let endpoint = format!(
+        "http://127.0.0.1:{}/json/new?{url}",
+        chrome_devtools_port()
+    );
     let mut resp = client
         .put(&endpoint)
         .send()
