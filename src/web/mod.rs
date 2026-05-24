@@ -9,3 +9,6 @@ pub mod embedded_assets;
 
 pub mod http_server;
 pub use http_server::run_http_server_with_webrtc;
+
+#[cfg(feature = "agent")]
+pub mod provider_probe;

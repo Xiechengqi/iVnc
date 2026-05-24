@@ -1288,6 +1288,19 @@ tr:hover { background-color: #f8f9fa; }
   margin-right: auto;
 }
 
+.provider-test-status {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-test-status.ok { color: #166534; }
+.provider-test-status.err { color: var(--danger); }
+.provider-test-status.running { color: var(--primary); }
+
 /* Inputs with unit suffix */
 .input-suffix {
   position: relative;

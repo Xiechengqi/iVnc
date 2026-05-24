@@ -81,6 +81,11 @@ const I18N = {
         providerConfig: 'Provider Config',
         saved: 'Saved',
         providerSaved: 'Provider saved',
+        testButton: 'Test',
+        testRunning: 'Testing…',
+        testOk: 'OK',
+        testFailed: 'Failed:',
+        testSkipped: 'No network test for this provider',
         settingsSaved: 'Settings applied',
         agentSaved: 'Agent defaults saved',
         noRuns: 'No Agent runs yet.',
@@ -410,6 +415,11 @@ const I18N = {
         providerConfig: 'Provider 配置',
         saved: '已保存',
         providerSaved: 'Provider 已保存',
+        testButton: '测试',
+        testRunning: '测试中…',
+        testOk: '通过',
+        testFailed: '失败：',
+        testSkipped: '该 Provider 无需网络测试',
         settingsSaved: '设置已应用',
         agentSaved: 'Agent 默认参数已保存',
         noRuns: '暂无 Agent run。',
@@ -754,6 +764,7 @@ function applyTranslations() {
     setText('provider-default-badge', 'providerDefaultBadge');
     setText('provider-save', 'save');
     setText('provider-reset', 'reset');
+    setText('provider-test', 'testButton');
     setText('provider-dirty', 'dirtyIndicator');
     setText('api-key-replace', 'apiKeyReplace');
     setText('api-key-clear', 'apiKeyClear');
@@ -1539,6 +1550,79 @@ async function saveProvider() {
 function resetProvider() {
     if (!providerOriginalSettings) return;
     selectProvider(providerOriginalSettings.name);
+}
+
+async function testProvider() {
+    const name = document.getElementById('provider-name').value;
+    if (!name) return;
+    const btn = document.getElementById('provider-test');
+    const status = document.getElementById('provider-test-status');
+    if (status) {
+        status.textContent = t('testRunning');
+        status.className = 'provider-test-status running';
+    }
+    if (btn) { btn.disabled = true; }
+    const body = {
+        endpoint: document.getElementById('provider-endpoint').value.trim(),
+        model: document.getElementById('provider-model').value.trim(),
+        api_format: document.getElementById('provider-api-format').value,
+        api_key: document.getElementById('provider-api-key').value.trim(),
+        clear_api_key: document.getElementById('provider-clear-key').value === 'true',
+        coord_space: document.getElementById('provider-coord-space').value
+    };
+    try {
+        const r = await fetch(`${CONSOLE_API}/providers/${encodeURIComponent(name)}/test`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await parseJsonResponse(r);
+        if (!r.ok) {
+            const msg = d.error || r.statusText;
+            if (status) {
+                status.textContent = `${t('testFailed')} ${msg}`;
+                status.className = 'provider-test-status err';
+            }
+            toast(`${t('testFailed')} ${msg}`, 'err');
+            return;
+        }
+        if (d.skipped) {
+            if (status) {
+                status.textContent = t('testSkipped');
+                status.className = 'provider-test-status';
+            }
+            toast(t('testSkipped'), 'ok');
+            return;
+        }
+        if (d.ok) {
+            const parts = [`${t('testOk')} ${d.latency_ms}ms`];
+            if (d.preview) parts.push(`"${d.preview}"`);
+            const text = parts.join(' · ');
+            if (status) {
+                status.textContent = text;
+                status.className = 'provider-test-status ok';
+                status.title = d.preview || '';
+            }
+            toast(text, 'ok');
+        } else {
+            const sc = d.status_code ? `HTTP ${d.status_code}` : '';
+            const msg = [sc, d.error].filter(Boolean).join(' · ');
+            if (status) {
+                status.textContent = `${t('testFailed')} ${msg}`;
+                status.className = 'provider-test-status err';
+                status.title = d.error || '';
+            }
+            toast(`${t('testFailed')} ${msg}`, 'err');
+        }
+    } catch (e) {
+        if (status) {
+            status.textContent = `${t('testFailed')} ${e.message || e}`;
+            status.className = 'provider-test-status err';
+        }
+        toast(`${t('testFailed')} ${e.message || e}`, 'err');
+    } finally {
+        if (btn) { btn.disabled = false; }
+    }
 }
 
 // ---------- Runs ----------
@@ -2711,6 +2795,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('agent-save').addEventListener('click', () => saveAgentConfig().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('provider-save').addEventListener('click', () => saveProvider().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('provider-reset')?.addEventListener('click', resetProvider);
+    document.getElementById('provider-test')?.addEventListener('click', testProvider);
     document.getElementById('runs-refresh').addEventListener('click', loadRuns);
     document.getElementById('new-task-start')?.addEventListener('click', () => startTask().catch(e => toast(t('newTaskFailed') + (e.message || e), 'err')));
     document.getElementById('runs-search')?.addEventListener('input', (e) => {

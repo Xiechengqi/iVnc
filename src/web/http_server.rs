@@ -173,6 +173,10 @@ pub async fn run_http_server_with_webrtc(
             "/api/console/providers/{name}",
             put(console_provider_put_handler),
         )
+        .route(
+            "/api/console/providers/{name}/test",
+            post(console_provider_test_handler),
+        )
         .route("/api/console/agent-runs", get(console_agent_runs_handler))
         .route(
             "/api/console/agent-runs/{run_id}/steps",
@@ -1589,6 +1593,105 @@ async fn console_provider_put_handler(
 
 #[cfg(not(feature = "agent"))]
 async fn console_provider_put_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_provider_test_handler(
+    Path(name): Path<String>,
+    axum::extract::Json(body): axum::extract::Json<ProviderConsoleUpdate>,
+) -> Response {
+    use crate::agent::registry::provider_presets;
+    use crate::web::provider_probe;
+
+    let presets = provider_presets();
+    let Some(preset) = presets.iter().find(|p| p.name == name) else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({"ok": false, "error": "unknown provider"}),
+        );
+    };
+
+    if name == "replay" {
+        return json_response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "skipped": true,
+                "message": "replay provider has no network call",
+            }),
+        );
+    }
+
+    let saved = crate::console_config::provider(&name);
+    let endpoint = clean_optional(body.endpoint.clone())
+        .or(saved.endpoint.clone())
+        .unwrap_or_else(|| preset.default_endpoint.to_string());
+    let model = clean_optional(body.model.clone())
+        .or(saved.model.clone())
+        .unwrap_or_else(|| preset.default_model.to_string());
+    let api_format = clean_optional(body.api_format.clone()).or(saved.api_format.clone());
+
+    let clear_key = body.clear_api_key.unwrap_or(false);
+    let api_key = if clear_key {
+        None
+    } else {
+        let from_body = clean_optional(body.api_key.clone())
+            .filter(|k| k != "********");
+        from_body
+            .or(saved.api_key.clone())
+            .or_else(|| preset.api_key_env.and_then(|e| std::env::var(e).ok()))
+    };
+
+    let Some(shape) = provider_probe::shape_for(&name, api_format.as_deref()) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "error": format!("provider {name} is not probeable")}),
+        );
+    };
+
+    if endpoint.is_empty() {
+        return json_response(
+            StatusCode::OK,
+            json!({"ok": false, "error": "endpoint is empty"}),
+        );
+    }
+    if model.is_empty() {
+        return json_response(
+            StatusCode::OK,
+            json!({"ok": false, "error": "model is empty"}),
+        );
+    }
+
+    match provider_probe::probe(shape, &endpoint, &model, api_key.as_deref()).await {
+        Ok(ok) => json_response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "latency_ms": ok.latency_ms,
+                "status_code": ok.status_code,
+                "model": model,
+                "preview": ok.preview,
+            }),
+        ),
+        Err(err) => json_response(
+            StatusCode::OK,
+            json!({
+                "ok": false,
+                "latency_ms": err.latency_ms,
+                "status_code": err.status_code,
+                "model": model,
+                "error": err.message,
+            }),
+        ),
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_provider_test_handler() -> Response {
     json_response(
         StatusCode::NOT_IMPLEMENTED,
         json!({"error": "agent feature is not enabled"}),
