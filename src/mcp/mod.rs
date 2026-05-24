@@ -46,136 +46,38 @@ impl McpServer {
         params: AgentStartParams,
         wait: bool,
     ) -> Result<crate::agent::types::RunReport, McpError> {
-        let mut options = crate::console_config::agent_defaults().options;
-        if let Some(explicit) = params.options {
-            options = explicit;
-        }
-        if let Some(budget) = params.budget {
-            options.budget = budget;
-        }
-        if let Some(active_run_id) = self.state.agent_runs.running_run_id() {
-            return Err(McpError::invalid_request(
-                format!("agent_run_already_active: {}", active_run_id),
-                None,
-            ));
-        }
-        let run_id = format!("run_{}", uuid::Uuid::new_v4());
         let replay_actions = match (params.replay_actions, params.replay_path) {
             (Some(actions), _) => Some(actions),
             (None, Some(path)) => Some(load_replay_actions(&path)?),
             (None, None) => None,
         };
-        let provider =
-            crate::agent::registry::build_provider(&params.provider, params.model, replay_actions)
-                .ok_or_else(|| {
+        let req = crate::agent::launch::LaunchRequest {
+            task: params.task,
+            provider: params.provider,
+            model: params.model,
+            budget: params.budget,
+            options: params.options,
+            replay_actions,
+        };
+        crate::agent::launch::launch_agent_run(self.state.clone(), req, wait)
+            .await
+            .map_err(|err| match err {
+                crate::agent::launch::LaunchError::AlreadyActive(id) => {
+                    McpError::invalid_request(format!("agent_run_already_active: {}", id), None)
+                }
+                crate::agent::launch::LaunchError::ProviderUnavailable(name) => {
                     McpError::invalid_params(
-                        format!(
-                            "provider '{}' is not available in this build",
-                            params.provider
-                        ),
+                        format!("provider '{}' is not available in this build", name),
                         None,
                     )
-                })?;
-        let state = self.state.clone();
-        let task = params.task.clone();
-        let run_id_for_task = run_id.clone();
-        let options_for_task = options.clone();
-        let initial = crate::agent::types::RunReport {
-            run_id: run_id.clone(),
-            task: params.task,
-            success: None,
-            finish_reason: crate::agent::types::FinishReason::Running,
-            steps_taken: 0,
-            tokens_in: 0,
-            tokens_out: 0,
-            wall_ms: 0,
-            started_at_ms: crate::agent::types::now_ms(),
-            trajectory_path: options
-                .record_trajectory
-                .then(|| crate::agent::trajectory::default_trajectory_path(&run_id)),
-            pending_question: None,
-            pending_safety_checks: Vec::new(),
-            last_action: None,
-            last_result: None,
-            output: None,
-            warnings: Vec::new(),
-        };
-        self.state.agent_runs.insert(initial.clone());
-        let handle = tokio::spawn(async move {
-            let result = crate::agent::run_agent(
-                state.clone(),
-                provider,
-                task,
-                options_for_task,
-                run_id_for_task.clone(),
-            )
-            .await;
-            match result {
-                Ok(report) => report,
-                Err(crate::agent::r#loop::RunError::Interrupted(report))
-                | Err(crate::agent::r#loop::RunError::BudgetExceeded(report))
-                | Err(crate::agent::r#loop::RunError::MaxStepsReached(report)) => report,
-                Err(crate::agent::r#loop::RunError::Provider(err)) => {
-                    let mut report = state.agent_runs.get(&run_id_for_task).unwrap_or_else(|| {
-                        crate::agent::types::RunReport {
-                            run_id: run_id_for_task.clone(),
-                            task: String::new(),
-                            success: None,
-                            finish_reason: crate::agent::types::FinishReason::ProviderError,
-                            steps_taken: 0,
-                            tokens_in: 0,
-                            tokens_out: 0,
-                            wall_ms: 0,
-                            started_at_ms: crate::agent::types::now_ms(),
-                            trajectory_path: None,
-                            pending_question: None,
-                            pending_safety_checks: Vec::new(),
-                            last_action: None,
-                            last_result: None,
-                            output: None,
-                            warnings: Vec::new(),
-                        }
-                    });
-                    report.finish_reason = crate::agent::types::FinishReason::ProviderError;
-                    report.pending_question = Some(err.to_string());
-                    state.agent_runs.update(report.clone());
-                    report
                 }
-                Err(crate::agent::r#loop::RunError::Capture(err)) => {
-                    let mut report = state.agent_runs.get(&run_id_for_task).unwrap_or_else(|| {
-                        crate::agent::types::RunReport {
-                            run_id: run_id_for_task.clone(),
-                            task: String::new(),
-                            success: None,
-                            finish_reason: crate::agent::types::FinishReason::ProviderError,
-                            steps_taken: 0,
-                            tokens_in: 0,
-                            tokens_out: 0,
-                            wall_ms: 0,
-                            started_at_ms: crate::agent::types::now_ms(),
-                            trajectory_path: None,
-                            pending_question: None,
-                            pending_safety_checks: Vec::new(),
-                            last_action: None,
-                            last_result: None,
-                            output: None,
-                            warnings: Vec::new(),
-                        }
-                    });
-                    report.finish_reason = crate::agent::types::FinishReason::ProviderError;
-                    report.pending_question = Some(err);
-                    state.agent_runs.update(report.clone());
-                    report
+                crate::agent::launch::LaunchError::InvalidRequest(msg) => {
+                    McpError::invalid_request(msg, None)
                 }
-            }
-        });
-        if wait {
-            handle
-                .await
-                .map_err(|e| McpError::internal_error(e.to_string(), None))
-        } else {
-            Ok(initial)
-        }
+                crate::agent::launch::LaunchError::Internal(msg) => {
+                    McpError::internal_error(msg, None)
+                }
+            })
     }
 
     fn combined_tool_router() -> ToolRouter<Self> {

@@ -48,6 +48,25 @@ impl RunStore {
         runs
     }
 
+    /// Atomically begin a new run. Returns `Err(active_run_id)` without
+    /// inserting if any run is currently `Running`; otherwise inserts `report`
+    /// and writes the sidecar to disk after releasing the lock.
+    pub fn try_begin(&self, report: RunReport) -> Result<(), String> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(active) = inner
+                .values()
+                .find(|r| matches!(r.finish_reason, FinishReason::Running))
+                .map(|r| r.run_id.clone())
+            {
+                return Err(active);
+            }
+            inner.insert(report.run_id.clone(), report.clone());
+        }
+        super::trajectory::write_report_sync(&report);
+        Ok(())
+    }
+
     pub fn running_run_id(&self) -> Option<String> {
         self.inner
             .lock()

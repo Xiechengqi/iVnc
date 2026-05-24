@@ -287,6 +287,21 @@ const I18N = {
         resultRunning: 'Task in progress…',
         resultWarnings: 'Warnings',
         badgeScheduled: 'Scheduled',
+        newTaskTitle: 'New task',
+        newTaskHint: 'Launch one agent run',
+        newTaskProvider: 'Provider',
+        newTaskMaxSteps: 'Max steps',
+        newTaskMaxWall: 'Max wall (s)',
+        newTaskStart: 'Start',
+        newTaskStarting: 'Starting…',
+        newTaskPlaceholder: 'Describe the task for the agent',
+        newTaskUseDefault: 'Use default',
+        newTaskTaskRequired: 'Task is required',
+        newTaskProviderRequired: 'Provider is required',
+        newTaskStarted: 'Task started',
+        newTaskAlreadyActive: 'A run is already active',
+        newTaskFailed: 'Failed to start: ',
+        newTaskRunning: 'A run is already in progress — stop it first',
         runDetailFilterAll: 'All actions',
         stepLatency: 'latency',
         stepGap: 'gap',
@@ -569,6 +584,21 @@ const I18N = {
         resultRunning: '任务进行中…',
         resultWarnings: '提醒',
         badgeScheduled: '定时',
+        newTaskTitle: '新建任务',
+        newTaskHint: '一次提交一条任务即可启动 Agent',
+        newTaskProvider: 'Provider',
+        newTaskMaxSteps: '最大步数',
+        newTaskMaxWall: '最长时长 (秒)',
+        newTaskStart: '启动',
+        newTaskStarting: '启动中…',
+        newTaskPlaceholder: '请描述要让 Agent 完成的任务',
+        newTaskUseDefault: '使用默认值',
+        newTaskTaskRequired: '请填写任务描述',
+        newTaskProviderRequired: '请选择 Provider',
+        newTaskStarted: '已启动任务',
+        newTaskAlreadyActive: '已有运行中的任务',
+        newTaskFailed: '启动失败：',
+        newTaskRunning: '已有运行中的任务，请先停止再启动',
         runDetailFilterAll: '全部动作',
         stepLatency: '延迟',
         stepGap: '间隔',
@@ -669,6 +699,15 @@ function applyTranslations() {
     setText('runs-refresh', 'refresh');
     setPlaceholderById('runs-search', t('runsSearchPlaceholder'));
     setText('run-detail-back-label', 'runDetailBack');
+    setText('new-task-title', 'newTaskTitle');
+    setText('new-task-hint', 'newTaskHint');
+    setText('new-task-provider-label', 'newTaskProvider');
+    setText('new-task-steps-label', 'newTaskMaxSteps');
+    setText('new-task-wall-label', 'newTaskMaxWall');
+    setText('new-task-start', 'newTaskStart');
+    setPlaceholderById('new-task-task', t('newTaskPlaceholder'));
+    setPlaceholderById('new-task-max-steps', t('newTaskUseDefault'));
+    setPlaceholderById('new-task-max-wall', t('newTaskUseDefault'));
 
     [
         ['label-target-fps', 'paramTargetFps'],
@@ -819,7 +858,9 @@ async function loadSection(section = activeSection) {
     if (section === 'settings') await loadSettings();
     if (section === 'agent') await loadAgentConfig();
     if (section === 'providers') await loadProviders();
-    if (section === 'runs') await loadRuns();
+    if (section === 'runs') {
+        await Promise.all([loadRuns(), loadNewTaskPanel()]);
+    }
 }
 
 async function load() {
@@ -1438,8 +1479,93 @@ async function loadRuns() {
         runsCache = d.runs || [];
         renderRunsFilterChips();
         renderRunsList();
+        updateNewTaskButtonState();
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
+    }
+}
+
+async function loadNewTaskPanel() {
+    const select = document.getElementById('new-task-provider');
+    if (!select) return;
+    try {
+        const [providers, agentCfg] = await Promise.all([
+            fetchJson(`${CONSOLE_API}/providers`).catch(() => ({ providers: [] })),
+            fetchJson(`${CONSOLE_API}/agent-config`).catch(() => ({}))
+        ]);
+        const list = providers.providers || [];
+        const previous = select.value;
+        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+        const preferred = previous && list.find(p => p.name === previous)
+            ? previous
+            : (agentCfg.default_provider || (list[0]?.name || ''));
+        if (preferred) select.value = preferred;
+    } catch (_) {
+        // leave the select empty; the user will see no options
+    }
+}
+
+function updateNewTaskButtonState() {
+    const btn = document.getElementById('new-task-start');
+    const statusEl = document.getElementById('new-task-status');
+    if (!btn) return;
+    if (btn.dataset.pending === '1') return;
+    const hasRunning = (runsCache || []).some(r => runStateClass(r) === 'running');
+    btn.disabled = hasRunning;
+    btn.textContent = t('newTaskStart');
+    if (statusEl) statusEl.textContent = hasRunning ? t('newTaskRunning') : '';
+}
+
+async function startTask() {
+    const btn = document.getElementById('new-task-start');
+    const statusEl = document.getElementById('new-task-status');
+    if (!btn || btn.dataset.pending === '1') return;
+    const taskEl = document.getElementById('new-task-task');
+    const providerEl = document.getElementById('new-task-provider');
+    const maxStepsEl = document.getElementById('new-task-max-steps');
+    const maxWallEl = document.getElementById('new-task-max-wall');
+    const task = (taskEl.value || '').trim();
+    const provider = providerEl.value || '';
+    if (!task) { toast(t('newTaskTaskRequired'), 'err'); taskEl.focus(); return; }
+    if (!provider) { toast(t('newTaskProviderRequired'), 'err'); return; }
+    const body = { task, provider };
+    const maxSteps = parseInt(maxStepsEl.value, 10);
+    const maxWall = parseInt(maxWallEl.value, 10);
+    const budget = {};
+    if (Number.isFinite(maxSteps) && maxSteps > 0) budget.max_steps = maxSteps;
+    if (Number.isFinite(maxWall) && maxWall > 0) budget.max_wall_seconds = maxWall;
+    if (Object.keys(budget).length) body.budget = budget;
+
+    btn.dataset.pending = '1';
+    btn.disabled = true;
+    btn.textContent = t('newTaskStarting');
+    if (statusEl) statusEl.textContent = '';
+    try {
+        const r = await fetch(`${CONSOLE_API}/agent-start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const d = await parseJsonResponse(r);
+        if (r.status === 409) {
+            toast(t('newTaskAlreadyActive'), 'err');
+            if (statusEl && d.run_id) statusEl.textContent = `run_id: ${d.run_id}`;
+            await loadRuns();
+            return;
+        }
+        if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+        toast(t('newTaskStarted'), 'ok');
+        taskEl.value = '';
+        await loadRuns();
+        if (d.run_id) {
+            const newRun = (runsCache || []).find(rr => rr.run_id === d.run_id);
+            if (newRun) openRunDetail(newRun);
+        }
+    } catch (e) {
+        toast(t('newTaskFailed') + (e.message || e), 'err');
+    } finally {
+        delete btn.dataset.pending;
+        updateNewTaskButtonState();
     }
 }
 
@@ -2327,6 +2453,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('provider-save').addEventListener('click', () => saveProvider().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('provider-reset')?.addEventListener('click', resetProvider);
     document.getElementById('runs-refresh').addEventListener('click', loadRuns);
+    document.getElementById('new-task-start')?.addEventListener('click', () => startTask().catch(e => toast(t('newTaskFailed') + (e.message || e), 'err')));
     document.getElementById('runs-search')?.addEventListener('input', (e) => {
         runsSearchTerm = e.target.value;
         renderRunsList();

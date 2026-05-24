@@ -155,6 +155,7 @@ pub async fn run_http_server_with_webrtc(
             get(console_agent_get_handler).put(console_agent_put_handler),
         )
         .route("/api/console/agent-stop", post(console_agent_stop_handler))
+        .route("/api/console/agent-start", post(console_agent_start_handler))
         .route("/api/console/providers", get(console_providers_get_handler))
         .route(
             "/api/console/providers/{name}",
@@ -1142,6 +1143,85 @@ async fn console_agent_stop_handler() -> Response {
     json_response(
         StatusCode::OK,
         json!({"ok": false, "disabled": true, "reason": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
+#[derive(serde::Deserialize)]
+struct AgentStartHttpRequest {
+    task: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    budget: Option<crate::agent::types::Budget>,
+    #[serde(default)]
+    options: Option<crate::agent::types::RunOptions>,
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_start_handler(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Json(body): axum::extract::Json<AgentStartHttpRequest>,
+) -> Response {
+    if body.task.trim().is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "task is required"}),
+        );
+    }
+    let provider = body
+        .provider
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| crate::console_config::agent_defaults().default_provider);
+    if provider.trim().is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "provider is required"}),
+        );
+    }
+    let req = crate::agent::launch::LaunchRequest {
+        task: body.task,
+        provider,
+        model: body.model,
+        budget: body.budget,
+        options: body.options,
+        replay_actions: None,
+    };
+    match crate::agent::launch::launch_agent_run(state.clone(), req, false).await {
+        Ok(report) => json_response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "run_id": report.run_id,
+                "started_at_ms": report.started_at_ms,
+            }),
+        ),
+        Err(crate::agent::launch::LaunchError::AlreadyActive(id)) => json_response(
+            StatusCode::CONFLICT,
+            json!({"error": "agent_run_already_active", "run_id": id}),
+        ),
+        Err(crate::agent::launch::LaunchError::ProviderUnavailable(name)) => json_response(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "error": format!("provider '{}' is not available in this build", name),
+            }),
+        ),
+        Err(crate::agent::launch::LaunchError::InvalidRequest(msg)) => {
+            json_response(StatusCode::BAD_REQUEST, json!({"error": msg}))
+        }
+        Err(crate::agent::launch::LaunchError::Internal(msg)) => {
+            json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": msg}))
+        }
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_agent_start_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
     )
 }
 

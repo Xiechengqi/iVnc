@@ -375,6 +375,33 @@
             </section>
 
             <section class="section" id="section-runs">
+                <div class="panel new-task-panel" id="new-task-panel">
+                    <div class="new-task-header">
+                        <h2 class="new-task-title" id="new-task-title">新建任务</h2>
+                        <span class="new-task-hint" id="new-task-hint">单条任务即可启动一次 Agent 运行</span>
+                    </div>
+                    <div class="new-task-body">
+                        <textarea class="new-task-task" id="new-task-task" rows="3" placeholder="请描述要让 Agent 完成的任务"></textarea>
+                        <div class="new-task-row">
+                            <label class="new-task-field">
+                                <span class="new-task-label" id="new-task-provider-label">Provider</span>
+                                <select class="new-task-select" id="new-task-provider"></select>
+                            </label>
+                            <label class="new-task-field">
+                                <span class="new-task-label" id="new-task-steps-label">最大步数</span>
+                                <input class="new-task-input" id="new-task-max-steps" type="number" min="1" step="1" placeholder="使用默认">
+                            </label>
+                            <label class="new-task-field">
+                                <span class="new-task-label" id="new-task-wall-label">最长时长 (秒)</span>
+                                <input class="new-task-input" id="new-task-max-wall" type="number" min="1" step="1" placeholder="使用默认">
+                            </label>
+                        </div>
+                        <div class="new-task-actions">
+                            <span class="new-task-status" id="new-task-status"></span>
+                            <button class="btn btn-save" id="new-task-start" type="button">启动</button>
+                        </div>
+                    </div>
+                </div>
                 <div class="panel">
                     <div class="runs-toolbar">
                         <div class="runs-filter-group" id="runs-filter-chips"></div>
