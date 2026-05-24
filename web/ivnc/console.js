@@ -279,6 +279,14 @@ const I18N = {
         runDetailTokens: 'Tokens (in / out)',
         runDetailCost: 'Cost',
         runDetailReason: 'Result',
+        resultTitle: 'Result',
+        resultCopy: 'Copy',
+        resultCopied: 'Result copied',
+        resultEmpty: 'No text result (task completed)',
+        resultFailed: 'Not completed',
+        resultRunning: 'Task in progress…',
+        resultWarnings: 'Warnings',
+        badgeScheduled: 'Scheduled',
         runDetailFilterAll: 'All actions',
         stepLatency: 'latency',
         stepGap: 'gap',
@@ -553,6 +561,14 @@ const I18N = {
         runDetailTokens: 'Tokens（入 / 出）',
         runDetailCost: '成本',
         runDetailReason: '结束原因',
+        resultTitle: '结果',
+        resultCopy: '复制',
+        resultCopied: '结果已复制',
+        resultEmpty: '无文本结果（任务已完成）',
+        resultFailed: '未完成',
+        resultRunning: '任务进行中…',
+        resultWarnings: '提醒',
+        badgeScheduled: '定时',
         runDetailFilterAll: '全部动作',
         stepLatency: '延迟',
         stepGap: '间隔',
@@ -1522,6 +1538,22 @@ function renderRunCard(run, parent) {
     const startedShort = startedMs ? formatDateTimeShort(startedMs) : '';
     const startedFull = startedMs ? formatDateTime(startedMs) : '';
 
+    const reason = (run.finish_reason && run.finish_reason.kind) || 'running';
+    let previewHtml = '';
+    if (reason !== 'running') {
+        const out = (run.output || '').trim();
+        const pq = (run.pending_question || '').trim();
+        if (out) {
+            previewHtml = `<div class="run-card-output"><span class="rco-dot"></span>${esc(truncate(out, 120))}</div>`;
+        } else if (pq) {
+            previewHtml = `<div class="run-card-output warn"><span class="rco-dot warn"></span>${esc(truncate(pq.split(/\r?\n/)[0], 120))}</div>`;
+        }
+    }
+    const scheduled = run.source && run.source.kind === 'schedule';
+    const badgeHtml = scheduled
+        ? `<span class="run-badge-scheduled" title="${esc(run.source.id || '')}">⏰ ${esc(t('badgeScheduled'))}</span>`
+        : '';
+
     card.innerHTML = `
         <div class="run-card-status">
             <span class="run-state-pill state-${esc(cls)}">${esc(stateLabel)}</span>
@@ -1530,7 +1562,8 @@ function renderRunCard(run, parent) {
             <span class="run-card-id" title="${esc(run.run_id || '')}" data-action="copy-id">
                 <span aria-hidden="true">⧉</span>${esc(idShort)}
             </span>
-            <div class="run-card-task">${esc(taskText)}</div>
+            <div class="run-card-task">${esc(taskText)}${badgeHtml}</div>
+            ${previewHtml}
             <div class="run-card-meta">
                 ${startedShort ? `<span title="${esc(t('runsStartedAt'))} ${esc(startedFull)}">🕐 ${esc(startedShort)}</span>` : ''}
                 <span>⏱ ${esc(wall)}</span>
@@ -1634,6 +1667,7 @@ async function openRunDetail(run) {
     const overlay = document.getElementById('run-detail-overlay');
     if (!overlay) return;
     renderRunDetailHeader(run);
+    renderRunDetailResult(run);
     renderRunDetailSummary(run);
     document.getElementById('run-detail-filter').innerHTML = '';
     const stepsEl = document.getElementById('run-detail-steps');
@@ -1646,6 +1680,7 @@ async function openRunDetail(run) {
             runDetailRun = d.report;
             renderRunDetailHeader(d.report);
         }
+        renderRunDetailResult(runDetailRun);
         renderRunDetailSummary(runDetailRun);
         renderRunDetailFilter();
         renderRunDetailSteps();
@@ -1675,6 +1710,62 @@ function renderRunDetailHeader(run) {
         task.textContent = run.task || '—';
         task.title = `${run.run_id || ''}`;
     }
+}
+
+function runIsOk(run) {
+    const r = run.finish_reason;
+    return r && r.kind === 'done' && r.success !== false;
+}
+
+function renderRunDetailResult(run) {
+    const el = document.getElementById('run-detail-result');
+    if (!el) return;
+    const reason = (run.finish_reason && run.finish_reason.kind) || 'running';
+    const output = (run.output || '').trim();
+    const warnings = Array.isArray(run.warnings) ? run.warnings.filter(Boolean) : [];
+
+    let cls, headHtml, bodyHtml;
+    let copyPayload = '';
+
+    if (reason === 'running') {
+        cls = 'running';
+        headHtml = `<span class="rd-result-title">${esc(t('resultTitle'))}</span>`;
+        bodyHtml = `<div class="rd-result-placeholder">${esc(t('resultRunning'))}</div>`;
+    } else if (runIsOk(run) && output) {
+        cls = 'ok';
+        copyPayload = run.output;
+        headHtml = `<span class="rd-result-title">${esc(t('resultTitle'))}</span>
+            <button type="button" class="rd-result-copy" data-action="copy-result">⧉ ${esc(t('resultCopy'))}</button>`;
+        bodyHtml = `<pre class="rd-result-body">${esc(run.output)}</pre>`;
+    } else if (runIsOk(run)) {
+        cls = 'muted';
+        headHtml = `<span class="rd-result-title">${esc(t('resultTitle'))}</span>`;
+        bodyHtml = `<div class="rd-result-placeholder">${esc(t('resultEmpty'))}</div>`;
+    } else {
+        cls = 'warn';
+        const msg = (run.pending_question || '').trim() || runStateLabel(run);
+        copyPayload = msg;
+        headHtml = `<span class="rd-result-title">${esc(t('resultFailed'))}</span>
+            <button type="button" class="rd-result-copy" data-action="copy-result">⧉ ${esc(t('resultCopy'))}</button>`;
+        const partial = output ? `<pre class="rd-result-body">${esc(run.output)}</pre>` : '';
+        bodyHtml = `<div class="rd-result-msg">${esc(msg)}</div>${partial}`;
+    }
+
+    let warnHtml = '';
+    if (warnings.length) {
+        warnHtml = `<div class="rd-result-warnings">
+            <span class="rd-result-warntitle">⚠ ${esc(t('resultWarnings'))}</span>
+            <ul>${warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>
+        </div>`;
+    }
+
+    el.className = 'run-detail-result rd-result-' + cls;
+    el.innerHTML = `<div class="rd-result-head">${headHtml}</div>${bodyHtml}${warnHtml}`;
+
+    el.querySelector('[data-action="copy-result"]')?.addEventListener('click', async () => {
+        try { await copyText(copyPayload); toast(t('resultCopied'), 'ok'); }
+        catch { toast(t('copyFailed'), 'err'); }
+    });
 }
 
 function renderRunDetailSummary(run) {
