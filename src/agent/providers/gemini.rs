@@ -11,7 +11,7 @@ use crate::agent::provider::{
     ProviderTurn,
 };
 use crate::agent::types::{
-    Action, CoordinateSpace, History, Observation, ObservationFrame, ProviderUsage,
+    Action, CoordinateSpace, DisplayMetadata, History, Observation, ObservationFrame, ProviderUsage,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -79,13 +79,7 @@ impl GeminiProvider {
         let history_text = history_text(history);
         let image_part = Self::image_part(observation)?;
         let user_text = json!({
-            "text": format!(
-                "Task: {}\nScreenshot image size: {}x{}.\nReturn actions in this image coordinate space.\n{}",
-                task,
-                display.image_width,
-                display.image_height,
-                history_text
-            )
+            "text": build_user_text(task, display, &history_text, observation.page_text.as_deref())
         });
         Ok(json!({
             "systemInstruction": {
@@ -282,6 +276,30 @@ fn history_text(history: &History) -> String {
             step.observation.image_height,
             step.observation.sha256
         ));
+    }
+    out
+}
+
+fn build_user_text(
+    task: &str,
+    display: &DisplayMetadata,
+    history_text: &str,
+    page_text: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "Task: {}\nScreenshot image size: {}x{}.\nReturn actions in this image coordinate space.\n{}",
+        task, display.image_width, display.image_height, history_text
+    );
+    if display.read_only {
+        out.push_str(
+            "\n[Read-only full-page capture] This frame is taller than the live viewport and its \
+             coordinates are NOT clickable. To interact, call screenshot to return to the live \
+             viewport, then scroll and click on that frame.",
+        );
+    }
+    if let Some(text) = page_text.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str("\n[Extracted page text]\n");
+        out.push_str(text);
     }
     out
 }

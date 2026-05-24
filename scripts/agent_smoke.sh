@@ -292,7 +292,31 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 4. launch_app reuse E2E (verifies the DevTools URL-delivery fix).
+# 4. capture_full_page negative (no Chrome yet) — must surface
+#    capture_full_page_unavailable instead of silently failing.
+# ----------------------------------------------------------------------------
+hdr "E2E: capture_full_page rejected when Chrome not running"
+actions_neg='[
+  {"kind":"capture_full_page"},
+  {"kind":"done","success":true,"reason":"negative case","output":""}
+]'
+RUN_NEG="$(start_replay "capture full page chrome down" "$actions_neg")"
+if [ -n "$RUN_NEG" ]; then
+  pass "capture_full_page negative run started ($RUN_NEG)"
+  if res_neg="$(wait_run "$RUN_NEG")"; then
+    neg_kind="$(jq -r '.steps[] | select(.action.kind=="capture_full_page") | .result.kind' <<<"$res_neg" | head -n1)"
+    neg_msg="$(jq -r '.steps[] | select(.action.kind=="capture_full_page") | .result.message // ""' <<<"$res_neg" | head -n1)"
+    check_eq "negative capture_full_page result executor_error" "executor_error" "${neg_kind:-MISSING}"
+    check_contains "negative message mentions capture_full_page_unavailable" "capture_full_page_unavailable" "$neg_msg"
+  else
+    fail "capture_full_page negative finished (timed out waiting)"
+  fi
+else
+  fail "capture_full_page negative run started"
+fi
+
+# ----------------------------------------------------------------------------
+# 5. launch_app reuse E2E (verifies the DevTools URL-delivery fix).
 # ----------------------------------------------------------------------------
 if [ "${SKIP_CHROME:-}" = "1" ]; then
   hdr "E2E: launch_app reuse — SKIPPED (SKIP_CHROME=1)"
@@ -368,6 +392,65 @@ else
     else
       fail "launch_app run B started"
     fi
+  fi
+fi
+
+# ----------------------------------------------------------------------------
+# 6. capture_full_page positive — Chrome up; verifies read-only frame guard
+#    and that the captured frame is taller than the live viewport screenshot.
+# ----------------------------------------------------------------------------
+if [ "${SKIP_CHROME:-}" = "1" ]; then
+  hdr "E2E: capture_full_page positive — SKIPPED (SKIP_CHROME=1)"
+elif [ "${CHROME_UP:-0}" != "1" ]; then
+  hdr "E2E: capture_full_page positive — SKIPPED (Chrome never came up)"
+else
+  hdr "E2E: capture_full_page positive (Chrome up; read-only frame guard)"
+  actions_pos='[
+    {"kind":"capture_full_page"},
+    {"kind":"mouse_click","x":10,"y":10,"button":"Left","click_count":1},
+    {"kind":"screenshot"},
+    {"kind":"done","success":true,"reason":"fullpage covered","output":""}
+  ]'
+  RUN_POS="$(start_replay "capture full page positive" "$actions_pos")"
+  if [ -n "$RUN_POS" ]; then
+    pass "capture_full_page positive run started ($RUN_POS)"
+    if res_pos="$(wait_run "$RUN_POS")"; then
+      pos_full_kind="$(jq -r '.steps[] | select(.action.kind=="capture_full_page") | .result.kind' <<<"$res_pos" | head -n1)"
+      check_eq "positive capture_full_page result ok" "ok" "${pos_full_kind:-MISSING}"
+
+      pos_click_kind="$(jq -r '.steps[] | select(.action.kind=="mouse_click") | .result.kind' <<<"$res_pos" | head -n1)"
+      pos_click_msg="$(jq -r '.steps[] | select(.action.kind=="mouse_click") | .result.message // ""' <<<"$res_pos" | head -n1)"
+      check_eq "click on read-only frame rejected" "unsupported_action" "${pos_click_kind:-MISSING}"
+      check_contains "read-only message present" "read_only_frame" "$pos_click_msg"
+
+      click_h="$(jq -r '.steps[] | select(.action.kind=="mouse_click") | .observation.image_height' <<<"$res_pos" | head -n1)"
+      click_w="$(jq -r '.steps[] | select(.action.kind=="mouse_click") | .observation.image_width' <<<"$res_pos" | head -n1)"
+      click_sha="$(jq -r '.steps[] | select(.action.kind=="mouse_click") | .observation.sha256' <<<"$res_pos" | head -n1)"
+      shot_h="$(jq -r '.steps[] | select(.action.kind=="screenshot") | .observation.image_height' <<<"$res_pos" | head -n1)"
+      shot_w="$(jq -r '.steps[] | select(.action.kind=="screenshot") | .observation.image_width' <<<"$res_pos" | head -n1)"
+      shot_sha="$(jq -r '.steps[] | select(.action.kind=="screenshot") | .observation.sha256' <<<"$res_pos" | head -n1)"
+      say "  fullpage(click) step: ${click_w}x${click_h} sha=${click_sha:0:12}"
+      say "  live(screenshot) step: ${shot_w}x${shot_h} sha=${shot_sha:0:12}"
+      # The full-page frame must be a distinct capture (CDP) from the live viewport
+      # (compositor) — their sha256 and dimensions will differ regardless of how
+      # short the rendered page happens to be, because they originate from
+      # different pipelines.
+      if [ -n "$click_sha" ] && [ -n "$shot_sha" ] && [ "$click_sha" != "$shot_sha" ]; then
+        pass "fullpage capture distinct from live viewport (different sha256)"
+      else
+        fail "fullpage capture distinct from live viewport (sha256s equal: $click_sha)"
+      fi
+      if [ -n "$click_w" ] && [ -n "$shot_w" ] && \
+         { [ "$click_w" != "$shot_w" ] || [ "$click_h" != "$shot_h" ]; }; then
+        pass "fullpage capture has different dimensions than live (${click_w}x${click_h} vs ${shot_w}x${shot_h})"
+      else
+        fail "fullpage capture has different dimensions than live (${click_w}x${click_h} vs ${shot_w}x${shot_h})"
+      fi
+    else
+      fail "capture_full_page positive finished (timed out waiting)"
+    fi
+  else
+    fail "capture_full_page positive run started"
   fi
 fi
 

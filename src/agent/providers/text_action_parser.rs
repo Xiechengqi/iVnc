@@ -74,6 +74,8 @@ fn looks_like_action(s: &str) -> bool {
         "wait",
         "done",
         "screenshot",
+        "capture_full_page",
+        "full_page_screenshot",
     ]
     .iter()
     .any(|prefix| lower.starts_with(prefix))
@@ -134,6 +136,7 @@ fn parse_candidate(candidate: &str) -> Result<Option<Action>, String> {
             ms: parse_optional_i32(body, &["ms"]).unwrap_or(1000).max(0) as u32,
         })),
         "screenshot" => Ok(Some(Action::Screenshot)),
+        "capture_full_page" | "full_page_screenshot" => Ok(Some(Action::CaptureFullPage)),
         "launch_app" | "open_app" | "launch" | "open" => Ok(Some(Action::LaunchApp {
             app: parse_string_arg(body, &["app", "name", "id"]).unwrap_or_default(),
             url: parse_string_arg(body, &["url", "address"]),
@@ -303,6 +306,7 @@ fn json_action_to_action(name: &str, args: &Value) -> Result<Action, String> {
             ms: json_i32(args, &["ms"]).unwrap_or(1000).max(0) as u32,
         }),
         "screenshot" => Ok(Action::Screenshot),
+        "capture_full_page" | "full_page_screenshot" => Ok(Action::CaptureFullPage),
         "launch_app" | "open_app" | "launch" | "open" => Ok(Action::LaunchApp {
             app: json_string(args, &["app", "name", "id"]).unwrap_or_default(),
             url: json_string(args, &["url", "address"]),

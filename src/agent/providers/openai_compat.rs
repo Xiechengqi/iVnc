@@ -90,6 +90,7 @@ impl OpenAiCompatibleProvider {
         let image_url = Self::image_data_url(observation)?;
         let display = &observation.display;
         let history_text = history_text(history);
+        let user_text = build_user_text(task, display, &history_text, observation.page_text.as_deref());
         Ok(json!({
             "model": self.cfg.model,
             "messages": [
@@ -102,13 +103,7 @@ impl OpenAiCompatibleProvider {
                     "content": [
                         {
                             "type": "text",
-                            "text": format!(
-                                "Task: {}\nScreenshot image size: {}x{}.\nReturn actions in this image coordinate space.\n{}",
-                                task,
-                                display.image_width,
-                                display.image_height,
-                                history_text
-                            )
+                            "text": user_text
                         },
                         {
                             "type": "image_url",
@@ -132,6 +127,7 @@ impl OpenAiCompatibleProvider {
         let image_url = Self::image_data_url(observation)?;
         let display = &observation.display;
         let history_text = history_text(history);
+        let user_text = build_user_text(task, display, &history_text, observation.page_text.as_deref());
         Ok(json!({
             "model": self.cfg.model,
             "instructions": self.cfg.system_prompt,
@@ -141,13 +137,7 @@ impl OpenAiCompatibleProvider {
                     "content": [
                         {
                             "type": "input_text",
-                            "text": format!(
-                                "Task: {}\nScreenshot image size: {}x{}.\nReturn actions in this image coordinate space.\n{}",
-                                task,
-                                display.image_width,
-                                display.image_height,
-                                history_text
-                            )
+                            "text": user_text
                         },
                         {
                             "type": "input_image",
@@ -407,6 +397,33 @@ fn history_text(history: &History) -> String {
     out
 }
 
+/// Compose the user-facing text block sent alongside the screenshot. When the
+/// observation is a read-only full-page capture, marks the frame and appends
+/// the extracted page text so the model can read content below the fold.
+fn build_user_text(
+    task: &str,
+    display: &DisplayMetadata,
+    history_text: &str,
+    page_text: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "Task: {}\nScreenshot image size: {}x{}.\nReturn actions in this image coordinate space.\n{}",
+        task, display.image_width, display.image_height, history_text
+    );
+    if display.read_only {
+        out.push_str(
+            "\n[Read-only full-page capture] This frame is taller than the live viewport and its \
+             coordinates are NOT clickable. To interact, call screenshot to return to the live \
+             viewport, then scroll and click on that frame.",
+        );
+    }
+    if let Some(text) = page_text.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str("\n[Extracted page text]\n");
+        out.push_str(text);
+    }
+    out
+}
+
 fn parse_usage(
     value: Option<&Value>,
     elapsed_ms: u64,
@@ -567,6 +584,7 @@ fn tool_call_to_action(
             ms: optional_i32_arg(args, &["ms"]).unwrap_or(1000).max(0) as u32,
         }),
         "screenshot" => Ok(Action::Screenshot),
+        "capture_full_page" | "full_page_screenshot" => Ok(Action::CaptureFullPage),
         "launch_app" | "open_app" => Ok(Action::LaunchApp {
             app: string_arg(args, &["app", "name", "id"]).unwrap_or_default(),
             url: string_arg(args, &["url", "address"]),
@@ -727,6 +745,7 @@ fn tool_schema() -> Value {
             })
         ),
         function_schema("screenshot", json!({"type":"object","properties":{}})),
+        function_schema("capture_full_page", json!({"type":"object","properties":{}})),
         function_schema(
             "launch_app",
             json!({
@@ -809,6 +828,7 @@ fn responses_tool_schema() -> Value {
             })
         ),
         responses_function_schema("screenshot", json!({"type":"object","properties":{}})),
+        responses_function_schema("capture_full_page", json!({"type":"object","properties":{}})),
         responses_function_schema(
             "launch_app",
             json!({
@@ -885,7 +905,14 @@ pub fn default_system_prompt() -> String {
      Synthesis bias: when the current screenshot already contains enough information to answer \
      the task, call done immediately rather than taking one more exploration step — but only if \
      the literal answer is visible (see the Honesty rule). If the answer requires opening a \
-     linked page, navigate to it first."
+     linked page, navigate to it first. \
+     Full-page capture: capture_full_page returns a READ-ONLY full-page screenshot (and extracted \
+     page text) of the active built-in Chrome tab — use it when content extends below the viewport \
+     so you can read the whole page in one turn. The returned frame is taller than the viewport, \
+     so its coordinates are NOT clickable; the next turn will tell you it is read-only if you try. \
+     To interact, call screenshot again (returning to the live viewport), then scroll/click on \
+     that frame. capture_full_page requires the built-in Chrome to be running — call \
+     launch_app(app='chrome', url='<page>') first if it is not."
         .to_string()
 }
 
@@ -903,6 +930,7 @@ mod tests {
             image_to_screen_scale_y: 2.0,
             client_dpr: None,
             monitors: vec![],
+            read_only: false,
         }
     }
 
