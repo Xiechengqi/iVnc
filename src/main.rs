@@ -1570,6 +1570,17 @@ fn desired_render_state(
     shared: &web::SharedState,
     last_visual_activity_at: Instant,
 ) -> RenderState {
+    // While an agent run is active, keep rendering even with no transport
+    // viewer. Wayland clients only paint frames they were given a frame
+    // callback for; those callbacks are only sent in the Active state. Without
+    // this, a headless agent run sees the client's first paint frozen forever
+    // (e.g. a browser stuck on "Loading…") and the captured screenshot never
+    // updates, so the agent believes its actions had no effect.
+    #[cfg(feature = "agent")]
+    if shared.agent_exclusive() {
+        return RenderState::Active;
+    }
+
     if shared.automation_wakeup_active() {
         return RenderState::Active;
     }
