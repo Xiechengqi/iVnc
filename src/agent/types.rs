@@ -9,6 +9,11 @@ pub struct Observation {
     pub display: DisplayMetadata,
     pub windows: Option<serde_json::Value>,
     pub clipboard_preview: Option<String>,
+    /// Readable page text extracted alongside a full-page capture (innerText).
+    /// `None` for ordinary live-viewport frames. Providers inject this into the
+    /// per-turn user text block so the model can read content beyond the image.
+    #[serde(default)]
+    pub page_text: Option<String>,
     pub timestamp_ms: u64,
 }
 
@@ -89,6 +94,11 @@ pub struct DisplayMetadata {
     pub client_dpr: Option<f32>,
     #[serde(default)]
     pub monitors: Vec<MonitorRect>,
+    /// True for full-page CDP capture frames, which are taller than the live
+    /// viewport so their coordinates cannot be mapped back to clickable screen
+    /// positions. The executor rejects coordinate/input actions on such frames.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl DisplayMetadata {
@@ -209,6 +219,13 @@ pub enum Action {
         ms: u32,
     },
     Screenshot,
+    /// Capture a READ-ONLY full-page screenshot (and extracted text) of the
+    /// active built-in Chrome tab via CDP, including content below the fold.
+    /// The returned frame is taller than the viewport, so its coordinates are
+    /// NOT clickable — use it only to read/locate content, then return to the
+    /// live view with a normal screenshot before scrolling and clicking.
+    /// Requires the built-in Chrome to be running (launch_app first).
+    CaptureFullPage,
     /// Launch a managed desktop app (e.g. the built-in Chrome) by id or name.
     /// An optional URL is appended to the launch command so the app can open it directly.
     LaunchApp {
@@ -402,6 +419,15 @@ pub struct RunOptions {
     pub record_frames_to_disk: bool,
     #[serde(default)]
     pub dry_run: bool,
+    /// Max CSS height (in px) captured by `capture_full_page`. Content beyond
+    /// this is truncated to bound decode memory and provider payload size.
+    #[serde(default = "default_fullpage_max_css_height")]
+    pub fullpage_max_css_height: f64,
+    /// Megapixel ceiling for full-page captures. The loop takes
+    /// `min(provider_cap, this)` so the encoded frame never exceeds what the
+    /// provider accepts.
+    #[serde(default = "default_fullpage_max_megapixels")]
+    pub fullpage_max_megapixels: f32,
 }
 
 impl Default for RunOptions {
@@ -418,6 +444,8 @@ impl Default for RunOptions {
             record_trajectory: default_record_trajectory(),
             record_frames_to_disk: false,
             dry_run: false,
+            fullpage_max_css_height: default_fullpage_max_css_height(),
+            fullpage_max_megapixels: default_fullpage_max_megapixels(),
         }
     }
 }
@@ -436,6 +464,12 @@ fn default_screenshot_max_bytes() -> usize {
 }
 fn default_record_trajectory() -> bool {
     true
+}
+fn default_fullpage_max_css_height() -> f64 {
+    20_000.0
+}
+fn default_fullpage_max_megapixels() -> f32 {
+    4.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -546,6 +580,7 @@ mod tests {
             image_to_screen_scale_y: 2.0,
             client_dpr: None,
             monitors: vec![],
+            read_only: false,
         };
         assert_eq!(
             display.provider_to_image((500.0, 500.0), CoordinateSpace::NormalizedUnit),

@@ -33,6 +33,14 @@ pub async fn execute(
             };
         }
     }
+    if display.read_only && action_requires_live_viewport(action) {
+        return ActionResult::UnsupportedAction {
+            message: "read_only_frame: this is a full-page capture; its coordinates are not \
+                clickable. Call screenshot to return to the live viewport, then scroll and \
+                click on that frame."
+                .to_string(),
+        };
+    }
     match execute_inner(state, display, action).await {
         Ok(()) => ActionResult::Ok,
         Err(result) => result,
@@ -205,8 +213,44 @@ async fn execute_inner(
             }
         }
         Action::Done { .. } | Action::Ask { .. } => {}
+        Action::CaptureFullPage => {
+            let Some(apps) = state.apps_state() else {
+                return Err(ActionResult::ExecutorError {
+                    message: "capture_full_page_unavailable: apps manager not initialized"
+                        .to_string(),
+                });
+            };
+            if apps.process.pid("builtin-chrome").is_none() {
+                return Err(ActionResult::ExecutorError {
+                    message: "capture_full_page_unavailable: built-in Chrome is not running; \
+                        call launch_app(app='chrome', url='<page>') first"
+                        .to_string(),
+                });
+            }
+            // Actual full-page capture runs at the top of the next loop iteration.
+        }
     }
     Ok(())
+}
+
+/// Actions whose coordinates or input must target the live viewport. Returning
+/// true means the action cannot run on a read-only full-page capture frame.
+fn action_requires_live_viewport(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::MouseMove { .. }
+            | Action::MouseClick { .. }
+            | Action::MouseDown { .. }
+            | Action::MouseUp { .. }
+            | Action::MouseDrag { .. }
+            | Action::Scroll { .. }
+            | Action::Zoom { .. }
+            | Action::TypeText { .. }
+            | Action::KeyChord { .. }
+            | Action::KeyHold { .. }
+            | Action::WindowFocus { .. }
+            | Action::WindowClose { .. }
+    )
 }
 
 /// Count toplevel windows currently mapped in the compositor, read from the
@@ -300,6 +344,7 @@ mod tests {
             image_to_screen_scale_y: 1.0,
             client_dpr: None,
             monitors: Vec::new(),
+            read_only: false,
         }
     }
 
@@ -336,5 +381,64 @@ mod tests {
             let v = serde_json::to_value(&r).expect("ActionResult must serialize");
             assert!(v.get("kind").is_some(), "missing kind tag: {v}");
         }
+    }
+
+    #[test]
+    fn action_requires_live_viewport_classification() {
+        // Mutating actions need the live viewport.
+        assert!(action_requires_live_viewport(&Action::MouseClick {
+            x: 0, y: 0, button: MouseButton::Left, click_count: 1, label: None,
+        }));
+        assert!(action_requires_live_viewport(&Action::Scroll {
+            x: None, y: None, dx: 0, dy: -3, label: None,
+        }));
+        assert!(action_requires_live_viewport(&Action::TypeText {
+            text: "hi".into(), press_enter: false,
+        }));
+        // Observation-only / control actions must remain allowed on a read-only frame
+        // so the model can escape it.
+        assert!(!action_requires_live_viewport(&Action::Screenshot));
+        assert!(!action_requires_live_viewport(&Action::CaptureFullPage));
+        assert!(!action_requires_live_viewport(&Action::Wait { ms: 100 }));
+        assert!(!action_requires_live_viewport(&Action::Done {
+            success: true, reason: String::new(), output: String::new(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn read_only_frame_rejects_clicks() {
+        let state = test_state();
+        let mut display = test_display();
+        display.read_only = true;
+        let result = execute(
+            &state,
+            &display,
+            &Action::MouseClick {
+                x: 100, y: 100, button: MouseButton::Left, click_count: 1, label: None,
+            },
+            &super::super::types::RunOptions::default(),
+        )
+        .await;
+        match result {
+            ActionResult::UnsupportedAction { message } => {
+                assert!(message.contains("read_only_frame"), "unexpected: {}", message);
+            }
+            other => panic!("expected UnsupportedAction, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_frame_allows_screenshot_to_escape() {
+        let state = test_state();
+        let mut display = test_display();
+        display.read_only = true;
+        let result = execute(
+            &state,
+            &display,
+            &Action::Screenshot,
+            &super::super::types::RunOptions::default(),
+        )
+        .await;
+        assert!(matches!(result, ActionResult::Ok), "got {:?}", result);
     }
 }

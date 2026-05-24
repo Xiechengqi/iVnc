@@ -42,6 +42,7 @@ pub async fn run_agent(
         .unwrap_or_default();
     let mut consecutive_out_of_bounds = 0u8;
     let mut substantive = false;
+    let mut pending_fullpage = false;
     if let Err(err) = provider.reset(&task).await {
         state.set_agent_exclusive(false, "provider_error");
         return Err(RunError::Provider(err));
@@ -74,13 +75,17 @@ pub async fn run_agent(
             return Err(RunError::Interrupted(report));
         }
 
-        let mut observation = match frame_capture::capture_observation(
-            &state,
-            80,
-            options.screenshot_max_bytes,
-        )
-        .await
-        {
+        let capture_result = if pending_fullpage {
+            pending_fullpage = false;
+            let cap = provider
+                .capabilities()
+                .max_screenshot_megapixels
+                .min(options.fullpage_max_megapixels);
+            frame_capture::capture_fullpage_observation(&state, &options, cap).await
+        } else {
+            frame_capture::capture_observation(&state, 80, options.screenshot_max_bytes).await
+        };
+        let mut observation = match capture_result {
             Ok(observation) => observation,
             Err(err) => {
                 report = build_report(
@@ -259,6 +264,11 @@ pub async fn run_agent(
                 0
             };
             let force_observe = matches!(action, Action::Screenshot);
+            let trigger_fullpage =
+                matches!(action, Action::CaptureFullPage) && matches!(result, ActionResult::Ok);
+            if trigger_fullpage {
+                pending_fullpage = true;
+            }
             let needs_settle = action_needs_settle(&action);
             if matches!(result, ActionResult::Ok) && is_substantive_action(&action) {
                 substantive = true;
@@ -333,7 +343,7 @@ pub async fn run_agent(
                 state.set_agent_exclusive(false, "out_of_bounds");
                 return Err(RunError::BudgetExceeded(report));
             }
-            if force_observe {
+            if force_observe || trigger_fullpage {
                 break;
             }
             if needs_settle && !loop_blocked {
@@ -372,7 +382,10 @@ pub async fn run_agent(
 }
 
 fn action_needs_settle(action: &Action) -> bool {
-    !matches!(action, Action::Wait { .. } | Action::Screenshot)
+    !matches!(
+        action,
+        Action::Wait { .. } | Action::Screenshot | Action::CaptureFullPage
+    )
 }
 
 /// Whether an action represents substantive work that can change the environment
@@ -521,14 +534,19 @@ fn canonical_action(a: &Action) -> String {
         Action::LaunchApp { app, url } => {
             format!("launch:{}:{}", app.to_ascii_lowercase(), url.as_deref().unwrap_or(""))
         }
-        Action::Wait { .. } | Action::Screenshot | Action::Done { .. } | Action::Ask { .. } => {
-            String::new()
-        }
+        Action::Wait { .. }
+        | Action::Screenshot
+        | Action::CaptureFullPage
+        | Action::Done { .. }
+        | Action::Ask { .. } => String::new(),
     }
 }
 
 fn is_loop_repeat(action: &Action, history: &History, current_sha: &str) -> bool {
-    if matches!(action, Action::Wait { .. } | Action::Screenshot) {
+    if matches!(
+        action,
+        Action::Wait { .. } | Action::Screenshot | Action::CaptureFullPage
+    ) {
         return false;
     }
     let Some(last) = history.steps.last() else {
