@@ -1881,6 +1881,7 @@ function renderRunCard(run, parent) {
 let runDetailRun = null;
 let runDetailSteps = [];
 let runDetailActionFilter = 'all';
+let runDetailTimer = null;
 
 function truncate(s, n) {
     s = String(s ?? '');
@@ -1941,6 +1942,7 @@ function resultInfo(r) {
 }
 
 async function openRunDetail(run) {
+    stopRunDetailPolling();
     runDetailRun = run;
     runDetailSteps = [];
     runDetailActionFilter = 'all';
@@ -1971,12 +1973,76 @@ async function openRunDetail(run) {
             <div>${esc(t('runDetailEmptyHint'))}</div>
         </div>`;
     }
+    // Keep the detail live while the run is still in progress.
+    if (runStateClass(runDetailRun || {}) === 'running') startRunDetailPolling();
 }
 
 function closeRunDetail() {
+    stopRunDetailPolling();
     document.getElementById('run-detail-overlay')?.classList.remove('show');
     runDetailRun = null;
     runDetailSteps = [];
+}
+
+function startRunDetailPolling() {
+    stopRunDetailPolling();
+    if (runStateClass(runDetailRun || {}) !== 'running') return;
+    runDetailTimer = setInterval(pollRunDetail, 2000);
+}
+
+function stopRunDetailPolling() {
+    if (runDetailTimer) { clearInterval(runDetailTimer); runDetailTimer = null; }
+}
+
+// Quiet refresh of the open detail overlay: re-fetch steps + report and
+// re-render in place, preserving the user's filter, expanded rows and scroll.
+async function pollRunDetail() {
+    const run = runDetailRun;
+    if (!run || !run.run_id) { stopRunDetailPolling(); return; }
+    const runId = run.run_id;
+    let d;
+    try {
+        d = await fetchJson(`${CONSOLE_API}/agent-runs/${encodeURIComponent(runId)}/steps`);
+    } catch (e) {
+        return; // transient (e.g. trajectory not flushed yet) — keep polling
+    }
+    // The overlay may have been closed or switched to another run while awaiting.
+    if (!runDetailRun || runDetailRun.run_id !== runId) return;
+
+    const stepsEl = document.getElementById('run-detail-steps');
+    const expanded = collectExpandedSteps(stepsEl);
+    const pinBottom = stepsEl
+        ? (stepsEl.scrollHeight - stepsEl.scrollTop - stepsEl.clientHeight < 40)
+        : false;
+    const prevTop = stepsEl ? stepsEl.scrollTop : 0;
+
+    runDetailSteps = d.steps || [];
+    if (d.report) runDetailRun = d.report;
+    renderRunDetailHeader(runDetailRun);
+    renderRunDetailResult(runDetailRun);
+    renderRunDetailSummary(runDetailRun);
+    renderRunDetailFilter();
+    renderRunDetailSteps();
+
+    restoreExpandedSteps(stepsEl, expanded);
+    if (stepsEl) stepsEl.scrollTop = pinBottom ? stepsEl.scrollHeight : prevTop;
+
+    if (runStateClass(runDetailRun || {}) !== 'running') stopRunDetailPolling();
+}
+
+function collectExpandedSteps(container) {
+    const set = new Set();
+    container?.querySelectorAll('.step-row.expanded').forEach(r => {
+        if (r.dataset.stepIdx != null) set.add(r.dataset.stepIdx);
+    });
+    return set;
+}
+
+function restoreExpandedSteps(container, set) {
+    if (!container || !set || !set.size) return;
+    set.forEach(idx => {
+        container.querySelector(`.step-row[data-step-idx="${idx}"]`)?.classList.add('expanded');
+    });
 }
 
 function renderRunDetailHeader(run) {
@@ -2147,7 +2213,7 @@ function renderStepRow(s, idx, ctx) {
         ? `${CONSOLE_API}/agent-runs/${encodeURIComponent(runDetailRun.run_id)}/frames/${encodeURIComponent(frameName)}`
         : null;
     const rawJson = esc(JSON.stringify(s, null, 2));
-    return `<div class="step-row${res.ok ? '' : ' step-row-err'}">
+    return `<div class="step-row${res.ok ? '' : ' step-row-err'}" data-step-idx="${esc(idx)}">
         <div class="step-row-head">
             <span class="step-idx">#${esc(s.step ?? idx)}</span>
             <span class="step-time" title="${esc(absTime)}">${esc(offset)}</span>
