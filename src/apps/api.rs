@@ -350,13 +350,9 @@ fn builtin_chrome_command() -> Result<String, String> {
         "profile_dir={data_dir}; \
 rm -f \"$profile_dir/SingletonLock\" \"$profile_dir/SingletonSocket\" \"$profile_dir/SingletonCookie\"; \
 proxy_arg=''; \
-for i in 1 2; do \
-  if curl --silent --show-error --max-time 5 -x socks5://127.0.0.1:1080 http://3.0.3.0 >/dev/null 2>&1; then \
-    proxy_arg='--proxy-server=socks5://127.0.0.1:1080'; \
-    break; \
-  fi; \
-  [ \"$i\" -lt 2 ] && sleep 1; \
-done; \
+if grep -qiE '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-Fa-f]+:0438[[:space:]]+[0-9A-Fa-f]+:[0-9A-Fa-f]+[[:space:]]+0A[[:space:]]' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then \
+  proxy_arg='--proxy-server=socks5://127.0.0.1:1080'; \
+fi; \
 exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
     ))
 }
