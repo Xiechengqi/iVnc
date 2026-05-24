@@ -74,13 +74,27 @@ pub fn xrgb_to_encoded_frame(
     let img: RgbImage =
         ImageBuffer::from_raw(width, height, rgb_buf).ok_or("failed to create image buffer")?;
 
-    // First attempt at original resolution
+    let (bytes, image_w, image_h, out_quality) = rgb_to_capped_jpeg(img, quality, max_bytes)?;
+    Ok(encoded_frame(bytes, width, height, image_w, image_h, out_quality))
+}
+
+/// Encode an RgbImage as JPEG, downscaling once if the encoded bytes exceed
+/// `max_bytes`. Returns `(bytes, image_width, image_height, quality_used)`.
+/// Shared between the live-viewport XRGB path and the CDP full-page path.
+pub(crate) fn rgb_to_capped_jpeg(
+    img: image::RgbImage,
+    quality: u8,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, u32, u32, u8), String> {
+    let (width, height) = (img.width(), img.height());
+
+    // First attempt at original resolution.
     let jpeg = encode_jpeg(&img, quality)?;
     if jpeg.len() <= max_bytes {
-        return Ok(encoded_frame(jpeg, width, height, width, height, quality));
+        return Ok((jpeg, width, height, quality));
     }
 
-    // Downscale if too large
+    // Downscale if too large.
     let scale = (max_bytes as f64 / jpeg.len() as f64)
         .sqrt()
         .clamp(0.25, 1.0);
@@ -91,14 +105,74 @@ pub fn xrgb_to_encoded_frame(
         image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Triangle);
     let out_quality = quality.min(75);
     let jpeg = encode_jpeg(&resized, out_quality)?;
-    Ok(encoded_frame(
-        jpeg,
-        width,
-        height,
-        new_w,
-        new_h,
-        out_quality,
-    ))
+    Ok((jpeg, new_w, new_h, out_quality))
+}
+
+/// Full-page (read-only) capture via the built-in Chrome CDP. Returns an
+/// Observation with `display.read_only=true` and `page_text` populated from
+/// the page's `document.body.innerText`. Falls back to a normal live capture
+/// (with a warning log) if CDP capture fails, so an agent run never breaks
+/// solely because the browser is in a weird state.
+#[cfg(feature = "agent")]
+pub async fn capture_fullpage_observation(
+    state: &Arc<SharedState>,
+    options: &crate::agent::types::RunOptions,
+    max_megapixels: f32,
+) -> Result<Observation, String> {
+    let port = crate::apps::api::chrome_devtools_port();
+    let capture = match crate::apps::cdp::capture_full_page(
+        port,
+        max_megapixels,
+        options.screenshot_max_bytes,
+        options.fullpage_max_css_height,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("capture_full_page failed, falling back to live viewport: {}", e);
+            return capture_observation(state, 75, options.screenshot_max_bytes).await;
+        }
+    };
+
+    let timestamp_ms = crate::agent::types::now_ms();
+    let (screen_width, screen_height) = state.display_size();
+    let mut hasher = Sha256::new();
+    hasher.update(&capture.jpeg_bytes);
+    let sha256 = format!("{:x}", hasher.finalize());
+    let display = DisplayMetadata {
+        screen_width,
+        screen_height,
+        image_width: capture.image_width,
+        image_height: capture.image_height,
+        // The full-page frame is read-only; to_screen is never called on it,
+        // so the scale factors are placeholders.
+        image_to_screen_scale_x: 1.0,
+        image_to_screen_scale_y: 1.0,
+        client_dpr: None,
+        monitors: Vec::new(),
+        read_only: true,
+    };
+    Ok(Observation {
+        frame: ObservationFrame::JpegBytes {
+            image_width: capture.image_width,
+            image_height: capture.image_height,
+            bytes: capture.jpeg_bytes,
+            quality: 75,
+            sha256,
+            frame_path: None,
+        },
+        display,
+        windows: state
+            .last_taskbar_json
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|j| serde_json::from_str(j).ok()),
+        clipboard_preview: state.clipboard_preview(256),
+        page_text: capture.page_text,
+        timestamp_ms,
+    })
 }
 
 #[cfg(feature = "agent")]
@@ -124,6 +198,7 @@ pub async fn capture_observation(
             width: screen_width,
             height: screen_height,
         }],
+        read_only: false,
     };
     Ok(Observation {
         frame: ObservationFrame::JpegBytes {
@@ -142,6 +217,7 @@ pub async fn capture_observation(
             .as_ref()
             .and_then(|j| serde_json::from_str(j).ok()),
         clipboard_preview: state.clipboard_preview(256),
+        page_text: None,
         timestamp_ms,
     })
 }
@@ -194,5 +270,28 @@ mod tests {
         assert_eq!(frame.image_to_screen_scale_y, 2.0);
         assert_eq!(frame.image_width, 960);
         assert_eq!(frame.image_height, 540);
+    }
+
+    #[test]
+    fn rgb_to_capped_jpeg_under_cap_keeps_dims() {
+        let img = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 100, 50]));
+        let (bytes, w, h, q) = rgb_to_capped_jpeg(img, 80, 1_000_000).unwrap();
+        assert_eq!((w, h), (64, 64));
+        assert!(!bytes.is_empty());
+        assert_eq!(q, 80);
+    }
+
+    #[test]
+    fn rgb_to_capped_jpeg_over_cap_downscales() {
+        // Random-ish gradient compresses poorly, so a generous original size
+        // ensures the JPEG bytes exceed the tight cap on the first attempt.
+        let mut img = image::RgbImage::new(512, 512);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgb([((x * 7) % 256) as u8, ((y * 11) % 256) as u8, ((x ^ y) % 256) as u8]);
+        }
+        let (bytes, w, h, q) = rgb_to_capped_jpeg(img, 95, 2_000).unwrap();
+        assert!(w < 512 && h < 512, "expected downscale, got {}x{}", w, h);
+        assert!(bytes.len() <= 2_000 || (w * h) < 512 * 512, "no resize");
+        assert!(q <= 75);
     }
 }

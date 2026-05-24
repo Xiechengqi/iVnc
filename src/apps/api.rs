@@ -360,7 +360,7 @@ exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" -
 /// DevTools remote-debugging port the built-in Chrome is launched with
 /// (see `builtin_chrome_command`). Overridable via `IVNC_CHROME_DEBUG_PORT`
 /// so multiple instances (or a sandboxed test instance) don't collide on 9222.
-fn chrome_devtools_port() -> u16 {
+pub(crate) fn chrome_devtools_port() -> u16 {
     std::env::var("IVNC_CHROME_DEBUG_PORT")
         .ok()
         .and_then(|v| v.trim().parse().ok())
