@@ -34,6 +34,9 @@ pub struct AppsState {
 pub enum LaunchOutcome {
     Started { pid: Option<u32> },
     AlreadyRunning { pid: Option<u32> },
+    /// The app was already running and we delivered the requested URL into the
+    /// live instance (e.g. a new Chrome tab via DevTools) instead of dropping it.
+    OpenedInExisting,
 }
 
 impl AppsState {
@@ -174,7 +177,8 @@ impl AppsState {
                 format!("no app matching {:?}; available: {}", query, available.join(", "))
             })?;
 
-        if let Some(url) = url.map(str::trim).filter(|u| !u.is_empty()) {
+        let trimmed_url = url.map(str::trim).filter(|u| !u.is_empty());
+        if let Some(url) = trimmed_url {
             if app.app_type == AppType::DesktopApp {
                 if let Some(cmd) = app.exec_command.as_mut() {
                     cmd.push(' ');
@@ -186,6 +190,21 @@ impl AppsState {
         match self.start_app_processes(&app).await {
             Ok(pid) => Ok(LaunchOutcome::Started { pid }),
             Err(e) if e == "App is already running" => {
+                // Re-invoking the launch command does nothing for a live process,
+                // so the URL would be dropped. For the built-in Chrome we instead
+                // hand the URL to the running browser over its DevTools port,
+                // opening it in a new tab of the existing window.
+                if let Some(url) = trimmed_url {
+                    if app.id == "builtin-chrome" {
+                        match chrome_open_url_in_existing(url).await {
+                            Ok(()) => return Ok(LaunchOutcome::OpenedInExisting),
+                            Err(err) => log::warn!(
+                                "Chrome already running; DevTools open-url failed, falling back to no-op: {}",
+                                err
+                            ),
+                        }
+                    }
+                }
                 Ok(LaunchOutcome::AlreadyRunning { pid: self.app_pid(&app) })
             }
             Err(e) => Err(e),
@@ -340,6 +359,39 @@ done; \
 exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port=9222 --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
         data_dir
     ))
+}
+
+/// DevTools remote-debugging port the built-in Chrome is launched with
+/// (see `builtin_chrome_command`).
+const CHROME_DEVTOOLS_PORT: u16 = 9222;
+
+/// Open `url` in a new tab of the already-running built-in Chrome via its
+/// DevTools HTTP endpoint, so a second `launch_app` actually navigates instead
+/// of dropping the URL. Chrome >= 111 requires PUT for `/json/new`; older
+/// builds accept GET, so we fall back on a 405.
+async fn chrome_open_url_in_existing(url: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("build devtools client: {e}"))?;
+    let endpoint = format!("http://127.0.0.1:{CHROME_DEVTOOLS_PORT}/json/new?{url}");
+    let mut resp = client
+        .put(&endpoint)
+        .send()
+        .await
+        .map_err(|e| format!("devtools PUT failed: {e}"))?;
+    if resp.status().as_u16() == 405 {
+        resp = client
+            .get(&endpoint)
+            .send()
+            .await
+            .map_err(|e| format!("devtools GET failed: {e}"))?;
+    }
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("devtools returned status {}", resp.status()))
+    }
 }
 
 pub fn router(state: Arc<AppsState>) -> Router {

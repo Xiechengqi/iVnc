@@ -177,6 +177,7 @@ async fn execute_inner(
             };
             match apps.launch_named(app, url.as_deref()).await {
                 Ok(crate::apps::api::LaunchOutcome::Started { .. }) => {}
+                Ok(crate::apps::api::LaunchOutcome::OpenedInExisting) => {}
                 Ok(crate::apps::api::LaunchOutcome::AlreadyRunning { .. }) => {
                     if let Some(u) = url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
                         return Err(ActionResult::ExecutorError {
