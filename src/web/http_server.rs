@@ -156,6 +156,18 @@ pub async fn run_http_server_with_webrtc(
         )
         .route("/api/console/agent-stop", post(console_agent_stop_handler))
         .route("/api/console/agent-start", post(console_agent_start_handler))
+        .route(
+            "/api/console/schedules",
+            get(console_schedules_get_handler).post(console_schedules_post_handler),
+        )
+        .route(
+            "/api/console/schedules/{id}",
+            put(console_schedule_put_handler).delete(console_schedule_delete_handler),
+        )
+        .route(
+            "/api/console/schedules/{id}/run-now",
+            post(console_schedule_run_now_handler),
+        )
         .route("/api/console/providers", get(console_providers_get_handler))
         .route(
             "/api/console/providers/{name}",
@@ -1188,6 +1200,7 @@ async fn console_agent_start_handler(
         budget: body.budget,
         options: body.options,
         replay_actions: None,
+        source: None,
     };
     match crate::agent::launch::launch_agent_run(state.clone(), req, false).await {
         Ok(report) => json_response(
@@ -1224,6 +1237,271 @@ async fn console_agent_start_handler() -> Response {
         json!({"error": "agent feature is not enabled"}),
     )
 }
+
+#[cfg(feature = "agent")]
+#[derive(serde::Deserialize)]
+struct ScheduleInput {
+    name: String,
+    cron: String,
+    task: String,
+    provider: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    budget: Option<crate::agent::types::Budget>,
+    #[serde(default)]
+    options: Option<crate::agent::types::RunOptions>,
+    #[serde(default = "default_true_bool")]
+    enabled: bool,
+}
+
+#[cfg(feature = "agent")]
+fn default_true_bool() -> bool {
+    true
+}
+
+#[cfg(feature = "agent")]
+fn validate_schedule_input(body: &ScheduleInput) -> Result<(), String> {
+    if body.name.trim().is_empty() {
+        return Err("name is required".into());
+    }
+    if body.task.trim().is_empty() {
+        return Err("task is required".into());
+    }
+    if body.provider.trim().is_empty() {
+        return Err("provider is required".into());
+    }
+    use std::str::FromStr;
+    let normalized = crate::agent::schedule::normalize_cron(&body.cron);
+    if let Err(e) = cron::Schedule::from_str(&normalized) {
+        return Err(format!("invalid cron expression: {}", e));
+    }
+    if let Some(b) = &body.budget {
+        if b.max_steps == 0 {
+            return Err("budget.max_steps must be > 0".into());
+        }
+        if b.max_wall_seconds == 0 {
+            return Err("budget.max_wall_seconds must be > 0".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "agent")]
+fn next_fire_preview(cron_expr: &str) -> Option<u64> {
+    use std::str::FromStr;
+    let sched = cron::Schedule::from_str(&crate::agent::schedule::normalize_cron(cron_expr)).ok()?;
+    sched
+        .upcoming(chrono::Local)
+        .next()
+        .map(|dt| dt.timestamp_millis() as u64)
+}
+
+#[cfg(feature = "agent")]
+fn merge_schedule_json(
+    st: &crate::console_config::ScheduledTask,
+    state: &Arc<SharedState>,
+) -> serde_json::Value {
+    let rt = state.schedule_state.lock().unwrap().get(&st.id).cloned();
+    let computed_next = next_fire_preview(&st.cron);
+    let runtime_next = rt.as_ref().map(|r| r.next_fire_ms);
+    json!({
+        "id": st.id,
+        "name": st.name,
+        "cron": st.cron,
+        "task": st.task,
+        "provider": st.provider,
+        "model": st.model,
+        "budget": st.budget,
+        "options": st.options,
+        "enabled": st.enabled,
+        "next_fire_ms": runtime_next.or(computed_next),
+        "last_run_ms": rt.as_ref().and_then(|r| r.last_run_ms),
+        "last_run_id": rt.as_ref().and_then(|r| r.last_run_id.clone()),
+        "last_outcome": rt.as_ref().and_then(|r| r.last_outcome.clone()),
+        "last_skip_reason": rt.as_ref().and_then(|r| r.last_skip_reason.clone()),
+    })
+}
+
+#[cfg(feature = "agent")]
+async fn console_schedules_get_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let cfg = crate::console_config::load();
+    let items: Vec<_> = cfg
+        .schedules
+        .iter()
+        .map(|st| merge_schedule_json(st, &state))
+        .collect();
+    json_response(StatusCode::OK, json!({ "schedules": items }))
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_schedules_get_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_schedules_post_handler(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Json(body): axum::extract::Json<ScheduleInput>,
+) -> Response {
+    if let Err(e) = validate_schedule_input(&body) {
+        return json_response(StatusCode::BAD_REQUEST, json!({"error": e}));
+    }
+    let id = format!("sch_{}", uuid::Uuid::new_v4());
+    let st = crate::console_config::ScheduledTask {
+        id: id.clone(),
+        name: body.name,
+        cron: body.cron,
+        task: body.task,
+        provider: body.provider,
+        model: body.model,
+        budget: body.budget.unwrap_or_default(),
+        options: body.options,
+        enabled: body.enabled,
+    };
+    let mut cfg = crate::console_config::load();
+    cfg.schedules.push(st.clone());
+    if let Err(e) = crate::console_config::save(&cfg) {
+        return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e}));
+    }
+    crate::agent::schedule::invalidate(&state, &id);
+    json_response(StatusCode::OK, json!({"ok": true, "schedule": merge_schedule_json(&st, &state)}))
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_schedules_post_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_schedule_put_handler(
+    State(state): State<Arc<SharedState>>,
+    Path(id): Path<String>,
+    axum::extract::Json(body): axum::extract::Json<ScheduleInput>,
+) -> Response {
+    if let Err(e) = validate_schedule_input(&body) {
+        return json_response(StatusCode::BAD_REQUEST, json!({"error": e}));
+    }
+    let mut cfg = crate::console_config::load();
+    let Some(idx) = cfg.schedules.iter().position(|s| s.id == id) else {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "schedule not found"}));
+    };
+    let updated = crate::console_config::ScheduledTask {
+        id: id.clone(),
+        name: body.name,
+        cron: body.cron,
+        task: body.task,
+        provider: body.provider,
+        model: body.model,
+        budget: body.budget.unwrap_or_default(),
+        options: body.options,
+        enabled: body.enabled,
+    };
+    cfg.schedules[idx] = updated.clone();
+    if let Err(e) = crate::console_config::save(&cfg) {
+        return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e}));
+    }
+    crate::agent::schedule::invalidate(&state, &id);
+    json_response(StatusCode::OK, json!({"ok": true, "schedule": merge_schedule_json(&updated, &state)}))
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_schedule_put_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_schedule_delete_handler(
+    State(state): State<Arc<SharedState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut cfg = crate::console_config::load();
+    let len_before = cfg.schedules.len();
+    cfg.schedules.retain(|s| s.id != id);
+    if cfg.schedules.len() == len_before {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "schedule not found"}));
+    }
+    if let Err(e) = crate::console_config::save(&cfg) {
+        return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e}));
+    }
+    crate::agent::schedule::invalidate(&state, &id);
+    json_response(StatusCode::OK, json!({"ok": true}))
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_schedule_delete_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
+async fn console_schedule_run_now_handler(
+    State(state): State<Arc<SharedState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let cfg = crate::console_config::load();
+    let Some(st) = cfg.schedules.iter().find(|s| s.id == id).cloned() else {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "schedule not found"}));
+    };
+    let req = crate::agent::launch::LaunchRequest {
+        task: st.task,
+        provider: st.provider,
+        model: st.model,
+        budget: Some(st.budget),
+        options: st.options,
+        replay_actions: None,
+        source: Some(crate::agent::types::RunSource::Schedule {
+            id: st.id.clone(),
+            name: Some(st.name.clone()),
+        }),
+    };
+    match crate::agent::launch::launch_agent_run(state.clone(), req, false).await {
+        Ok(report) => {
+            let mut map = state.schedule_state.lock().unwrap();
+            let rt = map.entry(st.id.clone()).or_default();
+            rt.last_run_ms = Some(crate::agent::types::now_ms());
+            rt.last_run_id = Some(report.run_id.clone());
+            rt.last_outcome = Some("started".into());
+            rt.last_skip_reason = None;
+            drop(map);
+            json_response(StatusCode::OK, json!({"ok": true, "run_id": report.run_id}))
+        }
+        Err(crate::agent::launch::LaunchError::AlreadyActive(active_id)) => json_response(
+            StatusCode::CONFLICT,
+            json!({"error": "agent_run_already_active", "run_id": active_id}),
+        ),
+        Err(crate::agent::launch::LaunchError::ProviderUnavailable(name)) => json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": format!("provider '{}' is not available in this build", name)}),
+        ),
+        Err(crate::agent::launch::LaunchError::InvalidRequest(m)) => {
+            json_response(StatusCode::BAD_REQUEST, json!({"error": m}))
+        }
+        Err(crate::agent::launch::LaunchError::Internal(m)) => {
+            json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": m}))
+        }
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_schedule_run_now_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
 
 #[cfg(feature = "agent")]
 async fn console_providers_get_handler() -> Response {

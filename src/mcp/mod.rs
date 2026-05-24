@@ -58,6 +58,7 @@ impl McpServer {
             budget: params.budget,
             options: params.options,
             replay_actions,
+            source: None,
         };
         crate::agent::launch::launch_agent_run(self.state.clone(), req, wait)
             .await

@@ -1959,3 +1959,130 @@ tr:hover { background-color: #f8f9fa; }
   .step-row-body { flex-direction: column; }
   .step-frame img { width: 100%; max-width: 100%; }
 }
+
+/* --- Scheduled tasks --- */
+.hidden { display: none !important; }
+
+.schedules-panel { margin-bottom: 12px; }
+.schedules-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.schedules-title { margin: 0; font-size: 15px; font-weight: 600; }
+.schedules-actions { display: flex; gap: 8px; }
+.schedules-hint { color: var(--text-muted); font-size: 12px; margin: 0 0 10px; }
+.schedules-list { display: flex; flex-direction: column; gap: 8px; }
+.schedules-empty { color: var(--text-muted); font-size: 13px; padding: 12px 4px; }
+
+.schedule-row {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+.schedule-row.disabled { opacity: 0.55; }
+.sched-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sched-name { font-weight: 600; font-size: 14px; }
+.sched-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.sched-cron {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #eef2f6;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #374151;
+}
+.sched-provider { color: var(--text-muted); }
+.sched-task {
+  font-size: 12px;
+  color: #4b5563;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sched-side {
+  flex: 0 0 auto;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+.sched-times {
+  font-size: 12px;
+  color: #4b5563;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sched-label { color: var(--text-muted); margin-right: 4px; }
+.sched-outcome {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.sched-outcome-started { color: #166534; background: #dcfce7; }
+.sched-outcome-skipped { color: #92400e; background: #fef3c7; }
+.sched-outcome-failed  { color: #991b1b; background: #fee2e2; }
+.sched-skip-reason {
+  font-size: 11px;
+  color: var(--danger);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+.sched-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
+.sched-toggle { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; color: var(--text-muted); }
+.sched-delete { color: var(--danger); }
+
+.schedule-edit-panel { margin-top: 12px; }
+.schedule-edit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.schedule-edit-title { margin: 0; font-size: 15px; font-weight: 600; }
+.schedule-edit-body { display: flex; flex-direction: column; gap: 10px; }
+.schedule-field { display: flex; flex-direction: column; gap: 4px; }
+.schedule-field-inline { flex-direction: row; align-items: center; gap: 8px; }
+.schedule-label { font-size: 12px; color: var(--text-muted); }
+.schedule-input,
+.schedule-select,
+.schedule-textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  background: var(--input-bg, #fff);
+  color: inherit;
+}
+.schedule-input-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.schedule-textarea { resize: vertical; min-height: 60px; }
+.schedule-checkbox { width: 16px; height: 16px; }
+.schedule-row + .schedule-row { margin-top: 0; }
+.schedule-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.schedule-edit-status { font-size: 12px; color: var(--text-muted); flex: 1; }
+
+@media (max-width: 760px) {
+  .schedule-row { flex-direction: column; }
+  .sched-side { min-width: 0; align-items: flex-start; }
+  .sched-times { text-align: left; }
+}

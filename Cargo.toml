@@ -92,6 +92,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 async-trait = { version = "0.1", optional = true }
 sha2 = { version = "0.10", optional = true }
 tokio-util = { version = "0.7", optional = true }
+cron = { version = "0.12", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 
 [features]
 default = ["pulseaudio"]
@@ -99,7 +101,7 @@ tls = ["rcgen", "tokio-rustls", "rustls"]
 audio = ["cpal", "opus"]
 pulseaudio = ["opus", "libpulse-simple-binding", "libpulse-binding"]
 mcp = ["rmcp", "image", "sha2"]
-agent = ["mcp", "async-trait", "tokio-util"]
+agent = ["mcp", "async-trait", "tokio-util", "cron", "chrono"]
 agent-holo3 = ["agent"]
 agent-anthropic = ["agent"]
 agent-openai = ["agent"]

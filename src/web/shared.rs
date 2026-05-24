@@ -79,6 +79,9 @@ pub struct SharedState {
     #[cfg(feature = "agent")]
     pub agent_runs: crate::agent::run_store::RunStore,
 
+    #[cfg(feature = "agent")]
+    pub schedule_state: Arc<Mutex<std::collections::HashMap<String, crate::agent::schedule::ScheduleRuntime>>>,
+
     /// Display dimensions
     pub display_size: Arc<Mutex<(u32, u32)>>,
 
@@ -205,6 +208,8 @@ impl SharedState {
                 store.load_from_disk();
                 store
             },
+            #[cfg(feature = "agent")]
+            schedule_state: Arc::new(Mutex::new(std::collections::HashMap::new())),
             display_size,
             clipboard: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),

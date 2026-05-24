@@ -26,6 +26,7 @@ const I18N = {
         navAgent: 'MCP / Agent',
         navProviders: 'Provider',
         navRuns: 'Logs / Trajectories',
+        navSchedules: 'Schedules',
         sectionOverviewDesc: 'Current iVnc status and quick checks.',
         sectionAppsDesc: 'Manage desktop and background applications.',
         sectionSettingsDesc: 'Common runtime controls for stream quality.',
@@ -302,6 +303,37 @@ const I18N = {
         newTaskAlreadyActive: 'A run is already active',
         newTaskFailed: 'Failed to start: ',
         newTaskRunning: 'A run is already in progress — stop it first',
+        schedulesTitle: 'Schedules',
+        schedulesHint: 'Five-field cron in server local timezone. Overlapping fires are skipped.',
+        schedulesEmpty: 'No schedules yet.',
+        schedulesNew: 'New',
+        scheduleEditTitle: 'Edit schedule',
+        scheduleEditNewTitle: 'New schedule',
+        scheduleName: 'Name',
+        scheduleCron: 'cron (5 fields)',
+        scheduleTask: 'Task',
+        scheduleProvider: 'Provider',
+        scheduleMaxSteps: 'Max steps',
+        scheduleMaxWall: 'Max wall (s)',
+        scheduleEnabled: 'Enabled',
+        scheduleSave: 'Save',
+        scheduleCancel: 'Cancel',
+        scheduleEdit: 'Edit',
+        scheduleDelete: 'Delete',
+        scheduleRunNow: 'Run now',
+        scheduleNextRun: 'Next',
+        scheduleLastRun: 'Last',
+        scheduleNever: 'never',
+        scheduleSaved: 'Schedule saved',
+        scheduleDeleted: 'Schedule deleted',
+        scheduleRunStarted: 'Schedule fired',
+        scheduleRunFailed: 'Failed to fire: ',
+        scheduleSaveFailed: 'Save failed: ',
+        scheduleDeleteFailed: 'Delete failed: ',
+        scheduleDeleteConfirm: 'Delete this schedule?',
+        scheduleOutcomeStarted: 'started',
+        scheduleOutcomeSkipped: 'skipped',
+        scheduleOutcomeFailed: 'failed',
         runDetailFilterAll: 'All actions',
         stepLatency: 'latency',
         stepGap: 'gap',
@@ -323,6 +355,7 @@ const I18N = {
         navAgent: 'MCP / Agent',
         navProviders: 'Provider',
         navRuns: '日志 / 轨迹',
+        navSchedules: '定时任务',
         sectionOverviewDesc: '当前 iVnc 运行状态和快捷入口。',
         sectionAppsDesc: '管理桌面应用和后台应用。',
         sectionSettingsDesc: '调整常用的实时串流质量参数。',
@@ -599,6 +632,37 @@ const I18N = {
         newTaskAlreadyActive: '已有运行中的任务',
         newTaskFailed: '启动失败：',
         newTaskRunning: '已有运行中的任务，请先停止再启动',
+        schedulesTitle: '定时任务',
+        schedulesHint: 'cron 五段表达式，服务器本地时区。运行重叠时跳过本次，不堆积。',
+        schedulesEmpty: '暂无定时任务。',
+        schedulesNew: '新建',
+        scheduleEditTitle: '编辑定时任务',
+        scheduleEditNewTitle: '新建定时任务',
+        scheduleName: '名称',
+        scheduleCron: 'cron (5 段)',
+        scheduleTask: '任务描述',
+        scheduleProvider: 'Provider',
+        scheduleMaxSteps: '最大步数',
+        scheduleMaxWall: '最长时长 (秒)',
+        scheduleEnabled: '启用',
+        scheduleSave: '保存',
+        scheduleCancel: '取消',
+        scheduleEdit: '编辑',
+        scheduleDelete: '删除',
+        scheduleRunNow: '立即运行',
+        scheduleNextRun: '下次',
+        scheduleLastRun: '上次',
+        scheduleNever: '—',
+        scheduleSaved: '已保存',
+        scheduleDeleted: '已删除',
+        scheduleRunStarted: '已触发',
+        scheduleRunFailed: '触发失败：',
+        scheduleSaveFailed: '保存失败：',
+        scheduleDeleteFailed: '删除失败：',
+        scheduleDeleteConfirm: '确认删除该定时任务？',
+        scheduleOutcomeStarted: '已启动',
+        scheduleOutcomeSkipped: '已跳过',
+        scheduleOutcomeFailed: '失败',
         runDetailFilterAll: '全部动作',
         stepLatency: '延迟',
         stepGap: '间隔',
@@ -661,6 +725,7 @@ function applyTranslations() {
     setText('nav-agent', 'navAgent');
     setText('nav-providers', 'navProviders');
     setText('nav-runs', 'navRuns');
+    setText('nav-schedules', 'navSchedules');
     setText('overview-providers-title', 'providerStatus');
     setText('overview-agent-title', 'agentStatus');
     setText('overview-agent-stop', 'stopAgent');
@@ -825,7 +890,8 @@ function updateSectionHeader() {
         settings: 'navSettings',
         agent: 'navAgent',
         providers: 'navProviders',
-        runs: 'navRuns'
+        runs: 'navRuns',
+        schedules: 'navSchedules'
     };
     const descMap = {
         overview: 'sectionOverviewDesc',
@@ -833,7 +899,8 @@ function updateSectionHeader() {
         settings: 'sectionSettingsDesc',
         agent: 'sectionAgentDesc',
         providers: 'sectionProvidersDesc',
-        runs: 'sectionRunsDesc'
+        runs: 'sectionRunsDesc',
+        schedules: 'schedulesHint'
     };
     setTextById('section-title', t(titleMap[activeSection]));
     setTextById('section-description', t(descMap[activeSection]));
@@ -860,6 +927,9 @@ async function loadSection(section = activeSection) {
     if (section === 'providers') await loadProviders();
     if (section === 'runs') {
         await Promise.all([loadRuns(), loadNewTaskPanel()]);
+    }
+    if (section === 'schedules') {
+        await loadSchedules();
     }
 }
 
@@ -2421,6 +2491,195 @@ function updateAppTypeVisibility() {
     }
 }
 
+let schedulesCache = [];
+let schedulesEditId = null;
+
+async function loadSchedules() {
+    try {
+        const d = await fetchJson(`${CONSOLE_API}/schedules`);
+        schedulesCache = d.schedules || [];
+        renderSchedulesList();
+    } catch (e) {
+        toast(t('fetchFailed') + (e.message || e), 'err');
+    }
+}
+
+function renderSchedulesList() {
+    const list = document.getElementById('schedules-list');
+    if (!list) return;
+    if (!schedulesCache.length) {
+        list.innerHTML = `<div class="schedules-empty">${esc(t('schedulesEmpty'))}</div>`;
+        return;
+    }
+    list.innerHTML = schedulesCache.map(renderScheduleRow).join('');
+    list.querySelectorAll('[data-action="edit"]').forEach(b => b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = b.dataset.id;
+        const st = schedulesCache.find(s => s.id === id);
+        if (st) openScheduleEditor(st);
+    }));
+    list.querySelectorAll('[data-action="delete"]').forEach(b => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(t('scheduleDeleteConfirm'))) return;
+        try {
+            const r = await fetch(`${CONSOLE_API}/schedules/${encodeURIComponent(b.dataset.id)}`, { method: 'DELETE' });
+            const d = await parseJsonResponse(r);
+            if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+            toast(t('scheduleDeleted'), 'ok');
+            loadSchedules();
+        } catch (err) { toast(t('scheduleDeleteFailed') + (err.message || err), 'err'); }
+    }));
+    list.querySelectorAll('[data-action="run-now"]').forEach(b => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+            const r = await fetch(`${CONSOLE_API}/schedules/${encodeURIComponent(b.dataset.id)}/run-now`, { method: 'POST' });
+            const d = await parseJsonResponse(r);
+            if (r.status === 409) { toast(t('newTaskAlreadyActive'), 'err'); return; }
+            if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+            toast(t('scheduleRunStarted'), 'ok');
+            loadSchedules();
+            loadRuns().catch(() => {});
+        } catch (err) { toast(t('scheduleRunFailed') + (err.message || err), 'err'); }
+    }));
+    list.querySelectorAll('[data-action="toggle"]').forEach(cb => cb.addEventListener('change', async (e) => {
+        const id = cb.dataset.id;
+        const st = schedulesCache.find(s => s.id === id);
+        if (!st) return;
+        const updated = { ...st, enabled: cb.checked };
+        delete updated.id; delete updated.next_fire_ms; delete updated.last_run_ms;
+        delete updated.last_run_id; delete updated.last_outcome; delete updated.last_skip_reason;
+        try {
+            const r = await fetch(`${CONSOLE_API}/schedules/${encodeURIComponent(id)}`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updated)
+            });
+            const d = await parseJsonResponse(r);
+            if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+            loadSchedules();
+        } catch (err) {
+            toast(t('scheduleSaveFailed') + (err.message || err), 'err');
+            cb.checked = !cb.checked;
+        }
+    }));
+}
+
+function renderScheduleRow(st) {
+    const next = st.next_fire_ms ? formatDateTime(st.next_fire_ms) : t('scheduleNever');
+    const last = st.last_run_ms ? formatDateTime(st.last_run_ms) : t('scheduleNever');
+    const outcomeLabel = st.last_outcome === 'started' ? t('scheduleOutcomeStarted')
+        : st.last_outcome === 'skipped' ? t('scheduleOutcomeSkipped')
+        : st.last_outcome === 'failed' ? t('scheduleOutcomeFailed')
+        : (st.last_outcome || '');
+    const outcomeClass = st.last_outcome === 'failed' ? 'sched-outcome-failed'
+        : st.last_outcome === 'skipped' ? 'sched-outcome-skipped'
+        : st.last_outcome === 'started' ? 'sched-outcome-started'
+        : '';
+    const skipReason = st.last_skip_reason ? `<span class="sched-skip-reason" title="${esc(st.last_skip_reason)}">${esc(st.last_skip_reason)}</span>` : '';
+    return `
+        <div class="schedule-row${st.enabled ? '' : ' disabled'}" data-id="${esc(st.id)}">
+            <div class="sched-main">
+                <div class="sched-name">${esc(st.name)}</div>
+                <div class="sched-meta">
+                    <code class="sched-cron">${esc(st.cron)}</code>
+                    <span class="sched-provider">${esc(st.provider)}</span>
+                </div>
+                <div class="sched-task">${esc(truncate(st.task || '', 140))}</div>
+            </div>
+            <div class="sched-side">
+                <div class="sched-times">
+                    <div><span class="sched-label">${esc(t('scheduleNextRun'))}</span> ${esc(next)}</div>
+                    <div><span class="sched-label">${esc(t('scheduleLastRun'))}</span> ${esc(last)} ${outcomeLabel ? `<span class="sched-outcome ${outcomeClass}">${esc(outcomeLabel)}</span>` : ''}</div>
+                    ${skipReason}
+                </div>
+                <div class="sched-actions">
+                    <label class="sched-toggle">
+                        <input type="checkbox" data-action="toggle" data-id="${esc(st.id)}" ${st.enabled ? 'checked' : ''}>
+                        <span>${esc(t('scheduleEnabled'))}</span>
+                    </label>
+                    <button class="btn btn-cancel btn-sm" data-action="run-now" data-id="${esc(st.id)}" type="button">${esc(t('scheduleRunNow'))}</button>
+                    <button class="btn btn-cancel btn-sm" data-action="edit" data-id="${esc(st.id)}" type="button">${esc(t('scheduleEdit'))}</button>
+                    <button class="btn btn-cancel btn-sm sched-delete" data-action="delete" data-id="${esc(st.id)}" type="button">${esc(t('scheduleDelete'))}</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function fillScheduleProviderSelect() {
+    const select = document.getElementById('schedule-provider');
+    if (!select) return;
+    try {
+        const providers = await fetchJson(`${CONSOLE_API}/providers`).catch(() => ({ providers: [] }));
+        const list = providers.providers || [];
+        const prev = select.value;
+        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+        if (prev && list.find(p => p.name === prev)) select.value = prev;
+    } catch (_) {}
+}
+
+function openScheduleEditor(st) {
+    const panel = document.getElementById('schedule-edit-panel');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    schedulesEditId = st && st.id ? st.id : null;
+    setTextById('schedule-edit-title', t(schedulesEditId ? 'scheduleEditTitle' : 'scheduleEditNewTitle'));
+    document.getElementById('schedule-name').value = st?.name || '';
+    document.getElementById('schedule-cron').value = st?.cron || '0 9 * * *';
+    document.getElementById('schedule-task').value = st?.task || '';
+    document.getElementById('schedule-max-steps').value = st?.budget?.max_steps || '';
+    document.getElementById('schedule-max-wall').value = st?.budget?.max_wall_seconds || '';
+    document.getElementById('schedule-enabled').checked = st?.enabled !== false;
+    document.getElementById('schedule-edit-status').textContent = '';
+    fillScheduleProviderSelect().then(() => {
+        if (st?.provider) document.getElementById('schedule-provider').value = st.provider;
+    });
+}
+
+function closeScheduleEditor() {
+    document.getElementById('schedule-edit-panel')?.classList.add('hidden');
+    schedulesEditId = null;
+}
+
+async function saveSchedule() {
+    const name = document.getElementById('schedule-name').value.trim();
+    const cron = document.getElementById('schedule-cron').value.trim();
+    const task = document.getElementById('schedule-task').value.trim();
+    const provider = document.getElementById('schedule-provider').value;
+    const maxSteps = parseInt(document.getElementById('schedule-max-steps').value, 10);
+    const maxWall = parseInt(document.getElementById('schedule-max-wall').value, 10);
+    const enabled = document.getElementById('schedule-enabled').checked;
+    if (!name || !cron || !task || !provider) {
+        document.getElementById('schedule-edit-status').textContent = t('newTaskTaskRequired');
+        return;
+    }
+    const body = { name, cron, task, provider, enabled };
+    if (Number.isFinite(maxSteps) && maxSteps > 0 || Number.isFinite(maxWall) && maxWall > 0) {
+        const budget = {};
+        if (Number.isFinite(maxSteps) && maxSteps > 0) budget.max_steps = maxSteps;
+        if (Number.isFinite(maxWall) && maxWall > 0) budget.max_wall_seconds = maxWall;
+        body.budget = budget;
+    }
+    const isUpdate = !!schedulesEditId;
+    const url = isUpdate
+        ? `${CONSOLE_API}/schedules/${encodeURIComponent(schedulesEditId)}`
+        : `${CONSOLE_API}/schedules`;
+    try {
+        const r = await fetch(url, {
+            method: isUpdate ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const d = await parseJsonResponse(r);
+        if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+        toast(t('scheduleSaved'), 'ok');
+        closeScheduleEditor();
+        loadSchedules();
+    } catch (e) {
+        document.getElementById('schedule-edit-status').textContent = (e.message || e);
+        toast(t('scheduleSaveFailed') + (e.message || e), 'err');
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     document.body.dataset.section = activeSection;
     document.querySelectorAll('.nav-item').forEach(btn => {
@@ -2472,6 +2731,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (ov?.classList.contains('show')) closeRunDetail();
     });
     document.getElementById('overview-agent-stop').addEventListener('click', stopAgent);
+
+    document.getElementById('schedules-refresh')?.addEventListener('click', loadSchedules);
+    document.getElementById('schedule-new')?.addEventListener('click', () => openScheduleEditor(null));
+    document.getElementById('schedule-edit-save')?.addEventListener('click', () => saveSchedule().catch(e => toast(t('scheduleSaveFailed') + (e.message || e), 'err')));
+    document.getElementById('schedule-edit-cancel')?.addEventListener('click', closeScheduleEditor);
+    document.getElementById('schedule-edit-close')?.addEventListener('click', closeScheduleEditor);
 
     // Quick action / overview jump buttons
     document.addEventListener('click', (e) => {

@@ -1,4 +1,4 @@
-use crate::agent::types::RunOptions;
+use crate::agent::types::{Budget, RunOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,6 +11,30 @@ pub struct ConsoleConfig {
     pub providers: BTreeMap<String, ProviderConsoleConfig>,
     #[serde(default)]
     pub runtime: RuntimeConsoleConfig,
+    #[serde(default)]
+    pub schedules: Vec<ScheduledTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledTask {
+    pub id: String,
+    pub name: String,
+    /// Standard 5-field cron expression in the server local timezone.
+    pub cron: String,
+    pub task: String,
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub budget: Budget,
+    #[serde(default)]
+    pub options: Option<RunOptions>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

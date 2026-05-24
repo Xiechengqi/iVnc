@@ -1,7 +1,7 @@
 use super::exec;
 use super::provider::{BrainProvider, ProviderError, ProviderSession};
 use super::types::{
-    now_ms, Action, ActionResult, FinishReason, History, RunOptions, RunReport, Step,
+    now_ms, Action, ActionResult, FinishReason, History, RunOptions, RunReport, RunSource, Step,
 };
 use crate::mcp::frame_capture;
 use crate::web::SharedState;
@@ -35,6 +35,11 @@ pub async fn run_agent(
     let trajectory_path = options
         .record_trajectory
         .then(|| super::trajectory::default_trajectory_path(&run_id));
+    let source = state
+        .agent_runs
+        .get(&run_id)
+        .map(|r| r.source)
+        .unwrap_or_default();
     let mut consecutive_out_of_bounds = 0u8;
     let mut substantive = false;
     if let Err(err) = provider.reset(&task).await {
@@ -49,6 +54,7 @@ pub async fn run_agent(
         started_ms,
         FinishReason::Running,
         trajectory_path.clone(),
+        source.clone(),
     );
     state.agent_runs.insert(report.clone());
 
@@ -61,6 +67,7 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::Interrupted,
                 trajectory_path.clone(),
+                source.clone(),
             );
             state.agent_runs.update(report.clone());
             state.set_agent_exclusive(false, "interrupted");
@@ -83,6 +90,7 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::ProviderError,
                     trajectory_path.clone(),
+                    source.clone(),
                 );
                 report.pending_question = Some(err.clone());
                 state.agent_runs.update(report);
@@ -103,6 +111,7 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::ProviderError,
                     trajectory_path.clone(),
+                    source.clone(),
                 );
                 report.pending_question = Some(err.clone());
                 state.agent_runs.update(report);
@@ -118,7 +127,7 @@ pub async fn run_agent(
         let turn = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                report = build_report(&run_id, &task, &history, started_ms, FinishReason::Interrupted, trajectory_path.clone());
+                report = build_report(&run_id, &task, &history, started_ms, FinishReason::Interrupted, trajectory_path.clone(), source.clone());
                 state.agent_runs.update(report.clone());
                 state.set_agent_exclusive(false, "interrupted");
                 return Err(RunError::Interrupted(report));
@@ -130,7 +139,7 @@ pub async fn run_agent(
                     continue;
                 }
                 Err(e) => {
-                    report = build_report(&run_id, &task, &history, started_ms, FinishReason::ProviderError, trajectory_path.clone());
+                    report = build_report(&run_id, &task, &history, started_ms, FinishReason::ProviderError, trajectory_path.clone(), source.clone());
                     state.agent_runs.update(report.clone());
                     state.set_agent_exclusive(false, "provider_error");
                     return Err(RunError::Provider(e));
@@ -149,6 +158,7 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::Safety,
                 trajectory_path.clone(),
+                source.clone(),
             );
             report.pending_safety_checks = turn.pending_safety_checks;
             state.agent_runs.update(report.clone());
@@ -181,6 +191,7 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::Done { success },
                     trajectory_path.clone(),
+                    source.clone(),
                 );
                 if success
                     && !substantive
@@ -220,6 +231,7 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::Ask,
                     trajectory_path.clone(),
+                    source.clone(),
                 );
                 report.pending_question = Some(question);
                 state.agent_runs.update(report.clone());
@@ -282,6 +294,7 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::Running,
                 trajectory_path.clone(),
+                source.clone(),
             );
             state.agent_runs.update(report.clone());
 
@@ -293,6 +306,7 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::Ask,
                     trajectory_path.clone(),
+                    source.clone(),
                 );
                 report.pending_question = Some(format!(
                     "Destructive action blocked ({}). Re-run with allow_destructive=true or remove the kind from require_confirmation_for to proceed.",
@@ -311,6 +325,7 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::BudgetExceeded,
                     trajectory_path.clone(),
+                    source.clone(),
                 );
                 report.pending_question =
                     Some("aborted after 3 consecutive out-of-bounds actions".to_string());
@@ -334,6 +349,7 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::BudgetExceeded,
                 trajectory_path.clone(),
+                source.clone(),
             );
             state.agent_runs.update(report.clone());
             state.set_agent_exclusive(false, "budget_exceeded");
@@ -348,6 +364,7 @@ pub async fn run_agent(
         started_ms,
         FinishReason::MaxStepsReached,
         trajectory_path.clone(),
+        source.clone(),
     );
     state.agent_runs.update(report.clone());
     state.set_agent_exclusive(false, "max_steps_reached");
@@ -387,6 +404,7 @@ fn build_report(
     started_ms: u64,
     finish_reason: FinishReason,
     trajectory_path: Option<PathBuf>,
+    source: RunSource,
 ) -> RunReport {
     let tokens_in = history
         .steps
@@ -423,6 +441,7 @@ fn build_report(
         last_result: history.steps.last().map(|s| s.result.clone()),
         output,
         warnings: Vec::new(),
+        source,
     }
 }
 

@@ -20,6 +20,7 @@
                 <button class="nav-item" data-section="agent" id="nav-agent" type="button">MCP / Agent</button>
                 <button class="nav-item" data-section="providers" id="nav-providers" type="button">Provider</button>
                 <button class="nav-item" data-section="runs" id="nav-runs" type="button">日志 / 轨迹</button>
+                <button class="nav-item" data-section="schedules" id="nav-schedules" type="button">定时任务</button>
             </nav>
             <div class="sidebar-footer">
                 <button class="lang-toggle" id="lang-toggle" type="button">English</button>
@@ -413,6 +414,64 @@
                         </div>
                     </div>
                     <div class="runs-list" id="runs-list"></div>
+                </div>
+            </section>
+
+            <section class="section" id="section-schedules">
+                <div class="panel schedules-panel" id="schedules-panel">
+                    <div class="schedules-header">
+                        <h2 class="schedules-title" id="schedules-title">定时任务</h2>
+                        <div class="schedules-actions">
+                            <button class="btn btn-cancel btn-sm" id="schedules-refresh" type="button">刷新</button>
+                            <button class="btn btn-save btn-sm" id="schedule-new" type="button">新建</button>
+                        </div>
+                    </div>
+                    <p class="schedules-hint" id="schedules-hint">cron 五段表达式，使用服务器本地时区。运行重叠时跳过本次。</p>
+                    <div class="schedules-list" id="schedules-list"></div>
+                </div>
+
+                <div class="panel schedule-edit-panel hidden" id="schedule-edit-panel">
+                    <div class="schedule-edit-header">
+                        <h3 class="schedule-edit-title" id="schedule-edit-title">编辑定时任务</h3>
+                        <button class="modal-close" id="schedule-edit-close" type="button" aria-label="关闭">×</button>
+                    </div>
+                    <div class="schedule-edit-body">
+                        <label class="schedule-field">
+                            <span class="schedule-label" id="schedule-name-label">名称</span>
+                            <input class="schedule-input" id="schedule-name" type="text" maxlength="80">
+                        </label>
+                        <label class="schedule-field">
+                            <span class="schedule-label" id="schedule-cron-label">cron (5 段)</span>
+                            <input class="schedule-input schedule-input-mono" id="schedule-cron" type="text" placeholder="0 9 * * *">
+                        </label>
+                        <label class="schedule-field">
+                            <span class="schedule-label" id="schedule-task-label">任务描述</span>
+                            <textarea class="schedule-textarea" id="schedule-task" rows="3"></textarea>
+                        </label>
+                        <div class="schedule-row">
+                            <label class="schedule-field">
+                                <span class="schedule-label" id="schedule-provider-label">Provider</span>
+                                <select class="schedule-select" id="schedule-provider"></select>
+                            </label>
+                            <label class="schedule-field">
+                                <span class="schedule-label" id="schedule-max-steps-label">最大步数</span>
+                                <input class="schedule-input" id="schedule-max-steps" type="number" min="1" step="1">
+                            </label>
+                            <label class="schedule-field">
+                                <span class="schedule-label" id="schedule-max-wall-label">最长时长 (秒)</span>
+                                <input class="schedule-input" id="schedule-max-wall" type="number" min="1" step="1">
+                            </label>
+                        </div>
+                        <label class="schedule-field schedule-field-inline">
+                            <input class="schedule-checkbox" id="schedule-enabled" type="checkbox">
+                            <span id="schedule-enabled-label">启用</span>
+                        </label>
+                        <div class="schedule-edit-actions">
+                            <span class="schedule-edit-status" id="schedule-edit-status"></span>
+                            <button class="btn btn-cancel" id="schedule-edit-cancel" type="button">取消</button>
+                            <button class="btn btn-save" id="schedule-edit-save" type="button">保存</button>
+                        </div>
+                    </div>
                 </div>
             </section>
         </main>

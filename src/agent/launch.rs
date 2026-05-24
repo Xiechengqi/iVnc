@@ -6,7 +6,7 @@
 //! provider construction, initial-report bookkeeping and the spawned
 //! `run_agent` error mapping in one place.
 
-use crate::agent::types::{Action, Budget, FinishReason, RunOptions, RunReport};
+use crate::agent::types::{Action, Budget, FinishReason, RunOptions, RunReport, RunSource};
 use crate::web::SharedState;
 use std::sync::Arc;
 
@@ -20,6 +20,8 @@ pub struct LaunchRequest {
     pub budget: Option<Budget>,
     pub options: Option<RunOptions>,
     pub replay_actions: Option<Vec<Action>>,
+    /// Optional provenance label. Defaults to `RunSource::Manual` when `None`.
+    pub source: Option<RunSource>,
 }
 
 /// Failure modes shared across transports. Each transport maps these to its own
@@ -79,6 +81,7 @@ pub async fn launch_agent_run(
         last_result: None,
         output: None,
         warnings: Vec::new(),
+        source: req.source.unwrap_or_default(),
     };
 
     // Atomic single-active guard: rejects if another run is already Running.
@@ -126,6 +129,7 @@ pub async fn launch_agent_run(
                         last_result: None,
                         output: None,
                         warnings: Vec::new(),
+                        source: RunSource::default(),
                     });
                 report.finish_reason = FinishReason::ProviderError;
                 report.pending_question = Some(err.to_string());
@@ -153,6 +157,7 @@ pub async fn launch_agent_run(
                         last_result: None,
                         output: None,
                         warnings: Vec::new(),
+                        source: RunSource::default(),
                     });
                 report.finish_reason = FinishReason::ProviderError;
                 report.pending_question = Some(err);

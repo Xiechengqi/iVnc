@@ -453,6 +453,25 @@ pub enum DestructiveKind {
     TypeIntoPasswordField,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunSource {
+    /// Started manually (MCP tool or `POST /api/console/agent-start`).
+    Manual,
+    /// Fired by the scheduler from the named schedule entry.
+    Schedule {
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+}
+
+impl Default for RunSource {
+    fn default() -> Self {
+        RunSource::Manual
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunReport {
     pub run_id: String,
@@ -478,6 +497,10 @@ pub struct RunReport {
     /// not backed by any substantive on-screen work).
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// How this run was launched. Older sidecars without this field default to
+    /// `RunSource::Manual`.
+    #[serde(default)]
+    pub source: RunSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

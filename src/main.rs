@@ -1802,6 +1802,13 @@ async fn run_async_services(
     if let Some(ps) = &apps_state {
         shared.set_apps_state(ps.clone());
     }
+    #[cfg(feature = "agent")]
+    {
+        let scheduler_state = shared.clone();
+        tokio::spawn(async move {
+            crate::agent::schedule::run_loop(scheduler_state).await;
+        });
+    }
     web::run_http_server_with_webrtc(
         port,
         shared.clone(),

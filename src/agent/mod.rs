@@ -9,6 +9,8 @@ pub mod providers;
 pub mod registry;
 pub mod run_store;
 pub mod safety;
+#[cfg(feature = "agent")]
+pub mod schedule;
 pub mod trajectory;
 pub mod types;
 
