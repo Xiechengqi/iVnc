@@ -25,6 +25,17 @@ pub struct AppsState {
     pub service: ServiceProcessManager,
 }
 
+/// Outcome of `launch_named` — distinguishes a fresh start (where any
+/// URL appended to the launch command was actually delivered) from a
+/// reuse of an existing process (where it was not). Callers passing a
+/// URL must handle these differently: a running process won't navigate
+/// just because we re-invoked the launch command.
+#[derive(Debug, Clone)]
+pub enum LaunchOutcome {
+    Started { pid: Option<u32> },
+    AlreadyRunning { pid: Option<u32> },
+}
+
 impl AppsState {
     pub fn new() -> Result<Self, String> {
         let store = Arc::new(AppStore::new()?);
@@ -143,7 +154,7 @@ impl AppsState {
         &self,
         query: &str,
         url: Option<&str>,
-    ) -> Result<Option<u32>, String> {
+    ) -> Result<LaunchOutcome, String> {
         let q = query.trim();
         if q.is_empty() {
             return Err("empty app name".to_string());
@@ -173,8 +184,10 @@ impl AppsState {
         }
 
         match self.start_app_processes(&app).await {
-            Ok(pid) => Ok(pid),
-            Err(e) if e == "App is already running" => Ok(self.app_pid(&app)),
+            Ok(pid) => Ok(LaunchOutcome::Started { pid }),
+            Err(e) if e == "App is already running" => {
+                Ok(LaunchOutcome::AlreadyRunning { pid: self.app_pid(&app) })
+            }
             Err(e) => Err(e),
         }
     }
