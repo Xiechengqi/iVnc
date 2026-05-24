@@ -175,8 +175,16 @@ async fn execute_inner(
                     message: "launch_app_unavailable: apps manager not initialized".to_string(),
                 });
             };
+            let windows_before = mapped_window_count(state);
             match apps.launch_named(app, url.as_deref()).await {
-                Ok(crate::apps::api::LaunchOutcome::Started { .. }) => {}
+                Ok(crate::apps::api::LaunchOutcome::Started { .. }) => {
+                    // A freshly launched app needs seconds to connect to Wayland
+                    // and map its first surface. Without waiting, the agent's next
+                    // observation is captured before any window exists (blank
+                    // screen), so it wastes steps re-launching. Block until a new
+                    // window maps or we time out.
+                    wait_for_new_window(state, windows_before, Duration::from_secs(10)).await;
+                }
                 Ok(crate::apps::api::LaunchOutcome::OpenedInExisting) => {}
                 Ok(crate::apps::api::LaunchOutcome::AlreadyRunning { .. }) => {
                     if let Some(u) = url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
@@ -199,6 +207,42 @@ async fn execute_inner(
         Action::Done { .. } | Action::Ask { .. } => {}
     }
     Ok(())
+}
+
+/// Count toplevel windows currently mapped in the compositor, read from the
+/// cached taskbar JSON the compositor loop maintains. Returns 0 when unavailable
+/// (e.g. in unit tests with no compositor running).
+fn mapped_window_count(state: &Arc<SharedState>) -> usize {
+    state
+        .last_taskbar_json
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .and_then(|v| {
+            v.get("windows")
+                .and_then(|w| w.as_array())
+                .map(|a| a.len())
+        })
+        .unwrap_or(0)
+}
+
+/// Block until the mapped window count exceeds `baseline` (a newly launched app
+/// has mapped its surface) or `timeout` elapses. On success, waits a short extra
+/// beat so the client has a chance to paint its first real frame before the
+/// agent captures the next observation.
+async fn wait_for_new_window(state: &Arc<SharedState>, baseline: usize, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if state.agent_stop_requested() {
+            return;
+        }
+        if mapped_window_count(state) > baseline {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
 }
 
 fn to_screen(display: &DisplayMetadata, x: i32, y: i32) -> Result<(i32, i32), ActionResult> {
