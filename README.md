@@ -20,6 +20,7 @@
 - **Basic Auth** - 内置 HTTP 基础认证
 - **TLS** - 可选自签名 HTTPS（`--tls`）
 - **MCP 服务器** - 可选 [Model Context Protocol](https://modelcontextprotocol.io) 支持，AI 代理可通过 13 个工具控制远程桌面（截图、鼠标、键盘、剪贴板、窗口管理）
+- **VLM 原生 Agent** - 可选内置 AI 自动化闭环：给定一个任务目标和一个视觉大模型（VLM）API，iVnc 在进程内自主完成"看屏幕 → 决策 → 操作 → 再看"循环，支持 OpenAI / Anthropic / Gemini / Holo3 / 本地 VLM
 
 ## 快速开始
 
@@ -80,6 +81,9 @@ cargo build --release
 | `audio` | cpal 音频捕获 + Opus 编码 | |
 | `tls` | 自签名 HTTPS（`--tls` 启用，PWA 支持） | |
 | `mcp` | MCP 服务器（AI 代理远程桌面控制） | |
+| `agent` | VLM 原生 Agent 框架（含 `replay` provider，隐含 `mcp`） | |
+| `agent-openai` / `agent-anthropic` / `agent-gemini` / `agent-holo3` / `agent-local` | 启用对应云/本地 VLM provider（各自隐含 `agent`） | |
+| `agent-all` | 启用全部 VLM provider | |
 | `vaapi` | Intel VA-API 硬件编码 | |
 | `nvenc` | NVIDIA NVENC 硬件编码 | |
 | `qsv` | Intel Quick Sync Video | |
@@ -539,6 +543,168 @@ POST http://<server-ip>:8008/mcp
 Content-Type: application/json
 Authorization: Basic <base64(user:password)>
 ```
+
+## VLM 原生 Agent（内置 AI 自动化）
+
+除了把桌面"暴露"给外部 AI 的 MCP 工具之外，iVnc 还内置了一个 **VLM 原生 Agent**：你只需给它一个自然语言任务（例如"打开浏览器，查一下香港 VPS 价格并整理成表格"）和一个视觉大模型（VLM）的 API，它就会在 iVnc 进程内自己跑完整个"看 → 想 → 做"的循环，直到任务完成。
+
+### 与 MCP 工具的区别
+
+| | MCP 工具 | 内置 VLM Agent |
+|---|---|---|
+| 谁在决策 | 外部 AI（如 Claude Desktop） | iVnc 进程内的 Agent 循环 |
+| 调用粒度 | 外部每次调用一个工具（截图/点击…） | 给一个任务目标，内部自动多步执行 |
+| 网络往返 | 外部 ↔ iVnc 每个动作一次 | 只有 Agent ↔ VLM 的模型调用 |
+| 典型场景 | 把 iVnc 当作 Claude 的"手和眼" | 让 iVnc 独立完成一个端到端任务 |
+
+### 设计理念：纯像素、不靠辅助信息
+
+Agent 是 **VLM-native / pixel-native** 的：模型只看一张桌面截图，直接输出"点屏幕哪个坐标、敲什么键"。它**不依赖** DOM、无障碍树（accessibility tree）、OCR 或目标检测——这套机制对任意 GUI（浏览器、原生应用、游戏）都通用，也不需要在被控端安装额外探针。
+
+### 核心闭环
+
+每一步（step）都重复同一个循环，直到模型主动 `done`/`ask`、预算耗尽或被用户中断：
+
+```
+                ┌──────────────────────────────────────────────────────┐
+                │                  Agent Loop (loop.rs)                 │
+                │                                                       │
+  ┌─────────────▼─────────────┐    ┌──────────────────────────────┐    │
+  │  1. 截图观测               │    │  2. BrainProvider.next_action │    │
+  │  capture_observation()    │───▶│  把 任务+截图+历史 翻译成      │    │
+  │  截图 + 尺寸/缩放 + 窗口   │    │  模型 API 调用，拿回 Action   │    │
+  │  列表 + 剪贴板 + sha256    │    │  (OpenAI/Anthropic/Gemini…)   │    │
+  └───────────────────────────┘    └───────────────┬──────────────┘    │
+                ▲                                   │                   │
+                │                                   ▼                   │
+  ┌─────────────┴─────────────┐    ┌──────────────────────────────┐    │
+  │  4. 等待画面沉降           │    │  3. 执行动作 exec::execute()  │    │
+  │  action_settle_ms (250ms) │◀───│  图像坐标→屏幕坐标，注入       │    │
+  │  然后回到第 1 步           │    │  Wayland Seat（鼠标/键盘…）   │    │
+  └───────────────────────────┘    └──────────────────────────────┘    │
+                │                                                       │
+                └──────────── done / ask / 预算到顶 / 中断 ────────────┘
+                                          │
+                                          ▼
+                              RunReport（成败 + 交付物 output + 轨迹）
+```
+
+### 关键数据契约（`src/agent/types.rs`）
+
+- **Observation（观测）** —— 一帧"现在屏幕长什么样"：JPEG 截图字节、屏幕真实尺寸、缩放后的图像尺寸、`image_to_screen_scale`、窗口列表、剪贴板预览，以及一个 `sha256`（用于判断画面是否变化）。
+- **Action（动作）** —— 一个枚举，覆盖 `mouse_move/click/down/up/drag`、`scroll`、`zoom`、`type_text`、`key_chord`、`key_hold`、`clipboard_write/read`、`window_focus/close`、`wait`、`screenshot`、`launch_app`（按 id/名称启动内置应用，可附带 URL）、`done`、`ask`。
+- **坐标空间（CoordinateSpace）** —— 模型看到的是**缩放后的图像像素**，executor 用 `image_to_screen_scale` 把它换算回真实屏幕像素再注入。不同模型用不同坐标约定（`ImagePixels` / `ScreenPixels` / 归一化 `NormalizedUnit` 千分比），由各 provider 的 `capabilities` 声明，Agent 自动适配。模型永远不需要关心真实分辨率。
+- **History / Step** —— 每一步记录"观测摘要 + 动作 + 结果 + 模型 token 用量"，作为下一步的上下文。截图按滑动窗口只保留最近 `max_history_images`（默认 3）帧，避免 token 爆炸。
+- **Budget / RunOptions** —— 步数、输入/输出 token、墙钟时长、截图数、可选费用（micro-USD）上限，任一触顶就自动停止。还可配置动作沉降时间、是否记录轨迹、`dry_run`（只记录不真正注入）等。
+- **RunReport** —— 一次运行的最终产物：是否成功、`finish_reason`、**`output`（任务真正的交付物，而不仅是状态句）**、`warnings`、token 统计、轨迹文件路径。
+
+### 可插拔的"大脑"：BrainProvider
+
+`BrainProvider` trait 负责把"任务 + 观测 + 历史"翻译成某家模型的 API 请求，再把模型回复翻译回 `Action`。新增一个模型后端只需实现这个 trait。每个 provider 通过 `ProviderCapabilities` 声明自己的坐标空间、动作语法、能吃几帧历史图、所需 API key 环境变量等。
+
+内置 provider：
+
+| Provider | 默认模型 | 默认 endpoint | API Key 环境变量 | 动作语法 |
+|---|---|---|---|---|
+| `replay` | — | —（离线） | 无 | 回放固定轨迹（测试/演示） |
+| `local` | `local-vlm` | `http://localhost:8000/v1` | `LOCAL_VLM_API_KEY`（可选） | OpenAI 兼容 tool call |
+| `openai` | `gpt-4o-mini` | `https://api.openai.com/v1` | `OPENAI_API_KEY` | OpenAI tool call / Responses |
+| `anthropic` | `claude-haiku-4-5` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` | Anthropic computer use |
+| `gemini` | `gemini-2.0-flash` | `https://generativelanguage.googleapis.com/v1beta` | `GEMINI_API_KEY` | Gemini computer use |
+| `holo3` | `holo3-35b-a3b` | `https://api.hcompany.ai/v1` | `HAI_API_KEY` | OpenAI 兼容 tool call |
+
+> OpenAI 兼容 provider（`openai`/`local`/`holo3`）支持 `api_format = chat_completions`（默认）或 `responses` 两种请求格式。所有 provider 的模型回复最终都会经过统一的 `text_action_parser` 兜底解析——它同时能识别 **JSON 工具调用**与**自然语言文本动作**（如 `Action: click(point='(840,210)')`），即使模型不严格遵守函数调用格式也能稳健落地。
+
+### 可靠性与"诚实"机制
+
+纯视觉 Agent 容易陷入两类问题：**反复点同一个没反应的地方**，以及**没干活却谎报成功**。iVnc 内置了多重护栏：
+
+- **卡死检测** —— 连续两帧截图 `sha256` 完全相同（画面没变），会在下一轮提示中警告模型"你上一步没产生任何效果，换个策略"。
+- **循环阻断** —— 如果模型在画面未变的情况下重复完全相同的动作，executor 直接拒绝执行并回一条错误提示，强制它改变方法或收尾。
+- **预算临近提示** —— 用掉 >60% 步数时提示尽快 `done`；最后一步会强制要求返回 `done`，避免把额度浪费在无意义探索上。
+- **假成功护栏** —— 如果模型声称 `success=true`，却既没做任何实质性动作、也没提供 `output` 交付物，运行报告会附带一条 warning，提示该结论很可能未经验证。
+- **越界保护** —— 动作坐标超出屏幕范围会返回 `OutOfBounds`；连续 3 次越界则中止运行。
+- **交付物要求** —— `done.output` 用于承载"用户真正想要的答案"（如整理好的表格、查到的结论），与"是否成功"分离。
+
+### 安全与操作隔离
+
+- **破坏性动作守卫（`safety.rs`）** —— `window_close`、危险快捷键（`Alt+F4`、`Ctrl+Alt+Del`、`Cmd/Super+Q`）、剪贴板覆盖等动作默认被拦截，需显式 `allow_destructive=true` 才执行；也可通过 `require_confirmation_for` 指定需要人工确认的类别。
+- **随时中断（kill-switch）** —— `agent_stop` 工具或 Web DataChannel 控制消息会触发 `CancellationToken`，正在执行的运行会立即停止。
+- **独占与时间线广播** —— Agent 运行期间设为独占模式；每执行一步都通过 DataChannel 广播 `mcp_action,{json}`（动作 + 结果），运行状态变化广播 `mcp_control,{json}`，前端据此显示横幅与中断按钮。
+- **dry-run 演练** —— `dry_run=true` 时模型照常被调用，但动作只记录不真正注入桌面，便于安全地预演一条轨迹。
+- **轨迹持久化** —— 每步以 JSONL 追加写入 `~/.local/share/ivnc/trajectories/<run_id>.jsonl`，并伴随 `<run_id>.report.json` 旁车文件，进程重启后运行列表与轨迹不丢失。
+
+### MCP Agent 工具
+
+启用 `agent`（或 `agent-all`）feature 后，MCP 端点会额外暴露以下工具：
+
+| 工具 | 说明 |
+|------|------|
+| `agent_start` | 启动一次 Agent 运行并立即返回 run_id（适合长任务，异步） |
+| `agent_run` | 启动并**等待**运行结束后返回最终报告（适合短任务） |
+| `agent_status` | 查询某次运行的实时状态/报告 |
+| `agent_stop` | 中断正在进行的运行 |
+| `agent_step` | 对实时桌面执行**单个** Action（同样受破坏性守卫约束），返回结果与新观测摘要 |
+| `agent_history_get` | 获取一次运行的完整轨迹（步骤序列） |
+| `agent_history_replay` | 用 `replay` provider 回放一条已有轨迹 |
+| `provider_list` | 列出已编译且已配置（有 key）的 provider |
+| `provider_health` | 探测某个 provider 的可用性 |
+
+### 编译与配置
+
+```bash
+# build.sh 默认即包含 mcp + agent-all（全部 provider）
+bash build.sh --release
+
+# 仅用 cargo 时按需指定
+cargo build --release --features agent-openai            # 只要 OpenAI
+cargo build --release --features mcp,agent-all           # 全部 provider
+```
+
+provider 的 endpoint / model / api_format / api_key / system_prompt 可写入 `~/.config/ivnc/console.json`（通过内置管理控制台编辑，文件权限 0600），或用上表中的环境变量提供。Agent 默认 provider 为 `local`。
+
+```jsonc
+// ~/.config/ivnc/console.json（节选）
+{
+  "providers": {
+    "openai": {
+      "endpoint": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "api_format": "responses",
+      "api_key": "sk-..."        // 仅存于本地，不要提交到 git
+    }
+  },
+  "agent": { "default_provider": "openai" }
+}
+```
+
+跑一个任务（通过任意 MCP 客户端调用 `agent_run`）：
+
+```jsonc
+{
+  "name": "agent_run",
+  "arguments": {
+    "provider": "openai",
+    "task": "打开浏览器，搜索香港 VPS 并整理一张价格对比表",
+    "budget": { "max_steps": 30, "max_wall_seconds": 240 }
+  }
+}
+```
+
+### 模块结构（`src/agent/`）
+
+| 模块 | 功能 |
+|------|------|
+| `types.rs` | 数据契约：Observation / Action / History / Budget / RunOptions / RunReport 等 |
+| `provider.rs` | `BrainProvider` trait、`ProviderCapabilities`、`ProviderTurn`、`ProviderSession` |
+| `registry.rs` | provider 预设注册表与按 key 配置的构建/可用性探测 |
+| `loop.rs` | 主循环：观测→决策→执行→沉降，含卡死/循环/预算/假成功护栏 |
+| `exec.rs` | 把 Action 转成 Wayland 输入注入，含坐标换算与破坏性守卫 |
+| `safety.rs` | 破坏性动作分类 |
+| `budget.rs` | 预算计量 |
+| `trajectory.rs` | JSONL 轨迹与 report.json 旁车的读写 |
+| `run_store.rs` | 运行注册表（内存 + 磁盘恢复） |
+| `providers/` | 各模型后端：`openai_compat` / `anthropic` / `gemini` / `holo3` / `local_vlm` / `replay`，以及 `text_action_parser` 兜底解析器 |
 
 ## 故障排除
 
