@@ -28,6 +28,7 @@ use hyper_util::rt::TokioIo;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +41,9 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::apps::api::AppsState;
 use crate::webrtc::SessionManager;
+
+#[derive(Clone, Copy, Debug)]
+struct HttpPeerAddr(SocketAddr);
 
 /// Classify a TCP connection by its first bytes.
 fn classify_first_bytes(buf: &[u8]) -> ConnectionType {
@@ -285,8 +289,12 @@ pub async fn run_http_server_with_webrtc(
             proxy_panel_absolute_path_middleware,
         ))
         .layer(middleware::from_fn_with_state(
-            auth_state,
+            auth_state.clone(),
             basic_auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            auth_state,
+            console_remote_access_middleware,
         ));
 
     let listener = TcpListener::bind(&addr).await?;
@@ -400,7 +408,7 @@ pub async fn run_http_server_with_webrtc(
                     // TLS handshake
                     match acceptor.accept(tcp_stream).await {
                         Ok(tls_stream) => {
-                            serve_http(TokioIo::new(tls_stream), app).await;
+                            serve_http(TokioIo::new(tls_stream), app, peer_addr).await;
                         }
                         Err(e) => {
                             debug!("TLS handshake error from {}: {}", peer_addr, e);
@@ -432,7 +440,7 @@ pub async fn run_http_server_with_webrtc(
             match kind {
                 ConnectionType::IceTcp => handle_ice_connection(tcp_stream, peer_addr, sm).await,
                 ConnectionType::Http | ConnectionType::Tls => {
-                    serve_http(TokioIo::new(tcp_stream), app).await;
+                    serve_http(TokioIo::new(tcp_stream), app, peer_addr).await;
                 }
                 ConnectionType::Unknown => {
                     warn!(
@@ -446,13 +454,17 @@ pub async fn run_http_server_with_webrtc(
 }
 
 /// Serve HTTP over a generic IO stream
-async fn serve_http<I>(io: TokioIo<I>, app: Router<()>)
+async fn serve_http<I>(io: TokioIo<I>, app: Router<()>, peer_addr: SocketAddr)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = hyper::service::service_fn(move |req| {
         let mut app = app.clone();
-        async move { app.call(req).await }
+        async move {
+            let mut req = req;
+            req.extensions_mut().insert(HttpPeerAddr(peer_addr));
+            app.call(req).await
+        }
     });
     let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
         .serve_connection_with_upgrades(io, service)
@@ -660,6 +672,61 @@ async fn basic_auth_middleware(
         header::HeaderValue::from_static("Basic realm=\"ivnc\""),
     );
     response
+}
+
+async fn console_remote_access_middleware(
+    State(state): State<Arc<SharedState>>,
+    req: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    if state.config.ui_features.console_enabled || !is_console_management_path(req.uri().path()) {
+        return next.run(req).await;
+    }
+
+    let peer_is_loopback = req
+        .extensions()
+        .get::<HttpPeerAddr>()
+        .map(|addr| addr.0.ip().is_loopback())
+        .unwrap_or(false);
+    let host_is_loopback = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(host_header_is_loopback)
+        .unwrap_or(false);
+
+    if peer_is_loopback && host_is_loopback {
+        return next.run(req).await;
+    }
+
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from("Not Found"))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn is_console_management_path(path: &str) -> bool {
+    path == "/console"
+        || path == "/console/"
+        || path == "/console.html"
+        || path == "/console.css"
+        || path == "/console.js"
+        || path.starts_with("/api/console/")
+        || path == "/api/apps"
+        || path.starts_with("/api/apps/")
+        || path == "/api/capabilities"
+        || path.starts_with("/api/capabilities/")
+}
+
+fn host_header_is_loopback(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    if host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1" {
+        return true;
+    }
+    if let Some((name, _port)) = host.rsplit_once(':') {
+        return name == "localhost" || name == "127.0.0.1" || name == "[::1]";
+    }
+    false
 }
 
 /// Clients handler - returns WebRTC session count
@@ -2194,10 +2261,16 @@ fn provider_id_slug(value: &str) -> String {
 }
 
 async fn proxy_status_handler(State(state): State<Arc<SharedState>>) -> Response {
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
     proxy_json_response(StatusCode::OK, json!(state.proxy_panel.status()))
 }
 
 async fn proxy_restart_handler(State(state): State<Arc<SharedState>>) -> Response {
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
     match state.proxy_panel.restart().await {
         Ok(pid) => proxy_json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
         Err(err) => proxy_json_response(
@@ -2207,7 +2280,10 @@ async fn proxy_restart_handler(State(state): State<Arc<SharedState>>) -> Respons
     }
 }
 
-async fn proxy_panel_root_handler() -> Response {
+async fn proxy_panel_root_handler(State(state): State<Arc<SharedState>>) -> Response {
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
     Response::builder()
         .status(StatusCode::TEMPORARY_REDIRECT)
         .header(header::LOCATION, "/proxy/")
@@ -2222,6 +2298,9 @@ async fn proxy_panel_handler(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
     proxy_to_miao(state, method, uri, headers, body, true).await
 }
 
@@ -2230,6 +2309,9 @@ async fn proxy_panel_ws_handler(
     ws: WebSocketUpgrade,
     uri: Uri,
 ) -> Response {
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
     if let Err(err) = state.proxy_panel.ensure_running().await {
         return proxy_json_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2277,6 +2359,10 @@ async fn proxy_panel_absolute_path_middleware(
         return next.run(req).await;
     }
 
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
+
     let (parts, body) = req.into_parts();
     proxy_to_miao(state, parts.method, parts.uri, parts.headers, body, false).await
 }
@@ -2289,6 +2375,9 @@ async fn proxy_to_miao(
     body: Body,
     strip_proxy_prefix: bool,
 ) -> Response {
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
     if let Err(err) = state.proxy_panel.ensure_running().await {
         return proxy_json_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2387,6 +2476,13 @@ async fn proxy_to_miao(
             json!({"ok": false, "error": format!("upstream proxy error: {}", err)}),
         ),
     }
+}
+
+fn proxy_disabled_response() -> Response {
+    proxy_json_response(
+        StatusCode::NOT_FOUND,
+        json!({"ok": false, "error": "proxy disabled"}),
+    )
 }
 
 async fn proxy_miao_websocket(client_socket: AxumWebSocket, upstream: String) {
@@ -3016,6 +3112,74 @@ async fn try_restart_systemd(service_name: &str) -> Result<(), Box<dyn std::erro
         Ok(())
     } else {
         Err("systemctl restart failed".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{host_header_is_loopback, is_console_management_path};
+
+    #[test]
+    fn console_management_paths_are_restricted() {
+        for path in [
+            "/console",
+            "/console/",
+            "/console.html",
+            "/console.css",
+            "/console.js",
+            "/api/console/sessions",
+            "/api/apps",
+            "/api/apps/chrome/start",
+            "/api/capabilities",
+            "/api/capabilities/providers",
+        ] {
+            assert!(is_console_management_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn non_console_paths_are_not_restricted() {
+        for path in [
+            "/",
+            "/ui-config",
+            "/ws-config",
+            "/api/console",
+            "/api/apps-status",
+            "/api/capabilities-extra",
+            "/terminal/ws",
+        ] {
+            assert!(!is_console_management_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn loopback_hosts_are_allowed_for_local_console_access() {
+        for host in [
+            "localhost",
+            "localhost:8008",
+            "127.0.0.1",
+            "127.0.0.1:8008",
+            "::1",
+            "[::1]",
+            "[::1]:8008",
+        ] {
+            assert!(host_header_is_loopback(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn non_loopback_hosts_are_rejected_for_local_console_access() {
+        for host in [
+            "",
+            "example.com",
+            "example.com:8008",
+            "192.168.1.10",
+            "192.168.1.10:8008",
+            "localhost.example.com",
+            "127.0.0.1.example.com",
+        ] {
+            assert!(!host_header_is_loopback(host), "{host}");
+        }
     }
 }
 

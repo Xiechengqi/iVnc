@@ -230,6 +230,14 @@ fn main() {
         error!("Invalid configuration: {}", e);
         std::process::exit(1);
     }
+    env::set_var(
+        "IVNC_PROXY_PANEL_ENABLED",
+        if config.ui_features.proxy_enabled {
+            "1"
+        } else {
+            "0"
+        },
+    );
     let width = config.display.width;
     let height = config.display.height;
     info!("Display: {}x{}", width, height);
@@ -929,6 +937,14 @@ fn run(
 
     info!("Shutting down...");
     running.store(false, Ordering::SeqCst);
+    if let Some(apps_state) = shared_state.apps_state().cloned() {
+        if let Err(err) = apps_state.shutdown_running_apps_with_state() {
+            warn!(
+                "Failed to save and stop running apps during shutdown: {}",
+                err
+            );
+        }
+    }
     let _ = pipeline.stop();
     tokio_rt.shutdown_timeout(Duration::from_secs(3));
     cleanup_env_file();
@@ -1709,16 +1725,19 @@ async fn run_async_services(
     _running: Arc<AtomicBool>,
     #[cfg(feature = "mcp")] mcp_stdio: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    shared.proxy_panel.clone().start_watchdog();
-    let proxy_startup = {
+    let proxy_startup = if config.ui_features.proxy_enabled {
+        shared.proxy_panel.clone().start_watchdog();
         let proxy_panel = shared.proxy_panel.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             match proxy_panel.ensure_running().await {
                 Ok(Some(pid)) => info!("miao proxy panel startup completed: pid={}", pid),
                 Ok(None) => warn!("miao proxy panel startup completed without a running pid"),
                 Err(err) => warn!("miao proxy panel startup failed: {}", err),
             }
-        })
+        }))
+    } else {
+        info!("miao proxy panel disabled");
+        None
     };
 
     let upload_settings = file_upload::FileUploadSettings::from_config(&config);
@@ -1785,8 +1804,10 @@ async fn run_async_services(
             tokio::spawn(async move {
                 // Wait a bit for the system to stabilize
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                if let Err(err) = proxy_startup.await {
-                    log::warn!("miao proxy panel startup task failed: {}", err);
+                if let Some(proxy_startup) = proxy_startup {
+                    if let Err(err) = proxy_startup.await {
+                        log::warn!("miao proxy panel startup task failed: {}", err);
+                    }
                 }
                 if let Err(e) = ps_clone.restore_running_state().await {
                     log::warn!("Failed to restore running apps: {}", e);
@@ -1857,6 +1878,18 @@ fn apply_cli_overrides(config: &mut Config, args: &RunArgs) {
     }
     if let Some(v) = args.commands_enabled {
         config.input.enable_commands = v;
+    }
+    if let Some(v) = args.terminal_enabled {
+        config.ui_features.terminal_enabled = v;
+        config.terminal.enabled = v;
+    } else {
+        config.terminal.enabled = config.terminal.enabled && config.ui_features.terminal_enabled;
+    }
+    if let Some(v) = args.proxy_enabled {
+        config.ui_features.proxy_enabled = v;
+    }
+    if let Some(v) = args.console_enabled {
+        config.ui_features.console_enabled = v;
     }
     if let Some(ref ft) = args.file_transfers {
         config.input.file_transfers = ft.split(',').map(|s| s.trim().to_string()).collect();

@@ -2098,6 +2098,8 @@ export default function webrtc() {
 	let logEntries = [];
 	let debugEntries = [];
 	let status = 'connecting';
+	const toolbarFeatures = (window.__IVNC_UI_CONFIG__ && window.__IVNC_UI_CONFIG__.features) || {};
+	const toolbarFeatureEnabled = (name) => toolbarFeatures[name] !== false;
 	const terminalController = createWebTerminalController();
 	const proxyController = createProxyModalController();
 	const consoleController = createConsoleModalController();
@@ -3670,50 +3672,56 @@ export default function webrtc() {
 			});
 			taskbar.appendChild(updateBtn);
 
-			const proxySvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
-			const proxyBtn = document.createElement('div');
-			proxyBtn.className = 'taskbar-pin';
-			proxyBtn.id = 'proxy-btn';
-			proxyBtn.innerHTML = proxySvg;
-			setLiveTitle(proxyBtn, 'proxyTooltip');
-			proxyBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				terminalController.minimize();
-				consoleController.minimize();
-				proxyController.toggle();
-			});
-			proxyController.setButton(proxyBtn);
-			taskbar.appendChild(proxyBtn);
+			if (toolbarFeatureEnabled('proxy')) {
+				const proxySvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
+				const proxyBtn = document.createElement('div');
+				proxyBtn.className = 'taskbar-pin';
+				proxyBtn.id = 'proxy-btn';
+				proxyBtn.innerHTML = proxySvg;
+				setLiveTitle(proxyBtn, 'proxyTooltip');
+				proxyBtn.addEventListener('click', (e) => {
+					e.stopPropagation();
+					terminalController.minimize();
+					consoleController.minimize();
+					proxyController.toggle();
+				});
+				proxyController.setButton(proxyBtn);
+				taskbar.appendChild(proxyBtn);
+			}
 
-			const terminalSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
-			const terminalBtn = document.createElement('div');
-			terminalBtn.className = 'taskbar-pin';
-			terminalBtn.id = 'terminal-btn';
-			terminalBtn.innerHTML = terminalSvg;
-			setLiveTitle(terminalBtn, 'terminalTooltip');
-			terminalBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				proxyController.minimize();
-				consoleController.minimize();
-				terminalController.toggle();
-			});
-			terminalController.setButton(terminalBtn);
-			taskbar.appendChild(terminalBtn);
+			if (toolbarFeatureEnabled('terminal')) {
+				const terminalSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+				const terminalBtn = document.createElement('div');
+				terminalBtn.className = 'taskbar-pin';
+				terminalBtn.id = 'terminal-btn';
+				terminalBtn.innerHTML = terminalSvg;
+				setLiveTitle(terminalBtn, 'terminalTooltip');
+				terminalBtn.addEventListener('click', (e) => {
+					e.stopPropagation();
+					proxyController.minimize();
+					consoleController.minimize();
+					terminalController.toggle();
+				});
+				terminalController.setButton(terminalBtn);
+				taskbar.appendChild(terminalBtn);
+			}
 
-			const consoleSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
-			const consoleBtn = document.createElement('div');
-			consoleBtn.className = 'taskbar-pin';
-			consoleBtn.id = 'console-btn';
-			consoleBtn.innerHTML = consoleSvg;
-			setLiveTitle(consoleBtn, 'consoleTooltip');
-			consoleBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				proxyController.minimize();
-				terminalController.minimize();
-				consoleController.toggle();
-			});
-			consoleController.setButton(consoleBtn);
-			taskbar.appendChild(consoleBtn);
+			if (toolbarFeatureEnabled('console')) {
+				const consoleSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
+				const consoleBtn = document.createElement('div');
+				consoleBtn.className = 'taskbar-pin';
+				consoleBtn.id = 'console-btn';
+				consoleBtn.innerHTML = consoleSvg;
+				setLiveTitle(consoleBtn, 'consoleTooltip');
+				consoleBtn.addEventListener('click', (e) => {
+					e.stopPropagation();
+					proxyController.minimize();
+					terminalController.minimize();
+					consoleController.toggle();
+				});
+				consoleController.setButton(consoleBtn);
+				taskbar.appendChild(consoleBtn);
+			}
 
 			const connIndicator = document.createElement('div');
 			connIndicator.className = 'taskbar-conn';

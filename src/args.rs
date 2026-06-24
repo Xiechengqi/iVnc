@@ -63,6 +63,18 @@ pub struct RunArgs {
     #[arg(long)]
     pub commands_enabled: Option<bool>,
 
+    /// Enable or disable the browser toolbar terminal (true/false)
+    #[arg(long)]
+    pub terminal_enabled: Option<bool>,
+
+    /// Enable or disable the browser toolbar proxy panel (true/false)
+    #[arg(long)]
+    pub proxy_enabled: Option<bool>,
+
+    /// Enable or disable remote console access (true/false)
+    #[arg(long)]
+    pub console_enabled: Option<bool>,
+
     /// Allowed file transfer directions (comma-separated: "upload,download")
     #[arg(long)]
     pub file_transfers: Option<String>,

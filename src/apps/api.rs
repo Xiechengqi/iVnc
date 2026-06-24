@@ -61,23 +61,63 @@ impl AppsState {
 
     /// Save current running apps state
     pub fn save_running_state(&self) -> Result<(), String> {
-        let apps = self.store.list()?;
-        let running_ids: Vec<String> = apps
-            .iter()
-            .filter(|app| {
-                let status = self.app_status(app);
-                matches!(status, AppStatus::Running)
-            })
-            .map(|app| app.id.clone())
-            .collect();
+        let running_ids = self.running_app_ids()?;
 
         if running_ids.is_empty() {
             log::info!("No running apps to save");
+            AppRunningState::clear()?;
             return Ok(());
         }
 
         let state = AppRunningState::new(running_ids);
         state.save()
+    }
+
+    pub fn shutdown_running_apps_with_state(&self) -> Result<(), String> {
+        let apps = self.store.list()?;
+        let running_ids: Vec<String> = apps
+            .iter()
+            .filter(|app| matches!(self.app_status(app), AppStatus::Running))
+            .map(|app| app.id.clone())
+            .collect();
+
+        if running_ids.is_empty() {
+            log::info!("No running apps to save before shutdown");
+            AppRunningState::clear()?;
+        } else {
+            AppRunningState::new(running_ids.clone()).save()?;
+        }
+
+        for app_id in running_ids {
+            match self.store.get(&app_id) {
+                Ok(app) => {
+                    log::info!(
+                        "Stopping managed app during shutdown: {} ({})",
+                        app.name,
+                        app.id
+                    );
+                    if let Err(err) = self.stop_app_processes(&app) {
+                        log::warn!("Failed to stop app {} during shutdown: {}", app.id, err);
+                    }
+                }
+                Err(err) => log::warn!(
+                    "Running app {} disappeared before shutdown: {}",
+                    app_id,
+                    err
+                ),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn running_app_ids(&self) -> Result<Vec<String>, String> {
+        let apps = self.store.list()?;
+        Ok(apps
+            .iter()
+            .filter(|app| matches!(self.app_status(app), AppStatus::Running))
+            .map(|app| app.id.clone())
+            .collect())
     }
 
     /// Restore previously running apps
@@ -495,7 +535,7 @@ fn builtin_chrome_command() -> Result<String, String> {
         "profile_dir={data_dir}; \
 rm -f \"$profile_dir/SingletonLock\" \"$profile_dir/SingletonSocket\" \"$profile_dir/SingletonCookie\"; \
 proxy_arg=''; \
-if grep -qiE '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-Fa-f]+:0438[[:space:]]+[0-9A-Fa-f]+:[0-9A-Fa-f]+[[:space:]]+0A[[:space:]]' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then \
+if [ \"${{IVNC_PROXY_PANEL_ENABLED:-1}}\" != '0' ] && grep -qiE '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-Fa-f]+:0438[[:space:]]+[0-9A-Fa-f]+:[0-9A-Fa-f]+[[:space:]]+0A[[:space:]]' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then \
   proxy_arg='--proxy-server=socks5://127.0.0.1:1080'; \
 fi; \
 exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",

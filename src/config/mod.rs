@@ -76,6 +76,10 @@ pub struct Config {
     /// Built-in browser terminal configuration
     #[serde(default)]
     pub terminal: TerminalConfig,
+
+    /// Browser toolbar and local management feature gates
+    #[serde(default)]
+    pub ui_features: UiFeaturesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +374,32 @@ impl Default for TerminalConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiFeaturesConfig {
+    /// Show and allow the browser terminal.
+    #[serde(default = "default_ui_feature_enabled")]
+    pub terminal_enabled: bool,
+
+    /// Show and allow the miao proxy panel.
+    #[serde(default = "default_ui_feature_enabled")]
+    pub proxy_enabled: bool,
+
+    /// Show the remote console entry and allow remote console APIs.
+    /// When false, console/admin APIs remain available only from loopback.
+    #[serde(default = "default_ui_feature_enabled")]
+    pub console_enabled: bool,
+}
+
+impl Default for UiFeaturesConfig {
+    fn default() -> Self {
+        Self {
+            terminal_enabled: default_ui_feature_enabled(),
+            proxy_enabled: default_ui_feature_enabled(),
+            console_enabled: default_ui_feature_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     /// Log level
     #[serde(default = "default_log_level")]
@@ -645,4 +675,8 @@ fn default_terminal_cwd() -> String {
 
 fn default_terminal_term() -> String {
     "xterm-256color".to_string()
+}
+
+fn default_ui_feature_enabled() -> bool {
+    true
 }

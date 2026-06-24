@@ -15,6 +15,7 @@ pub struct UiConfig {
     pub input: UiInput,
     pub clipboard: UiToggle,
     pub stats: UiToggle,
+    pub features: UiFeatures,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +51,13 @@ pub struct UiAudio {
 pub struct UiInput {
     pub mouse: UiBool,
     pub keyboard: UiBool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UiFeatures {
+    pub terminal: bool,
+    pub proxy: bool,
+    pub console: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +141,11 @@ impl UiConfig {
                 enabled: clipboard_enabled.value,
             },
             stats: UiToggle { enabled: true },
+            features: UiFeatures {
+                terminal: config.terminal.enabled && config.ui_features.terminal_enabled,
+                proxy: config.ui_features.proxy_enabled,
+                console: config.ui_features.console_enabled,
+            },
         }
     }
 

@@ -23,19 +23,26 @@
         window.__IVNC_WS_PORT__ = "8007";
       }
       window.__IVNC_TCP_ONLY__ = false;
-      fetch(`/ws-config?ts=${Date.now()}`, { cache: 'no-store' })
-        .then((resp) => resp.ok ? resp.json() : null)
-        .then((data) => {
-          if (data && data.ws_port) {
-            window.__IVNC_WS_PORT__ = String(data.ws_port);
+      Promise.all([
+        fetch(`/ws-config?ts=${Date.now()}`, { cache: 'no-store' })
+          .then((resp) => resp.ok ? resp.json() : null),
+        fetch(`/ui-config?ts=${Date.now()}`, { cache: 'no-store' })
+          .then((resp) => resp.ok ? resp.json() : null)
+      ])
+        .then(([wsConfig, uiConfig]) => {
+          if (wsConfig && wsConfig.ws_port) {
+            window.__IVNC_WS_PORT__ = String(wsConfig.ws_port);
             console.log('iVnc WS port set from ws-config', window.__IVNC_WS_PORT__);
           }
-          if (data && typeof data.tcp_only === 'boolean') {
-            window.__IVNC_TCP_ONLY__ = data.tcp_only;
+          if (wsConfig && typeof wsConfig.tcp_only === 'boolean') {
+            window.__IVNC_TCP_ONLY__ = wsConfig.tcp_only;
+          }
+          if (uiConfig) {
+            window.__IVNC_UI_CONFIG__ = uiConfig;
           }
         })
         .catch((err) => {
-          console.warn('iVnc ws-config fetch failed', err);
+          console.warn('iVnc startup config fetch failed', err);
         })
         .finally(() => {
           const script = document.createElement('script');
