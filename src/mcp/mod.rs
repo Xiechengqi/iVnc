@@ -306,6 +306,143 @@ impl McpServer {
             params.window_id
         ))]))
     }
+
+    #[tool(description = "List iVNC managed apps, tools, skills, and diagnostics.")]
+    pub async fn ivnc_capabilities_list(
+        &self,
+        Parameters(params): Parameters<CapabilityListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let apps = self
+            .state
+            .apps_state()
+            .cloned()
+            .ok_or_else(|| McpError::internal_error("apps manager is not initialized", None))?;
+        let snapshot = crate::capabilities::build_snapshot(&apps).await;
+        let kind = params.kind.as_deref().unwrap_or("all");
+        let value = match kind {
+            "apps" => {
+                serde_json::json!({ "apps": snapshot.apps, "diagnostics": snapshot.diagnostics })
+            }
+            "tools" => {
+                serde_json::json!({ "tools": snapshot.tools, "diagnostics": snapshot.diagnostics })
+            }
+            "skills" => {
+                serde_json::json!({ "skills": snapshot.skills, "diagnostics": snapshot.diagnostics })
+            }
+            _ => serde_json::to_value(snapshot)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        };
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&value).unwrap(),
+        )]))
+    }
+
+    #[tool(description = "List iVNC capability tools available through ivnc_tool_call.")]
+    pub async fn ivnc_tools_list(
+        &self,
+        Parameters(_params): Parameters<CapabilityListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let apps = self
+            .state
+            .apps_state()
+            .cloned()
+            .ok_or_else(|| McpError::internal_error("apps manager is not initialized", None))?;
+        let snapshot = crate::capabilities::build_snapshot(&apps).await;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "tools": snapshot.tools, "diagnostics": snapshot.diagnostics }),
+            )
+            .unwrap(),
+        )]))
+    }
+
+    #[tool(description = "Call an iVNC capability tool by tool_id with JSON arguments.")]
+    pub async fn ivnc_tool_call(
+        &self,
+        Parameters(params): Parameters<CapabilityToolCallParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let apps = self
+            .state
+            .apps_state()
+            .cloned()
+            .ok_or_else(|| McpError::internal_error("apps manager is not initialized", None))?;
+        let caller = crate::capabilities::CallerContext {
+            client_id: params.client_id.unwrap_or_else(|| "mcp-client".to_string()),
+            session_id: params
+                .session_id
+                .unwrap_or_else(|| format!("session_{}", uuid::Uuid::new_v4())),
+            user: None,
+            source: "mcp".to_string(),
+        };
+        let request = crate::capabilities::CapabilityCallRequest {
+            arguments: params.arguments,
+            confirm: params.confirm,
+            caller: None,
+        };
+        let outcome = crate::capabilities::call_tool(apps, &params.tool_id, request, caller).await;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&outcome).unwrap(),
+        )]))
+    }
+
+    #[tool(description = "List iVNC capability skills.")]
+    pub async fn ivnc_skills_list(
+        &self,
+        Parameters(_params): Parameters<CapabilityListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let apps = self
+            .state
+            .apps_state()
+            .cloned()
+            .ok_or_else(|| McpError::internal_error("apps manager is not initialized", None))?;
+        let snapshot = crate::capabilities::build_snapshot(&apps).await;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "skills": snapshot.skills, "diagnostics": snapshot.diagnostics }),
+            )
+            .unwrap(),
+        )]))
+    }
+
+    #[tool(description = "Read a capability skill by skill_id.")]
+    pub async fn ivnc_skill_get(
+        &self,
+        Parameters(params): Parameters<CapabilitySkillGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let apps = self
+            .state
+            .apps_state()
+            .cloned()
+            .ok_or_else(|| McpError::internal_error("apps manager is not initialized", None))?;
+        let snapshot = crate::capabilities::build_snapshot(&apps).await;
+        let skill = snapshot
+            .skills
+            .into_iter()
+            .find(|skill| skill.id == params.skill_id)
+            .ok_or_else(|| McpError::invalid_params("unknown skill", None))?;
+        let mut skill = skill;
+        if let crate::capabilities::SkillSource::LocalPath { path } = &skill.source {
+            let content = crate::capabilities::read_skill_content(path)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?;
+            skill.content = Some(content);
+        }
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&skill).unwrap(),
+        )]))
+    }
+
+    #[tool(description = "Read recent audited iVNC capability tool calls.")]
+    pub async fn ivnc_call_history(
+        &self,
+        Parameters(params): Parameters<CapabilityCallHistoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let calls =
+            crate::capabilities::call_log::read_recent(params.limit.unwrap_or(50).min(200)).await;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({ "calls": calls })).unwrap(),
+        )]))
+    }
 }
 
 #[cfg(feature = "agent")]
@@ -410,6 +547,25 @@ impl McpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(description = "Read the structured JSONL event stream for an agent run.")]
+    pub async fn agent_events_get(
+        &self,
+        Parameters(params): Parameters<AgentHistoryGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self
+            .state
+            .agent_runs
+            .get(&params.run_id)
+            .ok_or_else(|| McpError::invalid_params("unknown run_id".to_string(), None))?;
+        let path = report
+            .event_path
+            .unwrap_or_else(|| crate::agent::trajectory::default_event_path(&params.run_id));
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| McpError::internal_error(format!("read agent events: {}", e), None))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[tool(
         description = "Execute a single agent Action against the live desktop, honoring the same destructive-action guard as agent_run. Returns the ActionResult and a fresh observation digest."
     )]
@@ -432,9 +588,13 @@ impl McpServer {
         )
         .await
         .map_err(|e| McpError::internal_error(format!("capture: {}", e), None))?;
-        let result =
-            crate::agent::exec::execute(&self.state, &observation.display, &params.action, &options)
-                .await;
+        let result = crate::agent::exec::execute(
+            &self.state,
+            &observation.display,
+            &params.action,
+            &options,
+        )
+        .await;
         let digest = if params.capture_observation {
             crate::mcp::frame_capture::capture_observation(
                 &self.state,
@@ -490,18 +650,27 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<ProviderHealthParams>,
     ) -> Result<CallToolResult, McpError> {
-        let provider = crate::agent::registry::provider_presets()
+        if params.provider == "replay" {
+            let info = serde_json::json!({
+                "name": "replay",
+                "configured": true,
+                "internal": true,
+                "default_endpoint": "",
+                "default_model": "replay",
+            });
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&info).unwrap(),
+            )]));
+        }
+        let provider = crate::agent::registry::provider_infos()
             .into_iter()
             .find(|p| p.name == params.provider)
             .ok_or_else(|| McpError::invalid_params("unknown provider".to_string(), None))?;
-        let configured = crate::agent::registry::provider_infos()
-            .iter()
-            .find(|p| p.name == provider.name)
-            .map(|p| p.configured)
-            .unwrap_or(false);
         let info = serde_json::json!({
             "name": provider.name,
-            "configured": configured,
+            "display_name": provider.display_name,
+            "provider_type": provider.provider_type,
+            "configured": provider.configured,
             "api_key_env": provider.api_key_env,
             "api_key_present": provider.api_key_env.map(|env| std::env::var_os(env).is_some()),
             "default_endpoint": provider.default_endpoint,

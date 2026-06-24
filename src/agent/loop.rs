@@ -1,7 +1,8 @@
 use super::exec;
 use super::provider::{BrainProvider, ProviderError, ProviderSession};
 use super::types::{
-    now_ms, Action, ActionResult, FinishReason, History, RunOptions, RunReport, RunSource, Step,
+    now_ms, Action, ActionResult, BudgetExceeded, FinishReason, History, RunOptions, RunReport,
+    RunSource, Step, ToolCallRecord, ToolResultRecord,
 };
 use crate::mcp::frame_capture;
 use crate::web::SharedState;
@@ -35,6 +36,8 @@ pub async fn run_agent(
     let trajectory_path = options
         .record_trajectory
         .then(|| super::trajectory::default_trajectory_path(&run_id));
+    let event_path = super::events::event_path_for_trajectory(trajectory_path.as_deref(), &run_id);
+    let mut events = EventRecorder::new(run_id.clone(), event_path.clone());
     let source = state
         .agent_runs
         .get(&run_id)
@@ -43,10 +46,6 @@ pub async fn run_agent(
     let mut consecutive_out_of_bounds = 0u8;
     let mut substantive = false;
     let mut pending_fullpage = false;
-    if let Err(err) = provider.reset(&task).await {
-        state.set_agent_exclusive(false, "provider_error");
-        return Err(RunError::Provider(err));
-    }
 
     let mut report = build_report(
         &run_id,
@@ -55,9 +54,44 @@ pub async fn run_agent(
         started_ms,
         FinishReason::Running,
         trajectory_path.clone(),
+        Some(event_path.clone()),
+        None,
         source.clone(),
     );
     state.agent_runs.insert(report.clone());
+    events
+        .emit(super::events::AgentEvent::RunStarted {
+            run_id: run_id.clone(),
+            task: task.clone(),
+            provider: provider_name.to_string(),
+            dry_run: options.dry_run,
+        })
+        .await;
+
+    if let Err(err) = provider.reset(&task).await {
+        events
+            .emit(super::events::AgentEvent::ProviderError {
+                provider: provider_name.to_string(),
+                message: err.to_string(),
+            })
+            .await;
+        report = build_report(
+            &run_id,
+            &task,
+            &history,
+            started_ms,
+            FinishReason::ProviderError,
+            trajectory_path.clone(),
+            Some(event_path.clone()),
+            None,
+            source.clone(),
+        );
+        report.pending_question = Some(err.to_string());
+        emit_run_finished(&mut events, &report).await;
+        state.agent_runs.update(report.clone());
+        state.set_agent_exclusive(false, "provider_error");
+        return Err(RunError::Provider(err));
+    }
 
     for _ in 0..options.budget.max_steps {
         if state.agent_stop_requested() {
@@ -68,8 +102,11 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::Interrupted,
                 trajectory_path.clone(),
+                Some(event_path.clone()),
+                None,
                 source.clone(),
             );
+            emit_run_finished(&mut events, &report).await;
             state.agent_runs.update(report.clone());
             state.set_agent_exclusive(false, "interrupted");
             return Err(RunError::Interrupted(report));
@@ -95,9 +132,12 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::ProviderError,
                     trajectory_path.clone(),
+                    Some(event_path.clone()),
+                    None,
                     source.clone(),
                 );
                 report.pending_question = Some(err.clone());
+                emit_run_finished(&mut events, &report).await;
                 state.agent_runs.update(report);
                 state.set_agent_exclusive(false, "capture_error");
                 return Err(RunError::Capture(err));
@@ -116,23 +156,60 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::ProviderError,
                     trajectory_path.clone(),
+                    Some(event_path.clone()),
+                    None,
                     source.clone(),
                 );
                 report.pending_question = Some(err.clone());
+                emit_run_finished(&mut events, &report).await;
                 state.agent_runs.update(report);
                 state.set_agent_exclusive(false, "frame_persist_error");
                 return Err(RunError::Capture(err));
             }
         }
         let digest = observation.digest();
+        events
+            .emit(super::events::AgentEvent::ObservationCaptured {
+                digest: digest.clone(),
+                observations_seen: history.observations_seen,
+            })
+            .await;
 
         let turn_hints = compute_turn_hints(&history, &digest.sha256, options.budget.max_steps);
-        let turn_task = augment_task(&task, turn_hints.as_deref());
+        let dynamic_context =
+            super::skills::build_dynamic_context(&state, &observation, &task, &history);
+        events
+            .emit(super::events::AgentEvent::ContextPrepared {
+                has_turn_hints: turn_hints
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|h| !h.is_empty()),
+                dynamic_context_bytes: dynamic_context.as_ref().map_or(0, String::len),
+            })
+            .await;
+        let turn_task =
+            augment_task_with_context(&task, turn_hints.as_deref(), dynamic_context.as_deref());
 
+        events
+            .emit(super::events::AgentEvent::ProviderRequestStarted {
+                provider: provider_name.to_string(),
+            })
+            .await;
         let turn = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                report = build_report(&run_id, &task, &history, started_ms, FinishReason::Interrupted, trajectory_path.clone(), source.clone());
+                report = build_report(
+                    &run_id,
+                    &task,
+                    &history,
+                    started_ms,
+                    FinishReason::Interrupted,
+                    trajectory_path.clone(),
+                    Some(event_path.clone()),
+                    None,
+                    source.clone(),
+                );
+                emit_run_finished(&mut events, &report).await;
                 state.agent_runs.update(report.clone());
                 state.set_agent_exclusive(false, "interrupted");
                 return Err(RunError::Interrupted(report));
@@ -144,13 +221,38 @@ pub async fn run_agent(
                     continue;
                 }
                 Err(e) => {
-                    report = build_report(&run_id, &task, &history, started_ms, FinishReason::ProviderError, trajectory_path.clone(), source.clone());
+                    events
+                        .emit(super::events::AgentEvent::ProviderError {
+                            provider: provider_name.to_string(),
+                            message: e.to_string(),
+                        })
+                        .await;
+                    report = build_report(
+                        &run_id,
+                        &task,
+                        &history,
+                        started_ms,
+                        FinishReason::ProviderError,
+                        trajectory_path.clone(),
+                        Some(event_path.clone()),
+                        None,
+                        source.clone(),
+                    );
+                    emit_run_finished(&mut events, &report).await;
                     state.agent_runs.update(report.clone());
                     state.set_agent_exclusive(false, "provider_error");
                     return Err(RunError::Provider(e));
                 }
             }
         };
+        events
+            .emit(super::events::AgentEvent::ProviderResponseReceived {
+                provider: provider_name.to_string(),
+                action_count: turn.actions.len(),
+                usage: turn.usage.clone(),
+                provider_response_id: turn.provider_response_id.clone(),
+            })
+            .await;
 
         if let Some(response_id) = turn.provider_response_id.clone() {
             session.previous_response_id = Some(response_id);
@@ -163,9 +265,12 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::Safety,
                 trajectory_path.clone(),
+                Some(event_path.clone()),
+                None,
                 source.clone(),
             );
             report.pending_safety_checks = turn.pending_safety_checks;
+            emit_run_finished(&mut events, &report).await;
             state.agent_runs.update(report.clone());
             state.set_agent_exclusive(false, "safety");
             return Ok(report);
@@ -174,6 +279,14 @@ pub async fn run_agent(
         for action in turn.actions.into_iter().take(options.max_actions_per_step) {
             let before = now_ms();
             if let Action::Done { success, .. } = action.clone() {
+                let step_index = history.steps.len();
+                let tool_call = ToolCallRecord::from_action(step_index, &action);
+                events
+                    .emit(super::events::AgentEvent::ToolExecutionStarted {
+                        step: step_index,
+                        tool_call: tool_call.clone(),
+                    })
+                    .await;
                 let step = Step {
                     observation: digest.clone(),
                     action,
@@ -181,6 +294,16 @@ pub async fn run_agent(
                     elapsed_ms: 0,
                     provider_usage: turn.usage.clone(),
                 };
+                let tool_result =
+                    ToolResultRecord::from_action_result(tool_call.id.clone(), &step.result);
+                events
+                    .emit(super::events::AgentEvent::ToolExecutionFinished {
+                        step: step_index,
+                        tool_call,
+                        tool_result,
+                        elapsed_ms: step.elapsed_ms,
+                    })
+                    .await;
                 push_step(
                     &mut history,
                     step,
@@ -196,6 +319,8 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::Done { success },
                     trajectory_path.clone(),
+                    Some(event_path.clone()),
+                    None,
                     source.clone(),
                 );
                 if success
@@ -209,11 +334,20 @@ pub async fn run_agent(
                         "reported success=true without taking any substantive action or providing an output deliverable — result is likely unverified".to_string(),
                     );
                 }
+                emit_run_finished(&mut events, &report).await;
                 state.agent_runs.update(report.clone());
                 state.set_agent_exclusive(false, "done");
                 return Ok(report);
             }
             if let Action::Ask { question } = action.clone() {
+                let step_index = history.steps.len();
+                let tool_call = ToolCallRecord::from_action(step_index, &action);
+                events
+                    .emit(super::events::AgentEvent::ToolExecutionStarted {
+                        step: step_index,
+                        tool_call: tool_call.clone(),
+                    })
+                    .await;
                 let step = Step {
                     observation: digest.clone(),
                     action,
@@ -221,6 +355,16 @@ pub async fn run_agent(
                     elapsed_ms: 0,
                     provider_usage: turn.usage.clone(),
                 };
+                let tool_result =
+                    ToolResultRecord::from_action_result(tool_call.id.clone(), &step.result);
+                events
+                    .emit(super::events::AgentEvent::ToolExecutionFinished {
+                        step: step_index,
+                        tool_call,
+                        tool_result,
+                        elapsed_ms: step.elapsed_ms,
+                    })
+                    .await;
                 push_step(
                     &mut history,
                     step,
@@ -236,15 +380,26 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::Ask,
                     trajectory_path.clone(),
+                    Some(event_path.clone()),
+                    None,
                     source.clone(),
                 );
                 report.pending_question = Some(question);
+                emit_run_finished(&mut events, &report).await;
                 state.agent_runs.update(report.clone());
                 state.set_agent_exclusive(false, "ask");
                 return Ok(report);
             }
-            let loop_blocked = !options.dry_run
-                && is_loop_repeat(&action, &history, &digest.sha256);
+            let step_index = history.steps.len();
+            let tool_call = ToolCallRecord::from_action(step_index, &action);
+            events
+                .emit(super::events::AgentEvent::ToolExecutionStarted {
+                    step: step_index,
+                    tool_call: tool_call.clone(),
+                })
+                .await;
+            let loop_blocked =
+                !options.dry_run && is_loop_repeat(&action, &history, &digest.sha256);
             let result = if loop_blocked {
                 ActionResult::ExecutorError {
                     message: "blocked_loop: duplicate of previous action that did not change the screen — pick a different approach (different coordinates, different key, scroll, or call done)".to_string(),
@@ -270,7 +425,7 @@ pub async fn run_agent(
                 pending_fullpage = true;
             }
             let needs_settle = action_needs_settle(&action);
-            if matches!(result, ActionResult::Ok) && is_substantive_action(&action) {
+            if action_result_succeeded(&result) && is_substantive_action(&action) {
                 substantive = true;
             }
             let blocked_message = if destructive_blocked {
@@ -289,6 +444,16 @@ pub async fn run_agent(
                 elapsed_ms: now_ms().saturating_sub(before),
                 provider_usage: turn.usage.clone(),
             };
+            let tool_result =
+                ToolResultRecord::from_action_result(tool_call.id.clone(), &step.result);
+            events
+                .emit(super::events::AgentEvent::ToolExecutionFinished {
+                    step: step_index,
+                    tool_call,
+                    tool_result,
+                    elapsed_ms: step.elapsed_ms,
+                })
+                .await;
             push_step(
                 &mut history,
                 step,
@@ -304,6 +469,8 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::Running,
                 trajectory_path.clone(),
+                Some(event_path.clone()),
+                None,
                 source.clone(),
             );
             state.agent_runs.update(report.clone());
@@ -316,12 +483,15 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::Ask,
                     trajectory_path.clone(),
+                    Some(event_path.clone()),
+                    None,
                     source.clone(),
                 );
                 report.pending_question = Some(format!(
                     "Destructive action blocked ({}). Re-run with allow_destructive=true or remove the kind from require_confirmation_for to proceed.",
                     message
                 ));
+                emit_run_finished(&mut events, &report).await;
                 state.agent_runs.update(report.clone());
                 state.set_agent_exclusive(false, "destructive_blocked");
                 return Ok(report);
@@ -335,10 +505,30 @@ pub async fn run_agent(
                     started_ms,
                     FinishReason::BudgetExceeded,
                     trajectory_path.clone(),
+                    Some(event_path.clone()),
+                    Some(BudgetExceeded {
+                        kind: super::types::BudgetExceededKind::OutOfBoundsGuard,
+                        steps: history.steps.len() as u32,
+                        max_steps: options.budget.max_steps,
+                        input_tokens: report.tokens_in,
+                        max_input_tokens: options.budget.max_input_tokens,
+                        output_tokens: report.tokens_out,
+                        max_output_tokens: options.budget.max_output_tokens,
+                        screenshots: history.observations_seen,
+                        max_screenshots: options.budget.max_screenshots,
+                        wall_seconds: now_ms().saturating_sub(started_ms) / 1000,
+                        max_wall_seconds: options.budget.max_wall_seconds,
+                    }),
                     source.clone(),
                 );
                 report.pending_question =
                     Some("aborted after 3 consecutive out-of-bounds actions".to_string());
+                events
+                    .emit(super::events::AgentEvent::BudgetExceeded {
+                        budget: report.budget_exceeded.clone().unwrap(),
+                    })
+                    .await;
+                emit_run_finished(&mut events, &report).await;
                 state.agent_runs.update(report.clone());
                 state.set_agent_exclusive(false, "out_of_bounds");
                 return Err(RunError::BudgetExceeded(report));
@@ -351,7 +541,7 @@ pub async fn run_agent(
             }
         }
 
-        if history.over_budget(started_ms) {
+        if let Some(budget) = history.budget_exceeded(started_ms) {
             report = build_report(
                 &run_id,
                 &task,
@@ -359,8 +549,14 @@ pub async fn run_agent(
                 started_ms,
                 FinishReason::BudgetExceeded,
                 trajectory_path.clone(),
+                Some(event_path.clone()),
+                Some(budget.clone()),
                 source.clone(),
             );
+            events
+                .emit(super::events::AgentEvent::BudgetExceeded { budget })
+                .await;
+            emit_run_finished(&mut events, &report).await;
             state.agent_runs.update(report.clone());
             state.set_agent_exclusive(false, "budget_exceeded");
             return Err(RunError::BudgetExceeded(report));
@@ -374,8 +570,11 @@ pub async fn run_agent(
         started_ms,
         FinishReason::MaxStepsReached,
         trajectory_path.clone(),
+        Some(event_path.clone()),
+        history.budget_exceeded(started_ms),
         source.clone(),
     );
+    emit_run_finished(&mut events, &report).await;
     state.agent_runs.update(report.clone());
     state.set_agent_exclusive(false, "max_steps_reached");
     Err(RunError::MaxStepsReached(report))
@@ -407,7 +606,13 @@ fn is_substantive_action(action: &Action) -> bool {
             | Action::WindowFocus { .. }
             | Action::WindowClose { .. }
             | Action::LaunchApp { .. }
+            | Action::CliAppRun { .. }
     )
+}
+
+fn action_result_succeeded(result: &ActionResult) -> bool {
+    matches!(result, ActionResult::Ok)
+        || matches!(result, ActionResult::CommandOutput { success: true, .. })
 }
 
 fn build_report(
@@ -417,6 +622,8 @@ fn build_report(
     started_ms: u64,
     finish_reason: FinishReason,
     trajectory_path: Option<PathBuf>,
+    event_path: Option<PathBuf>,
+    budget_exceeded: Option<BudgetExceeded>,
     source: RunSource,
 ) -> RunReport {
     let tokens_in = history
@@ -448,6 +655,8 @@ fn build_report(
         wall_ms: now_ms().saturating_sub(started_ms),
         started_at_ms: started_ms,
         trajectory_path,
+        event_path,
+        budget_exceeded,
         pending_question: None,
         pending_safety_checks: Vec::new(),
         last_action: history.steps.last().map(|s| s.action.clone()),
@@ -456,6 +665,40 @@ fn build_report(
         warnings: Vec::new(),
         source,
     }
+}
+
+struct EventRecorder {
+    run_id: String,
+    path: PathBuf,
+    seq: u64,
+}
+
+impl EventRecorder {
+    fn new(run_id: String, path: PathBuf) -> Self {
+        Self {
+            run_id,
+            path,
+            seq: 0,
+        }
+    }
+
+    async fn emit(&mut self, event: super::events::AgentEvent) {
+        let seq = self.seq;
+        self.seq = self.seq.saturating_add(1);
+        if let Err(err) = super::events::append_event(&self.path, &self.run_id, seq, &event).await {
+            log::warn!("failed to append agent event: {}", err);
+        }
+    }
+}
+
+async fn emit_run_finished(events: &mut EventRecorder, report: &RunReport) {
+    events
+        .emit(super::events::AgentEvent::RunFinished {
+            finish_reason: super::events::finish_reason_value(&report.finish_reason),
+            success: report.success,
+            output: report.output.clone(),
+        })
+        .await;
 }
 
 async fn push_step(
@@ -499,13 +742,7 @@ fn canonical_action(a: &Action) -> String {
             button,
             click_count,
             ..
-        } => format!(
-            "click:{}:{}:{:?}:{}",
-            r5(*x),
-            r5(*y),
-            button,
-            click_count
-        ),
+        } => format!("click:{}:{}:{:?}:{}", r5(*x), r5(*y), button, click_count),
         Action::MouseMove { x, y, .. } => format!("move:{}:{}", r5(*x), r5(*y)),
         Action::MouseDown { x, y, button, .. } => {
             format!("mousedown:{}:{}:{:?}", r5(*x), r5(*y), button)
@@ -532,7 +769,14 @@ fn canonical_action(a: &Action) -> String {
             format!("drag:{}:{:?}:{:?}", path.len(), button, path.first())
         }
         Action::LaunchApp { app, url } => {
-            format!("launch:{}:{}", app.to_ascii_lowercase(), url.as_deref().unwrap_or(""))
+            format!(
+                "launch:{}:{}",
+                app.to_ascii_lowercase(),
+                url.as_deref().unwrap_or("")
+            )
+        }
+        Action::CliAppRun { app, args, .. } => {
+            format!("cli:{}:{:?}", app.to_ascii_lowercase(), args)
         }
         Action::Wait { .. }
         | Action::Screenshot
@@ -577,6 +821,7 @@ fn brief_action(a: &Action) -> String {
         Action::Screenshot => "screenshot".to_string(),
         Action::WindowFocus { id } => format!("window_focus({})", id),
         Action::WindowClose { id } => format!("window_close({})", id),
+        Action::CliAppRun { app, args, .. } => format!("cli_app_run({}, {} args)", app, args.len()),
         Action::MouseDrag { path, .. } => format!("drag({} points)", path.len()),
         Action::Zoom { level_delta, .. } => format!("zoom({})", level_delta),
         other => format!("{:?}", other),
@@ -630,11 +875,21 @@ fn compute_turn_hints(history: &History, current_sha: &str, max_steps: u32) -> O
     }
 }
 
-fn augment_task(original: &str, hints: Option<&str>) -> String {
-    match hints {
-        Some(h) if !h.is_empty() => format!("{}\n\n[Turn hints]\n{}", original, h),
-        _ => original.to_string(),
+fn augment_task_with_context(
+    original: &str,
+    hints: Option<&str>,
+    dynamic_context: Option<&str>,
+) -> String {
+    let mut out = original.to_string();
+    if let Some(h) = hints.map(str::trim).filter(|h| !h.is_empty()) {
+        out.push_str("\n\n[Turn hints]\n");
+        out.push_str(h);
     }
+    if let Some(context) = dynamic_context.map(str::trim).filter(|c| !c.is_empty()) {
+        out.push_str("\n\n[Dynamic app context]\n");
+        out.push_str(context);
+    }
+    out
 }
 
 async fn persist_observation_frame(

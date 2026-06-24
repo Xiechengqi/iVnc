@@ -32,18 +32,15 @@ pub enum ProbeShape {
     ChatCompletions,
     Responses,
     AnthropicMessages,
-    GeminiGenerate,
 }
 
-pub fn shape_for(provider: &str, api_format: Option<&str>) -> Option<ProbeShape> {
-    match provider {
-        "anthropic" => Some(ProbeShape::AnthropicMessages),
-        "gemini" => Some(ProbeShape::GeminiGenerate),
-        "openai" | "holo3" | "local" | "openai_compat" => match api_format {
-            Some("responses") => Some(ProbeShape::Responses),
-            _ => Some(ProbeShape::ChatCompletions),
+pub fn shape_for_provider_type(provider_type: &str, api_format: Option<&str>) -> ProbeShape {
+    match provider_type {
+        "anthropic" => ProbeShape::AnthropicMessages,
+        _ => match api_format {
+            Some("responses") => ProbeShape::Responses,
+            _ => ProbeShape::ChatCompletions,
         },
-        _ => None,
     }
 }
 
@@ -73,7 +70,9 @@ pub async fn probe(
                 "messages": [{"role": "user", "content": "ping"}],
                 "max_tokens": 4,
             });
-            let mut req = client.post(format!("{}/chat/completions", endpoint)).json(&body);
+            let mut req = client
+                .post(format!("{}/chat/completions", endpoint))
+                .json(&body);
             if let Some(k) = api_key {
                 req = req.bearer_auth(k);
             }
@@ -82,7 +81,7 @@ pub async fn probe(
         ProbeShape::Responses => {
             let body = json!({
                 "model": model,
-                "input": "ping",
+                "input": [{"role": "user", "content": "ping"}],
                 "max_output_tokens": 16,
             });
             let mut req = client.post(format!("{}/responses", endpoint)).json(&body);
@@ -103,19 +102,6 @@ pub async fn probe(
                 .json(&body);
             if let Some(k) = api_key {
                 req = req.header("x-api-key", k);
-            }
-            req.send().await
-        }
-        ProbeShape::GeminiGenerate => {
-            let body = json!({
-                "contents": [{"parts": [{"text": "ping"}]}],
-                "generationConfig": {"maxOutputTokens": 8},
-            });
-            let mut req = client
-                .post(format!("{}/models/{}:generateContent", endpoint, model))
-                .json(&body);
-            if let Some(k) = api_key {
-                req = req.header("x-goog-api-key", k);
             }
             req.send().await
         }
@@ -189,18 +175,6 @@ fn extract_preview(body: &str) -> Option<String> {
         .get("content")
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("text"))
-        .and_then(|t| t.as_str())
-    {
-        return Some(truncate(s, PREVIEW_MAX));
-    }
-    // gemini: candidates[0].content.parts[0].text
-    if let Some(s) = v
-        .get("candidates")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.get(0))
-        .and_then(|p| p.get("text"))
         .and_then(|t| t.as_str())
     {
         return Some(truncate(s, PREVIEW_MAX));

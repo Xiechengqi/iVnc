@@ -233,6 +233,15 @@ pub enum Action {
         #[serde(default)]
         url: Option<String>,
     },
+    /// Run a registered CLI app as a one-shot command. The app must be a
+    /// managed CLI app; args are passed directly without a shell.
+    CliAppRun {
+        app: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
     Done {
         success: bool,
         #[serde(default)]
@@ -285,7 +294,7 @@ impl History {
         self.observations_seen = self.observations_seen.saturating_add(1);
     }
 
-    pub fn over_budget(&self, started_ms: u64) -> bool {
+    pub fn budget_exceeded(&self, started_ms: u64) -> Option<BudgetExceeded> {
         let tokens_in: u64 = self
             .steps
             .iter()
@@ -296,18 +305,33 @@ impl History {
             .iter()
             .filter_map(|s| s.provider_usage.as_ref().map(|u| u.output_tokens))
             .sum();
-        let cost_micros: u64 = self
-            .steps
-            .iter()
-            .filter_map(|s| s.provider_usage.as_ref().and_then(|u| u.cost_usd_micros))
-            .sum();
-        let cost_ceiling = self.budget.max_cost_usd_micros.unwrap_or(u64::MAX);
-        self.steps.len() as u32 >= self.budget.max_steps
-            || tokens_in > self.budget.max_input_tokens
-            || tokens_out > self.budget.max_output_tokens
-            || cost_micros > cost_ceiling
-            || self.observations_seen > self.budget.max_screenshots
-            || now_ms().saturating_sub(started_ms) / 1000 > self.budget.max_wall_seconds
+        let wall_seconds = now_ms().saturating_sub(started_ms) / 1000;
+        let kind = if self.steps.len() as u32 >= self.budget.max_steps {
+            BudgetExceededKind::Steps
+        } else if tokens_in > self.budget.max_input_tokens {
+            BudgetExceededKind::InputTokens
+        } else if tokens_out > self.budget.max_output_tokens {
+            BudgetExceededKind::OutputTokens
+        } else if self.observations_seen > self.budget.max_screenshots {
+            BudgetExceededKind::Screenshots
+        } else if wall_seconds > self.budget.max_wall_seconds {
+            BudgetExceededKind::WallTime
+        } else {
+            return None;
+        };
+        Some(BudgetExceeded {
+            kind,
+            steps: self.steps.len() as u32,
+            max_steps: self.budget.max_steps,
+            input_tokens: tokens_in,
+            max_input_tokens: self.budget.max_input_tokens,
+            output_tokens: tokens_out,
+            max_output_tokens: self.budget.max_output_tokens,
+            screenshots: self.observations_seen,
+            max_screenshots: self.budget.max_screenshots,
+            wall_seconds,
+            max_wall_seconds: self.budget.max_wall_seconds,
+        })
     }
 }
 
@@ -324,9 +348,26 @@ pub struct Step {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionResult {
     Ok,
-    OutOfBounds { x: i32, y: i32, w: u32, h: u32 },
-    UnsupportedAction { message: String },
-    ExecutorError { message: String },
+    CommandOutput {
+        success: bool,
+        exit_code: Option<i32>,
+        #[serde(default)]
+        env_keys: Vec<String>,
+        stdout: String,
+        stderr: String,
+    },
+    OutOfBounds {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    },
+    UnsupportedAction {
+        message: String,
+    },
+    ExecutorError {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -341,11 +382,6 @@ pub struct Budget {
     pub max_wall_seconds: u64,
     #[serde(default = "default_max_screenshots")]
     pub max_screenshots: u32,
-    /// Optional ceiling on aggregate provider cost (micro-USD, i.e. 1e-6 USD).
-    /// `None` means unlimited. Only providers that populate
-    /// `ProviderUsage.cost_usd_micros` contribute toward this ceiling.
-    #[serde(default)]
-    pub max_cost_usd_micros: Option<u64>,
 }
 
 impl Default for Budget {
@@ -356,7 +392,6 @@ impl Default for Budget {
             max_output_tokens: default_max_output_tokens(),
             max_wall_seconds: default_max_wall_seconds(),
             max_screenshots: default_max_screenshots(),
-            max_cost_usd_micros: None,
         }
     }
 }
@@ -392,7 +427,32 @@ pub struct ProviderUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub provider_latency_ms: u64,
-    pub cost_usd_micros: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetExceededKind {
+    Steps,
+    InputTokens,
+    OutputTokens,
+    Screenshots,
+    WallTime,
+    OutOfBoundsGuard,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BudgetExceeded {
+    pub kind: BudgetExceededKind,
+    pub steps: u32,
+    pub max_steps: u32,
+    pub input_tokens: u64,
+    pub max_input_tokens: u64,
+    pub output_tokens: u64,
+    pub max_output_tokens: u64,
+    pub screenshots: u32,
+    pub max_screenshots: u32,
+    pub wall_seconds: u64,
+    pub max_wall_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -520,6 +580,12 @@ pub struct RunReport {
     #[serde(default)]
     pub started_at_ms: u64,
     pub trajectory_path: Option<PathBuf>,
+    /// JSONL event stream for this run. Newer than trajectory_path and more
+    /// useful for provider/tool/session diagnostics.
+    #[serde(default)]
+    pub event_path: Option<PathBuf>,
+    #[serde(default)]
+    pub budget_exceeded: Option<BudgetExceeded>,
     pub pending_question: Option<String>,
     pub pending_safety_checks: Vec<SafetyCheck>,
     pub last_action: Option<Action>,
@@ -558,11 +624,240 @@ pub struct SafetyCheck {
     pub raw: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultRecord {
+    pub tool_call_id: String,
+    pub ok: bool,
+    pub text: String,
+    pub data: serde_json::Value,
+}
+
+impl ToolCallRecord {
+    pub fn from_action(step: usize, action: &Action) -> Self {
+        let (name, arguments) = action_tool_parts(action);
+        Self {
+            id: format!("step_{}", step),
+            name,
+            arguments,
+        }
+    }
+}
+
+impl ToolResultRecord {
+    pub fn from_action_result(tool_call_id: String, result: &ActionResult) -> Self {
+        let ok = matches!(result, ActionResult::Ok)
+            || matches!(result, ActionResult::CommandOutput { success: true, .. });
+        let text = match result {
+            ActionResult::Ok => "ok".to_string(),
+            ActionResult::CommandOutput {
+                success,
+                exit_code,
+                stdout,
+                stderr,
+                ..
+            } => {
+                let mut text = format!("command success={} exit_code={:?}", success, exit_code);
+                if !stdout.trim().is_empty() {
+                    text.push_str("\nstdout:\n");
+                    text.push_str(stdout.trim());
+                }
+                if !stderr.trim().is_empty() {
+                    text.push_str("\nstderr:\n");
+                    text.push_str(stderr.trim());
+                }
+                text
+            }
+            ActionResult::OutOfBounds { x, y, w, h } => {
+                format!("out of bounds: ({}, {}) outside {}x{}", x, y, w, h)
+            }
+            ActionResult::UnsupportedAction { message }
+            | ActionResult::ExecutorError { message } => message.clone(),
+        };
+        Self {
+            tool_call_id,
+            ok,
+            text,
+            data: serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
+        }
+    }
+}
+
+fn action_tool_parts(action: &Action) -> (String, serde_json::Value) {
+    match action {
+        Action::MouseMove { x, y, label } => (
+            "mouse_move".to_string(),
+            serde_json::json!({ "x": x, "y": y, "label": label }),
+        ),
+        Action::MouseClick {
+            x,
+            y,
+            button,
+            click_count,
+            label,
+        } => (
+            "mouse_click".to_string(),
+            serde_json::json!({ "x": x, "y": y, "button": button, "click_count": click_count, "label": label }),
+        ),
+        Action::MouseDown {
+            x,
+            y,
+            button,
+            label,
+        } => (
+            "mouse_down".to_string(),
+            serde_json::json!({ "x": x, "y": y, "button": button, "label": label }),
+        ),
+        Action::MouseUp {
+            x,
+            y,
+            button,
+            label,
+        } => (
+            "mouse_up".to_string(),
+            serde_json::json!({ "x": x, "y": y, "button": button, "label": label }),
+        ),
+        Action::MouseDrag {
+            path,
+            button,
+            label,
+        } => (
+            "mouse_drag".to_string(),
+            serde_json::json!({ "path": path, "button": button, "label": label }),
+        ),
+        Action::Scroll {
+            x,
+            y,
+            dx,
+            dy,
+            label,
+        } => (
+            "scroll".to_string(),
+            serde_json::json!({ "x": x, "y": y, "dx": dx, "dy": dy, "label": label }),
+        ),
+        Action::Zoom { level_delta, label } => (
+            "zoom".to_string(),
+            serde_json::json!({ "level_delta": level_delta, "label": label }),
+        ),
+        Action::TypeText { text, press_enter } => (
+            "type_text".to_string(),
+            serde_json::json!({ "text": text, "press_enter": press_enter }),
+        ),
+        Action::KeyChord { combo } => (
+            "key_chord".to_string(),
+            serde_json::json!({ "combo": combo }),
+        ),
+        Action::KeyHold { key, ms } => (
+            "key_hold".to_string(),
+            serde_json::json!({ "key": key, "ms": ms }),
+        ),
+        Action::ClipboardWrite { text } => (
+            "clipboard_write".to_string(),
+            serde_json::json!({ "text": text }),
+        ),
+        Action::ClipboardRead => ("clipboard_read".to_string(), serde_json::json!({})),
+        Action::WindowFocus { id } => ("window_focus".to_string(), serde_json::json!({ "id": id })),
+        Action::WindowClose { id } => ("window_close".to_string(), serde_json::json!({ "id": id })),
+        Action::Wait { ms } => ("wait".to_string(), serde_json::json!({ "ms": ms })),
+        Action::Screenshot => ("screenshot".to_string(), serde_json::json!({})),
+        Action::CaptureFullPage => ("capture_full_page".to_string(), serde_json::json!({})),
+        Action::LaunchApp { app, url } => (
+            "launch_app".to_string(),
+            serde_json::json!({ "app": app, "url": url }),
+        ),
+        Action::CliAppRun {
+            app,
+            args,
+            timeout_ms,
+        } => (
+            "cli_app_run".to_string(),
+            serde_json::json!({ "app": app, "args": args, "timeout_ms": timeout_ms }),
+        ),
+        Action::Done {
+            success,
+            reason,
+            output,
+        } => (
+            "done".to_string(),
+            serde_json::json!({ "success": success, "reason": reason, "output": output }),
+        ),
+        Action::Ask { question } => (
+            "ask".to_string(),
+            serde_json::json!({ "question": question }),
+        ),
+    }
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod event_contract_tests {
+    use super::*;
+
+    #[test]
+    fn budget_exceeded_reports_specific_kind() {
+        let mut history = History::new(
+            "task".to_string(),
+            Budget {
+                max_steps: 1,
+                ..Budget::default()
+            },
+        );
+        history.push(Step {
+            observation: ObservationDigest {
+                screen_width: 1,
+                screen_height: 1,
+                image_width: 1,
+                image_height: 1,
+                sha256: "x".to_string(),
+                frame_path: None,
+            },
+            action: Action::Wait { ms: 1 },
+            result: ActionResult::Ok,
+            elapsed_ms: 0,
+            provider_usage: None,
+        });
+        let exceeded = history.budget_exceeded(now_ms()).unwrap();
+        assert_eq!(exceeded.kind, BudgetExceededKind::Steps);
+        assert_eq!(exceeded.steps, 1);
+    }
+
+    #[test]
+    fn action_and_result_have_tool_records() {
+        let action = Action::CliAppRun {
+            app: "agent-browser".to_string(),
+            args: vec!["snapshot".to_string(), "--json".to_string()],
+            timeout_ms: Some(1000),
+        };
+        let call = ToolCallRecord::from_action(7, &action);
+        assert_eq!(call.id, "step_7");
+        assert_eq!(call.name, "cli_app_run");
+        assert_eq!(call.arguments["app"], "agent-browser");
+
+        let result = ToolResultRecord::from_action_result(
+            call.id,
+            &ActionResult::CommandOutput {
+                success: true,
+                exit_code: Some(0),
+                env_keys: vec!["NO_COLOR".to_string()],
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+            },
+        );
+        assert!(result.ok);
+        assert!(result.text.contains("stdout"));
+    }
 }
 
 #[cfg(test)]
@@ -587,49 +882,5 @@ mod tests {
             (480, 270)
         );
         assert_eq!(display.image_to_screen((480, 270)), (960, 540));
-    }
-
-    fn step_with_cost(cost: u64) -> Step {
-        Step {
-            observation: ObservationDigest {
-                screen_width: 0,
-                screen_height: 0,
-                image_width: 0,
-                image_height: 0,
-                sha256: String::new(),
-                frame_path: None,
-            },
-            action: Action::Wait { ms: 0 },
-            result: ActionResult::Ok,
-            elapsed_ms: 0,
-            provider_usage: Some(ProviderUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                provider_latency_ms: 0,
-                cost_usd_micros: Some(cost),
-            }),
-        }
-    }
-
-    #[test]
-    fn over_budget_enforces_cost_ceiling() {
-        let mut budget = Budget::default();
-        budget.max_cost_usd_micros = Some(1_000);
-        let mut history = History::new("t".to_string(), budget);
-        history.push(step_with_cost(600));
-        assert!(!history.over_budget(now_ms()));
-        history.push(step_with_cost(600));
-        // sum = 1_200 > 1_000 → over budget
-        assert!(history.over_budget(now_ms()));
-    }
-
-    #[test]
-    fn over_budget_ignores_cost_when_unlimited() {
-        let mut budget = Budget::default();
-        budget.max_cost_usd_micros = None;
-        let mut history = History::new("t".to_string(), budget);
-        history.push(step_with_cost(u64::MAX / 2));
-        history.push(step_with_cost(u64::MAX / 2));
-        assert!(!history.over_budget(now_ms()));
     }
 }

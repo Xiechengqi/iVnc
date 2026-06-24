@@ -62,6 +62,13 @@ pub async fn launch_agent_run(
             .ok_or_else(|| LaunchError::ProviderUnavailable(req.provider.clone()))?;
 
     let run_id = format!("run_{}", uuid::Uuid::new_v4());
+    let trajectory_path = options
+        .record_trajectory
+        .then(|| crate::agent::trajectory::default_trajectory_path(&run_id));
+    let event_path = Some(crate::agent::events::event_path_for_trajectory(
+        trajectory_path.as_deref(),
+        &run_id,
+    ));
     let initial = RunReport {
         run_id: run_id.clone(),
         task: req.task.clone(),
@@ -72,9 +79,9 @@ pub async fn launch_agent_run(
         tokens_out: 0,
         wall_ms: 0,
         started_at_ms: crate::agent::types::now_ms(),
-        trajectory_path: options
-            .record_trajectory
-            .then(|| crate::agent::trajectory::default_trajectory_path(&run_id)),
+        trajectory_path,
+        event_path,
+        budget_exceeded: None,
         pending_question: None,
         pending_safety_checks: Vec::new(),
         last_action: None,
@@ -123,6 +130,10 @@ pub async fn launch_agent_run(
                         wall_ms: 0,
                         started_at_ms: crate::agent::types::now_ms(),
                         trajectory_path: None,
+                        event_path: Some(crate::agent::trajectory::default_event_path(
+                            &run_id_for_task,
+                        )),
+                        budget_exceeded: None,
                         pending_question: None,
                         pending_safety_checks: Vec::new(),
                         last_action: None,
@@ -151,6 +162,10 @@ pub async fn launch_agent_run(
                         wall_ms: 0,
                         started_at_ms: crate::agent::types::now_ms(),
                         trajectory_path: None,
+                        event_path: Some(crate::agent::trajectory::default_event_path(
+                            &run_id_for_task,
+                        )),
+                        budget_exceeded: None,
                         pending_question: None,
                         pending_safety_checks: Vec::new(),
                         last_action: None,

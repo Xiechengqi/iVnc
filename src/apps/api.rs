@@ -16,6 +16,7 @@ use axum::{
 };
 use serde_json::json;
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,8 +33,12 @@ pub struct AppsState {
 /// just because we re-invoked the launch command.
 #[derive(Debug, Clone)]
 pub enum LaunchOutcome {
-    Started { pid: Option<u32> },
-    AlreadyRunning { pid: Option<u32> },
+    Started {
+        pid: Option<u32>,
+    },
+    AlreadyRunning {
+        pid: Option<u32>,
+    },
     /// The app was already running and we delivered the requested URL into the
     /// live instance (e.g. a new Chrome tab via DevTools) instead of dropping it.
     OpenedInExisting,
@@ -144,6 +149,7 @@ impl AppsState {
                 }
                 self.service.start_and_wait(app).await
             }
+            AppType::CliApp => Err("CLI apps are one-shot tools and cannot be started".to_string()),
         }
     }
 
@@ -168,13 +174,18 @@ impl AppsState {
             .iter()
             .find(|a| a.id.eq_ignore_ascii_case(q) || a.name.eq_ignore_ascii_case(q))
             .or_else(|| {
-                apps.iter()
-                    .find(|a| a.name.to_lowercase().contains(&ql) || a.id.to_lowercase().contains(&ql))
+                apps.iter().find(|a| {
+                    a.name.to_lowercase().contains(&ql) || a.id.to_lowercase().contains(&ql)
+                })
             })
             .cloned()
             .ok_or_else(|| {
                 let available: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
-                format!("no app matching {:?}; available: {}", query, available.join(", "))
+                format!(
+                    "no app matching {:?}; available: {}",
+                    query,
+                    available.join(", ")
+                )
             })?;
 
         let trimmed_url = url.map(str::trim).filter(|u| !u.is_empty());
@@ -205,7 +216,9 @@ impl AppsState {
                         }
                     }
                 }
-                Ok(LaunchOutcome::AlreadyRunning { pid: self.app_pid(&app) })
+                Ok(LaunchOutcome::AlreadyRunning {
+                    pid: self.app_pid(&app),
+                })
             }
             Err(e) => Err(e),
         }
@@ -215,6 +228,7 @@ impl AppsState {
         match app.app_type {
             AppType::DesktopApp => self.process.stop(&app.id),
             AppType::BackgroundApp => self.service.stop(&app.id),
+            AppType::CliApp => Ok(()),
         }
     }
 
@@ -223,10 +237,11 @@ impl AppsState {
         self.start_app_processes(app).await
     }
 
-    fn app_status(&self, app: &ManagedApp) -> AppStatus {
+    pub fn app_status(&self, app: &ManagedApp) -> AppStatus {
         match app.app_type {
             AppType::DesktopApp => self.process.status(&app.id),
             AppType::BackgroundApp => self.service.status(&app.id),
+            AppType::CliApp => AppStatus::Stopped,
         }
     }
 
@@ -234,7 +249,26 @@ impl AppsState {
         match app.app_type {
             AppType::DesktopApp => self.process.pid(&app.id),
             AppType::BackgroundApp => self.service.pid(&app.id),
+            AppType::CliApp => None,
         }
+    }
+
+    pub fn find_app(&self, query: &str) -> Result<ManagedApp, String> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Err("empty app name".to_string());
+        }
+        let apps = self.store.list()?;
+        let ql = q.to_lowercase();
+        apps.iter()
+            .find(|a| a.id.eq_ignore_ascii_case(q) || a.name.eq_ignore_ascii_case(q))
+            .cloned()
+            .or_else(|| {
+                apps.into_iter().find(|a| {
+                    a.name.to_lowercase().contains(&ql) || a.id.to_lowercase().contains(&ql)
+                })
+            })
+            .ok_or_else(|| format!("no app matching {:?}", query))
     }
 }
 
@@ -282,6 +316,8 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 app.launch_wait_timeout_secs = None;
                 app.exec_command = Some(chrome_command.clone());
                 app.env_vars = None;
+                app.cli_binary_path = None;
+                app.cli_env_vars = None;
                 store.update(&app)?;
                 log::info!("Updated built-in Chrome desktop app");
             }
@@ -299,6 +335,9 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 launch_wait_timeout_secs: None,
                 exec_command: Some(chrome_command.clone()),
                 env_vars: None,
+                cli_binary_path: None,
+                cli_env_vars: None,
+                skill_paths: None,
                 created_at: chrono_now(),
             };
             match store.add(&app) {
@@ -309,7 +348,113 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
         }
     }
     desktop_entry::ensure_desktop_entry("Chrome", &chrome_command)?;
+    ensure_builtin_agent_browser_cli(store)?;
     Ok(())
+}
+
+fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String> {
+    let skill_path = "/root/.config/ivnc/skills/agent-browser/SKILL.md".to_string();
+    if let Err(err) = ensure_agent_browser_skill(&skill_path) {
+        log::warn!("Failed to ensure default agent-browser skill: {}", err);
+    }
+    match store.get("builtin-agent-browser") {
+        Ok(mut app) => {
+            let mut changed = false;
+            if app.app_type != AppType::CliApp {
+                app.app_type = AppType::CliApp;
+                app.url = None;
+                app.launch_command = None;
+                app.launch_env_vars = None;
+                app.launch_cwd = None;
+                app.launch_wait_timeout_secs = None;
+                app.exec_command = None;
+                app.env_vars = None;
+                changed = true;
+            }
+            if app.autostart {
+                app.autostart = false;
+                changed = true;
+            }
+            if app
+                .cli_binary_path
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                app.cli_binary_path = Some("/usr/local/bin/agent-browser".to_string());
+                changed = true;
+            }
+            if app.cli_env_vars.is_none() {
+                app.cli_env_vars = Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())]));
+                changed = true;
+            }
+            if app.skill_paths.as_ref().map_or(true, Vec::is_empty) {
+                app.skill_paths = Some(vec![skill_path]);
+                changed = true;
+            }
+            if changed {
+                store.update(&app)?;
+                log::info!("Updated built-in agent-browser CLI app defaults");
+            }
+        }
+        Err(_) => {
+            let app = ManagedApp {
+                id: "builtin-agent-browser".to_string(),
+                name: "agent-browser".to_string(),
+                app_type: AppType::CliApp,
+                autostart: false,
+                url: None,
+                launch_command: None,
+                launch_env_vars: None,
+                launch_cwd: None,
+                launch_wait_timeout_secs: None,
+                exec_command: None,
+                env_vars: None,
+                cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
+                cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
+                skill_paths: Some(vec![skill_path]),
+                created_at: chrono_now(),
+            };
+            match store.add(&app) {
+                Ok(()) => log::info!("Added built-in agent-browser CLI app"),
+                Err(err) if err.contains("already exists") => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_agent_browser_skill(path: &str) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create skill directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    let content = r#"Use the registered CLI app `agent-browser` through `cli_app_run`.
+
+Always prefer JSON output when available. Do not parse human-readable output if a `--json` flag can be used.
+
+Common commands:
+- Inspect browser state: `cli_app_run(app="agent-browser", args=["snapshot", "--json"])`
+- Open a page: `cli_app_run(app="agent-browser", args=["open", "https://example.com", "--json"])`
+- Click an accessibility ref from a snapshot: `cli_app_run(app="agent-browser", args=["click", "@e3", "--json"])`
+- Fill text into an accessibility ref: `cli_app_run(app="agent-browser", args=["fill", "@e3", "text", "--json"])`
+- Press a key: `cli_app_run(app="agent-browser", args=["press", "Enter", "--json"])`
+
+After every mutating command, inspect stdout/stderr and verify browser state with another snapshot before calling done.
+"#;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write default agent-browser skill: {}", e))
 }
 
 fn ivnc_config_dir() -> PathBuf {
@@ -376,10 +521,7 @@ async fn chrome_open_url_in_existing(url: &str) -> Result<(), String> {
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("build devtools client: {e}"))?;
-    let endpoint = format!(
-        "http://127.0.0.1:{}/json/new?{url}",
-        chrome_devtools_port()
-    );
+    let endpoint = format!("http://127.0.0.1:{}/json/new?{url}", chrome_devtools_port());
     let mut resp = client
         .put(&endpoint)
         .send()
@@ -456,6 +598,75 @@ fn parse_optional_string(value: Option<&serde_json::Value>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn parse_string_list(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let values = value.and_then(|v| v.as_array()).map(|items| {
+        items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    })?;
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+pub fn cli_install_status(app: &ManagedApp) -> (bool, &'static str, Option<String>) {
+    if app.app_type != AppType::CliApp {
+        return (false, "not_cli", None);
+    }
+    let Some(path) = app
+        .cli_binary_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    else {
+        return (
+            false,
+            "missing_path",
+            Some("missing binary path".to_string()),
+        );
+    };
+    let path = std::path::Path::new(path);
+    if !path.is_absolute() {
+        return (
+            false,
+            "invalid_path",
+            Some("binary path must be absolute".to_string()),
+        );
+    }
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                false,
+                "missing",
+                Some("binary path does not exist".to_string()),
+            );
+        }
+        Err(err) => return (false, "invalid_path", Some(err.to_string())),
+    };
+    if !metadata.is_file() {
+        return (
+            false,
+            "not_file",
+            Some("binary path is not a regular file".to_string()),
+        );
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return (
+            false,
+            "not_executable",
+            Some("binary path is not executable".to_string()),
+        );
+    }
+    (true, "installed", None)
+}
+
 fn app_json(
     app: &ManagedApp,
     status: &str,
@@ -472,6 +683,7 @@ fn app_json(
         "data_size_bytes": data_bytes,
         "data_size_human": datadir::size_human(data_bytes),
         "created_at": app.created_at,
+        "skill_paths": app.skill_paths,
     });
 
     match app.app_type {
@@ -485,6 +697,14 @@ fn app_json(
         AppType::DesktopApp => {
             obj["exec_command"] = json!(app.exec_command);
             obj["env_vars"] = json!(app.env_vars);
+        }
+        AppType::CliApp => {
+            let (installed, install_status, install_error) = cli_install_status(app);
+            obj["cli_binary_path"] = json!(app.cli_binary_path);
+            obj["cli_env_vars"] = json!(app.cli_env_vars);
+            obj["installed"] = json!(installed);
+            obj["install_status"] = json!(install_status);
+            obj["install_error"] = json!(install_error);
         }
     }
 
@@ -532,6 +752,9 @@ async fn add_app(
         launch_wait_timeout_secs,
         exec_command,
         env_vars,
+        cli_binary_path,
+        cli_env_vars,
+        skill_paths,
     ) = match app_type {
         AppType::BackgroundApp => {
             let url = parse_optional_string(body.get("url"));
@@ -567,6 +790,9 @@ async fn add_app(
                 launch_wait_timeout_secs,
                 None,
                 None,
+                None,
+                None,
+                parse_string_list(body.get("skill_paths")),
             )
         }
         AppType::DesktopApp => {
@@ -580,13 +806,45 @@ async fn add_app(
                 }
             };
             let env_vars = parse_env_vars(body.get("env_vars"));
-            (None, None, None, None, None, exec_command, env_vars)
+            (
+                None,
+                None,
+                None,
+                None,
+                None,
+                exec_command,
+                env_vars,
+                None,
+                None,
+                parse_string_list(body.get("skill_paths")),
+            )
+        }
+        AppType::CliApp => {
+            let cli_binary_path = match body.get("cli_binary_path").and_then(|v| v.as_str()) {
+                Some(path) if !path.trim().is_empty() => Some(path.trim().to_string()),
+                _ => return err_response(StatusCode::BAD_REQUEST, "missing cli_binary_path"),
+            };
+            let cli_env_vars = parse_env_vars(body.get("cli_env_vars"));
+            let skill_paths = parse_string_list(body.get("skill_paths"));
+            (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                cli_binary_path,
+                cli_env_vars,
+                skill_paths,
+            )
         }
     };
     let autostart = body
         .get("autostart")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && app_type != AppType::CliApp;
 
     let app = ManagedApp {
         id: uuid::Uuid::new_v4().to_string(),
@@ -600,6 +858,9 @@ async fn add_app(
         launch_wait_timeout_secs,
         exec_command,
         env_vars,
+        cli_binary_path,
+        cli_env_vars,
+        skill_paths,
         created_at: chrono_now(),
     };
 
@@ -626,7 +887,13 @@ async fn add_app(
         }
     }
 
-    json_response(StatusCode::CREATED, json!({"ok": true, "app": app}))
+    let status = state.app_status(&app);
+    let pid = state.app_pid(&app);
+    let size = datadir::dir_size(&datadir::data_dir(&app));
+    json_response(
+        StatusCode::CREATED,
+        json!({"ok": true, "app": app_json(&app, &format!("{:?}", status).to_lowercase(), pid, size)}),
+    )
 }
 
 async fn get_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
@@ -697,10 +964,23 @@ async fn update_app(
             }
             app.env_vars = parse_env_vars(body.get("env_vars"));
         }
+        AppType::CliApp => {
+            if let Some(path) = body.get("cli_binary_path").and_then(|v| v.as_str()) {
+                let path = path.trim();
+                if path.is_empty() {
+                    return err_response(StatusCode::BAD_REQUEST, "missing cli_binary_path");
+                }
+                app.cli_binary_path = Some(path.to_string());
+            }
+            app.cli_env_vars = parse_env_vars(body.get("cli_env_vars"));
+        }
+    }
+    if body.get("skill_paths").is_some() {
+        app.skill_paths = parse_string_list(body.get("skill_paths"));
     }
 
     if let Some(autostart) = body.get("autostart").and_then(|v| v.as_bool()) {
-        app.autostart = autostart;
+        app.autostart = app.app_type != AppType::CliApp && autostart;
     }
 
     if let Err(e) = state.store.update(&app) {

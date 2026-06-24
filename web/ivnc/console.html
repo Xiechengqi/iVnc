@@ -271,109 +271,24 @@
             </section>
 
             <section class="section" id="section-providers">
-                <div class="provider-layout">
-                    <div class="panel">
-                        <div class="panel-header">
-                            <h2 id="providers-title">Provider</h2>
-                            <span class="provider-count" id="provider-count"></span>
-                        </div>
-                        <div class="provider-list" id="provider-list"></div>
-                    </div>
-                    <div class="panel provider-editor-panel">
-                        <div class="provider-editor-empty" id="provider-empty" hidden>
-                            <div class="empty-icon" aria-hidden="true">←</div>
-                            <p id="provider-empty-text">从左侧选择一个 Provider 查看或编辑配置</p>
-                        </div>
-                        <div class="provider-editor" id="provider-editor">
-                            <div class="panel-header">
-                                <div class="provider-editor-title-row">
-                                    <h2 id="provider-editor-title">Provider 配置</h2>
-                                    <span class="badge-default" id="provider-default-badge" hidden>默认</span>
-                                </div>
-                                <span class="dirty-indicator" id="provider-dirty" hidden>● 未保存改动</span>
-                            </div>
-                            <input type="hidden" id="provider-name">
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-provider-endpoint">Endpoint</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-provider-endpoint">Provider 的 API 基础地址，留空使用内置默认值。</span>
-                                    </span>
-                                </label>
-                                <input id="provider-endpoint" type="text" data-dirty-group="provider">
-                                <span class="field-hint" id="provider-endpoint-hint"></span>
-                            </div>
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-provider-model">Model</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-provider-model">调用的模型名称，需与所选 Provider 支持的模型一致。</span>
-                                    </span>
-                                </label>
-                                <input id="provider-model" type="text" data-dirty-group="provider">
-                                <span class="field-hint" id="provider-model-hint"></span>
-                            </div>
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-provider-api-format">API format</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-provider-api-format">Provider 使用的 OpenAI 接口协议。Responses 会请求 /responses，Chat Completions 会请求 /chat/completions。</span>
-                                    </span>
-                                </label>
-                                <select id="provider-api-format" data-dirty-group="provider">
-                                    <option value="">Chat Completions</option>
-                                    <option value="responses">Responses</option>
-                                </select>
-                            </div>
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-provider-api-key">API Key</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-provider-api-key">Provider 凭据。已配置时显示遮罩；点击"替换"输入新值，或"清除"删除已保存的密钥。</span>
-                                    </span>
-                                </label>
-                                <div class="api-key-control" id="api-key-control">
-                                    <div class="api-key-stored" id="api-key-stored" hidden>
-                                        <span class="api-key-mask">••••••••••••</span>
-                                        <span class="api-key-status" id="api-key-status">已保存</span>
-                                        <div class="api-key-actions">
-                                            <button type="button" class="btn-link" id="api-key-replace">替换</button>
-                                            <button type="button" class="btn-link btn-link-danger" id="api-key-clear">清除</button>
-                                        </div>
-                                    </div>
-                                    <div class="api-key-input" id="api-key-input-wrap">
-                                        <input id="provider-api-key" type="password" placeholder="保持为空表示不修改" data-dirty-group="provider">
-                                        <button type="button" class="btn-link" id="api-key-cancel" hidden>取消</button>
-                                    </div>
-                                    <div class="api-key-pending" id="api-key-pending" hidden>
-                                        <span class="badge-warn-pill" id="api-key-pending-text">将在保存时清除已存 API Key</span>
-                                        <button type="button" class="btn-link" id="api-key-undo-clear">撤销</button>
-                                    </div>
-                                </div>
-                                <input type="hidden" id="provider-clear-key">
-                            </div>
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-provider-coord-space">Coordinate space</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-provider-coord-space">Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。</span>
-                                    </span>
-                                </label>
-                                <select id="provider-coord-space" data-dirty-group="provider"><option value="">默认</option><option value="image">image</option><option value="screen">screen</option><option value="normalized">normalized</option></select>
-                            </div>
-                            <div class="panel-section-footer">
-                                <span class="provider-test-status" id="provider-test-status"></span>
-                                <button class="btn btn-cancel" id="provider-test" type="button">测试</button>
-                                <button class="btn btn-cancel" id="provider-reset" type="button">重置</button>
-                                <button class="btn btn-save" id="provider-save" type="button">保存</button>
-                            </div>
-                        </div>
-                    </div>
+                <div class="section-actions">
+                    <button class="btn btn-add" id="provider-add" type="button">添加供应商</button>
+                </div>
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th id="th-provider-name">名称</th>
+                                <th id="th-provider-type">类型</th>
+                                <th id="th-provider-config">配置</th>
+                                <th id="th-provider-status">状态</th>
+                                <th id="th-provider-actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="provider-list">
+                            <tr><td colspan="5" class="empty" id="provider-loading-text">加载中...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </section>
 
@@ -526,6 +441,7 @@
                 <select id="f-app-type">
                     <option value="background">后台应用</option>
                     <option value="desktop">桌面应用</option>
+                    <option value="cli">CLI 应用</option>
                 </select>
             </div>
 
@@ -534,6 +450,17 @@
                 <label for="f-autostart" id="label-autostart">开机启动</label>
             </div>
             <div id="general-autostart-slot"></div>
+
+            <div class="form-line">
+                <label class="form-label info-label">
+                    <span id="label-skill-paths">Skill 路径</span>
+                    <span class="info-tip">
+                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                        <span class="default-text" id="label-skill-paths-default">（可选，每行一个 .md/.txt 文件或包含 SKILL.md 的目录）</span>
+                    </span>
+                </label>
+                <textarea id="f-skill-paths" rows="3" placeholder="/root/.config/ivnc/skills/app/SKILL.md"></textarea>
+            </div>
             
             <div id="background-config">
                 <div class="form-line command-line">
@@ -625,6 +552,26 @@
                 </div>
             </div>
 
+            <div id="cli-config" style="display:none">
+                <div class="form-line">
+                    <label class="form-label required-label">
+                        <span id="label-cli-binary">Binary Path</span>
+                        <span class="required-mark">*</span>
+                    </label>
+                    <input type="text" id="f-cli-binary" placeholder="/usr/local/bin/agent-browser">
+                </div>
+                <div class="form-line">
+                    <label class="form-label info-label">
+                        <span id="label-cli-env">执行环境变量</span>
+                        <span class="info-tip">
+                            <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                            <span class="default-text" id="label-cli-env-default">（可选，agent 调用该 CLI 时附加，每行 KEY=value）</span>
+                        </span>
+                    </label>
+                    <textarea id="f-cli-env" rows="5" placeholder="NO_COLOR=1&#10;AGENT_BROWSER_SESSION=ivnc-default"></textarea>
+                </div>
+            </div>
+
             <div class="modal-actions">
                 <button class="btn btn-cancel" id="modal-cancel">取消</button>
                 <button class="btn btn-save" id="modal-save">保存</button>
@@ -633,6 +580,111 @@
     </div>
 
     <div class="toast" id="toast"></div>
+
+    <!-- 模态框：添加 Provider -->
+    <div class="modal-bg" id="provider-modal">
+        <div class="modal app-modal">
+            <div class="modal-header">
+                <h2 id="provider-modal-title">添加 Provider</h2>
+                <button class="modal-close" id="provider-modal-close" type="button" aria-label="关闭">×</button>
+            </div>
+            <input type="hidden" id="provider-name">
+            <div class="form-line">
+                <label class="form-label required-label">
+                    <span id="label-provider-type">API format</span>
+                    <span class="required-mark">*</span>
+                </label>
+                <select id="provider-type" data-dirty-group="provider">
+                    <option value="openai">OpenAI compatible</option>
+                    <option value="anthropic">Anthropic</option>
+                </select>
+            </div>
+            <div class="form-line">
+                <label class="form-label required-label">
+                    <span id="label-provider-display-name">Name</span>
+                    <span class="required-mark">*</span>
+                </label>
+                <input id="provider-display-name" type="text" placeholder="cc-switch-market" data-dirty-group="provider">
+            </div>
+            <div class="form-line">
+                <label class="form-label info-label">
+                    <span id="label-provider-endpoint">Base URL</span>
+                    <span class="info-tip">
+                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                        <span class="default-text" id="help-provider-endpoint">Provider 的 API 基础地址，留空使用内置默认值。</span>
+                    </span>
+                </label>
+                <input id="provider-endpoint" type="text" placeholder="https://api.openai.com/v1" data-dirty-group="provider">
+                <span class="field-hint" id="provider-endpoint-hint"></span>
+            </div>
+            <div class="form-line">
+                <label class="form-label info-label">
+                    <span id="label-provider-model">Model</span>
+                    <span class="info-tip">
+                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                        <span class="default-text" id="help-provider-model">调用的模型名称，需与所选 Provider 支持的模型一致。</span>
+                    </span>
+                </label>
+                <input id="provider-model" type="text" placeholder="gpt-4o-mini" data-dirty-group="provider">
+                <span class="field-hint" id="provider-model-hint"></span>
+            </div>
+            <div class="form-line provider-openai-only">
+                <label class="form-label info-label">
+                    <span id="label-provider-api-format">OpenAI API 类型</span>
+                    <span class="info-tip">
+                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                        <span class="default-text" id="help-provider-api-format">Provider 使用的 OpenAI 接口协议。Responses 会请求 /responses，Chat Completions 会请求 /chat/completions。</span>
+                    </span>
+                </label>
+                <select id="provider-api-format" data-dirty-group="provider">
+                    <option value="">Chat Completions</option>
+                    <option value="responses">Responses</option>
+                </select>
+            </div>
+            <div class="form-line provider-openai-only">
+                <label class="form-label info-label">
+                    <span id="label-provider-coord-space">Coordinate space</span>
+                    <span class="info-tip">
+                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                        <span class="default-text" id="help-provider-coord-space">Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。</span>
+                    </span>
+                </label>
+                <select id="provider-coord-space" data-dirty-group="provider"><option value="">默认</option><option value="image">image</option><option value="screen">screen</option><option value="normalized">normalized</option></select>
+            </div>
+            <div class="form-line">
+                <label class="form-label info-label">
+                    <span id="label-provider-api-key">API Key</span>
+                    <span class="info-tip">
+                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                        <span class="default-text" id="help-provider-api-key">Provider 凭据。已配置时显示遮罩；点击"替换"输入新值，或"清除"删除已保存的密钥。</span>
+                    </span>
+                </label>
+                <div class="api-key-control" id="api-key-control">
+                    <div class="api-key-stored" id="api-key-stored" hidden>
+                        <span class="api-key-mask">••••••••••••</span>
+                        <span class="api-key-status" id="api-key-status">已保存</span>
+                        <div class="api-key-actions">
+                            <button type="button" class="btn-link" id="api-key-replace">替换</button>
+                            <button type="button" class="btn-link btn-link-danger" id="api-key-clear">清除</button>
+                        </div>
+                    </div>
+                    <div class="api-key-input" id="api-key-input-wrap">
+                        <input id="provider-api-key" type="password" placeholder="保持为空表示不修改" data-dirty-group="provider">
+                        <button type="button" class="btn-link" id="api-key-cancel" hidden>取消</button>
+                    </div>
+                    <div class="api-key-pending" id="api-key-pending" hidden>
+                        <span class="badge-warn-pill" id="api-key-pending-text">将在保存时清除已存 API Key</span>
+                        <button type="button" class="btn-link" id="api-key-undo-clear">撤销</button>
+                    </div>
+                </div>
+                <input type="hidden" id="provider-clear-key">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-cancel" id="provider-modal-cancel" type="button">取消</button>
+                <button class="btn btn-save" id="provider-modal-save" type="button">保存</button>
+            </div>
+        </div>
+    </div>
 
     <!-- 模态框：日志 -->
     <div class="modal-bg" id="log-modal">

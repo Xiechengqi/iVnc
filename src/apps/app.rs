@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub enum AppType {
     BackgroundApp,
     DesktopApp,
+    CliApp,
 }
 
 impl AppType {
@@ -13,6 +14,7 @@ impl AppType {
         match self {
             AppType::BackgroundApp => "background",
             AppType::DesktopApp => "desktop",
+            AppType::CliApp => "cli",
         }
     }
 
@@ -20,6 +22,7 @@ impl AppType {
         match s {
             "background" => Some(AppType::BackgroundApp),
             "desktop" => Some(AppType::DesktopApp),
+            "cli" => Some(AppType::CliApp),
             _ => None,
         }
     }
@@ -55,6 +58,16 @@ pub struct ManagedApp {
     pub exec_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_vars: Option<HashMap<String, String>>,
+
+    // CliApp fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_env_vars: Option<HashMap<String, String>>,
+
+    // Agent guidance for this app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_paths: Option<Vec<String>>,
 
     pub created_at: String,
 }

@@ -75,7 +75,14 @@ pub fn xrgb_to_encoded_frame(
         ImageBuffer::from_raw(width, height, rgb_buf).ok_or("failed to create image buffer")?;
 
     let (bytes, image_w, image_h, out_quality) = rgb_to_capped_jpeg(img, quality, max_bytes)?;
-    Ok(encoded_frame(bytes, width, height, image_w, image_h, out_quality))
+    Ok(encoded_frame(
+        bytes,
+        width,
+        height,
+        image_w,
+        image_h,
+        out_quality,
+    ))
 }
 
 /// Encode an RgbImage as JPEG, downscaling once if the encoded bytes exceed
@@ -130,7 +137,10 @@ pub async fn capture_fullpage_observation(
     {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("capture_full_page failed, falling back to live viewport: {}", e);
+            log::warn!(
+                "capture_full_page failed, falling back to live viewport: {}",
+                e
+            );
             return capture_observation(state, 75, options.screenshot_max_bytes).await;
         }
     };
@@ -287,7 +297,11 @@ mod tests {
         // ensures the JPEG bytes exceed the tight cap on the first attempt.
         let mut img = image::RgbImage::new(512, 512);
         for (x, y, p) in img.enumerate_pixels_mut() {
-            *p = image::Rgb([((x * 7) % 256) as u8, ((y * 11) % 256) as u8, ((x ^ y) % 256) as u8]);
+            *p = image::Rgb([
+                ((x * 7) % 256) as u8,
+                ((y * 11) % 256) as u8,
+                ((x ^ y) % 256) as u8,
+            ]);
         }
         let (bytes, w, h, q) = rgb_to_capped_jpeg(img, 95, 2_000).unwrap();
         assert!(w < 512 && h < 512, "expected downscale, got {}x{}", w, h);

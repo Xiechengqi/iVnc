@@ -15,7 +15,7 @@ use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatConfig {
-    pub provider_name: &'static str,
+    pub provider_name: String,
     pub endpoint: String,
     pub model: String,
     pub api_format: OpenAiApiFormat,
@@ -61,7 +61,7 @@ impl OpenAiCompatibleProvider {
     pub fn new(cfg: OpenAiCompatConfig) -> Self {
         Self {
             cfg,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 
@@ -90,7 +90,12 @@ impl OpenAiCompatibleProvider {
         let image_url = Self::image_data_url(observation)?;
         let display = &observation.display;
         let history_text = history_text(history);
-        let user_text = build_user_text(task, display, &history_text, observation.page_text.as_deref());
+        let user_text = build_user_text(
+            task,
+            display,
+            &history_text,
+            observation.page_text.as_deref(),
+        );
         Ok(json!({
             "model": self.cfg.model,
             "messages": [
@@ -127,7 +132,12 @@ impl OpenAiCompatibleProvider {
         let image_url = Self::image_data_url(observation)?;
         let display = &observation.display;
         let history_text = history_text(history);
-        let user_text = build_user_text(task, display, &history_text, observation.page_text.as_deref());
+        let user_text = build_user_text(
+            task,
+            display,
+            &history_text,
+            observation.page_text.as_deref(),
+        );
         Ok(json!({
             "model": self.cfg.model,
             "instructions": self.cfg.system_prompt,
@@ -161,7 +171,7 @@ impl OpenAiCompatibleProvider {
             .get("id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        let usage = parse_usage(body.get("usage"), elapsed_ms, self.cfg.provider_name, &self.cfg.model);
+        let usage = parse_usage(body.get("usage"), elapsed_ms);
         let message = body
             .pointer("/choices/0/message")
             .ok_or_else(|| ProviderError::InvalidResponse("missing choices[0].message".into()))?;
@@ -203,7 +213,7 @@ impl OpenAiCompatibleProvider {
             .get("id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        let usage = parse_usage(body.get("usage"), elapsed_ms, self.cfg.provider_name, &self.cfg.model);
+        let usage = parse_usage(body.get("usage"), elapsed_ms);
         let output = body
             .get("output")
             .and_then(Value::as_array)
@@ -286,8 +296,8 @@ impl OpenAiCompatibleProvider {
 
 #[async_trait]
 impl BrainProvider for OpenAiCompatibleProvider {
-    fn name(&self) -> &'static str {
-        self.cfg.provider_name
+    fn name(&self) -> &str {
+        &self.cfg.provider_name
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -330,10 +340,7 @@ impl BrainProvider for OpenAiCompatibleProvider {
         if let Some(api_key) = &self.cfg.api_key {
             request = request.header(AUTHORIZATION, format!("Bearer {}", api_key));
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ProviderError::NetworkError(e.to_string()))?;
+        let response = super::send_with_retry(request).await?;
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err(ProviderError::AuthError(status.to_string()));
@@ -382,8 +389,17 @@ fn history_text(history: &History) -> String {
     if history.steps.is_empty() {
         return "No prior steps.".to_string();
     }
+    const MAX_HISTORY_STEPS: usize = 20;
+    const MAX_HISTORY_CHARS: usize = 24_000;
     let mut out = String::from("Prior steps:\n");
-    for (idx, step) in history.steps.iter().enumerate() {
+    let skipped = history.steps.len().saturating_sub(MAX_HISTORY_STEPS);
+    if skipped > 0 {
+        out.push_str(&format!(
+            "[{} older steps compacted; recent steps below]\n",
+            skipped
+        ));
+    }
+    for (idx, step) in history.steps.iter().enumerate().skip(skipped) {
         out.push_str(&format!(
             "{}. action={:?}; result={:?}; image={}x{} sha256={}\n",
             idx + 1,
@@ -393,6 +409,15 @@ fn history_text(history: &History) -> String {
             step.observation.image_height,
             step.observation.sha256
         ));
+        if out.len() > MAX_HISTORY_CHARS {
+            let mut end = MAX_HISTORY_CHARS;
+            while !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.truncate(end);
+            out.push_str("\n[history text compacted by iVNC context budget]\n");
+            break;
+        }
     }
     out
 }
@@ -424,14 +449,9 @@ fn build_user_text(
     out
 }
 
-fn parse_usage(
-    value: Option<&Value>,
-    elapsed_ms: u64,
-    provider_name: &str,
-    model: &str,
-) -> Option<ProviderUsage> {
+fn parse_usage(value: Option<&Value>, elapsed_ms: u64) -> Option<ProviderUsage> {
     let usage = value?;
-    let mut parsed = ProviderUsage {
+    let parsed = ProviderUsage {
         input_tokens: usage
             .get("prompt_tokens")
             .or_else(|| usage.get("input_tokens"))
@@ -443,10 +463,7 @@ fn parse_usage(
             .and_then(Value::as_u64)
             .unwrap_or(0),
         provider_latency_ms: elapsed_ms,
-        cost_usd_micros: None,
     };
-    parsed.cost_usd_micros =
-        super::super::budget::estimate_cost_usd_micros(provider_name, model, &parsed);
     Some(parsed)
 }
 
@@ -589,6 +606,11 @@ fn tool_call_to_action(
             app: string_arg(args, &["app", "name", "id"]).unwrap_or_default(),
             url: string_arg(args, &["url", "address"]),
         }),
+        "cli_app_run" | "run_cli_app" => Ok(Action::CliAppRun {
+            app: string_arg(args, &["app", "name", "id"]).unwrap_or_default(),
+            args: string_vec_arg(args, &["args", "arguments"]),
+            timeout_ms: args.get("timeout_ms").and_then(Value::as_u64),
+        }),
         "done" | "finish" => Ok(Action::Done {
             success: args.get("success").and_then(Value::as_bool).unwrap_or(true),
             reason: string_arg(args, &["reason"]).unwrap_or_default(),
@@ -600,6 +622,21 @@ fn tool_call_to_action(
             other
         ))),
     }
+}
+
+fn string_vec_arg(args: &Value, keys: &[&str]) -> Vec<String> {
+    for key in keys {
+        let Some(value) = args.get(*key) else {
+            continue;
+        };
+        if let Some(items) = value.as_array() {
+            return items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 fn mouse_button(args: &Value) -> MouseButton {
@@ -690,91 +727,26 @@ fn integers(text: &str) -> Vec<i32> {
 }
 
 fn tool_schema() -> Value {
-    json!([
-        function_schema(
-            "click",
-            json!({
-                "type":"object",
-                "properties":{
-                    "x":{"type":"number"},"y":{"type":"number"},
-                    "button":{"type":"string","enum":["left","middle","right"]},
-                    "click_count":{"type":"integer","minimum":1,"maximum":3},
-                    "label":{"type":"string"}
-                },
-                "required":["x","y"]
-            })
-        ),
-        function_schema(
-            "move",
-            json!({
-                "type":"object",
-                "properties":{"x":{"type":"number"},"y":{"type":"number"},"label":{"type":"string"}},
-                "required":["x","y"]
-            })
-        ),
-        function_schema(
-            "scroll",
-            json!({
-                "type":"object",
-                "properties":{"x":{"type":"number"},"y":{"type":"number"},"dx":{"type":"integer"},"dy":{"type":"integer"},"label":{"type":"string"}},
-                "required":["dy"]
-            })
-        ),
-        function_schema(
-            "type",
-            json!({
-                "type":"object",
-                "properties":{"text":{"type":"string"},"press_enter":{"type":"boolean"}},
-                "required":["text"]
-            })
-        ),
-        function_schema(
-            "key",
-            json!({
-                "type":"object",
-                "properties":{"combo":{"type":"string"}},
-                "required":["combo"]
-            })
-        ),
-        function_schema(
-            "wait",
-            json!({
-                "type":"object",
-                "properties":{"ms":{"type":"integer","minimum":0}},
-                "required":["ms"]
-            })
-        ),
-        function_schema("screenshot", json!({"type":"object","properties":{}})),
-        function_schema("capture_full_page", json!({"type":"object","properties":{}})),
-        function_schema(
-            "launch_app",
-            json!({
-                "type":"object",
-                "properties":{
-                    "app":{"type":"string","description":"App id or name to launch, e.g. 'chrome'"},
-                    "url":{"type":"string","description":"Optional URL/address to open in the app"}
-                },
-                "required":["app"]
-            })
-        ),
-        function_schema(
-            "done",
-            json!({
-                "type":"object",
-                "properties":{
-                    "success":{"type":"boolean"},
-                    "reason":{"type":"string"},
-                    "output":{"type":"string","description":"The deliverable/answer the task asked for (not just a status line)"}
-                },
-                "required":["success"]
-            })
-        )
-    ])
+    Value::Array(
+        action_tool_parameters()
+            .into_iter()
+            .map(|(name, parameters)| function_schema(name, parameters))
+            .collect(),
+    )
 }
 
 fn responses_tool_schema() -> Value {
-    json!([
-        responses_function_schema(
+    Value::Array(
+        action_tool_parameters()
+            .into_iter()
+            .map(|(name, parameters)| responses_function_schema(name, parameters))
+            .collect(),
+    )
+}
+
+fn action_tool_parameters() -> Vec<(&'static str, Value)> {
+    vec![
+        (
             "click",
             json!({
                 "type":"object",
@@ -785,51 +757,54 @@ fn responses_tool_schema() -> Value {
                     "label":{"type":"string"}
                 },
                 "required":["x","y"]
-            })
+            }),
         ),
-        responses_function_schema(
+        (
             "move",
             json!({
                 "type":"object",
                 "properties":{"x":{"type":"number"},"y":{"type":"number"},"label":{"type":"string"}},
                 "required":["x","y"]
-            })
+            }),
         ),
-        responses_function_schema(
+        (
             "scroll",
             json!({
                 "type":"object",
                 "properties":{"x":{"type":"number"},"y":{"type":"number"},"dx":{"type":"integer"},"dy":{"type":"integer"},"label":{"type":"string"}},
                 "required":["dy"]
-            })
+            }),
         ),
-        responses_function_schema(
+        (
             "type",
             json!({
                 "type":"object",
                 "properties":{"text":{"type":"string"},"press_enter":{"type":"boolean"}},
                 "required":["text"]
-            })
+            }),
         ),
-        responses_function_schema(
+        (
             "key",
             json!({
                 "type":"object",
                 "properties":{"combo":{"type":"string"}},
                 "required":["combo"]
-            })
+            }),
         ),
-        responses_function_schema(
+        (
             "wait",
             json!({
                 "type":"object",
                 "properties":{"ms":{"type":"integer","minimum":0}},
                 "required":["ms"]
-            })
+            }),
         ),
-        responses_function_schema("screenshot", json!({"type":"object","properties":{}})),
-        responses_function_schema("capture_full_page", json!({"type":"object","properties":{}})),
-        responses_function_schema(
+        ("screenshot", json!({"type":"object","properties":{}})),
+        (
+            "capture_full_page",
+            json!({"type":"object","properties":{}}),
+        ),
+        (
             "launch_app",
             json!({
                 "type":"object",
@@ -838,9 +813,21 @@ fn responses_tool_schema() -> Value {
                     "url":{"type":"string","description":"Optional URL/address to open in the app"}
                 },
                 "required":["app"]
-            })
+            }),
         ),
-        responses_function_schema(
+        (
+            "cli_app_run",
+            json!({
+                "type":"object",
+                "properties":{
+                    "app":{"type":"string","description":"Registered CLI app id or name, e.g. 'agent-browser'"},
+                    "args":{"type":"array","items":{"type":"string"},"description":"Command arguments passed directly without a shell"},
+                    "timeout_ms":{"type":"integer","minimum":100,"maximum":300000}
+                },
+                "required":["app","args"]
+            }),
+        ),
+        (
             "done",
             json!({
                 "type":"object",
@@ -850,9 +837,9 @@ fn responses_tool_schema() -> Value {
                     "output":{"type":"string","description":"The deliverable/answer the task asked for (not just a status line)"}
                 },
                 "required":["success"]
-            })
-        )
-    ])
+            }),
+        ),
+    ]
 }
 
 fn function_schema(name: &str, parameters: Value) -> Value {
@@ -906,13 +893,23 @@ pub fn default_system_prompt() -> String {
      the task, call done immediately rather than taking one more exploration step — but only if \
      the literal answer is visible (see the Honesty rule). If the answer requires opening a \
      linked page, navigate to it first. \
+     Registered CLI applications: use cli_app_run(app='<registered app>', args=[...]) when the \
+     dynamic app context lists a CLI tool relevant to the task. Arguments are passed directly, \
+     not through a shell. Prefer JSON-producing flags when the app supports them, and inspect \
+     cli_app_run stdout/stderr in the following turn before deciding success. \
      Full-page capture: capture_full_page returns a READ-ONLY full-page screenshot (and extracted \
      page text) of the active built-in Chrome tab — use it when content extends below the viewport \
      so you can read the whole page in one turn. The returned frame is taller than the viewport, \
      so its coordinates are NOT clickable; the next turn will tell you it is read-only if you try. \
      To interact, call screenshot again (returning to the live viewport), then scroll/click on \
      that frame. capture_full_page requires the built-in Chrome to be running — call \
-     launch_app(app='chrome', url='<page>') first if it is not."
+     launch_app(app='chrome', url='<page>') first if it is not. \
+     Reading strategy: when the task is to read, summarize, or extract information from a web page \
+     (e.g. chat logs, articles, tables, search results), ALWAYS prefer capture_full_page over \
+     repeated scroll+screenshot cycles. capture_full_page gives you the complete page content \
+     including extracted text in a single step, eliminating the need to scroll back and forth. \
+     Only fall back to manual scrolling if capture_full_page is unavailable (Chrome not running) \
+     or if you need to interact with the page (click links, fill forms) after reading."
         .to_string()
 }
 
@@ -989,7 +986,7 @@ mod tests {
     #[test]
     fn parses_responses_function_call() {
         let provider = OpenAiCompatibleProvider::new(OpenAiCompatConfig {
-            provider_name: "test",
+            provider_name: "test".to_string(),
             endpoint: "https://example.com/v1".to_string(),
             model: "future-model".to_string(),
             api_format: OpenAiApiFormat::Responses,

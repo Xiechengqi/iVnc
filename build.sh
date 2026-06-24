@@ -64,7 +64,7 @@ fi
 
 echo "=== Building backend ($BUILD_MODE) ==="
 cd "$ROOT"
-cargo build "${CARGO_ARGS[@]}"
+IVNC_REFRESH_MIAO=1 cargo build "${CARGO_ARGS[@]}"
 echo "=== Done ==="
 cp "$ROOT/target/$BUILD_MODE/ivnc" "$ROOT/ivnc"
 echo "Binary: $ROOT/ivnc"

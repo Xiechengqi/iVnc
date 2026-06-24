@@ -31,7 +31,7 @@ pub fn build_local_provider(model: Option<String>) -> OpenAiCompatibleProvider {
         .api_format
         .or_else(|| std::env::var(LOCAL_API_FORMAT_ENV).ok());
     OpenAiCompatibleProvider::new(OpenAiCompatConfig {
-        provider_name: LOCAL_PROVIDER_NAME,
+        provider_name: LOCAL_PROVIDER_NAME.to_string(),
         endpoint,
         model,
         api_format: OpenAiApiFormat::from_config(api_format.as_deref()),

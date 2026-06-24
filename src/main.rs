@@ -7,6 +7,7 @@ mod agent;
 mod apps;
 mod args;
 mod audio;
+mod capabilities;
 mod clipboard;
 mod compositor;
 mod config;

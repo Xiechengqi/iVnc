@@ -76,6 +76,8 @@ fn looks_like_action(s: &str) -> bool {
         "screenshot",
         "capture_full_page",
         "full_page_screenshot",
+        "cli_app_run",
+        "run_cli_app",
     ]
     .iter()
     .any(|prefix| lower.starts_with(prefix))
@@ -140,6 +142,11 @@ fn parse_candidate(candidate: &str) -> Result<Option<Action>, String> {
         "launch_app" | "open_app" | "launch" | "open" => Ok(Some(Action::LaunchApp {
             app: parse_string_arg(body, &["app", "name", "id"]).unwrap_or_default(),
             url: parse_string_arg(body, &["url", "address"]),
+        })),
+        "cli_app_run" | "run_cli_app" => Ok(Some(Action::CliAppRun {
+            app: parse_string_arg(body, &["app", "name", "id"]).unwrap_or_default(),
+            args: Vec::new(),
+            timeout_ms: parse_optional_i32(body, &["timeout_ms"]).map(|v| v.max(0) as u64),
         })),
         "done" | "finish" => Ok(Some(Action::Done {
             success: parse_bool_arg(body, &["success"]).unwrap_or(true),
@@ -311,6 +318,11 @@ fn json_action_to_action(name: &str, args: &Value) -> Result<Action, String> {
             app: json_string(args, &["app", "name", "id"]).unwrap_or_default(),
             url: json_string(args, &["url", "address"]),
         }),
+        "cli_app_run" | "run_cli_app" => Ok(Action::CliAppRun {
+            app: json_string(args, &["app", "name", "id"]).unwrap_or_default(),
+            args: json_string_vec(args, &["args", "arguments"]),
+            timeout_ms: args.get("timeout_ms").and_then(Value::as_u64),
+        }),
         "done" | "finish" => Ok(Action::Done {
             success: json_bool(args, &["success"]).unwrap_or(true),
             reason: json_string(args, &["reason"]).unwrap_or_default(),
@@ -319,6 +331,18 @@ fn json_action_to_action(name: &str, args: &Value) -> Result<Action, String> {
         }),
         _ => Err(format!("unsupported provider action JSON: {}", name)),
     }
+}
+
+fn json_string_vec(args: &Value, keys: &[&str]) -> Vec<String> {
+    for key in keys {
+        if let Some(values) = args.get(*key).and_then(Value::as_array) {
+            return values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 fn json_point(args: &Value) -> Result<(i32, i32), String> {

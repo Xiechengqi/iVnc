@@ -14,11 +14,11 @@ use crate::console_config;
 use crate::web::SharedState;
 use chrono::TimeZone;
 use cron::Schedule;
+use log::{info, warn};
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use log::{info, warn};
 
 /// Per-task runtime state. Lives in `SharedState::schedule_state`, never on
 /// disk — it is rebuilt from `cron.upcoming(...)` on startup and on edits.
@@ -71,7 +71,10 @@ pub async fn tick_once(state: Arc<SharedState>) {
             continue;
         }
         let Ok(sched) = Schedule::from_str(&normalize_cron(&st.cron)) else {
-            warn!("scheduler: invalid cron expression for schedule {} ({}), skipping", st.id, st.cron);
+            warn!(
+                "scheduler: invalid cron expression for schedule {} ({}), skipping",
+                st.id, st.cron
+            );
             continue;
         };
 

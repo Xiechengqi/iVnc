@@ -1,6 +1,6 @@
 //! VLM-native agent loop and provider abstractions.
 
-pub mod budget;
+pub mod events;
 pub mod exec;
 pub mod launch;
 pub mod r#loop;
@@ -11,6 +11,7 @@ pub mod run_store;
 pub mod safety;
 #[cfg(feature = "agent")]
 pub mod schedule;
+pub mod skills;
 pub mod trajectory;
 pub mod types;
 

@@ -46,7 +46,7 @@ impl GeminiProvider {
             model,
             api_key,
             system_prompt,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 
@@ -111,18 +111,11 @@ impl GeminiProvider {
                 .get("candidatesTokenCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let mut parsed = ProviderUsage {
+            ProviderUsage {
                 input_tokens,
                 output_tokens,
                 provider_latency_ms: elapsed_ms,
-                cost_usd_micros: None,
-            };
-            parsed.cost_usd_micros = crate::agent::budget::estimate_cost_usd_micros(
-                GEMINI_PROVIDER_NAME,
-                &self.model,
-                &parsed,
-            );
-            parsed
+            }
         });
 
         let mut text_buf = String::new();
@@ -142,9 +135,7 @@ impl GeminiProvider {
                         }
                         if let Some(call) = part.get("functionCall") {
                             if let Some(args) = call.get("args") {
-                                if let Ok(action) =
-                                    serde_json::from_value::<Action>(args.clone())
-                                {
+                                if let Ok(action) = serde_json::from_value::<Action>(args.clone()) {
                                     actions.push(action);
                                 } else {
                                     text_buf.push_str(&args.to_string());
@@ -177,7 +168,7 @@ impl GeminiProvider {
 
 #[async_trait]
 impl BrainProvider for GeminiProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         GEMINI_PROVIDER_NAME
     }
 
@@ -218,16 +209,15 @@ impl BrainProvider for GeminiProvider {
             // Some gateways accept either x-goog-api-key or Authorization: Bearer.
             request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", key));
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ProviderError::NetworkError(e.to_string()))?;
+        let response = super::send_with_retry(request).await?;
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err(ProviderError::AuthError(status.to_string()));
         }
         if status.as_u16() == 429 {
-            return Err(ProviderError::RateLimited { retry_after_ms: 1000 });
+            return Err(ProviderError::RateLimited {
+                retry_after_ms: 1000,
+            });
         }
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -265,8 +255,17 @@ fn history_text(history: &History) -> String {
     if history.steps.is_empty() {
         return "No prior steps.".to_string();
     }
+    const MAX_HISTORY_STEPS: usize = 20;
+    const MAX_HISTORY_CHARS: usize = 24_000;
     let mut out = String::from("Prior steps:\n");
-    for (idx, step) in history.steps.iter().enumerate() {
+    let skipped = history.steps.len().saturating_sub(MAX_HISTORY_STEPS);
+    if skipped > 0 {
+        out.push_str(&format!(
+            "[{} older steps compacted; recent steps below]\n",
+            skipped
+        ));
+    }
+    for (idx, step) in history.steps.iter().enumerate().skip(skipped) {
         out.push_str(&format!(
             "{}. action={:?}; result={:?}; image={}x{} sha256={}\n",
             idx + 1,
@@ -276,6 +275,13 @@ fn history_text(history: &History) -> String {
             step.observation.image_height,
             step.observation.sha256
         ));
+        if out.len() > MAX_HISTORY_CHARS {
+            let mut end = MAX_HISTORY_CHARS;
+            while !out.is_char_boundary(end) { end -= 1; }
+            out.truncate(end);
+            out.push_str("\n[history text compacted by iVNC context budget]\n");
+            break;
+        }
     }
     out
 }

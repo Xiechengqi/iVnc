@@ -1,7 +1,9 @@
 use super::safety::destructive_kind;
 use super::types::{Action, ActionResult, DisplayMetadata, MouseButton, RunOptions};
+use crate::apps::app::AppType;
 use crate::mcp::input_exec;
 use crate::web::SharedState;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,8 +77,11 @@ async fn execute_inner(
             state.request_automation_wakeup(AUTOMATION_WAKEUP);
             let (sx, sy) = to_screen(display, *x, *y)?;
             input_exec::mouse_move(state, sx, sy).await;
-            let button = input_exec::mouse_button_id(button_name(*button))
-                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
+            let button = input_exec::mouse_button_id(button_name(*button)).map_err(|e| {
+                ActionResult::ExecutorError {
+                    message: e.to_string(),
+                }
+            })?;
             let _ = state.input_sender.send(crate::input::InputEventData {
                 event_type: crate::input::InputEvent::MouseButton,
                 mouse_x: sx,
@@ -90,8 +95,11 @@ async fn execute_inner(
             state.request_automation_wakeup(AUTOMATION_WAKEUP);
             let (sx, sy) = to_screen(display, *x, *y)?;
             input_exec::mouse_move(state, sx, sy).await;
-            let button = input_exec::mouse_button_id(button_name(*button))
-                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
+            let button = input_exec::mouse_button_id(button_name(*button)).map_err(|e| {
+                ActionResult::ExecutorError {
+                    message: e.to_string(),
+                }
+            })?;
             let _ = state.input_sender.send(crate::input::InputEventData {
                 event_type: crate::input::InputEvent::MouseButton,
                 mouse_x: sx,
@@ -104,15 +112,22 @@ async fn execute_inner(
         Action::MouseDrag { path, button, .. } => {
             state.request_automation_wakeup(AUTOMATION_WAKEUP);
             let Some(first) = path.first().copied() else {
-                return Err(ActionResult::ExecutorError { message: "empty_drag_path".to_string() });
+                return Err(ActionResult::ExecutorError {
+                    message: "empty_drag_path".to_string(),
+                });
             };
             let Some(last) = path.last().copied() else {
-                return Err(ActionResult::ExecutorError { message: "empty_drag_path".to_string() });
+                return Err(ActionResult::ExecutorError {
+                    message: "empty_drag_path".to_string(),
+                });
             };
             let (first_x, first_y) = to_screen(display, first.0, first.1)?;
             input_exec::mouse_move(state, first_x, first_y).await;
-            let button_id = input_exec::mouse_button_id(button_name(*button))
-                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
+            let button_id = input_exec::mouse_button_id(button_name(*button)).map_err(|e| {
+                ActionResult::ExecutorError {
+                    message: e.to_string(),
+                }
+            })?;
             let _ = state.input_sender.send(crate::input::InputEventData {
                 event_type: crate::input::InputEvent::MouseButton,
                 mouse_x: first_x,
@@ -150,7 +165,9 @@ async fn execute_inner(
         Action::KeyChord { combo } => {
             input_exec::key_chord(state, combo)
                 .await
-                .map_err(|e| ActionResult::ExecutorError { message: e.to_string() })?;
+                .map_err(|e| ActionResult::ExecutorError {
+                    message: e.to_string(),
+                })?;
         }
         Action::KeyHold { key, ms } => {
             let (mods, sym) = crate::mcp::keyboard::parse_key_combo(key)
@@ -175,7 +192,9 @@ async fn execute_inner(
         Action::Wait { ms } => tokio::time::sleep(Duration::from_millis(*ms as u64)).await,
         Action::Screenshot | Action::ClipboardRead => {}
         Action::Zoom { .. } => {
-            return Err(ActionResult::UnsupportedAction { message: "zoom".to_string() })
+            return Err(ActionResult::UnsupportedAction {
+                message: "zoom".to_string(),
+            })
         }
         Action::LaunchApp { app, url } => {
             let Some(apps) = state.apps_state() else {
@@ -212,6 +231,13 @@ async fn execute_inner(
                 }
             }
         }
+        Action::CliAppRun {
+            app,
+            args,
+            timeout_ms,
+        } => {
+            return run_cli_app(state, app, args, *timeout_ms).await;
+        }
         Action::Done { .. } | Action::Ask { .. } => {}
         Action::CaptureFullPage => {
             let Some(apps) = state.apps_state() else {
@@ -231,6 +257,148 @@ async fn execute_inner(
         }
     }
     Ok(())
+}
+
+async fn run_cli_app(
+    state: &Arc<SharedState>,
+    app_query: &str,
+    args: &[String],
+    timeout_ms: Option<u64>,
+) -> Result<(), ActionResult> {
+    let Some(apps) = state.apps_state() else {
+        return Err(ActionResult::ExecutorError {
+            message: "cli_app_run_unavailable: apps manager not initialized".to_string(),
+        });
+    };
+    let app = apps
+        .find_app(app_query)
+        .map_err(|message| ActionResult::ExecutorError {
+            message: format!("cli_app_run_app_not_found: {}", message),
+        })?;
+    if app.app_type != AppType::CliApp {
+        return Err(ActionResult::ExecutorError {
+            message: format!("cli_app_run_wrong_type: {} is not a CLI app", app.name),
+        });
+    }
+    let (installed, status, error) = crate::apps::api::cli_install_status(&app);
+    if !installed {
+        return Err(ActionResult::ExecutorError {
+            message: format!(
+                "cli_app_run_not_installed: status={} error={}",
+                status,
+                error.unwrap_or_default()
+            ),
+        });
+    }
+    let binary = app
+        .cli_binary_path
+        .as_deref()
+        .ok_or_else(|| ActionResult::ExecutorError {
+            message: "cli_app_run_missing_binary_path".to_string(),
+        })?;
+    let mut command = tokio::process::Command::new(binary);
+    command.args(args);
+    let mut env_keys = Vec::new();
+    if let Some(env) = app.cli_env_vars.as_ref() {
+        env_keys = env.keys().cloned().collect();
+        env_keys.sort();
+        command.envs(env);
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let child = command.spawn().map_err(|err| ActionResult::ExecutorError {
+        message: format!("cli_app_run_spawn_failed: {}", err),
+    })?;
+    let child_pid = child.id();
+
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(15_000).clamp(100, 300_000));
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout));
+            let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
+            Err(ActionResult::CommandOutput {
+                success: output.status.success(),
+                exit_code: output.status.code(),
+                env_keys,
+                stdout,
+                stderr,
+            })
+        }
+        Ok(Err(err)) => {
+            kill_cli_app_tree(child_pid, binary);
+            Err(ActionResult::ExecutorError {
+                message: format!("cli_app_run_spawn_failed: {}", err),
+            })
+        }
+        Err(_) => {
+            kill_cli_app_tree(child_pid, binary);
+            Err(ActionResult::ExecutorError {
+                message: format!("cli_app_run_timeout: exceeded {}ms", timeout.as_millis()),
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+fn kill_cli_app_tree(pid: Option<u32>, binary: &str) {
+    let current = std::process::id() as i32;
+    if let Some(pid) = pid {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    // CLI apps like agent-browser may double-fork a daemon that escapes the
+    // process group.  Scan /proc for any process whose cmdline matches the
+    // binary and kill it too.
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let p: i32 = match entry.file_name().to_string_lossy().parse() {
+                Ok(p) if p > 1 && p != current => p,
+                _ => continue,
+            };
+            if pid == Some(p as u32) {
+                continue;
+            }
+            let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let cmdline = String::from_utf8_lossy(&cmdline);
+            if cmdline.contains(binary) {
+                unsafe {
+                    let pgid = libc::getpgid(p);
+                    if pgid > 1 {
+                        libc::kill(-pgid, libc::SIGKILL);
+                    }
+                    libc::kill(p, libc::SIGKILL);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_cli_app_tree(_pid: Option<u32>, _binary: &str) {}
+
+fn truncate_output(text: &str) -> String {
+    const MAX_CHARS: usize = 64 * 1024;
+    if text.chars().count() <= MAX_CHARS {
+        return text.to_string();
+    }
+    let mut out = text.chars().take(MAX_CHARS).collect::<String>();
+    out.push_str("\n[truncated by iVNC]\n");
+    out
 }
 
 /// Actions whose coordinates or input must target the live viewport. Returning
@@ -263,11 +431,7 @@ fn mapped_window_count(state: &Arc<SharedState>) -> usize {
         .unwrap()
         .as_ref()
         .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-        .and_then(|v| {
-            v.get("windows")
-                .and_then(|w| w.as_array())
-                .map(|a| a.len())
-        })
+        .and_then(|v| v.get("windows").and_then(|w| w.as_array()).map(|a| a.len()))
         .unwrap_or(0)
 }
 
@@ -373,9 +537,18 @@ mod tests {
     fn action_result_error_variants_serialize() {
         let cases = [
             ActionResult::Ok,
-            ActionResult::OutOfBounds { x: -1, y: 2, w: 1920, h: 1080 },
-            ActionResult::UnsupportedAction { message: "zoom".into() },
-            ActionResult::ExecutorError { message: "destructive_blocked".into() },
+            ActionResult::OutOfBounds {
+                x: -1,
+                y: 2,
+                w: 1920,
+                h: 1080,
+            },
+            ActionResult::UnsupportedAction {
+                message: "zoom".into(),
+            },
+            ActionResult::ExecutorError {
+                message: "destructive_blocked".into(),
+            },
         ];
         for r in cases {
             let v = serde_json::to_value(&r).expect("ActionResult must serialize");
@@ -387,13 +560,22 @@ mod tests {
     fn action_requires_live_viewport_classification() {
         // Mutating actions need the live viewport.
         assert!(action_requires_live_viewport(&Action::MouseClick {
-            x: 0, y: 0, button: MouseButton::Left, click_count: 1, label: None,
+            x: 0,
+            y: 0,
+            button: MouseButton::Left,
+            click_count: 1,
+            label: None,
         }));
         assert!(action_requires_live_viewport(&Action::Scroll {
-            x: None, y: None, dx: 0, dy: -3, label: None,
+            x: None,
+            y: None,
+            dx: 0,
+            dy: -3,
+            label: None,
         }));
         assert!(action_requires_live_viewport(&Action::TypeText {
-            text: "hi".into(), press_enter: false,
+            text: "hi".into(),
+            press_enter: false,
         }));
         // Observation-only / control actions must remain allowed on a read-only frame
         // so the model can escape it.
@@ -401,7 +583,9 @@ mod tests {
         assert!(!action_requires_live_viewport(&Action::CaptureFullPage));
         assert!(!action_requires_live_viewport(&Action::Wait { ms: 100 }));
         assert!(!action_requires_live_viewport(&Action::Done {
-            success: true, reason: String::new(), output: String::new(),
+            success: true,
+            reason: String::new(),
+            output: String::new(),
         }));
     }
 
@@ -414,14 +598,22 @@ mod tests {
             &state,
             &display,
             &Action::MouseClick {
-                x: 100, y: 100, button: MouseButton::Left, click_count: 1, label: None,
+                x: 100,
+                y: 100,
+                button: MouseButton::Left,
+                click_count: 1,
+                label: None,
             },
             &super::super::types::RunOptions::default(),
         )
         .await;
         match result {
             ActionResult::UnsupportedAction { message } => {
-                assert!(message.contains("read_only_frame"), "unexpected: {}", message);
+                assert!(
+                    message.contains("read_only_frame"),
+                    "unexpected: {}",
+                    message
+                );
             }
             other => panic!("expected UnsupportedAction, got {:?}", other),
         }

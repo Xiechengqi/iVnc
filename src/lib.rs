@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod apps;
 pub mod audio;
+pub mod capabilities;
 pub mod clipboard;
 pub mod compositor;
 pub mod config;

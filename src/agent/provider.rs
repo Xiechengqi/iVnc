@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[async_trait]
 #[allow(dead_code)]
 pub trait BrainProvider: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn capabilities(&self) -> ProviderCapabilities;
 
     async fn next_action(

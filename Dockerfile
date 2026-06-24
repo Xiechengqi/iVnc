@@ -48,6 +48,8 @@ RUN IVNC_REFRESH_MIAO=1 \
 
 FROM ubuntu:22.04
 
+ARG AGENT_BROWSER_VERSION=0.29.0
+
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     tzdata \
@@ -72,6 +74,8 @@ RUN apt-get update && \
     && wget -O /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/google-chrome-stable_current_amd64.deb \
     && rm -f /tmp/google-chrome-stable_current_amd64.deb \
+    && curl -fsSL "https://github.com/vercel-labs/agent-browser/releases/download/v${AGENT_BROWSER_VERSION}/agent-browser-linux-x64" -o /usr/local/bin/agent-browser \
+    && chmod +x /usr/local/bin/agent-browser \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 

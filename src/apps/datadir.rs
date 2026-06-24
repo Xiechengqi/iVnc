@@ -7,6 +7,7 @@ pub fn data_dir(app: &ManagedApp) -> PathBuf {
     base.join(match app.app_type {
         AppType::BackgroundApp => "background",
         AppType::DesktopApp => "desktop",
+        AppType::CliApp => "cli",
     })
 }
 

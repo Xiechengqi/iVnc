@@ -2,6 +2,7 @@ import { getLang, setLang, onLangChange } from './lib/i18n.js?v=1';
 
 const API = '/api/apps';
 const CONSOLE_API = '/api/console';
+const CAP_API = '/api/capabilities';
 let editId = null;
 let lastDataHash = '';
 let currentLang = getLang();
@@ -24,11 +25,11 @@ const I18N = {
         navApps: 'Apps',
         navSettings: 'Connection',
         navAgent: 'MCP / Agent',
-        navProviders: 'Provider',
+        navProviders: 'Suppliers',
         navRuns: 'Logs / Trajectories',
         navSchedules: 'Schedules',
         sectionOverviewDesc: 'Current iVnc status and quick checks.',
-        sectionAppsDesc: 'Manage desktop and background applications.',
+        sectionAppsDesc: 'Manage desktop, background, and CLI applications.',
         sectionSettingsDesc: 'Common runtime controls for stream quality.',
         sectionAgentDesc: 'Default parameters for MCP Agent runs.',
         sectionProvidersDesc: 'Provider endpoint, model, and credential settings.',
@@ -65,6 +66,8 @@ const I18N = {
         paramAgentDryRunHelp: 'Generate plans and actions without controlling the desktop. Useful for Provider debugging.',
         paramProviderEndpoint: 'Endpoint',
         paramProviderEndpointHelp: 'Provider API base URL. Leave empty to use the built-in default.',
+        paramProviderName: 'Name',
+        paramProviderType: 'Provider type',
         paramProviderModel: 'Model',
         paramProviderModelHelp: 'Model name to call. It must be supported by the selected Provider.',
         paramProviderApiFormat: 'API format',
@@ -79,8 +82,17 @@ const I18N = {
         enterNewApiKey: 'Enter new API Key',
         agentDefaults: 'Agent Defaults',
         providerConfig: 'Provider Config',
+        providerAdd: 'Add Supplier',
+        providerAddTitle: 'Add Supplier',
+        providerEditTitle: 'Edit Supplier',
+        providerSetDefault: 'Set Default',
+        providerDefaultSet: 'Default supplier updated',
+        providerCreated: 'Provider created',
         saved: 'Saved',
         providerSaved: 'Provider saved',
+        providerDeleted: 'Provider deleted',
+        providerDeleteConfirm: 'Delete this Provider?',
+        newProviderNameRequired: 'Provider name is required',
         testButton: 'Test',
         testRunning: 'Testing…',
         testOk: 'OK',
@@ -101,10 +113,21 @@ const I18N = {
         thStatus: 'Status',
         thData: 'Data',
         thActions: 'Actions',
+        capTools: 'tools',
+        capSkills: 'skills',
+        capDescribeOk: 'describe ok',
+        capDescribeFailed: 'describe failed',
         loading: 'Loading...',
         empty: 'No apps yet. Click "Add App" to create one.',
         desktop: 'Desktop',
         background: 'Background',
+        cli: 'CLI',
+        installed: 'installed',
+        missing: 'missing',
+        not_executable: 'not executable',
+        invalid_path: 'invalid path',
+        not_file: 'not a file',
+        missing_path: 'missing path',
         running: 'running',
         stopped: 'stopped',
         crashed: 'crashed',
@@ -173,6 +196,16 @@ const I18N = {
         logLoadFailed: 'Load failed: ',
         backgroundOption: 'Background App',
         desktopOption: 'Desktop App',
+        cliOption: 'CLI App',
+        skillPaths: 'Skill Paths',
+        skillPathsDefault: '(Optional, one .md/.txt file or directory with SKILL.md per line)',
+        skillPathsPlaceholder: '/root/.config/ivnc/skills/app/SKILL.md',
+        cliBinary: 'Binary Path',
+        cliEnv: 'Execution Environment Variables',
+        cliEnvDefault: '(Optional, added when Agent runs this CLI; one KEY=value per line)',
+        cliBinaryPlaceholder: '/usr/local/bin/agent-browser',
+        cliEnvPlaceholder: 'NO_COLOR=1\nAGENT_BROWSER_SESSION=ivnc-default',
+        missingCliBinary: 'Please enter a binary path',
         accessUrlCopied: 'Access link copied',
         accessUrlCopyFailed: 'Failed to copy access link',
 
@@ -267,6 +300,7 @@ const I18N = {
         runsMetricTokens: 'tokens',
         runsCopyId: 'Copy ID',
         runsCopyPath: 'Copy trajectory path',
+        runsCopyEventPath: 'Copy event path',
         runsNoPath: 'No trajectory saved',
         runsIdCopied: 'Run ID copied',
         runsPathCopied: 'Trajectory path copied',
@@ -283,7 +317,8 @@ const I18N = {
         runDetailDuration: 'Duration',
         runDetailSteps: 'Steps',
         runDetailTokens: 'Tokens (in / out)',
-        runDetailCost: 'Cost',
+        runDetailEvents: 'Events',
+        runDetailBudget: 'Budget',
         runDetailReason: 'Result',
         resultTitle: 'Result',
         resultCopy: 'Copy',
@@ -343,7 +378,6 @@ const I18N = {
         stepLatency: 'latency',
         stepGap: 'gap',
         stepTokens: 'tokens',
-        stepCost: 'cost',
         stepResultOk: 'ok',
         stepCopyJson: 'Copy JSON',
         stepJsonCopied: 'Step JSON copied',
@@ -358,11 +392,11 @@ const I18N = {
         navApps: '应用',
         navSettings: '连接质量',
         navAgent: 'MCP / Agent',
-        navProviders: 'Provider',
+        navProviders: '供应商',
         navRuns: '日志 / 轨迹',
         navSchedules: '定时任务',
         sectionOverviewDesc: '当前 iVnc 运行状态和快捷入口。',
-        sectionAppsDesc: '管理桌面应用和后台应用。',
+        sectionAppsDesc: '管理桌面、后台和 CLI 应用。',
         sectionSettingsDesc: '调整常用的实时串流质量参数。',
         sectionAgentDesc: '配置 MCP Agent run 的默认参数。',
         sectionProvidersDesc: '配置 Provider 的 endpoint、模型和凭据。',
@@ -399,6 +433,8 @@ const I18N = {
         paramAgentDryRunHelp: '只生成计划和动作，不真正控制桌面，适合调试 Provider。',
         paramProviderEndpoint: 'Endpoint',
         paramProviderEndpointHelp: 'Provider 的 API 基础地址，留空使用内置默认值。',
+        paramProviderName: '名称',
+        paramProviderType: 'Provider 类型',
         paramProviderModel: 'Model',
         paramProviderModelHelp: '调用的模型名称，需与所选 Provider 支持的模型一致。',
         paramProviderApiFormat: 'API 格式',
@@ -413,8 +449,17 @@ const I18N = {
         enterNewApiKey: '输入新的 API Key',
         agentDefaults: 'Agent 默认参数',
         providerConfig: 'Provider 配置',
+        providerAdd: '添加供应商',
+        providerAddTitle: '添加供应商',
+        providerEditTitle: '编辑供应商',
+        providerSetDefault: '设为默认',
+        providerDefaultSet: '默认供应商已更新',
+        providerCreated: 'Provider 已创建',
         saved: '已保存',
         providerSaved: 'Provider 已保存',
+        providerDeleted: 'Provider 已删除',
+        providerDeleteConfirm: '确认删除这个 Provider？',
+        newProviderNameRequired: 'Provider 名称不能为空',
         testButton: '测试',
         testRunning: '测试中…',
         testOk: '通过',
@@ -435,10 +480,21 @@ const I18N = {
         thStatus: '状态',
         thData: '数据',
         thActions: '操作',
+        capTools: '工具',
+        capSkills: '技能',
+        capDescribeOk: 'describe 正常',
+        capDescribeFailed: 'describe 失败',
         loading: '加载中...',
         empty: '暂无应用，点击"添加应用"创建。',
         desktop: '桌面',
         background: '后台',
+        cli: 'CLI',
+        installed: '已安装',
+        missing: '缺失',
+        not_executable: '不可执行',
+        invalid_path: '路径无效',
+        not_file: '不是文件',
+        missing_path: '缺少路径',
         running: '运行中',
         stopped: '已停止',
         crashed: '已崩溃',
@@ -507,6 +563,16 @@ const I18N = {
         logLoadFailed: '加载失败: ',
         backgroundOption: '后台应用',
         desktopOption: '桌面应用',
+        cliOption: 'CLI 应用',
+        skillPaths: 'Skill 路径',
+        skillPathsDefault: '（可选，每行一个 .md/.txt 文件或包含 SKILL.md 的目录）',
+        skillPathsPlaceholder: '/root/.config/ivnc/skills/app/SKILL.md',
+        cliBinary: 'Binary Path',
+        cliEnv: '执行环境变量',
+        cliEnvDefault: '（可选，agent 调用该 CLI 时附加，每行 KEY=value）',
+        cliBinaryPlaceholder: '/usr/local/bin/agent-browser',
+        cliEnvPlaceholder: 'NO_COLOR=1\nAGENT_BROWSER_SESSION=ivnc-default',
+        missingCliBinary: '请输入 binary 路径',
         accessUrlCopied: '访问链接已复制',
         accessUrlCopyFailed: '复制访问链接失败',
 
@@ -601,6 +667,7 @@ const I18N = {
         runsMetricTokens: 'tokens',
         runsCopyId: '复制 ID',
         runsCopyPath: '复制轨迹路径',
+        runsCopyEventPath: '复制事件路径',
         runsNoPath: '未保存轨迹',
         runsIdCopied: 'Run ID 已复制',
         runsPathCopied: '轨迹路径已复制',
@@ -617,7 +684,8 @@ const I18N = {
         runDetailDuration: '总时长',
         runDetailSteps: '步数',
         runDetailTokens: 'Tokens（入 / 出）',
-        runDetailCost: '成本',
+        runDetailEvents: '事件数',
+        runDetailBudget: '预算',
         runDetailReason: '结束原因',
         resultTitle: '结果',
         resultCopy: '复制',
@@ -677,7 +745,6 @@ const I18N = {
         stepLatency: '延迟',
         stepGap: '间隔',
         stepTokens: 'tokens',
-        stepCost: '成本',
         stepResultOk: '成功',
         stepCopyJson: '复制 JSON',
         stepJsonCopied: '步骤 JSON 已复制',
@@ -706,8 +773,16 @@ function getHash(data) {
         size: a.data_size_human,
         url: a.url,
         exec: a.exec_command,
-        launch: a.launch_command
-    })));
+        launch: a.launch_command,
+        cli: a.cli_binary_path,
+        install: a.install_status,
+        skills: a.skill_paths
+    })).concat((data.capabilities?.apps || []).map(a => ({
+        capId: a.id,
+        tools: a.tool_count,
+        skills: a.skill_count,
+        diagnostics: a.diagnostics?.length || 0
+    }))));
 }
 
 function setTextById(id, value) {
@@ -759,13 +834,15 @@ function applyTranslations() {
     setText('agent-dirty', 'dirtyIndicator');
 
     setText('providers-title', 'navProviders');
-    setText('provider-editor-title', 'providerConfig');
-    setText('provider-empty-text', 'providerEmptyText');
-    setText('provider-default-badge', 'providerDefaultBadge');
-    setText('provider-save', 'save');
-    setText('provider-reset', 'reset');
-    setText('provider-test', 'testButton');
-    setText('provider-dirty', 'dirtyIndicator');
+    setText('provider-add', 'providerAdd');
+    setText('provider-modal-title', 'providerAddTitle');
+    setText('provider-modal-save', 'save');
+    setText('provider-modal-cancel', 'cancel');
+    setText('th-provider-name', 'thName');
+    setText('th-provider-type', 'thType');
+    setText('th-provider-config', 'thConfig');
+    setText('th-provider-status', 'thStatus');
+    setText('th-provider-actions', 'thActions');
     setText('api-key-replace', 'apiKeyReplace');
     setText('api-key-clear', 'apiKeyClear');
     setText('api-key-cancel', 'apiKeyCancel');
@@ -810,6 +887,8 @@ function applyTranslations() {
         ['help-agent-dry-run', 'paramAgentDryRunHelp'],
         ['label-provider-endpoint', 'paramProviderEndpoint'],
         ['help-provider-endpoint', 'paramProviderEndpointHelp'],
+        ['label-provider-display-name', 'paramProviderName'],
+        ['label-provider-type', 'paramProviderType'],
         ['label-provider-model', 'paramProviderModel'],
         ['help-provider-model', 'paramProviderModelHelp'],
         ['label-provider-api-format', 'paramProviderApiFormat'],
@@ -846,9 +925,13 @@ function applyTranslations() {
     setText('label-app-type', 'appType');
     const bgOpt = document.querySelector('#f-app-type option[value="background"]');
     const dtOpt = document.querySelector('#f-app-type option[value="desktop"]');
+    const cliOpt = document.querySelector('#f-app-type option[value="cli"]');
     if (bgOpt) bgOpt.textContent = t('backgroundOption');
     if (dtOpt) dtOpt.textContent = t('desktopOption');
+    if (cliOpt) cliOpt.textContent = t('cliOption');
     setText('label-autostart', 'autostart');
+    setText('label-skill-paths', 'skillPaths');
+    setText('label-skill-paths-default', 'skillPathsDefault');
     setText('label-launch-command', 'launchCommand');
     setText('label-launch-command-help', 'launchCommandHelp');
     setText('label-launch-cwd', 'launchCwd');
@@ -863,6 +946,9 @@ function applyTranslations() {
     setText('label-exec-help', 'execHelp');
     setText('label-env', 'env');
     setText('label-env-default', 'envDefault');
+    setText('label-cli-binary', 'cliBinary');
+    setText('label-cli-env', 'cliEnv');
+    setText('label-cli-env-default', 'cliEnvDefault');
     setText('modal-cancel', 'cancel');
     setText('log-close-btn', 'close');
     document.getElementById('modal-close')?.setAttribute('aria-label', t('close'));
@@ -874,6 +960,9 @@ function applyTranslations() {
     setPlaceholderById('f-url', t('accessUrlPlaceholder'));
     setPlaceholderById('f-launch-env', t('launchEnvPlaceholder'));
     setPlaceholderById('f-env', t('envPlaceholder'));
+    setPlaceholderById('f-skill-paths', t('skillPathsPlaceholder'));
+    setPlaceholderById('f-cli-binary', t('cliBinaryPlaceholder'));
+    setPlaceholderById('f-cli-env', t('cliEnvPlaceholder'));
 
     if (!editId) {
         setText('modal-title', 'addModal');
@@ -946,8 +1035,14 @@ async function loadSection(section = activeSection) {
 
 async function load() {
     try {
-        const r = await fetch(API);
-        const d = await r.json();
+        const [appsResp, capResp] = await Promise.all([
+            fetch(API),
+            fetch(CAP_API).catch(() => null)
+        ]);
+        const d = await appsResp.json();
+        const caps = capResp && capResp.ok ? await capResp.json() : null;
+        d.capabilities = caps;
+        const capByApp = new Map((caps?.apps || []).map(app => [app.id, app]));
 
         const currentHash = getHash(d);
         if (currentHash === lastDataHash) return;
@@ -962,12 +1057,21 @@ async function load() {
         const fragment = document.createDocumentFragment();
         d.apps.forEach(a => {
             const tr = document.createElement('tr');
-            const type = a.app_type === 'desktop' ? t('desktop') : t('background');
+            const cap = capByApp.get(a.id);
+            const type = a.app_type === 'desktop' ? t('desktop') : (a.app_type === 'cli' ? t('cli') : t('background'));
+            const capLines = cap ? capabilitySummaryLines(cap) : [];
             const configStr = a.app_type === 'desktop'
                 ? (a.exec_command || '')
-                : [a.url ? `${t('visit')}: ${a.url}` : '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
+                : a.app_type === 'cli'
+                    ? [a.cli_binary_path || '', ...capLines, ...(a.skill_paths || []).map(p => `skill: ${p}`)].filter(Boolean).join('\n')
+                    : [a.url ? `${t('visit')}: ${a.url}` : '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
             const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
-            const statusText = t(a.status) || a.status;
+            const statusKey = a.app_type === 'cli' ? (a.install_status || 'missing') : a.status;
+            const statusText = t(statusKey) || statusKey;
+            const statusClass = a.app_type === 'cli'
+                ? (a.installed ? 'running' : 'stopped')
+                : a.status;
+            const dataText = a.app_type === 'cli' ? '-' : a.data_size_human;
 
             tr.innerHTML = `
                 <td><strong>${esc(a.name)}</strong></td>
@@ -975,27 +1079,29 @@ async function load() {
                 <td title="${esc(configStr)}">${esc(configShort)}</td>
                 <td>
                     <div class="status-wrapper">
-                        <span class="status status-${a.status}"></span>
-                        <span>${statusText}</span>
+                        <span class="status status-${statusClass}"></span>
+                        <span title="${esc(a.install_error || '')}">${esc(statusText)}</span>
                     </div>
                 </td>
-                <td class="data-size">${a.data_size_human}</td>
+                <td class="data-size">${esc(dataText)}</td>
                 <td class="actions"></td>
             `;
 
             const actionsCell = tr.querySelector('.actions');
 
-            if (a.status === 'running') {
-                const stopBtn = createBtn(t('stop'), 'btn-stop btn-sm', () => act(a.id, 'stop'));
-                const restartBtn = createBtn(t('restart'), 'btn-restart btn-sm', () => act(a.id, 'restart'));
-                actionsCell.append(stopBtn, restartBtn);
-            } else {
-                const startBtn = createBtn(t('start'), 'btn-start btn-sm', () => act(a.id, 'start'));
-                actionsCell.append(startBtn);
+            if (a.app_type !== 'cli') {
+                if (a.status === 'running') {
+                    const stopBtn = createBtn(t('stop'), 'btn-stop btn-sm', () => act(a.id, 'stop'));
+                    const restartBtn = createBtn(t('restart'), 'btn-restart btn-sm', () => act(a.id, 'restart'));
+                    actionsCell.append(stopBtn, restartBtn);
+                } else {
+                    const startBtn = createBtn(t('start'), 'btn-start btn-sm', () => act(a.id, 'start'));
+                    actionsCell.append(startBtn);
+                }
             }
 
             const editBtn = createBtn(t('edit'), 'btn-edit btn-sm', () => showEdit(a.id));
-            if (a.status === 'running') {
+            if (a.app_type !== 'cli' && a.status === 'running') {
                 editBtn.disabled = true;
                 editBtn.title = t('editDisabled');
             }
@@ -1008,7 +1114,10 @@ async function load() {
             if (a.app_type !== 'desktop' && a.url) {
                 actionsCell.append(createBtn(t('visit'), 'btn-visit btn-sm', () => copyAccessUrl(a.url)));
             }
-            actionsCell.append(logBtn, clearBtn, delBtn);
+            if (a.app_type !== 'cli') {
+                actionsCell.append(logBtn, clearBtn);
+            }
+            actionsCell.append(delBtn);
             fragment.appendChild(tr);
         });
 
@@ -1017,6 +1126,18 @@ async function load() {
     } catch (e) {
         console.error('Load failed:', e);
     }
+}
+
+function capabilitySummaryLines(cap) {
+    const lines = [];
+    if (cap.tool_count) lines.push(`${t('capTools')}: ${cap.tool_count}`);
+    if (cap.skill_count) lines.push(`${t('capSkills')}: ${cap.skill_count}`);
+    if ((cap.capabilities || []).includes('cli_describe')) {
+        lines.push(t('capDescribeOk'));
+    } else if ((cap.diagnostics || []).some(d => String(d.code || '').startsWith('describe_'))) {
+        lines.push(t('capDescribeFailed'));
+    }
+    return lines;
 }
 
 // ---------- Overview ----------
@@ -1131,13 +1252,14 @@ function renderOverviewProviders(providers) {
         const row = document.createElement('div');
         row.className = 'list-row';
         const model = p.settings?.model || p.default_model || '';
+        const displayName = p.display_name || p.settings?.name || p.name;
         const isDefault = agentDefaultProvider && p.name === agentDefaultProvider;
         const badges = [];
         if (isDefault) badges.push(`<span class="badge-default">${esc(t('providerDefaultBadge'))}</span>`);
         badges.push(p.configured
             ? `<span class="badge-ok">${esc(t('configured'))}</span>`
             : `<span class="badge-warn">${esc(t('missingConfig'))}</span>`);
-        row.innerHTML = `<div><strong>${esc(p.name)}</strong><small>${esc(model)}</small></div><div class="provider-row-tags">${badges.join('')}</div>`;
+        row.innerHTML = `<div><strong>${esc(displayName)}</strong><small>${esc(model)}</small></div><div class="provider-row-tags">${badges.join('')}</div>`;
         box.appendChild(row);
     });
 }
@@ -1275,14 +1397,6 @@ function formatOffset(ms) {
     return `+${m}m ${pad2(r)}s`;
 }
 
-function formatCostMicros(micros) {
-    if (micros == null) return '—';
-    const usd = micros / 1e6;
-    if (usd === 0) return '$0';
-    if (usd < 0.01) return `$${usd.toFixed(4)}`;
-    return `$${usd.toFixed(2)}`;
-}
-
 // ---------- Settings ----------
 
 async function loadSettings() {
@@ -1332,7 +1446,7 @@ async function loadAgentConfig() {
         agentDefaultProvider = cfg.default_provider || null;
         const select = document.getElementById('agent-provider');
         if (select) {
-            select.innerHTML = providersCache.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+            select.innerHTML = providersCache.map(p => `<option value="${esc(p.name)}">${esc(p.display_name || p.name)}</option>`).join('');
             select.value = cfg.default_provider || (providersCache[0]?.name || 'local');
         }
         const opt = cfg.options || {};
@@ -1392,95 +1506,85 @@ async function loadProviders() {
         providersCache = d.providers || [];
         agentDefaultProvider = cfg.default_provider || agentDefaultProvider;
         renderProviders();
-        const selectedName = document.getElementById('provider-name')?.value;
-        if (selectedName && providersCache.find(p => p.name === selectedName)) {
-            selectProvider(selectedName);
-        } else if (providersCache.length) {
-            selectProvider(providersCache[0].name);
-        } else {
-            showProviderEmpty();
-        }
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
 }
 
 function renderProviders() {
-    const list = document.getElementById('provider-list');
-    if (!list) return;
-    const selected = document.getElementById('provider-name')?.value;
-    list.innerHTML = '';
-    const countEl = document.getElementById('provider-count');
-    if (countEl) countEl.textContent = String(providersCache.length);
+    const tbody = document.getElementById('provider-list');
+    if (!tbody) return;
+    if (!providersCache.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="empty">${esc(t('providerNoneConfigured'))}</td></tr>`;
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
     providersCache.forEach(p => {
-        const row = document.createElement('button');
-        row.type = 'button';
-        row.className = 'list-row provider-row' + (p.name === selected ? ' active' : '');
+        const tr = document.createElement('tr');
+        const displayName = p.display_name || p.settings?.name || p.name;
+        const providerType = p.provider_type || p.settings?.provider_type || 'openai';
         const model = p.settings?.model || p.default_model || '';
+        const endpoint = p.settings?.endpoint || p.default_endpoint || '';
+        const apiFormat = providerType === 'openai'
+            ? ((p.settings?.api_format === 'responses') ? 'Responses' : 'Chat Completions')
+            : '';
+        const configLines = [endpoint, model ? `model: ${model}` : '', apiFormat].filter(Boolean);
+        const configText = configLines.join('\n');
+        const configShort = configText.length > 64 ? configText.slice(0, 64) + '...' : configText;
         const isDefault = agentDefaultProvider && p.name === agentDefaultProvider;
-        const badges = [];
-        if (isDefault) badges.push(`<span class="badge-default">${esc(t('providerDefaultBadge'))}</span>`);
-        badges.push(p.configured
-            ? `<span class="badge-ok">${esc(t('configured'))}</span>`
-            : `<span class="badge-warn">${esc(t('missingConfig'))}</span>`);
-        row.innerHTML = `
-            <div class="provider-row-main">
-                <strong>${esc(p.name)}</strong>
-                <small>${esc(model)}</small>
-            </div>
-            <div class="provider-row-tags">${badges.join('')}</div>`;
-        row.addEventListener('click', () => selectProvider(p.name));
-        list.appendChild(row);
+        const statusClass = p.configured ? 'running' : 'stopped';
+        const statusText = p.configured ? t('configured') : t('missingConfig');
+        tr.innerHTML = `
+            <td><strong>${esc(displayName)}</strong><small class="provider-id">${esc(p.name)}</small></td>
+            <td><span class="badge">${esc(providerTypeLabel(providerType))}</span></td>
+            <td title="${esc(configText)}">${esc(configShort)}</td>
+            <td>
+                <div class="status-wrapper">
+                    <span class="status status-${statusClass}"></span>
+                    <span>${esc(statusText)}</span>
+                    ${isDefault ? `<span class="badge-default">${esc(t('providerDefaultBadge'))}</span>` : ''}
+                </div>
+            </td>
+            <td class="actions"></td>`;
+
+        const actionsCell = tr.querySelector('.actions');
+        actionsCell.append(
+            createBtn(t('testButton'), 'btn-log btn-sm', () => testProvider(p.name)),
+        );
+        if (!isDefault) {
+            actionsCell.append(createBtn(t('providerSetDefault'), 'btn-start btn-sm', () => setDefaultProvider(p.name)));
+        }
+        actionsCell.append(
+            createBtn(t('edit'), 'btn-edit btn-sm', () => openProviderModal(p.name)),
+            createBtn(t('delete'), 'btn-delete btn-sm', () => deleteProvider(p.name)),
+        );
+        fragment.appendChild(tr);
     });
+
+    tbody.innerHTML = '';
+    tbody.appendChild(fragment);
 }
 
-function showProviderEmpty() {
-    const empty = document.getElementById('provider-empty');
-    const editor = document.getElementById('provider-editor');
-    if (empty) empty.hidden = false;
-    if (editor) editor.hidden = true;
+function providerTypeLabel(providerType) {
+    return providerType === 'anthropic' ? 'Anthropic' : 'OpenAI compatible';
 }
 
-function selectProvider(name) {
-    const p = providersCache.find(item => item.name === name);
-    if (!p) return;
-    const empty = document.getElementById('provider-empty');
-    const editor = document.getElementById('provider-editor');
-    if (empty) empty.hidden = true;
-    if (editor) editor.hidden = false;
+function providerById(id) {
+    return providersCache.find(p => p.name === id) || null;
+}
 
-    const endpoint = p.settings?.endpoint || '';
-    const model = p.settings?.model || '';
-    const apiFormat = p.settings?.api_format || '';
-    const coord = p.settings?.coord_space || '';
-
-    document.getElementById('provider-name').value = p.name;
-    document.getElementById('provider-endpoint').value = endpoint;
-    document.getElementById('provider-model').value = model;
-    document.getElementById('provider-api-format').value = apiFormat;
-    document.getElementById('provider-api-key').value = '';
-    document.getElementById('provider-coord-space').value = coord;
-    document.getElementById('provider-clear-key').value = '';
-
-    setTextById('provider-endpoint-hint', p.default_endpoint ? t('providerEndpointHintDefault')(p.default_endpoint) : '');
-    setTextById('provider-model-hint', p.default_model ? t('providerModelHintDefault')(p.default_model) : '');
-
-    const badge = document.getElementById('provider-default-badge');
-    if (badge) badge.hidden = !(agentDefaultProvider && p.name === agentDefaultProvider);
-
-    providerOriginalSettings = {
-        name: p.name,
-        endpoint,
-        model,
-        apiFormat,
-        coord,
-        keyConfigured: !!p.settings?.api_key_configured,
+function providerPayloadFromModal() {
+    return {
+        name: document.getElementById('provider-display-name').value.trim(),
+        provider_type: document.getElementById('provider-type').value,
+        endpoint: document.getElementById('provider-endpoint').value.trim(),
+        model: document.getElementById('provider-model').value.trim(),
+        api_format: document.getElementById('provider-api-format').value,
+        api_key: document.getElementById('provider-api-key').value.trim(),
+        clear_api_key: document.getElementById('provider-clear-key').value === 'true',
+        coord_space: document.getElementById('provider-coord-space').value,
     };
-
-    setApiKeyMode(providerOriginalSettings.keyConfigured ? 'stored' : 'input');
-    renderProviders();
-    snapshotDirtyGroup('provider');
-    markDirty('provider', false);
 }
 
 function setApiKeyMode(mode) {
@@ -1530,99 +1634,133 @@ function refreshApiKeyPlaceholder() {
     }
 }
 
-async function saveProvider() {
-    const name = document.getElementById('provider-name').value;
-    if (!name) return;
-    const body = {
-        endpoint: document.getElementById('provider-endpoint').value.trim(),
-        model: document.getElementById('provider-model').value.trim(),
-        api_format: document.getElementById('provider-api-format').value,
-        api_key: document.getElementById('provider-api-key').value.trim(),
-        clear_api_key: document.getElementById('provider-clear-key').value === 'true',
-        coord_space: document.getElementById('provider-coord-space').value
-    };
-    await putJson(`${CONSOLE_API}/providers/${encodeURIComponent(name)}`, body);
-    toast(t('providerSaved'), 'ok');
-    document.getElementById('provider-name').value = name;
-    await loadProviders();
-}
-
-function resetProvider() {
-    if (!providerOriginalSettings) return;
-    selectProvider(providerOriginalSettings.name);
-}
-
-async function testProvider() {
-    const name = document.getElementById('provider-name').value;
-    if (!name) return;
-    const btn = document.getElementById('provider-test');
-    const status = document.getElementById('provider-test-status');
-    if (status) {
-        status.textContent = t('testRunning');
-        status.className = 'provider-test-status running';
-    }
-    if (btn) { btn.disabled = true; }
-    const body = {
-        endpoint: document.getElementById('provider-endpoint').value.trim(),
-        model: document.getElementById('provider-model').value.trim(),
-        api_format: document.getElementById('provider-api-format').value,
-        api_key: document.getElementById('provider-api-key').value.trim(),
-        clear_api_key: document.getElementById('provider-clear-key').value === 'true',
-        coord_space: document.getElementById('provider-coord-space').value
-    };
-    try {
-        const r = await fetch(`${CONSOLE_API}/providers/${encodeURIComponent(name)}/test`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-        const d = await parseJsonResponse(r);
-        if (!r.ok) {
-            const msg = d.error || r.statusText;
-            if (status) {
-                status.textContent = `${t('testFailed')} ${msg}`;
-                status.className = 'provider-test-status err';
-            }
-            toast(`${t('testFailed')} ${msg}`, 'err');
-            return;
-        }
-        if (d.skipped) {
-            if (status) {
-                status.textContent = t('testSkipped');
-                status.className = 'provider-test-status';
-            }
-            toast(t('testSkipped'), 'ok');
-            return;
-        }
-        if (d.ok) {
-            const parts = [`${t('testOk')} ${d.latency_ms}ms`];
-            if (d.preview) parts.push(`"${d.preview}"`);
-            const text = parts.join(' · ');
-            if (status) {
-                status.textContent = text;
-                status.className = 'provider-test-status ok';
-                status.title = d.preview || '';
-            }
-            toast(text, 'ok');
+function updateProviderTypeVisibility() {
+    const type = document.getElementById('provider-type')?.value || 'openai';
+    document.querySelectorAll('.provider-openai-only').forEach(el => {
+        el.style.display = type === 'openai' ? '' : 'none';
+    });
+    const endpoint = document.getElementById('provider-endpoint');
+    const model = document.getElementById('provider-model');
+    if (!providerOriginalSettings?.name) {
+        if (type === 'anthropic') {
+            if (!endpoint.value || endpoint.value === 'https://api.openai.com/v1') endpoint.value = 'https://api.anthropic.com/v1';
+            if (!model.value || model.value === 'gpt-4o-mini') model.value = 'claude-haiku-4-5';
         } else {
-            const sc = d.status_code ? `HTTP ${d.status_code}` : '';
-            const msg = [sc, d.error].filter(Boolean).join(' · ');
-            if (status) {
-                status.textContent = `${t('testFailed')} ${msg}`;
-                status.className = 'provider-test-status err';
-                status.title = d.error || '';
-            }
-            toast(`${t('testFailed')} ${msg}`, 'err');
+            if (!endpoint.value || endpoint.value === 'https://api.anthropic.com/v1') endpoint.value = 'https://api.openai.com/v1';
+            if (!model.value || model.value === 'claude-haiku-4-5') model.value = 'gpt-4o-mini';
         }
-    } catch (e) {
-        if (status) {
-            status.textContent = `${t('testFailed')} ${e.message || e}`;
-            status.className = 'provider-test-status err';
-        }
-        toast(`${t('testFailed')} ${e.message || e}`, 'err');
-    } finally {
-        if (btn) { btn.disabled = false; }
     }
+}
+
+function openProviderModal(id = null) {
+    const modal = document.getElementById('provider-modal');
+    if (!modal) return;
+    const p = id ? providerById(id) : null;
+    const providerType = p?.provider_type || p?.settings?.provider_type || 'openai';
+    const displayName = p?.display_name || p?.settings?.name || '';
+    const endpoint = p?.settings?.endpoint || p?.default_endpoint || (providerType === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1');
+    const model = p?.settings?.model || p?.default_model || (providerType === 'anthropic' ? 'claude-haiku-4-5' : 'gpt-4o-mini');
+
+    providerOriginalSettings = {
+        name: p?.name || '',
+        keyConfigured: !!p?.settings?.api_key_configured,
+    };
+
+    document.getElementById('provider-modal-title').textContent = p ? t('providerEditTitle') : t('providerAddTitle');
+    document.getElementById('provider-name').value = p?.name || '';
+    document.getElementById('provider-type').value = providerType;
+    document.getElementById('provider-display-name').value = displayName;
+    document.getElementById('provider-endpoint').value = endpoint;
+    document.getElementById('provider-model').value = model;
+    document.getElementById('provider-api-format').value = p?.settings?.api_format || '';
+    document.getElementById('provider-coord-space').value = p?.settings?.coord_space || '';
+    document.getElementById('provider-api-key').value = '';
+    document.getElementById('provider-clear-key').value = '';
+    setTextById('provider-endpoint-hint', p?.default_endpoint ? t('providerEndpointHintDefault')(p.default_endpoint) : '');
+    setTextById('provider-model-hint', p?.default_model ? t('providerModelHintDefault')(p.default_model) : '');
+    setApiKeyMode(providerOriginalSettings.keyConfigured ? 'stored' : 'input');
+    updateProviderTypeVisibility();
+    snapshotDirtyGroup('provider');
+    markDirty('provider', false);
+    modal.classList.add('show');
+    setTimeout(() => document.getElementById(p ? 'provider-display-name' : 'provider-type')?.focus(), 0);
+}
+
+function closeProviderModal() {
+    providerOriginalSettings = null;
+    document.getElementById('provider-modal')?.classList.remove('show');
+    markDirty('provider', false);
+}
+
+async function saveProviderModal() {
+    const id = document.getElementById('provider-name').value;
+    const body = providerPayloadFromModal();
+    if (!body.name) {
+        toast(t('newProviderNameRequired'), 'err');
+        return;
+    }
+    let saved;
+    if (id) {
+        saved = await putJson(`${CONSOLE_API}/providers/${encodeURIComponent(id)}`, body);
+        toast(t('providerSaved'), 'ok');
+    } else {
+        saved = await postJson(`${CONSOLE_API}/providers`, body);
+        toast(t('providerCreated'), 'ok');
+    }
+    closeProviderModal();
+    await loadProviders();
+    const savedId = saved.id || id;
+    if (!agentDefaultProvider && savedId) await setDefaultProvider(savedId, { silent: true });
+}
+
+async function testProvider(id) {
+    const p = providerById(id);
+    if (!p) return;
+    toast(t('testRunning'), 'ok');
+    const body = {
+        name: p.display_name || p.settings?.name || p.name,
+        provider_type: p.provider_type || p.settings?.provider_type || 'openai',
+        endpoint: p.settings?.endpoint || p.default_endpoint || '',
+        model: p.settings?.model || p.default_model || '',
+        api_format: p.settings?.api_format || '',
+        coord_space: p.settings?.coord_space || '',
+    };
+    const r = await fetch(`${CONSOLE_API}/providers/${encodeURIComponent(id)}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const d = await parseJsonResponse(r);
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    if (d.ok) {
+        const parts = [`${t('testOk')} ${d.latency_ms}ms`];
+        if (d.preview) parts.push(`"${d.preview}"`);
+        toast(parts.join(' · '), 'ok');
+    } else {
+        const sc = d.status_code ? `HTTP ${d.status_code}` : '';
+        const msg = [sc, d.error].filter(Boolean).join(' · ');
+        toast(`${t('testFailed')} ${msg}`, 'err');
+    }
+}
+
+async function deleteProvider(id) {
+    if (!id || !confirm(t('providerDeleteConfirm'))) return;
+    const r = await fetch(`${CONSOLE_API}/providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const d = await parseJsonResponse(r);
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    toast(t('providerDeleted'), 'ok');
+    await loadProviders();
+    await loadAgentConfig();
+}
+
+async function setDefaultProvider(id, opts = {}) {
+    const cfg = await fetchJson(`${CONSOLE_API}/agent-config`);
+    cfg.default_provider = id;
+    await putJson(`${CONSOLE_API}/agent-config`, cfg);
+    agentDefaultProvider = id;
+    if (!opts.silent) toast(t('providerDefaultSet'), 'ok');
+    await loadProviders();
+    await loadAgentConfig();
 }
 
 // ---------- Runs ----------
@@ -1649,7 +1787,7 @@ async function loadNewTaskPanel() {
         ]);
         const list = providers.providers || [];
         const previous = select.value;
-        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.display_name || p.name)}</option>`).join('');
         const preferred = previous && list.find(p => p.name === previous)
             ? previous
             : (agentCfg.default_provider || (list[0]?.name || ''));
@@ -1814,6 +1952,7 @@ function renderRunCard(run, parent) {
     const tokenIn = run.tokens_in ?? 0;
     const tokenOut = run.tokens_out ?? 0;
     const path = run.trajectory_path || '';
+    const eventPath = run.event_path || '';
     const startedMs = run.started_at_ms || 0;
     const startedShort = startedMs ? formatDateTimeShort(startedMs) : '';
     const startedFull = startedMs ? formatDateTime(startedMs) : '';
@@ -1855,6 +1994,9 @@ function renderRunCard(run, parent) {
             ${path
                 ? `<button type="button" class="btn-link" data-action="copy-path" title="${esc(path)}">${esc(t('runsCopyPath'))}</button>`
                 : `<span class="muted-hint">${esc(t('runsNoPath'))}</span>`}
+            ${eventPath
+                ? `<button type="button" class="btn-link" data-action="copy-event-path" title="${esc(eventPath)}">${esc(t('runsCopyEventPath'))}</button>`
+                : ''}
         </div>`;
 
     card.querySelector('[data-action="copy-id"]')?.addEventListener('click', async (e) => {
@@ -1869,7 +2011,18 @@ function renderRunCard(run, parent) {
             catch { toast(t('copyFailed'), 'err'); }
         });
     }
-    card.addEventListener('click', () => openRunDetail(run));
+    if (eventPath) {
+        card.querySelector('[data-action="copy-event-path"]')?.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try { await copyText(eventPath); toast(t('runsPathCopied'), 'ok'); }
+            catch { toast(t('copyFailed'), 'err'); }
+        });
+    }
+    card.addEventListener('click', () => {
+        const sel = window.getSelection();
+        if (sel && sel.toString().length > 0) return;
+        openRunDetail(run);
+    });
     card.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openRunDetail(run); }
     });
@@ -1880,6 +2033,7 @@ function renderRunCard(run, parent) {
 
 let runDetailRun = null;
 let runDetailSteps = [];
+let runDetailEvents = [];
 let runDetailActionFilter = 'all';
 let runDetailTimer = null;
 
@@ -1945,6 +2099,7 @@ async function openRunDetail(run) {
     stopRunDetailPolling();
     runDetailRun = run;
     runDetailSteps = [];
+    runDetailEvents = [];
     runDetailActionFilter = 'all';
     const overlay = document.getElementById('run-detail-overlay');
     if (!overlay) return;
@@ -1958,6 +2113,7 @@ async function openRunDetail(run) {
     try {
         const d = await fetchJson(`${CONSOLE_API}/agent-runs/${encodeURIComponent(run.run_id)}/steps`);
         runDetailSteps = d.steps || [];
+        runDetailEvents = d.events || [];
         if (d.report) {
             runDetailRun = d.report;
             renderRunDetailHeader(d.report);
@@ -1982,6 +2138,7 @@ function closeRunDetail() {
     document.getElementById('run-detail-overlay')?.classList.remove('show');
     runDetailRun = null;
     runDetailSteps = [];
+    runDetailEvents = [];
 }
 
 function startRunDetailPolling() {
@@ -2017,6 +2174,7 @@ async function pollRunDetail() {
     const prevTop = stepsEl ? stepsEl.scrollTop : 0;
 
     runDetailSteps = d.steps || [];
+    runDetailEvents = d.events || [];
     if (d.report) runDetailRun = d.report;
     renderRunDetailHeader(runDetailRun);
     renderRunDetailResult(runDetailRun);
@@ -2120,18 +2278,17 @@ function renderRunDetailSummary(run) {
     const startedMs = run.started_at_ms || 0;
     const running = run.finish_reason && run.finish_reason.kind === 'running';
     const finishedMs = startedMs ? startedMs + (run.wall_ms || 0) : 0;
-    let costMicros = null;
-    if (runDetailSteps.length && runDetailSteps.some(s => s.provider_usage && s.provider_usage.cost_usd_micros != null)) {
-        costMicros = runDetailSteps.reduce((a, s) => a + ((s.provider_usage && s.provider_usage.cost_usd_micros) || 0), 0);
-    }
     const items = [
         [t('runDetailStarted'), startedMs ? formatDateTime(startedMs) : '—'],
         [t('runDetailFinished'), running || !finishedMs ? '—' : formatDateTime(finishedMs)],
         [t('runDetailDuration'), formatDuration(run.wall_ms)],
         [t('runDetailSteps'), formatNumber(run.steps_taken ?? runDetailSteps.length)],
+        [t('runDetailEvents'), formatNumber(runDetailEvents.length)],
         [t('runDetailTokens'), `${formatNumber(run.tokens_in || 0)} / ${formatNumber(run.tokens_out || 0)}`],
-        [t('runDetailCost'), costMicros == null ? '—' : formatCostMicros(costMicros)],
     ];
+    if (run.budget_exceeded && run.budget_exceeded.kind) {
+        items.push([t('runDetailBudget'), run.budget_exceeded.kind]);
+    }
     el.innerHTML = items.map(([k, v]) =>
         `<div class="rd-stat"><span class="rd-stat-k">${esc(k)}</span><span class="rd-stat-v">${esc(v)}</span></div>`
     ).join('');
@@ -2170,15 +2327,14 @@ function renderRunDetailSteps() {
         return;
     }
     const startMs = runDetailRun?.started_at_ms || runDetailSteps[0]?.ts_ms || 0;
-    let cumIn = 0, cumOut = 0, cumCost = 0, prevTs = startMs;
+    let cumIn = 0, cumOut = 0, prevTs = startMs;
     const rows = runDetailSteps.map((s, idx) => {
         const u = s.provider_usage || {};
         cumIn += u.input_tokens || 0;
         cumOut += u.output_tokens || 0;
-        cumCost += u.cost_usd_micros || 0;
         const gap = prevTs ? (s.ts_ms - prevTs) : 0;
         prevTs = s.ts_ms;
-        return renderStepRow(s, idx, { startMs, cumIn, cumOut, cumCost, gap });
+        return renderStepRow(s, idx, { startMs, cumIn, cumOut, gap });
     });
     el.innerHTML = rows.filter(Boolean).join('');
 
@@ -2230,10 +2386,9 @@ function renderStepRow(s, idx, ctx) {
                     <span title="step elapsed">⏲ ${esc(formatDuration(s.elapsed_ms || 0))}</span>
                     <span title="wall gap">⌛ ${esc(t('stepGap'))} ${esc(formatDuration(ctx.gap))}</span>
                     <span title="tokens in/out">⇅ ${esc(formatNumber(u.input_tokens || 0))} / ${esc(formatNumber(u.output_tokens || 0))}</span>
-                    ${u.cost_usd_micros != null ? `<span>💲 ${esc(formatCostMicros(u.cost_usd_micros))}</span>` : ''}
                     ${sha ? `<span class="step-sha" title="screen sha256">⌗ ${esc(sha)}</span>` : ''}
                 </div>
-                <div class="step-cumulative">${esc(t('stepCumulative'))}: ⇅ ${esc(formatNumber(ctx.cumIn))} / ${esc(formatNumber(ctx.cumOut))}${ctx.cumCost ? ` · ${esc(formatCostMicros(ctx.cumCost))}` : ''}</div>
+                <div class="step-cumulative">${esc(t('stepCumulative'))}: ⇅ ${esc(formatNumber(ctx.cumIn))} / ${esc(formatNumber(ctx.cumOut))}</div>
                 <button type="button" class="btn-link step-copy" data-copy-step="${esc(idx)}">${esc(t('stepCopyJson'))}</button>
                 <pre class="step-json">${rawJson}</pre>
             </div>
@@ -2275,6 +2430,17 @@ async function fetchJson(url, options = {}) {
 async function putJson(url, body) {
     const r = await fetch(url, {
         method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    const d = await parseJsonResponse(r);
+    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    return d;
+}
+
+async function postJson(url, body) {
+    const r = await fetch(url, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
     });
@@ -2411,6 +2577,9 @@ function showAdd() {
     document.getElementById('f-launch-env').value = '';
     document.getElementById('f-exec').value = '';
     document.getElementById('f-env').value = '';
+    document.getElementById('f-cli-binary').value = '';
+    document.getElementById('f-cli-env').value = '';
+    document.getElementById('f-skill-paths').value = '';
 
     updateAppTypeVisibility();
     modal.classList.add('show');
@@ -2430,10 +2599,23 @@ async function showEdit(id) {
         document.getElementById('f-app-type').value = a.app_type || 'background';
         document.getElementById('f-app-type').disabled = true;
         document.getElementById('f-autostart').checked = !!a.autostart;
+        document.getElementById('f-skill-paths').value = listToText(a.skill_paths);
+        document.getElementById('f-url').value = '';
+        document.getElementById('f-launch-command').value = '';
+        document.getElementById('f-launch-cwd').value = '';
+        document.getElementById('f-launch-timeout').value = '';
+        document.getElementById('f-launch-env').value = '';
+        document.getElementById('f-exec').value = '';
+        document.getElementById('f-env').value = '';
+        document.getElementById('f-cli-binary').value = '';
+        document.getElementById('f-cli-env').value = '';
 
         if (a.app_type === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
             document.getElementById('f-env').value = envToText(a.env_vars);
+        } else if (a.app_type === 'cli') {
+            document.getElementById('f-cli-binary').value = a.cli_binary_path || '';
+            document.getElementById('f-cli-env').value = envToText(a.cli_env_vars);
         } else {
             document.getElementById('f-url').value = a.url || '';
             document.getElementById('f-launch-command').value = a.launch_command || '';
@@ -2467,6 +2649,15 @@ function envToText(envVars) {
     return envVars ? Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join('\n') : '';
 }
 
+function listToText(values) {
+    return Array.isArray(values) ? values.join('\n') : '';
+}
+
+function parseListText(text) {
+    const items = text.split('\n').map(line => line.trim()).filter(Boolean);
+    return items.length ? items : null;
+}
+
 function parseEnvText(text) {
     const trimmed = text.trim();
     if (!trimmed) return null;
@@ -2487,7 +2678,8 @@ async function saveApp() {
     const appType = document.getElementById('f-app-type').value;
     const body = {
         app_type: appType,
-        autostart: document.getElementById('f-autostart').checked
+        autostart: appType !== 'cli' && document.getElementById('f-autostart').checked,
+        skill_paths: parseListText(document.getElementById('f-skill-paths').value)
     };
 
     if (!editId) {
@@ -2500,6 +2692,10 @@ async function saveApp() {
         if (!body.exec_command) return toast(t('missingExec'), 'err');
 
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
+    } else if (appType === 'cli') {
+        body.cli_binary_path = document.getElementById('f-cli-binary').value.trim();
+        if (!body.cli_binary_path) return toast(t('missingCliBinary'), 'err');
+        body.cli_env_vars = parseEnvText(document.getElementById('f-cli-env').value);
     } else {
         body.launch_command = document.getElementById('f-launch-command').value.trim() || null;
         if (!body.launch_command) return toast(t('missingLaunchCommand'), 'err');
@@ -2624,17 +2820,22 @@ function updateAppTypeVisibility() {
     const backgroundSlot = document.getElementById('background-autostart-slot');
     const desktopSlot = document.getElementById('desktop-autostart-slot');
 
-    document.getElementById('background-config').style.display = type === 'desktop' ? 'none' : 'block';
+    document.getElementById('background-config').style.display = type === 'background' ? 'block' : 'none';
     document.getElementById('desktop-config').style.display = type === 'desktop' ? 'block' : 'none';
+    document.getElementById('cli-config').style.display = type === 'cli' ? 'block' : 'none';
 
     autostartControl.classList.remove('inline-slot');
     if (type === 'desktop') {
         desktopSlot.appendChild(autostartControl);
         autostartControl.classList.add('inline-slot');
-    } else {
+    } else if (type === 'background') {
         backgroundSlot.appendChild(autostartControl);
         autostartControl.classList.add('inline-slot');
+    } else {
+        generalSlot.appendChild(autostartControl);
     }
+
+    autostartControl.style.display = type === 'cli' ? 'none' : '';
 
     if (!autostartControl.parentElement) {
         generalSlot.appendChild(autostartControl);
@@ -2762,7 +2963,7 @@ async function fillScheduleProviderSelect() {
         const providers = await fetchJson(`${CONSOLE_API}/providers`).catch(() => ({ providers: [] }));
         const list = providers.providers || [];
         const prev = select.value;
-        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.display_name || p.name)}</option>`).join('');
         if (prev && list.find(p => p.name === prev)) select.value = prev;
     } catch (_) {}
 }
@@ -2859,9 +3060,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('settings-save').addEventListener('click', () => saveSettings().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('request-keyframe').addEventListener('click', () => requestKeyframe().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('agent-save').addEventListener('click', () => saveAgentConfig().catch(e => toast(t('actionFailed') + e, 'err')));
-    document.getElementById('provider-save').addEventListener('click', () => saveProvider().catch(e => toast(t('actionFailed') + e, 'err')));
-    document.getElementById('provider-reset')?.addEventListener('click', resetProvider);
-    document.getElementById('provider-test')?.addEventListener('click', testProvider);
+    document.getElementById('provider-add')?.addEventListener('click', () => openProviderModal());
+    document.getElementById('provider-modal-close')?.addEventListener('click', closeProviderModal);
+    document.getElementById('provider-modal-cancel')?.addEventListener('click', closeProviderModal);
+    document.getElementById('provider-modal-save')?.addEventListener('click', () => saveProviderModal().catch(e => toast(t('actionFailed') + e, 'err')));
+    document.getElementById('provider-type')?.addEventListener('change', updateProviderTypeVisibility);
     document.getElementById('runs-refresh').addEventListener('click', loadRuns);
     document.getElementById('new-task-start')?.addEventListener('click', () => startTask().catch(e => toast(t('newTaskFailed') + (e.message || e), 'err')));
     document.getElementById('runs-search')?.addEventListener('input', (e) => {
@@ -2916,6 +3119,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(() => {
         if (activeSection === 'apps') load();
         if (activeSection === 'overview') loadOverview();
+        if (activeSection === 'runs') loadRuns();
     }, 5000);
     setInterval(() => {
         if (activeSection === 'overview') updateOverviewMeta();

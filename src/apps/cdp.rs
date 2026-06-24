@@ -45,9 +45,7 @@ pub fn select_page_target(list: &[Value]) -> Option<String> {
         .filter(|t| t.get("type").and_then(Value::as_str) == Some("page"))
         .filter(|t| {
             let url = t.get("url").and_then(Value::as_str).unwrap_or("");
-            !url.starts_with("chrome://")
-                && !url.starts_with("devtools://")
-                && url != "about:blank"
+            !url.starts_with("chrome://") && !url.starts_with("devtools://") && url != "about:blank"
         })
         .find_map(|t| {
             t.get("webSocketDebuggerUrl")
@@ -136,8 +134,7 @@ async fn capture_via_ws(
 
     async fn read_reply<W>(ws: &mut W, want_id: u64) -> Result<Value, String>
     where
-        W: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-            + Unpin,
+        W: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
     {
         while let Some(msg) = ws.next().await {
             let msg = msg.map_err(|e| format!("cdp ws recv: {e}"))?;

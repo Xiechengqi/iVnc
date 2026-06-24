@@ -10,7 +10,6 @@
 
 use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::shared::SharedState;
-#[cfg(feature = "agent")]
 use axum::extract::Path;
 use axum::routing::put;
 use axum::{
@@ -155,7 +154,10 @@ pub async fn run_http_server_with_webrtc(
             get(console_agent_get_handler).put(console_agent_put_handler),
         )
         .route("/api/console/agent-stop", post(console_agent_stop_handler))
-        .route("/api/console/agent-start", post(console_agent_start_handler))
+        .route(
+            "/api/console/agent-start",
+            post(console_agent_start_handler),
+        )
         .route(
             "/api/console/schedules",
             get(console_schedules_get_handler).post(console_schedules_post_handler),
@@ -168,10 +170,13 @@ pub async fn run_http_server_with_webrtc(
             "/api/console/schedules/{id}/run-now",
             post(console_schedule_run_now_handler),
         )
-        .route("/api/console/providers", get(console_providers_get_handler))
+        .route(
+            "/api/console/providers",
+            get(console_providers_get_handler).post(console_provider_post_handler),
+        )
         .route(
             "/api/console/providers/{name}",
-            put(console_provider_put_handler),
+            put(console_provider_put_handler).delete(console_provider_delete_handler),
         )
         .route(
             "/api/console/providers/{name}/test",
@@ -183,8 +188,25 @@ pub async fn run_http_server_with_webrtc(
             get(console_agent_run_steps_handler),
         )
         .route(
+            "/api/console/agent-runs/{run_id}/events",
+            get(console_agent_run_events_handler),
+        )
+        .route(
             "/api/console/agent-runs/{run_id}/frames/{name}",
             get(console_agent_run_frame_handler),
+        )
+        .route("/api/capabilities", get(capabilities_handler))
+        .route("/api/capabilities/apps", get(capability_apps_handler))
+        .route("/api/capabilities/tools", get(capability_tools_handler))
+        .route("/api/capabilities/skills", get(capability_skills_handler))
+        .route(
+            "/api/capabilities/skills/{skill_id}",
+            get(capability_skill_get_handler),
+        )
+        .route("/api/capabilities/calls", get(capability_calls_handler))
+        .route(
+            "/api/capabilities/tools/{tool_id}/call",
+            post(capability_tool_call_handler),
         );
 
     // Add WebRTC signaling endpoint if session manager is provided
@@ -1296,7 +1318,8 @@ fn validate_schedule_input(body: &ScheduleInput) -> Result<(), String> {
 #[cfg(feature = "agent")]
 fn next_fire_preview(cron_expr: &str) -> Option<u64> {
     use std::str::FromStr;
-    let sched = cron::Schedule::from_str(&crate::agent::schedule::normalize_cron(cron_expr)).ok()?;
+    let sched =
+        cron::Schedule::from_str(&crate::agent::schedule::normalize_cron(cron_expr)).ok()?;
     sched
         .upcoming(chrono::Local)
         .next()
@@ -1374,7 +1397,10 @@ async fn console_schedules_post_handler(
         return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e}));
     }
     crate::agent::schedule::invalidate(&state, &id);
-    json_response(StatusCode::OK, json!({"ok": true, "schedule": merge_schedule_json(&st, &state)}))
+    json_response(
+        StatusCode::OK,
+        json!({"ok": true, "schedule": merge_schedule_json(&st, &state)}),
+    )
 }
 
 #[cfg(not(feature = "agent"))]
@@ -1396,7 +1422,10 @@ async fn console_schedule_put_handler(
     }
     let mut cfg = crate::console_config::load();
     let Some(idx) = cfg.schedules.iter().position(|s| s.id == id) else {
-        return json_response(StatusCode::NOT_FOUND, json!({"error": "schedule not found"}));
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({"error": "schedule not found"}),
+        );
     };
     let updated = crate::console_config::ScheduledTask {
         id: id.clone(),
@@ -1414,7 +1443,10 @@ async fn console_schedule_put_handler(
         return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e}));
     }
     crate::agent::schedule::invalidate(&state, &id);
-    json_response(StatusCode::OK, json!({"ok": true, "schedule": merge_schedule_json(&updated, &state)}))
+    json_response(
+        StatusCode::OK,
+        json!({"ok": true, "schedule": merge_schedule_json(&updated, &state)}),
+    )
 }
 
 #[cfg(not(feature = "agent"))]
@@ -1434,7 +1466,10 @@ async fn console_schedule_delete_handler(
     let len_before = cfg.schedules.len();
     cfg.schedules.retain(|s| s.id != id);
     if cfg.schedules.len() == len_before {
-        return json_response(StatusCode::NOT_FOUND, json!({"error": "schedule not found"}));
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({"error": "schedule not found"}),
+        );
     }
     if let Err(e) = crate::console_config::save(&cfg) {
         return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e}));
@@ -1458,7 +1493,10 @@ async fn console_schedule_run_now_handler(
 ) -> Response {
     let cfg = crate::console_config::load();
     let Some(st) = cfg.schedules.iter().find(|s| s.id == id).cloned() else {
-        return json_response(StatusCode::NOT_FOUND, json!({"error": "schedule not found"}));
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({"error": "schedule not found"}),
+        );
     };
     let req = crate::agent::launch::LaunchRequest {
         task: st.task,
@@ -1508,31 +1546,43 @@ async fn console_schedule_run_now_handler() -> Response {
     )
 }
 
-
 #[cfg(feature = "agent")]
 async fn console_providers_get_handler() -> Response {
     let saved = crate::console_config::load();
-    let providers: Vec<_> = crate::agent::registry::provider_presets()
+    let providers: Vec<_> = crate::agent::registry::provider_infos()
         .into_iter()
-        .map(|preset| {
-            let cfg = saved.providers.get(preset.name).cloned().unwrap_or_default();
-            json!({
-                "name": preset.name,
-                "default_model": preset.default_model,
-                "default_endpoint": preset.default_endpoint,
-                "api_key_env": preset.api_key_env,
-                "configured": crate::agent::registry::provider_infos().iter().find(|p| p.name == preset.name).map(|p| p.configured).unwrap_or(false),
-                "capabilities": preset.capabilities,
+        .filter_map(|info| {
+            let cfg = saved.providers.get(&info.name)?.clone();
+            let endpoint = cfg
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| info.default_endpoint.clone());
+            let model = cfg
+                .model
+                .clone()
+                .unwrap_or_else(|| info.default_model.clone());
+            Some(json!({
+                "name": info.name,
+                "display_name": info.display_name,
+                "provider_type": info.provider_type,
+                "default_model": info.default_model,
+                "default_endpoint": info.default_endpoint,
+                "api_key_env": info.api_key_env,
+                "configured": info.configured,
+                "capabilities": info.capabilities,
                 "settings": {
-                    "endpoint": cfg.endpoint,
-                    "model": cfg.model,
+                    "endpoint": endpoint,
+                    "model": model,
+                    "provider_type": cfg.provider_type,
+                    "name": cfg.name,
+                    "enabled": cfg.enabled.unwrap_or(true),
                     "api_format": cfg.api_format,
                     "api_key_configured": cfg.api_key.as_ref().is_some_and(|v| !v.is_empty())
-                        || preset.api_key_env.is_some_and(|env| std::env::var_os(env).is_some()),
+                        || cfg.api_key_env.as_deref().and_then(|env| std::env::var(env).ok()).is_some_and(|v| !v.is_empty()),
                     "coord_space": cfg.coord_space,
                     "system_prompt": cfg.system_prompt,
                 }
-            })
+            }))
         })
         .collect();
     json_response(StatusCode::OK, json!({ "providers": providers }))
@@ -1546,6 +1596,10 @@ async fn console_providers_get_handler() -> Response {
 #[cfg(feature = "agent")]
 #[derive(Debug, Deserialize)]
 struct ProviderConsoleUpdate {
+    id: Option<String>,
+    name: Option<String>,
+    provider_type: Option<String>,
+    enabled: Option<bool>,
     endpoint: Option<String>,
     model: Option<String>,
     api_format: Option<String>,
@@ -1556,23 +1610,106 @@ struct ProviderConsoleUpdate {
 }
 
 #[cfg(feature = "agent")]
+async fn console_provider_post_handler(
+    axum::extract::Json(body): axum::extract::Json<ProviderConsoleUpdate>,
+) -> Response {
+    let provider_type = match normalize_provider_type_for_api(body.provider_type.as_deref()) {
+        Some(kind) => kind,
+        None => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "provider_type must be openai or anthropic"}),
+            )
+        }
+    };
+    let display_name = clean_optional(body.name.clone()).unwrap_or_else(|| provider_type.clone());
+    let id = clean_optional(body.id.clone())
+        .map(|id| provider_id_slug(&id))
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| provider_id_slug(&display_name));
+    if id.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "invalid provider name"}),
+        );
+    }
+
+    let mut config = crate::console_config::load();
+    if config.providers.contains_key(&id) {
+        return json_response(
+            StatusCode::CONFLICT,
+            json!({"error": "provider already exists"}),
+        );
+    }
+    let (default_endpoint, default_model) = defaults_for_provider_type(&provider_type);
+    config.providers.insert(
+        id.clone(),
+        crate::console_config::ProviderConsoleConfig {
+            provider_type: Some(provider_type),
+            name: Some(display_name),
+            enabled: Some(body.enabled.unwrap_or(true)),
+            endpoint: clean_optional(body.endpoint).or_else(|| Some(default_endpoint.to_string())),
+            model: clean_optional(body.model).or_else(|| Some(default_model.to_string())),
+            api_format: clean_optional(body.api_format),
+            api_key: clean_optional(body.api_key).filter(|k| k != "********"),
+            api_key_env: None,
+            coord_space: clean_optional(body.coord_space),
+            system_prompt: clean_optional(body.system_prompt),
+        },
+    );
+    if config.agent.default_provider.trim().is_empty() {
+        config.agent.default_provider = id.clone();
+    }
+    match crate::console_config::save(&config) {
+        Ok(()) => json_response(StatusCode::CREATED, json!({"ok": true, "id": id})),
+        Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": err})),
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_provider_post_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
 async fn console_provider_put_handler(
     Path(name): Path<String>,
     axum::extract::Json(body): axum::extract::Json<ProviderConsoleUpdate>,
 ) -> Response {
-    let known = crate::agent::registry::provider_presets()
-        .into_iter()
-        .any(|preset| preset.name == name);
-    if !known {
-        return json_response(StatusCode::NOT_FOUND, json!({"error": "unknown provider"}));
-    }
-
     let mut config = crate::console_config::load();
-    let entry = config.providers.entry(name).or_default();
-    entry.endpoint = clean_optional(body.endpoint);
-    entry.model = clean_optional(body.model);
-    entry.api_format = clean_optional(body.api_format);
-    entry.coord_space = clean_optional(body.coord_space);
+    let Some(entry) = config.providers.get_mut(&name) else {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "unknown provider"}));
+    };
+    if let Some(provider_type) = body.provider_type {
+        let Some(provider_type) = normalize_provider_type_for_api(Some(&provider_type)) else {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "provider_type must be openai or anthropic"}),
+            );
+        };
+        entry.provider_type = Some(provider_type);
+    }
+    if body.name.is_some() {
+        entry.name = clean_optional(body.name).or_else(|| Some(name.clone()));
+    }
+    if let Some(enabled) = body.enabled {
+        entry.enabled = Some(enabled);
+    }
+    if body.endpoint.is_some() {
+        entry.endpoint = clean_optional(body.endpoint);
+    }
+    if body.model.is_some() {
+        entry.model = clean_optional(body.model);
+    }
+    if body.api_format.is_some() {
+        entry.api_format = clean_optional(body.api_format);
+    }
+    if body.coord_space.is_some() {
+        entry.coord_space = clean_optional(body.coord_space);
+    }
     if body.system_prompt.is_some() {
         entry.system_prompt = clean_optional(body.system_prompt);
     }
@@ -1602,58 +1739,84 @@ async fn console_provider_put_handler() -> Response {
 }
 
 #[cfg(feature = "agent")]
+async fn console_provider_delete_handler(Path(name): Path<String>) -> Response {
+    let mut config = crate::console_config::load();
+    if config.providers.remove(&name).is_none() {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "unknown provider"}));
+    }
+    if config.agent.default_provider == name {
+        config.agent.default_provider = config.providers.keys().next().cloned().unwrap_or_default();
+    }
+    for schedule in &mut config.schedules {
+        if schedule.provider == name {
+            schedule.enabled = false;
+        }
+    }
+    match crate::console_config::save(&config) {
+        Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
+        Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": err})),
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_provider_delete_handler() -> Response {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        json!({"error": "agent feature is not enabled"}),
+    )
+}
+
+#[cfg(feature = "agent")]
 async fn console_provider_test_handler(
     Path(name): Path<String>,
     axum::extract::Json(body): axum::extract::Json<ProviderConsoleUpdate>,
 ) -> Response {
-    use crate::agent::registry::provider_presets;
     use crate::web::provider_probe;
 
-    let presets = provider_presets();
-    let Some(preset) = presets.iter().find(|p| p.name == name) else {
+    let config = crate::console_config::load();
+    let known = config.providers.contains_key(&name);
+    if !known && body.provider_type.is_none() {
         return json_response(
             StatusCode::NOT_FOUND,
             json!({"ok": false, "error": "unknown provider"}),
         );
+    }
+    let saved = config.providers.get(&name).cloned().unwrap_or_default();
+    let provider_type = body
+        .provider_type
+        .as_deref()
+        .and_then(|v| normalize_provider_type_for_api(Some(v)))
+        .or_else(|| normalize_provider_type_for_api(saved.provider_type.as_deref()));
+    let Some(provider_type) = provider_type else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "error": "provider_type must be openai or anthropic"}),
+        );
     };
 
-    if name == "replay" {
-        return json_response(
-            StatusCode::OK,
-            json!({
-                "ok": true,
-                "skipped": true,
-                "message": "replay provider has no network call",
-            }),
-        );
-    }
-
-    let saved = crate::console_config::provider(&name);
+    let (default_endpoint, default_model) = defaults_for_provider_type(&provider_type);
     let endpoint = clean_optional(body.endpoint.clone())
         .or(saved.endpoint.clone())
-        .unwrap_or_else(|| preset.default_endpoint.to_string());
+        .unwrap_or_else(|| default_endpoint.to_string());
     let model = clean_optional(body.model.clone())
         .or(saved.model.clone())
-        .unwrap_or_else(|| preset.default_model.to_string());
+        .unwrap_or_else(|| default_model.to_string());
     let api_format = clean_optional(body.api_format.clone()).or(saved.api_format.clone());
 
     let clear_key = body.clear_api_key.unwrap_or(false);
     let api_key = if clear_key {
         None
     } else {
-        let from_body = clean_optional(body.api_key.clone())
-            .filter(|k| k != "********");
-        from_body
-            .or(saved.api_key.clone())
-            .or_else(|| preset.api_key_env.and_then(|e| std::env::var(e).ok()))
+        let from_body = clean_optional(body.api_key.clone()).filter(|k| k != "********");
+        from_body.or(saved.api_key.clone()).or_else(|| {
+            saved
+                .api_key_env
+                .as_deref()
+                .and_then(|env| std::env::var(env).ok())
+        })
     };
 
-    let Some(shape) = provider_probe::shape_for(&name, api_format.as_deref()) else {
-        return json_response(
-            StatusCode::BAD_REQUEST,
-            json!({"ok": false, "error": format!("provider {name} is not probeable")}),
-        );
-    };
+    let shape = provider_probe::shape_for_provider_type(&provider_type, api_format.as_deref());
 
     if endpoint.is_empty() {
         return json_response(
@@ -1727,21 +1890,74 @@ async fn console_agent_run_steps_handler(
                 .filter(|l| !l.trim().is_empty())
                 .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
                 .collect();
+            let events = read_agent_run_events(report.as_ref(), &run_id)
+                .await
+                .unwrap_or_default();
             json_response(
                 StatusCode::OK,
-                json!({ "run_id": run_id, "report": report, "steps": steps }),
+                json!({ "run_id": run_id, "report": report, "steps": steps, "events": events }),
             )
         }
-        Err(_) => json_response(
-            StatusCode::NOT_FOUND,
-            json!({ "run_id": run_id, "report": report, "steps": [], "error": "trajectory not found" }),
-        ),
+        Err(_) => {
+            let events = read_agent_run_events(report.as_ref(), &run_id)
+                .await
+                .unwrap_or_default();
+            let status = if events.is_empty() {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            json_response(
+                status,
+                json!({
+                    "run_id": run_id,
+                    "report": report,
+                    "steps": [],
+                    "events": events,
+                    "error": "trajectory not found"
+                }),
+            )
+        }
     }
 }
 
 #[cfg(not(feature = "agent"))]
 async fn console_agent_run_steps_handler(Path(_run_id): Path<String>) -> Response {
     json_response(StatusCode::OK, json!({ "steps": [] }))
+}
+
+#[cfg(feature = "agent")]
+async fn console_agent_run_events_handler(
+    State(state): State<Arc<SharedState>>,
+    Path(run_id): Path<String>,
+) -> Response {
+    let report = state.agent_runs.get(&run_id);
+    match read_agent_run_events(report.as_ref(), &run_id).await {
+        Ok(events) => json_response(
+            StatusCode::OK,
+            json!({ "run_id": run_id, "report": report, "events": events }),
+        ),
+        Err(err) => json_response(
+            StatusCode::NOT_FOUND,
+            json!({ "run_id": run_id, "report": report, "events": [], "error": err }),
+        ),
+    }
+}
+
+#[cfg(not(feature = "agent"))]
+async fn console_agent_run_events_handler(Path(_run_id): Path<String>) -> Response {
+    json_response(StatusCode::OK, json!({ "events": [] }))
+}
+
+#[cfg(feature = "agent")]
+async fn read_agent_run_events(
+    report: Option<&crate::agent::types::RunReport>,
+    run_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let path = report
+        .and_then(|r| r.event_path.clone())
+        .unwrap_or_else(|| crate::agent::trajectory::default_event_path(run_id));
+    crate::agent::events::read_events(&path).await
 }
 
 #[cfg(feature = "agent")]
@@ -1752,7 +1968,10 @@ async fn console_agent_run_frame_handler(Path((run_id, name)): Path<(String, Str
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
         && !name.contains("..");
     if !safe || name.is_empty() {
-        return json_response(StatusCode::BAD_REQUEST, json!({ "error": "invalid frame name" }));
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "invalid frame name" }),
+        );
     }
     let frame_dir = crate::agent::trajectory::default_trajectory_path(&run_id)
         .with_file_name(format!("{}_frames", run_id));
@@ -1776,8 +1995,142 @@ async fn console_agent_run_frame_handler(Path((run_id, name)): Path<(String, Str
 }
 
 #[cfg(not(feature = "agent"))]
-async fn console_agent_run_frame_handler(Path((_run_id, _name)): Path<(String, String)>) -> Response {
-    json_response(StatusCode::NOT_FOUND, json!({ "error": "agent feature is not enabled" }))
+async fn console_agent_run_frame_handler(
+    Path((_run_id, _name)): Path<(String, String)>,
+) -> Response {
+    json_response(
+        StatusCode::NOT_FOUND,
+        json!({ "error": "agent feature is not enabled" }),
+    )
+}
+
+async fn capabilities_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let Some(apps) = state.apps_state().cloned() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "apps manager is not initialized"}),
+        );
+    };
+    let snapshot = crate::capabilities::build_snapshot(&apps).await;
+    json_response(StatusCode::OK, json!(snapshot))
+}
+
+async fn capability_apps_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let Some(apps) = state.apps_state().cloned() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "apps manager is not initialized"}),
+        );
+    };
+    let snapshot = crate::capabilities::build_snapshot(&apps).await;
+    json_response(
+        StatusCode::OK,
+        json!({ "apps": snapshot.apps, "diagnostics": snapshot.diagnostics }),
+    )
+}
+
+async fn capability_tools_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let Some(apps) = state.apps_state().cloned() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "apps manager is not initialized"}),
+        );
+    };
+    let snapshot = crate::capabilities::build_snapshot(&apps).await;
+    json_response(
+        StatusCode::OK,
+        json!({ "tools": snapshot.tools, "diagnostics": snapshot.diagnostics }),
+    )
+}
+
+async fn capability_skills_handler(State(state): State<Arc<SharedState>>) -> Response {
+    let Some(apps) = state.apps_state().cloned() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "apps manager is not initialized"}),
+        );
+    };
+    let snapshot = crate::capabilities::build_snapshot(&apps).await;
+    json_response(
+        StatusCode::OK,
+        json!({ "skills": snapshot.skills, "diagnostics": snapshot.diagnostics }),
+    )
+}
+
+async fn capability_skill_get_handler(
+    State(state): State<Arc<SharedState>>,
+    Path(skill_id): Path<String>,
+) -> Response {
+    let Some(apps) = state.apps_state().cloned() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "apps manager is not initialized"}),
+        );
+    };
+    let snapshot = crate::capabilities::build_snapshot(&apps).await;
+    let Some(mut skill) = snapshot.skills.into_iter().find(|s| s.id == skill_id) else {
+        return json_response(StatusCode::NOT_FOUND, json!({"error": "unknown skill"}));
+    };
+    if let crate::capabilities::SkillSource::LocalPath { path } = &skill.source {
+        match crate::capabilities::read_skill_content(path).await {
+            Ok(content) => skill.content = Some(content),
+            Err(err) => return json_response(StatusCode::BAD_REQUEST, json!({"error": err})),
+        }
+    }
+    json_response(StatusCode::OK, json!({ "skill": skill }))
+}
+
+async fn capability_calls_handler() -> Response {
+    let calls = crate::capabilities::call_log::read_recent(100).await;
+    json_response(StatusCode::OK, json!({ "calls": calls }))
+}
+
+async fn capability_tool_call_handler(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Path(tool_id): Path<String>,
+    axum::extract::Json(body): axum::extract::Json<crate::capabilities::CapabilityCallRequest>,
+) -> Response {
+    let Some(apps) = state.apps_state().cloned() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "apps manager is not initialized"}),
+        );
+    };
+    let caller = capability_caller_from_headers(&headers, "http");
+    let outcome = crate::capabilities::call_tool(apps, &tool_id, body, caller).await;
+    let status = if outcome.ok {
+        StatusCode::OK
+    } else if outcome.requires_confirmation {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    json_response(status, json!(outcome))
+}
+
+fn capability_caller_from_headers(
+    headers: &HeaderMap,
+    source: &str,
+) -> crate::capabilities::CallerContext {
+    let client_id = headers
+        .get("x-ivnc-client-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("anonymous")
+        .to_string();
+    let session_id = headers
+        .get("x-ivnc-session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("session_{}", uuid::Uuid::new_v4()));
+    crate::capabilities::CallerContext {
+        client_id,
+        session_id,
+        user: None,
+        source: source.to_string(),
+    }
 }
 
 fn proxy_json_response(status: StatusCode, body: serde_json::Value) -> Response {
@@ -1805,6 +2158,39 @@ fn clean_optional(value: Option<String>) -> Option<String> {
             Some(trimmed)
         }
     })
+}
+
+#[cfg(feature = "agent")]
+fn normalize_provider_type_for_api(value: Option<&str>) -> Option<String> {
+    crate::agent::registry::normalized_provider_type(value)
+}
+
+#[cfg(feature = "agent")]
+fn defaults_for_provider_type(provider_type: &str) -> (&'static str, &'static str) {
+    match provider_type {
+        "anthropic" => ("https://api.anthropic.com/v1", "claude-haiku-4-5"),
+        _ => ("https://api.openai.com/v1", "gpt-4o-mini"),
+    }
+}
+
+#[cfg(feature = "agent")]
+fn provider_id_slug(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else if c.is_ascii_whitespace() || c == '.' || c == '/' {
+                '-'
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['-', '_'])
+        .to_string()
 }
 
 async fn proxy_status_handler(State(state): State<Arc<SharedState>>) -> Response {

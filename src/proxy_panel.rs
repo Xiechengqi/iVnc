@@ -105,10 +105,11 @@ impl ProxyPanelManager {
             return Ok(Some(pid));
         }
 
-        let bin = ensure_binary()?;
-        cleanup_stale_miao_processes(&bin)?;
-        cleanup_legacy_runtime_link()?;
         let dir = data_dir()?;
+        let expected_bin = dir.join("miao-rust-linux-amd64");
+        cleanup_stale_miao_processes(&expected_bin)?;
+        let bin = ensure_binary()?;
+        cleanup_legacy_runtime_link()?;
         let log_path = dir.join("miao.log");
         let stdout = OpenOptions::new()
             .create(true)
@@ -241,6 +242,7 @@ fn cleanup_stale_miao_processes(bin: &Path) -> Result<(), String> {
             reap_child_if_possible(*pid);
         }
     }
+    std::thread::sleep(Duration::from_millis(100));
 
     Ok(())
 }

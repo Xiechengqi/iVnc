@@ -5,7 +5,6 @@
 //! `text_action_parser` to convert assistant text (or JSON-shaped tool_use
 //! arguments) into `Action`s, mirroring the openai_compat fallback path.
 
-use super::openai_compat::default_system_prompt;
 use super::text_action_parser;
 use crate::agent::provider::{
     ActionGrammar, BrainProvider, ProviderCapabilities, ProviderError, ProviderSession,
@@ -20,30 +19,35 @@ use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-pub const ANTHROPIC_PROVIDER_NAME: &str = "anthropic";
-pub const ANTHROPIC_MODEL_ENV: &str = "ANTHROPIC_MODEL";
-pub const ANTHROPIC_ENDPOINT_ENV: &str = "ANTHROPIC_BASE_URL";
-pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
-pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-haiku-4-5";
-pub const ANTHROPIC_DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1";
 pub const ANTHROPIC_VERSION_HEADER: &str = "2023-06-01";
 
 pub struct AnthropicProvider {
+    provider_name: String,
     endpoint: String,
     model: String,
     api_key: Option<String>,
+    api_key_env: Option<&'static str>,
     system_prompt: String,
     client: reqwest::Client,
 }
 
 impl AnthropicProvider {
-    pub fn new(endpoint: String, model: String, api_key: Option<String>, system_prompt: String) -> Self {
+    pub fn with_name(
+        provider_name: String,
+        endpoint: String,
+        model: String,
+        api_key: Option<String>,
+        api_key_env: Option<&'static str>,
+        system_prompt: String,
+    ) -> Self {
         Self {
+            provider_name,
             endpoint,
             model,
             api_key,
+            api_key_env,
             system_prompt,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 
@@ -76,7 +80,12 @@ impl AnthropicProvider {
     ) -> Result<Value, ProviderError> {
         let display = &observation.display;
         let history_text = history_text(history);
-        let user_text = build_user_text(task, display, &history_text, observation.page_text.as_deref());
+        let user_text = build_user_text(
+            task,
+            display,
+            &history_text,
+            observation.page_text.as_deref(),
+        );
         let image_part = Self::image_part(observation)?;
         Ok(json!({
             "model": self.model,
@@ -103,26 +112,13 @@ impl AnthropicProvider {
             .and_then(Value::as_str)
             .map(ToString::to_string);
         let usage = body.get("usage").map(|u| {
-            let input_tokens = u
-                .get("input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let output_tokens = u
-                .get("output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let mut parsed = ProviderUsage {
+            let input_tokens = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let output_tokens = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+            ProviderUsage {
                 input_tokens,
                 output_tokens,
                 provider_latency_ms: elapsed_ms,
-                cost_usd_micros: None,
-            };
-            parsed.cost_usd_micros = crate::agent::budget::estimate_cost_usd_micros(
-                ANTHROPIC_PROVIDER_NAME,
-                &self.model,
-                &parsed,
-            );
-            parsed
+            }
         });
 
         let mut text_buf = String::new();
@@ -173,8 +169,8 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl BrainProvider for AnthropicProvider {
-    fn name(&self) -> &'static str {
-        ANTHROPIC_PROVIDER_NAME
+    fn name(&self) -> &str {
+        &self.provider_name
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -184,7 +180,7 @@ impl BrainProvider for AnthropicProvider {
             coordinate_space: CoordinateSpace::ImagePixels,
             supports_streaming: false,
             max_screenshot_megapixels: 4.0,
-            requires_api_key_env: Some(ANTHROPIC_API_KEY_ENV),
+            requires_api_key_env: self.api_key_env,
             supports_safety_ack: false,
             supports_window_actions: false,
         }
@@ -211,16 +207,15 @@ impl BrainProvider for AnthropicProvider {
             // Some gateways accept either x-api-key or Authorization: Bearer.
             request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", key));
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ProviderError::NetworkError(e.to_string()))?;
+        let response = super::send_with_retry(request).await?;
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err(ProviderError::AuthError(status.to_string()));
         }
         if status.as_u16() == 429 {
-            return Err(ProviderError::RateLimited { retry_after_ms: 1000 });
+            return Err(ProviderError::RateLimited {
+                retry_after_ms: 1000,
+            });
         }
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -237,29 +232,21 @@ impl BrainProvider for AnthropicProvider {
     }
 }
 
-pub fn build_anthropic_provider(model: Option<String>) -> AnthropicProvider {
-    let saved = crate::console_config::provider(ANTHROPIC_PROVIDER_NAME);
-    let model = model
-        .or(saved.model)
-        .or_else(|| std::env::var(ANTHROPIC_MODEL_ENV).ok())
-        .unwrap_or_else(|| ANTHROPIC_DEFAULT_MODEL.to_string());
-    let endpoint = saved
-        .endpoint
-        .or_else(|| std::env::var(ANTHROPIC_ENDPOINT_ENV).ok())
-        .unwrap_or_else(|| ANTHROPIC_DEFAULT_ENDPOINT.to_string());
-    let api_key = saved
-        .api_key
-        .or_else(|| std::env::var(ANTHROPIC_API_KEY_ENV).ok());
-    let system_prompt = saved.system_prompt.unwrap_or_else(default_system_prompt);
-    AnthropicProvider::new(endpoint, model, api_key, system_prompt)
-}
-
 fn history_text(history: &History) -> String {
     if history.steps.is_empty() {
         return "No prior steps.".to_string();
     }
+    const MAX_HISTORY_STEPS: usize = 20;
+    const MAX_HISTORY_CHARS: usize = 24_000;
     let mut out = String::from("Prior steps:\n");
-    for (idx, step) in history.steps.iter().enumerate() {
+    let skipped = history.steps.len().saturating_sub(MAX_HISTORY_STEPS);
+    if skipped > 0 {
+        out.push_str(&format!(
+            "[{} older steps compacted; recent steps below]\n",
+            skipped
+        ));
+    }
+    for (idx, step) in history.steps.iter().enumerate().skip(skipped) {
         out.push_str(&format!(
             "{}. action={:?}; result={:?}; image={}x{} sha256={}\n",
             idx + 1,
@@ -269,6 +256,15 @@ fn history_text(history: &History) -> String {
             step.observation.image_height,
             step.observation.sha256
         ));
+        if out.len() > MAX_HISTORY_CHARS {
+            let mut end = MAX_HISTORY_CHARS;
+            while !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.truncate(end);
+            out.push_str("\n[history text compacted by iVNC context budget]\n");
+            break;
+        }
     }
     out
 }

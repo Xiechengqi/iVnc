@@ -80,7 +80,8 @@ pub struct SharedState {
     pub agent_runs: crate::agent::run_store::RunStore,
 
     #[cfg(feature = "agent")]
-    pub schedule_state: Arc<Mutex<std::collections::HashMap<String, crate::agent::schedule::ScheduleRuntime>>>,
+    pub schedule_state:
+        Arc<Mutex<std::collections::HashMap<String, crate::agent::schedule::ScheduleRuntime>>>,
 
     /// Display dimensions
     pub display_size: Arc<Mutex<(u32, u32)>>,

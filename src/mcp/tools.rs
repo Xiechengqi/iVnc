@@ -2,6 +2,7 @@
 
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
+use serde_json::Value;
 
 #[cfg(feature = "agent")]
 use crate::agent::types::{Action, Budget, DestructiveKind, RunOptions};
@@ -89,6 +90,46 @@ pub struct ClipboardWriteParams {
 pub struct WindowIdParams {
     /// Window ID (index from list_windows)
     pub window_id: u32,
+}
+
+// ── Capabilities ───────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CapabilityListParams {
+    /// Optional kind filter: apps, tools, skills, or all.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CapabilityToolCallParams {
+    /// Tool id returned by ivnc_tools_list, for example twitter_cli_search.
+    pub tool_id: String,
+    /// Tool arguments as a JSON object.
+    #[serde(default)]
+    pub arguments: Value,
+    /// Set true to approve tools whose permission policy is confirm.
+    #[serde(default)]
+    pub confirm: bool,
+    /// Optional external caller id for resource locks and audit logs.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Optional external session id for resource locks and audit logs.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CapabilitySkillGetParams {
+    /// Skill id returned by ivnc_skills_list.
+    pub skill_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CapabilityCallHistoryParams {
+    /// Maximum recent call records to return.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 // ── Agent ──────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ pub fn build_openai_provider(model: Option<String>) -> OpenAiCompatibleProvider 
         .unwrap_or_else(|| OPENAI_DEFAULT_ENDPOINT.to_string());
     let api_format = OpenAiApiFormat::from_config(saved.api_format.as_deref());
     OpenAiCompatibleProvider::new(OpenAiCompatConfig {
-        provider_name: OPENAI_PROVIDER_NAME,
+        provider_name: OPENAI_PROVIDER_NAME.to_string(),
         endpoint,
         model,
         api_format,

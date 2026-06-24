@@ -22,7 +22,7 @@ impl ReplayProvider {
 
 #[async_trait]
 impl BrainProvider for ReplayProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "replay"
     }
 

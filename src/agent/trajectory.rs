@@ -23,6 +23,10 @@ pub fn default_trajectory_path(run_id: &str) -> PathBuf {
     trajectories_dir().join(format!("{}.jsonl", sanitize_run_id(run_id)))
 }
 
+pub fn default_event_path(run_id: &str) -> PathBuf {
+    trajectories_dir().join(format!("{}.events.jsonl", sanitize_run_id(run_id)))
+}
+
 /// Sidecar path holding the serialized `RunReport` for a run, so the run list
 /// survives process restarts.
 pub fn report_path(run_id: &str) -> PathBuf {
