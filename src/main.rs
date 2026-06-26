@@ -423,13 +423,16 @@ fn run(
     }
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let r = running.clone();
         tokio_rt.spawn(async move {
-            sigterm.recv().await;
-            info!("SIGTERM received, shutting down gracefully");
-            r.store(false, Ordering::SeqCst);
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    sigterm.recv().await;
+                    info!("SIGTERM received, shutting down gracefully");
+                    r.store(false, Ordering::SeqCst);
+                }
+                Err(err) => warn!("Failed to install SIGTERM handler: {}", err),
+            }
         });
     }
     {
