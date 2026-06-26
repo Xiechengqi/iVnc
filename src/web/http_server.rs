@@ -29,7 +29,7 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -2729,14 +2729,14 @@ async fn get_version_handler() -> axum::Json<VersionInfo> {
 }
 
 /// POST /api/restart - Restart iVNC without upgrading
-async fn restart_handler() -> axum::Json<serde_json::Value> {
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if let Err(err) = restart_current_process().await {
-            log::error!("Failed to restart iVNC: {}", err);
-        }
-    });
-    axum::Json(json!({"ok": true}))
+async fn restart_handler(State(state): State<Arc<SharedState>>) -> Response {
+    match request_process_restart(&state).await {
+        Ok(mode) => proxy_json_response(StatusCode::OK, json!({"ok": true, "mode": mode})),
+        Err(err) => proxy_json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"ok": false, "error": err}),
+        ),
+    }
 }
 
 /// GET /api/upgrade/ws - WebSocket upgrade endpoint
@@ -2767,7 +2767,10 @@ async fn upgrade_ws_handler(
                                 if user == state.config.http.basic_auth_user
                                     && pass == expected_password
                                 {
-                                    return Ok(ws.on_upgrade(handle_upgrade_websocket));
+                                    let state = state.clone();
+                                    return Ok(ws.on_upgrade(move |socket| {
+                                        handle_upgrade_websocket(socket, state)
+                                    }));
                                 }
                             }
                         }
@@ -2781,18 +2784,22 @@ async fn upgrade_ws_handler(
     }
 
     // No auth required, proceed
-    Ok(ws.on_upgrade(handle_upgrade_websocket))
+    Ok(ws.on_upgrade(move |socket| handle_upgrade_websocket(socket, state)))
 }
 
 /// Handle WebSocket connection for upgrade
-async fn handle_upgrade_websocket(mut socket: axum::extract::ws::WebSocket) {
+async fn handle_upgrade_websocket(
+    mut socket: axum::extract::ws::WebSocket,
+    state: Arc<SharedState>,
+) {
     use futures::SinkExt;
     use tokio::sync::mpsc;
 
     let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
 
     // Spawn upgrade task
-    let mut upgrade_task = tokio::spawn(async move { perform_upgrade_with_logs(log_tx).await });
+    let mut upgrade_task =
+        tokio::spawn(async move { perform_upgrade_with_logs(log_tx, state).await });
 
     // Forward logs to WebSocket
     loop {
@@ -2821,7 +2828,10 @@ async fn handle_upgrade_websocket(mut socket: axum::extract::ws::WebSocket) {
 }
 
 /// Perform upgrade with real-time logging
-async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+async fn perform_upgrade_with_logs(
+    log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>,
+    state: Arc<SharedState>,
+) {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -2841,13 +2851,15 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
 
     // Step 0: Save running apps state (before upgrade)
     send_log(0, "保存运行中的应用状态...", "info", None).await;
-    if let Ok(apps_state) = crate::apps::api::AppsState::new() {
+    if let Some(apps_state) = state.apps_state().cloned() {
         if let Err(e) = apps_state.save_running_state() {
             log::warn!("Failed to save running apps state: {}", e);
             send_log(0, &format!("保存应用状态失败: {}", e), "error", None).await;
         } else {
             send_log(0, "应用状态已保存", "success", None).await;
         }
+    } else {
+        send_log(0, "应用管理器尚未初始化，跳过应用状态保存", "warning", None).await;
     }
 
     // Step 1: Detect architecture
@@ -2861,6 +2873,20 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         return;
     };
     send_log(1, &format!("系统架构: {}", arch), "success", None).await;
+    let install_path = match current_install_path() {
+        Ok(path) => path,
+        Err(e) => {
+            send_log(1, &format!("定位当前程序失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+    send_log(
+        1,
+        &format!("当前程序路径: {}", install_path.display()),
+        "success",
+        None,
+    )
+    .await;
 
     // Step 2: Build download URL
     send_log(2, "准备下载最新版本...", "info", None).await;
@@ -2899,13 +2925,13 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     };
 
     let total_size = response.content_length().unwrap_or(0);
-    let temp_path = format!(
-        "/tmp/ivnc-new-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    );
+    let temp_path = match upgrade_temp_path(&install_path) {
+        Ok(path) => path,
+        Err(e) => {
+            send_log(3, &format!("创建临时文件路径失败: {}", e), "error", None).await;
+            return;
+        }
+    };
 
     let mut file = match tokio::fs::File::create(&temp_path).await {
         Ok(f) => f,
@@ -2992,25 +3018,16 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
 
     // Step 5: Backup current version
     send_log(5, "备份当前版本...", "info", None).await;
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            send_log(5, &format!("获取当前程序路径失败: {}", e), "error", None).await;
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return;
-        }
-    };
-
-    let backup_path = format!(
+    let backup_path = PathBuf::from(format!(
         "{}.backup-{}",
-        current_exe.display(),
+        install_path.display(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-    );
+    ));
 
-    if let Err(e) = tokio::fs::copy(&current_exe, &backup_path).await {
+    if let Err(e) = tokio::fs::copy(&install_path, &backup_path).await {
         send_log(5, &format!("备份失败: {}", e), "error", None).await;
         let _ = tokio::fs::remove_file(&temp_path).await;
         return;
@@ -3018,7 +3035,7 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     send_log(5, "备份完成", "success", None).await;
 
     // Cleanup old backups (keep only the 3 most recent)
-    cleanup_old_backups(&current_exe).await;
+    cleanup_old_backups(&install_path).await;
 
     // Step 6: Set permissions
     send_log(6, "设置执行权限...", "info", None).await;
@@ -3031,22 +3048,16 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
 
     // Step 7: Replace binary
     send_log(7, "替换程序文件...", "info", None).await;
-    if let Err(e) = tokio::fs::remove_file(&current_exe).await {
-        send_log(7, &format!("删除旧文件失败: {}", e), "error", None).await;
-        return;
-    }
-
-    if let Err(e) = tokio::fs::rename(&temp_path, &current_exe).await {
+    if let Err(e) = tokio::fs::rename(&temp_path, &install_path).await {
         send_log(7, &format!("移动新文件失败: {}", e), "error", None).await;
-        // Try to restore backup
-        let _ = tokio::fs::copy(&backup_path, &current_exe).await;
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return;
     }
     send_log(7, "文件替换完成", "success", None).await;
 
     // Step 7.5: Verify new binary
     send_log(7, "验证新版本...", "info", None).await;
-    match tokio::process::Command::new(&current_exe)
+    match tokio::process::Command::new(&install_path)
         .arg("--version")
         .output()
         .await
@@ -3057,7 +3068,8 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         _ => {
             send_log(7, "新版本验证失败，恢复备份", "error", None).await;
             // Restore backup
-            let _ = tokio::fs::copy(&backup_path, &current_exe).await;
+            let _ = tokio::fs::copy(&backup_path, &install_path).await;
+            let _ = fs::set_permissions(&install_path, fs::Permissions::from_mode(0o755));
             return;
         }
     }
@@ -3076,43 +3088,161 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     send_log(10, "重启服务...", "info", None).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    if let Err(err) = restart_current_process().await {
-        let err = err.to_string();
-        send_log(10, &format!("重启失败: {}", err), "error", None).await;
+    match request_process_restart(&state).await {
+        Ok(mode) => {
+            send_log(10, &format!("重启已触发: {}", mode), "success", None).await;
+        }
+        Err(err) => {
+            send_log(10, &format!("重启失败: {}", err), "error", None).await;
+        }
     }
-
-    // Try to restore backup
-    let _ = fs::remove_file(&current_exe);
-    let _ = fs::copy(&backup_path, &current_exe);
-    let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
 }
 
-async fn restart_current_process() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if try_restart_systemd("ivnc").await.is_ok() {
-        return Ok(());
+async fn request_process_restart(state: &SharedState) -> Result<&'static str, String> {
+    if current_process_in_systemd_service("ivnc") {
+        match try_restart_systemd_no_block("ivnc").await {
+            Ok(()) => return Ok("systemd"),
+            Err(err) => {
+                log::warn!(
+                    "systemd restart unavailable, falling back to self restart: {}",
+                    err
+                );
+            }
+        }
     }
 
-    let current_exe = std::env::current_exe()?;
-    let args: Vec<String> = std::env::args().collect();
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&current_exe)
-        .args(&args[1..])
-        .exec();
-    Err(Box::new(err))
+    if !state.has_shutdown_flag() {
+        return Err("shutdown flag is not initialized".to_string());
+    }
+
+    schedule_self_restart()?;
+    if !state.request_shutdown() {
+        return Err("failed to request graceful shutdown".to_string());
+    }
+    Ok("self")
 }
 
-/// Try to restart via systemd
-async fn try_restart_systemd(service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Ask systemd to restart without waiting for this process to stop.
+async fn try_restart_systemd_no_block(service_name: &str) -> Result<(), String> {
     let output = tokio::process::Command::new("systemctl")
-        .args(&["restart", service_name])
+        .args(["--no-block", "restart", service_name])
         .output()
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
 
     if output.status.success() {
         Ok(())
     } else {
-        Err("systemctl restart failed".into())
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!("systemctl exited with {}", output.status))
+        } else {
+            Err(stderr)
+        }
     }
+}
+
+fn schedule_self_restart() -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let binary = current_install_path()?;
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg("parent=$1; shift; i=0; while kill -0 \"$parent\" 2>/dev/null && [ \"$i\" -lt 30 ]; do sleep 1; i=$((i + 1)); done; exec \"$0\" \"$@\"")
+        .arg(&binary)
+        .arg(std::process::id().to_string())
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    command
+        .spawn()
+        .map_err(|e| format!("failed to schedule self restart: {}", e))?;
+    Ok(())
+}
+
+fn current_install_path() -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = std::env::current_exe() {
+        candidates.push(path.clone());
+        if let Some(stripped) = strip_deleted_suffix(&path) {
+            candidates.push(stripped);
+        }
+    }
+
+    if let Some(arg0) = std::env::args_os().next() {
+        candidates.extend(resolve_arg0_candidates(arg0));
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("no existing iVNC binary path found".to_string())
+}
+
+fn resolve_arg0_candidates(arg0: std::ffi::OsString) -> Vec<PathBuf> {
+    let path = PathBuf::from(&arg0);
+    if path.is_absolute() {
+        return vec![path];
+    }
+
+    if path.components().count() > 1 {
+        return std::env::current_dir()
+            .map(|cwd| vec![cwd.join(path)])
+            .unwrap_or_default();
+    }
+
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(&path))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn strip_deleted_suffix(path: &StdPath) -> Option<PathBuf> {
+    let raw = path.to_string_lossy();
+    raw.strip_suffix(" (deleted)").map(PathBuf::from)
+}
+
+fn upgrade_temp_path(install_path: &StdPath) -> Result<PathBuf, String> {
+    let parent = install_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", install_path.display()))?;
+    let file_name = install_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} has no valid file name", install_path.display()))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    Ok(parent.join(format!(".{}.new-{}-{}", file_name, std::process::id(), ts)))
+}
+
+fn current_process_in_systemd_service(service_name: &str) -> bool {
+    let service = format!("{}.service", service_name);
+    std::fs::read_to_string("/proc/self/cgroup")
+        .map(|content| content.lines().any(|line| line.contains(&service)))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -282,6 +282,7 @@ fn run(
     #[cfg_attr(not(feature = "mcp"), allow(unused))] args: &RunArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let running = Arc::new(AtomicBool::new(true));
+    shared_state.set_shutdown_flag(running.clone());
 
     use smithay::reexports::calloop::EventLoop;
     use smithay::reexports::wayland_server::Display;
@@ -411,6 +412,26 @@ fn run(
 
     // Tokio runtime for async services
     let tokio_rt = tokio::runtime::Runtime::new()?;
+    {
+        let r = running.clone();
+        tokio_rt.spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                info!("Ctrl+C received, shutting down gracefully");
+                r.store(false, Ordering::SeqCst);
+            }
+        });
+    }
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let r = running.clone();
+        tokio_rt.spawn(async move {
+            sigterm.recv().await;
+            info!("SIGTERM received, shutting down gracefully");
+            r.store(false, Ordering::SeqCst);
+        });
+    }
     {
         let st = shared_state.clone();
         let r = running.clone();

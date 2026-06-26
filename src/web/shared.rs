@@ -170,6 +170,9 @@ pub struct SharedState {
     /// Managed-apps manager, attached after construction (apps subsystem is
     /// built later in startup than SharedState). Lets the agent launch apps.
     apps_state: std::sync::OnceLock<Arc<crate::apps::api::AppsState>>,
+
+    /// Main loop shutdown flag, attached after the compositor loop creates it.
+    shutdown_flag: std::sync::OnceLock<Arc<AtomicBool>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -242,6 +245,7 @@ impl SharedState {
             ipv4_address: Arc::new(RwLock::new(String::new())),
             proxy_panel: Arc::new(ProxyPanelManager::new()),
             apps_state: std::sync::OnceLock::new(),
+            shutdown_flag: std::sync::OnceLock::new(),
         }
     }
 
@@ -253,6 +257,23 @@ impl SharedState {
     /// The apps manager, if it has been attached.
     pub fn apps_state(&self) -> Option<&Arc<crate::apps::api::AppsState>> {
         self.apps_state.get()
+    }
+
+    pub fn set_shutdown_flag(&self, running: Arc<AtomicBool>) {
+        let _ = self.shutdown_flag.set(running);
+    }
+
+    pub fn request_shutdown(&self) -> bool {
+        if let Some(running) = self.shutdown_flag.get() {
+            running.store(false, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn has_shutdown_flag(&self) -> bool {
+        self.shutdown_flag.get().is_some()
     }
 
     pub fn update_webrtc_stats(&self, kind: &str, payload: &str) {
