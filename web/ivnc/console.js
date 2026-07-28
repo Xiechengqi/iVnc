@@ -13,7 +13,7 @@ let lastOverviewAt = 0;
 const I18N = {
     en: {
         pageTitle: 'Management Console',
-        subtitle: 'Manage apps, runtime settings, and Agent',
+        subtitle: 'Manage apps and runtime settings',
         navOverview: 'Overview',
         navApps: 'Apps',
         navSettings: 'Connection',
@@ -149,7 +149,7 @@ const I18N = {
         skillPathsPlaceholder: '/root/.config/ivnc/skills/app/SKILL.md',
         cliBinary: 'Binary Path',
         cliEnv: 'Execution Environment Variables',
-        cliEnvDefault: '(Optional, added when Agent runs this CLI; one KEY=value per line)',
+        cliEnvDefault: '(Optional, added when this CLI is invoked; one KEY=value per line)',
         cliBinaryPlaceholder: '/usr/local/bin/agent-browser',
         cliEnvPlaceholder: 'NO_COLOR=1\nAGENT_BROWSER_SESSION=ivnc-default',
         missingCliBinary: 'Please enter a binary path',
@@ -179,7 +179,6 @@ const I18N = {
         sessionsHelpNone: 'no viewer connected',
         sessionsHelpOne: '1 viewer',
         sessionsHelpMany: (n) => `${n} viewers`,
-        // agent card
         // quick actions
         quickApps: 'Apps',
         quickAppsDesc: 'Add or manage desktop & background apps',
@@ -190,7 +189,7 @@ const I18N = {
     },
     zh: {
         pageTitle: '管理控制台',
-        subtitle: '管理应用、运行参数和 Agent',
+        subtitle: '管理应用与运行参数',
         navOverview: '概览',
         navApps: '应用',
         navSettings: '连接质量',
@@ -326,7 +325,7 @@ const I18N = {
         skillPathsPlaceholder: '/root/.config/ivnc/skills/app/SKILL.md',
         cliBinary: 'Binary Path',
         cliEnv: '执行环境变量',
-        cliEnvDefault: '（可选，agent 调用该 CLI 时附加，每行 KEY=value）',
+        cliEnvDefault: '（可选，调用该 CLI 时附加，每行 KEY=value）',
         cliBinaryPlaceholder: '/usr/local/bin/agent-browser',
         cliEnvPlaceholder: 'NO_COLOR=1\nAGENT_BROWSER_SESSION=ivnc-default',
         missingCliBinary: '请输入 binary 路径',
@@ -356,7 +355,6 @@ const I18N = {
         sessionsHelpNone: '当前无观看者',
         sessionsHelpOne: '1 位观看者',
         sessionsHelpMany: (n) => `${n} 位观看者`,
-        // agent card
         // quick actions
         quickApps: '应用',
         quickAppsDesc: '添加或管理桌面应用与后台应用',

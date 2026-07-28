@@ -46,10 +46,6 @@ pub enum ToolSource {
         binary_path: String,
         env: HashMap<String, String>,
     },
-    McpTool {
-        endpoint: String,
-        tool_name: String,
-    },
     HttpApi {
         base_url: String,
         path: String,

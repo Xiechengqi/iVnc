@@ -739,7 +739,7 @@ fn run(
                 let msg = format!("taskbar,{}", json);
                 info!("Taskbar broadcast: {}", msg);
                 shared_state.send_text(msg);
-                // Cache for MCP list_windows tool
+                // Cache for the taskbar window list
                 *shared_state.last_taskbar_json.lock().unwrap() = Some(json);
                 last_visual_activity_at = Instant::now();
             }

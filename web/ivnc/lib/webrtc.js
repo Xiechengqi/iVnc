@@ -200,15 +200,7 @@ export class WebRTCDemo {
 		 */
 		this.ontaskbarupdate = null;
 
-		/**
-		 * @type {function}
-		 */
-		this.onagentcontrol = null;
 
-		/**
-		 * @type {function}
-		 */
-		this.onagentaction = null;
 	}
 
 	/**
@@ -605,14 +597,6 @@ export class WebRTCDemo {
 		} else if (msg.type === 'taskbar') {
 			if (this.ontaskbarupdate !== null && msg.data !== null) {
 				this.ontaskbarupdate(msg.data);
-			}
-		} else if (msg.type === 'mcp_control') {
-			if (this.onagentcontrol !== null && msg.data !== null) {
-				this.onagentcontrol(msg.data);
-			}
-		} else if (msg.type === 'mcp_action') {
-			if (this.onagentaction !== null && msg.data !== null) {
-				this.onagentaction(msg.data);
 			}
 		} else if (msg.type === 'window_state') {
 			this._setDebug("received window state: " + JSON.stringify(msg.data));

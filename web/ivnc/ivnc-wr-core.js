@@ -411,44 +411,6 @@ function InitUI() {
 	.taskbar-pin.uploading {
 		animation: pulse 1.5s ease-in-out infinite;
 	}
-	.taskbar-agent-stop {
-		display: none;
-		color: #ffdddd;
-		background: rgba(190, 55, 55, 0.28);
-		border-color: rgba(220, 80, 80, 0.55);
-	}
-	.taskbar-agent-stop.active {
-		display: inline-flex;
-	}
-	.agent-timeline {
-		position: fixed;
-		right: 12px;
-		bottom: 48px;
-		width: min(360px, calc(100vw - 24px));
-		max-height: min(260px, calc(100vh - 96px));
-		overflow: auto;
-		background: rgba(28, 30, 34, 0.92);
-		color: #f3f4f6;
-		border: 1px solid rgba(255, 255, 255, 0.16);
-		border-radius: 6px;
-		padding: 8px;
-		z-index: 1001;
-		font: 12px/1.4 system-ui, sans-serif;
-		box-shadow: 0 8px 26px rgba(0, 0, 0, 0.32);
-	}
-	.agent-timeline.hidden {
-		display: none;
-	}
-	.agent-timeline-row {
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		padding: 3px 2px;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-	}
-	.agent-timeline-row:last-child {
-		border-bottom: 0;
-	}
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.5; }
@@ -3593,20 +3555,6 @@ export default function webrtc() {
 			});
 			taskbar.appendChild(pinBtn);
 
-			const agentStopSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`;
-			const agentStopBtn = document.createElement('div');
-			agentStopBtn.className = 'taskbar-pin taskbar-agent-stop';
-			agentStopBtn.id = 'agent-stop-btn';
-			agentStopBtn.innerHTML = agentStopSvg;
-			agentStopBtn.title = 'Stop agent';
-			agentStopBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				if (webrtc && webrtc._send_channel && webrtc._send_channel.readyState === 'open') {
-					webrtc.sendDataChannelMessage('agent_stop');
-				}
-			});
-			taskbar.appendChild(agentStopBtn);
-
 			// IME toggle button
 			let imeModeActive = getBoolParam('ime_mode', false);
 			const imeSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="16" text-anchor="middle" font-size="11" fill="currentColor" stroke="none" font-weight="bold">中</text></svg>`;
@@ -3743,11 +3691,6 @@ export default function webrtc() {
 
 			document.body.appendChild(taskbarTrigger);
 			document.body.appendChild(taskbar);
-
-			const agentTimeline = document.createElement('div');
-			agentTimeline.id = 'agent-timeline';
-			agentTimeline.className = 'agent-timeline hidden';
-			document.body.appendChild(agentTimeline);
 
 			let taskbarHideTimer = null;
 			const showTaskbar = () => {
@@ -4128,42 +4071,6 @@ export default function webrtc() {
 					});
 					tb.appendChild(item);
 				});
-			}
-
-			webrtc.onagentcontrol = (data) => {
-				const stopBtn = document.getElementById('agent-stop-btn');
-				const timeline = document.getElementById('agent-timeline');
-				const active = !!data.active;
-				if (stopBtn) stopBtn.classList.toggle('active', active);
-				if (timeline) timeline.classList.toggle('hidden', !active && timeline.children.length === 0);
-			}
-
-			webrtc.onagentaction = (data) => {
-				const timeline = document.getElementById('agent-timeline');
-				if (!timeline) return;
-				timeline.classList.remove('hidden');
-				const row = document.createElement('div');
-				row.className = 'agent-timeline-row';
-				row.textContent = describeAgentAction(data);
-				timeline.appendChild(row);
-				while (timeline.children.length > 20) timeline.removeChild(timeline.firstChild);
-				timeline.scrollTop = timeline.scrollHeight;
-			}
-
-			function describeAgentAction(data) {
-				const action = data && data.action ? data.action : {};
-				const kind = action.kind || 'action';
-				const label = action.label ? ` ${action.label}` : '';
-				if (typeof action.x === 'number' && typeof action.y === 'number') {
-					return `${data.seq ?? ''} ${kind} (${action.x}, ${action.y})${label}`;
-				}
-				if (kind === 'type_text' && action.text) {
-					return `${data.seq ?? ''} type ${String(action.text).slice(0, 60)}`;
-				}
-				if (kind === 'key_chord' && action.combo) {
-					return `${data.seq ?? ''} key ${action.combo}`;
-				}
-				return `${data.seq ?? ''} ${kind}${label}`;
 			}
 
 			webrtc.onsystemaction = (action) => {

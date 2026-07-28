@@ -138,7 +138,7 @@ pub struct SharedState {
     pub proxy_panel: Arc<ProxyPanelManager>,
 
     /// Managed-apps manager, attached after construction (apps subsystem is
-    /// built later in startup than SharedState). Lets the agent launch apps.
+    /// built later in startup than SharedState).
     apps_state: std::sync::OnceLock<Arc<crate::apps::api::AppsState>>,
 
     /// Main loop shutdown flag, attached after the compositor loop creates it.
