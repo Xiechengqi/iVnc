@@ -8,14 +8,7 @@ let lastDataHash = '';
 let currentLang = getLang();
 let activeSection = 'overview';
 let overviewCache = null;
-let providersCache = [];
-let agentDefaultProvider = null;
-let runsCache = [];
-let runsFilter = 'all';
-let runsSearchTerm = '';
 let lastOverviewAt = 0;
-let providerOriginalSettings = null;
-let apiKeyMode = 'stored';
 
 const I18N = {
     en: {
@@ -24,23 +17,10 @@ const I18N = {
         navOverview: 'Overview',
         navApps: 'Apps',
         navSettings: 'Connection',
-        navAgent: 'MCP / Agent',
-        navProviders: 'Suppliers',
-        navRuns: 'Logs / Trajectories',
-        navSchedules: 'Schedules',
         sectionOverviewDesc: 'Current iVnc status and quick checks.',
         sectionAppsDesc: 'Manage desktop, background, and CLI applications.',
         sectionSettingsDesc: 'Common runtime controls for stream quality.',
-        sectionAgentDesc: 'Default parameters for MCP Agent runs.',
-        sectionProvidersDesc: 'Provider endpoint, model, and credential settings.',
-        sectionRunsDesc: 'Recent Agent runs and trajectory paths.',
-        save: 'Save',
         saveApply: 'Save & Apply',
-        refresh: 'Refresh',
-        reset: 'Reset',
-        stopAgent: 'Stop Agent',
-        providerStatus: 'Provider Status',
-        agentStatus: 'Agent Status',
         requestKeyframe: 'Request Keyframe',
         paramTargetFps: 'Target FPS',
         paramTargetFpsHelp: 'Target video frame rate. Higher values are smoother but increase encoding and network load.',
@@ -78,33 +58,7 @@ const I18N = {
         paramProviderCoordSpaceHelp: 'Coordinate space returned by the Provider. Default uses the Provider built-in convention.',
         toggleEnabled: 'Enabled',
         defaultOption: 'Default',
-        keepApiKeyPlaceholder: 'Leave empty to keep unchanged',
-        enterNewApiKey: 'Enter new API Key',
-        agentDefaults: 'Agent Defaults',
-        providerConfig: 'Provider Config',
-        providerAdd: 'Add Supplier',
-        providerAddTitle: 'Add Supplier',
-        providerEditTitle: 'Edit Supplier',
-        providerSetDefault: 'Set Default',
-        providerDefaultSet: 'Default supplier updated',
-        providerCreated: 'Provider created',
-        saved: 'Saved',
-        providerSaved: 'Provider saved',
-        providerDeleted: 'Provider deleted',
-        providerDeleteConfirm: 'Delete this Provider?',
-        newProviderNameRequired: 'Provider name is required',
-        testButton: 'Test',
-        testRunning: 'Testing…',
-        testOk: 'OK',
-        testFailed: 'Failed:',
-        testSkipped: 'No network test for this provider',
         settingsSaved: 'Settings applied',
-        agentSaved: 'Agent defaults saved',
-        noRuns: 'No Agent runs yet.',
-        noRunsHint: 'Runs started from MCP or this console will appear here.',
-        noRunsMatch: 'No runs match the current filter.',
-        configured: 'Configured',
-        missingConfig: 'Missing config',
         langToggle: '中文',
         addApp: '+ Add App',
         thName: 'Name',
@@ -117,20 +71,13 @@ const I18N = {
         capSkills: 'skills',
         capDescribeOk: 'describe ok',
         capDescribeFailed: 'describe failed',
-        loading: 'Loading...',
         empty: 'No apps yet. Click "Add App" to create one.',
         desktop: 'Desktop',
         background: 'Background',
         cli: 'CLI',
-        installed: 'installed',
         missing: 'missing',
-        not_executable: 'not executable',
-        invalid_path: 'invalid path',
-        not_file: 'not a file',
-        missing_path: 'missing path',
         running: 'running',
         stopped: 'stopped',
-        crashed: 'crashed',
         start: 'Start',
         stop: 'Stop',
         restart: 'Restart',
@@ -214,10 +161,6 @@ const I18N = {
         settingsActionsTitle: 'Instant Actions',
         settingsActionsHint: 'Applied immediately, no save required',
         settingsHint: 'Changes apply instantly and persist as next-startup defaults.',
-        agentBudgetTitle: 'Run Budget',
-        agentBudgetHint: 'Caps the resources spent on a single Agent run',
-        agentBehaviorTitle: 'Provider & Behavior',
-        agentSaveHint: 'Defaults are used by subsequent runs started via MCP or this console.',
         suffixFps: 'fps',
         suffixKbps: 'kbps',
         suffixBps: 'bps',
@@ -228,162 +171,22 @@ const I18N = {
         metaLastRefresh: 'Last refresh',
         metaJustNow: 'just now',
         metaAutoRefresh: 'Auto-refresh 5s',
-        overviewAgentRaw: 'Raw data',
-        overviewJumpProviders: 'Configure →',
         // overview tiles
         tileVersion: 'Version',
         tileDisplay: 'Display',
         tileSessions: 'Sessions',
-        tileAgent: 'Agent',
         tileFpsTarget: (fps) => `target ${fps} FPS`,
-        tileWebRTC: 'WebRTC',
-        tileMcpAgentAll: 'mcp · agent-all',
-        tileMcpAgent: 'mcp · agent',
-        tileNoFeatures: 'core only',
-        tileExclusive: 'exclusive',
-        tileIdle: 'idle',
-        tileStopRequested: 'stop requested',
-        tileRunning: 'running',
         sessionsHelpNone: 'no viewer connected',
         sessionsHelpOne: '1 viewer',
         sessionsHelpMany: (n) => `${n} viewers`,
         // agent card
-        agentTaskLabel: 'Current task',
-        agentNoTaskRunning: 'Agent is running without a task summary.',
-        agentNoTaskIdle: 'No active task. Start one via MCP or the Agent tab.',
-        agentMetricRun: 'Run ID',
-        agentMetricExclusive: 'Exclusive',
-        agentMetricStop: 'Stop',
-        agentStateRunning: 'Running',
-        agentStateIdle: 'Idle',
-        agentStateExclusive: 'Exclusive',
-        agentStateStopping: 'Stopping',
-        agentStateDisabled: 'Disabled',
-        yes: 'Yes',
-        no: 'No',
         // quick actions
-        quickActionsTitle: 'Quick Actions',
         quickApps: 'Apps',
         quickAppsDesc: 'Add or manage desktop & background apps',
         quickSettings: 'Connection',
         quickSettingsDesc: 'Tune FPS, bitrate, clipboard',
-        quickAgent: 'MCP / Agent',
-        quickAgentDesc: 'Run budgets and Agent defaults',
-        quickRuns: 'Logs / Trajectories',
-        quickRunsDesc: 'Inspect recent Agent runs',
         // provider list
-        providerEmptyText: 'Pick a Provider on the left to view or edit its configuration.',
-        providerDefaultBadge: 'Default',
-        providerEndpointHintDefault: (v) => `Default: ${v}`,
-        providerModelHintDefault: (v) => `Default: ${v}`,
-        providerNoneConfigured: 'No Provider configured yet. Set one up to enable Agent.',
-        apiKeyStatusSaved: 'Saved',
-        apiKeyStatusEmpty: 'Not set',
-        apiKeyReplace: 'Replace',
-        apiKeyClear: 'Clear',
-        apiKeyCancel: 'Cancel',
-        apiKeyUndoClear: 'Undo',
-        apiKeyPendingText: 'Saved API Key will be cleared on save',
         // runs
-        runsSearchPlaceholder: 'Search by run ID or task',
-        runsFilterAll: 'All',
-        runState_running: 'Running',
-        runState_done: 'Done',
-        runState_failed: 'Failed',
-        runState_interrupted: 'Interrupted',
-        runState_ask: 'Awaiting Answer',
-        runState_safety: 'Safety',
-        runState_budget: 'Budget Exceeded',
-        runState_max_steps: 'Max Steps',
-        runState_provider_error: 'Provider Error',
-        runsMetricSteps: 'steps',
-        runsMetricTokens: 'tokens',
-        runsCopyId: 'Copy ID',
-        runsCopyPath: 'Copy trajectory path',
-        runsCopyEventPath: 'Copy event path',
-        runsNoPath: 'No trajectory saved',
-        runsIdCopied: 'Run ID copied',
-        runsPathCopied: 'Trajectory path copied',
-        copyFailed: 'Copy failed',
-        emptyRunsTitle: 'No runs yet',
-        emptyRunsFilterTitle: 'No matching runs',
-        runsStartedAt: 'started',
-        runDetailBack: 'Back',
-        runDetailLoading: 'Loading trajectory…',
-        runDetailEmpty: 'No step records on disk',
-        runDetailEmptyHint: 'Trajectory file not found or empty. Enable record_trajectory to capture steps.',
-        runDetailStarted: 'Started',
-        runDetailFinished: 'Finished',
-        runDetailDuration: 'Duration',
-        runDetailSteps: 'Steps',
-        runDetailTokens: 'Tokens (in / out)',
-        runDetailEvents: 'Events',
-        runDetailBudget: 'Budget',
-        runDetailReason: 'Result',
-        resultTitle: 'Result',
-        resultCopy: 'Copy',
-        resultCopied: 'Result copied',
-        resultEmpty: 'No text result (task completed)',
-        resultFailed: 'Not completed',
-        resultRunning: 'Task in progress…',
-        resultWarnings: 'Warnings',
-        badgeScheduled: 'Scheduled',
-        newTaskTitle: 'New task',
-        newTaskHint: 'Launch one agent run',
-        newTaskProvider: 'Provider',
-        newTaskMaxSteps: 'Max steps',
-        newTaskMaxWall: 'Max wall (s)',
-        newTaskStart: 'Start',
-        newTaskStarting: 'Starting…',
-        newTaskPlaceholder: 'Describe the task for the agent',
-        newTaskUseDefault: 'Use default',
-        newTaskTaskRequired: 'Task is required',
-        newTaskProviderRequired: 'Provider is required',
-        newTaskStarted: 'Task started',
-        newTaskAlreadyActive: 'A run is already active',
-        newTaskFailed: 'Failed to start: ',
-        newTaskRunning: 'A run is already in progress — stop it first',
-        schedulesTitle: 'Schedules',
-        schedulesHint: 'Five-field cron in server local timezone. Overlapping fires are skipped.',
-        schedulesEmpty: 'No schedules yet.',
-        schedulesNew: 'New',
-        scheduleEditTitle: 'Edit schedule',
-        scheduleEditNewTitle: 'New schedule',
-        scheduleName: 'Name',
-        scheduleCron: 'cron (5 fields)',
-        scheduleTask: 'Task',
-        scheduleProvider: 'Provider',
-        scheduleMaxSteps: 'Max steps',
-        scheduleMaxWall: 'Max wall (s)',
-        scheduleEnabled: 'Enabled',
-        scheduleSave: 'Save',
-        scheduleCancel: 'Cancel',
-        scheduleEdit: 'Edit',
-        scheduleDelete: 'Delete',
-        scheduleRunNow: 'Run now',
-        scheduleNextRun: 'Next',
-        scheduleLastRun: 'Last',
-        scheduleNever: 'never',
-        scheduleSaved: 'Schedule saved',
-        scheduleDeleted: 'Schedule deleted',
-        scheduleRunStarted: 'Schedule fired',
-        scheduleRunFailed: 'Failed to fire: ',
-        scheduleSaveFailed: 'Save failed: ',
-        scheduleDeleteFailed: 'Delete failed: ',
-        scheduleDeleteConfirm: 'Delete this schedule?',
-        scheduleOutcomeStarted: 'started',
-        scheduleOutcomeSkipped: 'skipped',
-        scheduleOutcomeFailed: 'failed',
-        runDetailFilterAll: 'All actions',
-        stepLatency: 'latency',
-        stepGap: 'gap',
-        stepTokens: 'tokens',
-        stepResultOk: 'ok',
-        stepCopyJson: 'Copy JSON',
-        stepJsonCopied: 'Step JSON copied',
-        stepFrame: 'screenshot',
-        stepNoFrame: 'no screenshot',
-        stepCumulative: 'cumulative',
     },
     zh: {
         pageTitle: '管理控制台',
@@ -391,23 +194,10 @@ const I18N = {
         navOverview: '概览',
         navApps: '应用',
         navSettings: '连接质量',
-        navAgent: 'MCP / Agent',
-        navProviders: '供应商',
-        navRuns: '日志 / 轨迹',
-        navSchedules: '定时任务',
         sectionOverviewDesc: '当前 iVnc 运行状态和快捷入口。',
         sectionAppsDesc: '管理桌面、后台和 CLI 应用。',
         sectionSettingsDesc: '调整常用的实时串流质量参数。',
-        sectionAgentDesc: '配置 MCP Agent run 的默认参数。',
-        sectionProvidersDesc: '配置 Provider 的 endpoint、模型和凭据。',
-        sectionRunsDesc: '查看最近 Agent run 和轨迹路径。',
-        save: '保存',
         saveApply: '保存并应用',
-        refresh: '刷新',
-        reset: '重置',
-        stopAgent: '停止 Agent',
-        providerStatus: 'Provider 状态',
-        agentStatus: 'Agent 状态',
         requestKeyframe: '请求关键帧',
         paramTargetFps: 'Target FPS',
         paramTargetFpsHelp: '目标画面帧率，越高越流畅但会增加编码和网络压力。',
@@ -445,33 +235,7 @@ const I18N = {
         paramProviderCoordSpaceHelp: 'Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。',
         toggleEnabled: '启用',
         defaultOption: '默认',
-        keepApiKeyPlaceholder: '保持为空表示不修改',
-        enterNewApiKey: '输入新的 API Key',
-        agentDefaults: 'Agent 默认参数',
-        providerConfig: 'Provider 配置',
-        providerAdd: '添加供应商',
-        providerAddTitle: '添加供应商',
-        providerEditTitle: '编辑供应商',
-        providerSetDefault: '设为默认',
-        providerDefaultSet: '默认供应商已更新',
-        providerCreated: 'Provider 已创建',
-        saved: '已保存',
-        providerSaved: 'Provider 已保存',
-        providerDeleted: 'Provider 已删除',
-        providerDeleteConfirm: '确认删除这个 Provider？',
-        newProviderNameRequired: 'Provider 名称不能为空',
-        testButton: '测试',
-        testRunning: '测试中…',
-        testOk: '通过',
-        testFailed: '失败：',
-        testSkipped: '该 Provider 无需网络测试',
         settingsSaved: '设置已应用',
-        agentSaved: 'Agent 默认参数已保存',
-        noRuns: '暂无 Agent run。',
-        noRunsHint: '通过 MCP 或控制台启动的 Agent run 会出现在这里。',
-        noRunsMatch: '当前筛选下没有匹配的 run。',
-        configured: '已配置',
-        missingConfig: '未配置',
         langToggle: 'English',
         addApp: '+ 添加应用',
         thName: '名称',
@@ -484,20 +248,13 @@ const I18N = {
         capSkills: '技能',
         capDescribeOk: 'describe 正常',
         capDescribeFailed: 'describe 失败',
-        loading: '加载中...',
         empty: '暂无应用，点击"添加应用"创建。',
         desktop: '桌面',
         background: '后台',
         cli: 'CLI',
-        installed: '已安装',
         missing: '缺失',
-        not_executable: '不可执行',
-        invalid_path: '路径无效',
-        not_file: '不是文件',
-        missing_path: '缺少路径',
         running: '运行中',
         stopped: '已停止',
-        crashed: '已崩溃',
         start: '启动',
         stop: '停止',
         restart: '重启',
@@ -581,10 +338,6 @@ const I18N = {
         settingsActionsTitle: '即时操作',
         settingsActionsHint: '立即生效，无需保存',
         settingsHint: '改动会立即应用并保存为下次启动的默认值。',
-        agentBudgetTitle: '运行限额',
-        agentBudgetHint: '控制单次 Agent run 的最大资源消耗',
-        agentBehaviorTitle: 'Provider 与行为',
-        agentSaveHint: '默认值会用于后续通过 MCP 或控制台启动的 Agent run。',
         suffixFps: 'fps',
         suffixKbps: 'kbps',
         suffixBps: 'bps',
@@ -595,162 +348,22 @@ const I18N = {
         metaLastRefresh: '最后刷新',
         metaJustNow: '刚刚',
         metaAutoRefresh: '自动刷新 5s',
-        overviewAgentRaw: '原始数据',
-        overviewJumpProviders: '配置 →',
         // overview tiles
         tileVersion: '版本',
         tileDisplay: '画面',
         tileSessions: '连接',
-        tileAgent: 'Agent',
         tileFpsTarget: (fps) => `目标 ${fps} FPS`,
-        tileWebRTC: 'WebRTC',
-        tileMcpAgentAll: 'mcp · agent-all',
-        tileMcpAgent: 'mcp · agent',
-        tileNoFeatures: '仅核心',
-        tileExclusive: '独占',
-        tileIdle: '空闲',
-        tileStopRequested: '请求停止',
-        tileRunning: '运行中',
         sessionsHelpNone: '当前无观看者',
         sessionsHelpOne: '1 位观看者',
         sessionsHelpMany: (n) => `${n} 位观看者`,
         // agent card
-        agentTaskLabel: '当前任务',
-        agentNoTaskRunning: 'Agent 正在运行（无任务摘要）',
-        agentNoTaskIdle: '当前无任务。通过 MCP 或 Agent 页发起新任务。',
-        agentMetricRun: 'Run ID',
-        agentMetricExclusive: '独占模式',
-        agentMetricStop: '停止请求',
-        agentStateRunning: '运行中',
-        agentStateIdle: '空闲',
-        agentStateExclusive: '独占',
-        agentStateStopping: '停止中',
-        agentStateDisabled: '未启用',
-        yes: '是',
-        no: '否',
         // quick actions
-        quickActionsTitle: '快捷入口',
         quickApps: '应用',
         quickAppsDesc: '添加或管理桌面应用与后台应用',
         quickSettings: '连接质量',
         quickSettingsDesc: '调整 FPS、码率与剪贴板',
-        quickAgent: 'MCP / Agent',
-        quickAgentDesc: '运行限额与 Agent 默认参数',
-        quickRuns: '日志 / 轨迹',
-        quickRunsDesc: '查看最近的 Agent run',
         // provider list
-        providerEmptyText: '从左侧选择一个 Provider 查看或编辑配置',
-        providerDefaultBadge: '默认',
-        providerEndpointHintDefault: (v) => `默认值：${v}`,
-        providerModelHintDefault: (v) => `默认值：${v}`,
-        providerNoneConfigured: '暂无已配置的 Provider，配置一个以启用 Agent。',
-        apiKeyStatusSaved: '已保存',
-        apiKeyStatusEmpty: '未设置',
-        apiKeyReplace: '替换',
-        apiKeyClear: '清除',
-        apiKeyCancel: '取消',
-        apiKeyUndoClear: '撤销',
-        apiKeyPendingText: '将在保存时清除已存 API Key',
         // runs
-        runsSearchPlaceholder: '按 run ID 或任务搜索',
-        runsFilterAll: '全部',
-        runState_running: '运行中',
-        runState_done: '完成',
-        runState_failed: '失败',
-        runState_interrupted: '已中断',
-        runState_ask: '等待回答',
-        runState_safety: '安全检查',
-        runState_budget: '超出预算',
-        runState_max_steps: '达到步数上限',
-        runState_provider_error: 'Provider 错误',
-        runsMetricSteps: '步',
-        runsMetricTokens: 'tokens',
-        runsCopyId: '复制 ID',
-        runsCopyPath: '复制轨迹路径',
-        runsCopyEventPath: '复制事件路径',
-        runsNoPath: '未保存轨迹',
-        runsIdCopied: 'Run ID 已复制',
-        runsPathCopied: '轨迹路径已复制',
-        copyFailed: '复制失败',
-        emptyRunsTitle: '暂无 Agent run',
-        emptyRunsFilterTitle: '无匹配 run',
-        runsStartedAt: '开始于',
-        runDetailBack: '返回',
-        runDetailLoading: '正在加载轨迹…',
-        runDetailEmpty: '磁盘上没有步骤记录',
-        runDetailEmptyHint: '未找到轨迹文件或文件为空。开启 record_trajectory 才会记录每一步。',
-        runDetailStarted: '开始时间',
-        runDetailFinished: '结束时间',
-        runDetailDuration: '总时长',
-        runDetailSteps: '步数',
-        runDetailTokens: 'Tokens（入 / 出）',
-        runDetailEvents: '事件数',
-        runDetailBudget: '预算',
-        runDetailReason: '结束原因',
-        resultTitle: '结果',
-        resultCopy: '复制',
-        resultCopied: '结果已复制',
-        resultEmpty: '无文本结果（任务已完成）',
-        resultFailed: '未完成',
-        resultRunning: '任务进行中…',
-        resultWarnings: '提醒',
-        badgeScheduled: '定时',
-        newTaskTitle: '新建任务',
-        newTaskHint: '一次提交一条任务即可启动 Agent',
-        newTaskProvider: 'Provider',
-        newTaskMaxSteps: '最大步数',
-        newTaskMaxWall: '最长时长 (秒)',
-        newTaskStart: '启动',
-        newTaskStarting: '启动中…',
-        newTaskPlaceholder: '请描述要让 Agent 完成的任务',
-        newTaskUseDefault: '使用默认值',
-        newTaskTaskRequired: '请填写任务描述',
-        newTaskProviderRequired: '请选择 Provider',
-        newTaskStarted: '已启动任务',
-        newTaskAlreadyActive: '已有运行中的任务',
-        newTaskFailed: '启动失败：',
-        newTaskRunning: '已有运行中的任务，请先停止再启动',
-        schedulesTitle: '定时任务',
-        schedulesHint: 'cron 五段表达式，服务器本地时区。运行重叠时跳过本次，不堆积。',
-        schedulesEmpty: '暂无定时任务。',
-        schedulesNew: '新建',
-        scheduleEditTitle: '编辑定时任务',
-        scheduleEditNewTitle: '新建定时任务',
-        scheduleName: '名称',
-        scheduleCron: 'cron (5 段)',
-        scheduleTask: '任务描述',
-        scheduleProvider: 'Provider',
-        scheduleMaxSteps: '最大步数',
-        scheduleMaxWall: '最长时长 (秒)',
-        scheduleEnabled: '启用',
-        scheduleSave: '保存',
-        scheduleCancel: '取消',
-        scheduleEdit: '编辑',
-        scheduleDelete: '删除',
-        scheduleRunNow: '立即运行',
-        scheduleNextRun: '下次',
-        scheduleLastRun: '上次',
-        scheduleNever: '—',
-        scheduleSaved: '已保存',
-        scheduleDeleted: '已删除',
-        scheduleRunStarted: '已触发',
-        scheduleRunFailed: '触发失败：',
-        scheduleSaveFailed: '保存失败：',
-        scheduleDeleteFailed: '删除失败：',
-        scheduleDeleteConfirm: '确认删除该定时任务？',
-        scheduleOutcomeStarted: '已启动',
-        scheduleOutcomeSkipped: '已跳过',
-        scheduleOutcomeFailed: '失败',
-        runDetailFilterAll: '全部动作',
-        stepLatency: '延迟',
-        stepGap: '间隔',
-        stepTokens: 'tokens',
-        stepResultOk: '成功',
-        stepCopyJson: '复制 JSON',
-        stepJsonCopied: '步骤 JSON 已复制',
-        stepFrame: '截图',
-        stepNoFrame: '无截图',
-        stepCumulative: '累计',
     }
 };
 
@@ -807,16 +420,7 @@ function applyTranslations() {
     setText('nav-overview', 'navOverview');
     setText('nav-apps', 'navApps');
     setText('nav-settings', 'navSettings');
-    setText('nav-agent', 'navAgent');
-    setText('nav-providers', 'navProviders');
-    setText('nav-runs', 'navRuns');
-    setText('nav-schedules', 'navSchedules');
-    setText('overview-providers-title', 'providerStatus');
-    setText('overview-agent-title', 'agentStatus');
-    setText('overview-agent-stop', 'stopAgent');
-    setText('overview-jump-providers', 'overviewJumpProviders');
     setText('overview-meta-auto', 'metaAutoRefresh');
-    setText('overview-agent-raw-summary', 'overviewAgentRaw');
 
     setText('settings-stream-title', 'settingsStreamTitle');
     setText('settings-actions-title', 'settingsActionsTitle');
@@ -826,41 +430,8 @@ function applyTranslations() {
     setText('settings-dirty', 'dirtyIndicator');
     setText('request-keyframe', 'requestKeyframe');
 
-    setText('agent-budget-title', 'agentBudgetTitle');
-    setText('agent-budget-hint', 'agentBudgetHint');
-    setText('agent-behavior-title', 'agentBehaviorTitle');
-    setText('agent-save-hint', 'agentSaveHint');
-    setText('agent-save', 'save');
-    setText('agent-dirty', 'dirtyIndicator');
 
-    setText('providers-title', 'navProviders');
-    setText('provider-add', 'providerAdd');
-    setText('provider-modal-title', 'providerAddTitle');
-    setText('provider-modal-save', 'save');
-    setText('provider-modal-cancel', 'cancel');
-    setText('th-provider-name', 'thName');
-    setText('th-provider-type', 'thType');
-    setText('th-provider-config', 'thConfig');
-    setText('th-provider-status', 'thStatus');
-    setText('th-provider-actions', 'thActions');
-    setText('api-key-replace', 'apiKeyReplace');
-    setText('api-key-clear', 'apiKeyClear');
-    setText('api-key-cancel', 'apiKeyCancel');
-    setText('api-key-undo-clear', 'apiKeyUndoClear');
-    setText('api-key-pending-text', 'apiKeyPendingText');
 
-    setText('runs-refresh', 'refresh');
-    setPlaceholderById('runs-search', t('runsSearchPlaceholder'));
-    setText('run-detail-back-label', 'runDetailBack');
-    setText('new-task-title', 'newTaskTitle');
-    setText('new-task-hint', 'newTaskHint');
-    setText('new-task-provider-label', 'newTaskProvider');
-    setText('new-task-steps-label', 'newTaskMaxSteps');
-    setText('new-task-wall-label', 'newTaskMaxWall');
-    setText('new-task-start', 'newTaskStart');
-    setPlaceholderById('new-task-task', t('newTaskPlaceholder'));
-    setPlaceholderById('new-task-max-steps', t('newTaskUseDefault'));
-    setPlaceholderById('new-task-max-wall', t('newTaskUseDefault'));
 
     [
         ['label-target-fps', 'paramTargetFps'],
@@ -974,11 +545,8 @@ function applyTranslations() {
         logTitle.textContent = t('logsTitle');
     }
     updateSectionHeader();
-    renderRunsFilterChips();
     if (activeSection === 'overview') {
         updateOverviewMeta();
-        renderOverviewProviders(overviewCache?.providers || []);
-        renderOverviewAgent(overviewCache?.agent || {});
         renderQuickActions();
     }
 }
@@ -987,20 +555,12 @@ function updateSectionHeader() {
     const titleMap = {
         overview: 'navOverview',
         apps: 'navApps',
-        settings: 'navSettings',
-        agent: 'navAgent',
-        providers: 'navProviders',
-        runs: 'navRuns',
-        schedules: 'navSchedules'
+        settings: 'navSettings'
     };
     const descMap = {
         overview: 'sectionOverviewDesc',
         apps: 'sectionAppsDesc',
-        settings: 'sectionSettingsDesc',
-        agent: 'sectionAgentDesc',
-        providers: 'sectionProvidersDesc',
-        runs: 'sectionRunsDesc',
-        schedules: 'schedulesHint'
+        settings: 'sectionSettingsDesc'
     };
     setTextById('section-title', t(titleMap[activeSection]));
     setTextById('section-description', t(descMap[activeSection]));
@@ -1023,14 +583,6 @@ async function loadSection(section = activeSection) {
     if (section === 'overview') await loadOverview();
     if (section === 'apps') await load();
     if (section === 'settings') await loadSettings();
-    if (section === 'agent') await loadAgentConfig();
-    if (section === 'providers') await loadProviders();
-    if (section === 'runs') {
-        await Promise.all([loadRuns(), loadNewTaskPanel()]);
-    }
-    if (section === 'schedules') {
-        await loadSchedules();
-    }
 }
 
 async function load() {
@@ -1148,12 +700,8 @@ async function loadOverview() {
         overviewCache = d;
         lastOverviewAt = Date.now();
         renderOverviewTiles(d);
-        renderOverviewProviders(d.providers || []);
-        renderOverviewAgent(d.agent || {});
         renderQuickActions();
         updateOverviewMeta();
-        const rawEl = document.getElementById('overview-agent-json');
-        if (rawEl) rawEl.textContent = JSON.stringify(d.agent, null, 2);
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
     }
@@ -1164,40 +712,14 @@ function renderOverviewTiles(d) {
     if (!grid) return;
     grid.innerHTML = '';
 
-    const features = d.build?.features || {};
-    let versionHelp;
-    if (features.agent_all) versionHelp = t('tileMcpAgentAll');
-    else if (features.agent || features.mcp) versionHelp = features.agent && features.mcp ? t('tileMcpAgent') : (features.mcp ? 'mcp' : 'agent');
-    else versionHelp = t('tileNoFeatures');
+    const commit = d.build?.commit;
+    const versionHelp = commit && commit !== 'unknown' ? commit.slice(0, 12) : '';
 
     const sessions = d.connections?.webrtc_sessions ?? 0;
     let sessionsHelp;
     if (sessions === 0) sessionsHelp = t('sessionsHelpNone');
     else if (sessions === 1) sessionsHelp = t('sessionsHelpOne');
     else sessionsHelp = t('sessionsHelpMany')(sessions);
-
-    const agent = d.agent || {};
-    const agentRunning = !!agent.running_run_id;
-    const stopRequested = !!agent.stop_requested;
-    const exclusive = !!agent.exclusive;
-    let agentValue, agentHelp, agentTone;
-    if (stopRequested) {
-        agentValue = t('agentStateStopping');
-        agentHelp = t('tileStopRequested');
-        agentTone = 'tone-warn';
-    } else if (agentRunning) {
-        agentValue = t('tileRunning');
-        agentHelp = exclusive ? t('tileExclusive') : '';
-        agentTone = 'tone-info';
-    } else if (exclusive) {
-        agentValue = t('agentStateExclusive');
-        agentHelp = '';
-        agentTone = 'tone-warn';
-    } else {
-        agentValue = t('tileIdle');
-        agentHelp = '';
-        agentTone = 'tone-muted';
-    }
 
     const tiles = [
         {
@@ -1218,12 +740,6 @@ function renderOverviewTiles(d) {
             help: sessionsHelp,
             tone: sessions > 0 ? 'tone-ok' : 'tone-muted',
         },
-        {
-            label: t('tileAgent'),
-            value: agentValue,
-            help: agentHelp,
-            tone: agentTone,
-        },
     ];
 
     tiles.forEach(({ label, value, help, tone }) => {
@@ -1237,96 +753,12 @@ function renderOverviewTiles(d) {
     });
 }
 
-function renderOverviewProviders(providers) {
-    const box = document.getElementById('overview-providers');
-    if (!box) return;
-    box.innerHTML = '';
-    if (!providers.length) {
-        const empty = document.createElement('div');
-        empty.className = 'muted-hint';
-        empty.textContent = t('providerNoneConfigured');
-        box.appendChild(empty);
-        return;
-    }
-    providers.forEach(p => {
-        const row = document.createElement('div');
-        row.className = 'list-row';
-        const model = p.settings?.model || p.default_model || '';
-        const displayName = p.display_name || p.settings?.name || p.name;
-        const isDefault = agentDefaultProvider && p.name === agentDefaultProvider;
-        const badges = [];
-        if (isDefault) badges.push(`<span class="badge-default">${esc(t('providerDefaultBadge'))}</span>`);
-        badges.push(p.configured
-            ? `<span class="badge-ok">${esc(t('configured'))}</span>`
-            : `<span class="badge-warn">${esc(t('missingConfig'))}</span>`);
-        row.innerHTML = `<div><strong>${esc(displayName)}</strong><small>${esc(model)}</small></div><div class="provider-row-tags">${badges.join('')}</div>`;
-        box.appendChild(row);
-    });
-}
-
-function renderOverviewAgent(agent) {
-    const card = document.getElementById('overview-agent-card');
-    if (!card) return;
-    const running = !!agent.running_run_id;
-    const stopping = !!agent.stop_requested;
-    const exclusive = !!agent.exclusive;
-    const disabled = agent.enabled === false;
-
-    let stateLabel, stateClass;
-    if (disabled) {
-        stateLabel = t('agentStateDisabled'); stateClass = 'state-disabled';
-    } else if (stopping) {
-        stateLabel = t('agentStateStopping'); stateClass = 'state-stopping';
-    } else if (running) {
-        stateLabel = t('agentStateRunning'); stateClass = 'state-running';
-    } else if (exclusive) {
-        stateLabel = t('agentStateExclusive'); stateClass = 'state-exclusive';
-    } else {
-        stateLabel = t('agentStateIdle'); stateClass = 'state-idle';
-    }
-
-    const taskText = agent.task || (running ? t('agentNoTaskRunning') : t('agentNoTaskIdle'));
-    const runIdShort = agent.running_run_id
-        ? String(agent.running_run_id).slice(0, 8)
-        : '—';
-
-    card.innerHTML = `
-        <div class="agent-card">
-            <div class="agent-card-state">
-                <span class="agent-state-pill ${stateClass}">${esc(stateLabel)}</span>
-            </div>
-            <div class="agent-card-task">
-                <span class="label">${esc(t('agentTaskLabel'))}</span>
-                <span>${esc(taskText)}</span>
-            </div>
-            <div class="agent-card-metrics">
-                <div class="agent-metric">
-                    <div class="agent-metric-label">${esc(t('agentMetricRun'))}</div>
-                    <div class="agent-metric-value" title="${esc(agent.running_run_id || '')}">${esc(runIdShort)}</div>
-                </div>
-                <div class="agent-metric">
-                    <div class="agent-metric-label">${esc(t('agentMetricExclusive'))}</div>
-                    <div class="agent-metric-value">${esc(exclusive ? t('yes') : t('no'))}</div>
-                </div>
-                <div class="agent-metric">
-                    <div class="agent-metric-label">${esc(t('agentMetricStop'))}</div>
-                    <div class="agent-metric-value">${esc(stopping ? t('yes') : t('no'))}</div>
-                </div>
-            </div>
-        </div>`;
-
-    const stopBtn = document.getElementById('overview-agent-stop');
-    if (stopBtn) stopBtn.disabled = !running || stopping;
-}
-
 function renderQuickActions() {
     const box = document.getElementById('overview-quick-actions');
     if (!box) return;
     const cards = [
         { jump: 'apps', icon: '⊞', label: t('quickApps'), desc: t('quickAppsDesc') },
         { jump: 'settings', icon: '⚙', label: t('quickSettings'), desc: t('quickSettingsDesc') },
-        { jump: 'agent', icon: '✦', label: t('quickAgent'), desc: t('quickAgentDesc') },
-        { jump: 'runs', icon: '☰', label: t('quickRuns'), desc: t('quickRunsDesc') },
     ];
     box.innerHTML = cards.map(c => `
         <button type="button" class="quick-card" data-jump="${esc(c.jump)}">
@@ -1436,989 +868,21 @@ async function requestKeyframe() {
 
 // ---------- Agent config ----------
 
-async function loadAgentConfig() {
-    try {
-        const [cfg, providers] = await Promise.all([
-            fetchJson(`${CONSOLE_API}/agent-config`),
-            fetchJson(`${CONSOLE_API}/providers`)
-        ]);
-        providersCache = providers.providers || [];
-        agentDefaultProvider = cfg.default_provider || null;
-        const select = document.getElementById('agent-provider');
-        if (select) {
-            select.innerHTML = providersCache.map(p => `<option value="${esc(p.name)}">${esc(p.display_name || p.name)}</option>`).join('');
-            select.value = cfg.default_provider || (providersCache[0]?.name || 'local');
-        }
-        const opt = cfg.options || {};
-        const budget = opt.budget || {};
-        setValue('agent-max-steps', budget.max_steps ?? 50);
-        setValue('agent-max-wall', budget.max_wall_seconds ?? 300);
-        setValue('agent-screenshot-bytes', opt.screenshot_max_bytes ?? 800000);
-        const rec = document.getElementById('agent-record-trajectory');
-        const dry = document.getElementById('agent-dry-run');
-        if (rec) rec.checked = opt.record_trajectory !== false;
-        if (dry) dry.checked = !!opt.dry_run;
-        snapshotDirtyGroup('agent');
-        markDirty('agent', false);
-    } catch (e) {
-        toast(t('fetchFailed') + e, 'err');
-    }
-}
-
-async function saveAgentConfig() {
-    const body = {
-        default_provider: document.getElementById('agent-provider').value,
-        options: {
-            budget: {
-                max_steps: numberValue('agent-max-steps'),
-                max_input_tokens: 200000,
-                max_output_tokens: 20000,
-                max_wall_seconds: numberValue('agent-max-wall'),
-                max_screenshots: Math.max(numberValue('agent-max-steps') + 10, 60)
-            },
-            action_settle_ms: 250,
-            max_actions_per_step: 30,
-            max_history_images: 3,
-            allow_destructive: false,
-            require_confirmation_for: [],
-            screenshot_format: 'Jpeg',
-            screenshot_max_bytes: numberValue('agent-screenshot-bytes'),
-            record_trajectory: document.getElementById('agent-record-trajectory').checked,
-            record_frames_to_disk: false,
-            dry_run: document.getElementById('agent-dry-run').checked
-        }
-    };
-    await putJson(`${CONSOLE_API}/agent-config`, body);
-    agentDefaultProvider = body.default_provider;
-    toast(t('agentSaved'), 'ok');
-    snapshotDirtyGroup('agent');
-    markDirty('agent', false);
-}
-
 // ---------- Providers ----------
-
-async function loadProviders() {
-    try {
-        const [d, cfg] = await Promise.all([
-            fetchJson(`${CONSOLE_API}/providers`),
-            fetchJson(`${CONSOLE_API}/agent-config`).catch(() => ({}))
-        ]);
-        providersCache = d.providers || [];
-        agentDefaultProvider = cfg.default_provider || agentDefaultProvider;
-        renderProviders();
-    } catch (e) {
-        toast(t('fetchFailed') + e, 'err');
-    }
-}
-
-function renderProviders() {
-    const tbody = document.getElementById('provider-list');
-    if (!tbody) return;
-    if (!providersCache.length) {
-        tbody.innerHTML = `<tr><td colspan="5" class="empty">${esc(t('providerNoneConfigured'))}</td></tr>`;
-        return;
-    }
-
-    const fragment = document.createDocumentFragment();
-    providersCache.forEach(p => {
-        const tr = document.createElement('tr');
-        const displayName = p.display_name || p.settings?.name || p.name;
-        const providerType = p.provider_type || p.settings?.provider_type || 'openai';
-        const model = p.settings?.model || p.default_model || '';
-        const endpoint = p.settings?.endpoint || p.default_endpoint || '';
-        const apiFormat = providerType === 'openai'
-            ? ((p.settings?.api_format === 'responses') ? 'Responses' : 'Chat Completions')
-            : '';
-        const configLines = [endpoint, model ? `model: ${model}` : '', apiFormat].filter(Boolean);
-        const configText = configLines.join('\n');
-        const configShort = configText.length > 64 ? configText.slice(0, 64) + '...' : configText;
-        const isDefault = agentDefaultProvider && p.name === agentDefaultProvider;
-        const statusClass = p.configured ? 'running' : 'stopped';
-        const statusText = p.configured ? t('configured') : t('missingConfig');
-        tr.innerHTML = `
-            <td><strong>${esc(displayName)}</strong><small class="provider-id">${esc(p.name)}</small></td>
-            <td><span class="badge">${esc(providerTypeLabel(providerType))}</span></td>
-            <td title="${esc(configText)}">${esc(configShort)}</td>
-            <td>
-                <div class="status-wrapper">
-                    <span class="status status-${statusClass}"></span>
-                    <span>${esc(statusText)}</span>
-                    ${isDefault ? `<span class="badge-default">${esc(t('providerDefaultBadge'))}</span>` : ''}
-                </div>
-            </td>
-            <td class="actions"></td>`;
-
-        const actionsCell = tr.querySelector('.actions');
-        actionsCell.append(
-            createBtn(t('testButton'), 'btn-log btn-sm', () => testProvider(p.name)),
-        );
-        if (!isDefault) {
-            actionsCell.append(createBtn(t('providerSetDefault'), 'btn-start btn-sm', () => setDefaultProvider(p.name)));
-        }
-        actionsCell.append(
-            createBtn(t('edit'), 'btn-edit btn-sm', () => openProviderModal(p.name)),
-            createBtn(t('delete'), 'btn-delete btn-sm', () => deleteProvider(p.name)),
-        );
-        fragment.appendChild(tr);
-    });
-
-    tbody.innerHTML = '';
-    tbody.appendChild(fragment);
-}
-
-function providerTypeLabel(providerType) {
-    return providerType === 'anthropic' ? 'Anthropic' : 'OpenAI compatible';
-}
-
-function providerById(id) {
-    return providersCache.find(p => p.name === id) || null;
-}
-
-function providerPayloadFromModal() {
-    return {
-        name: document.getElementById('provider-display-name').value.trim(),
-        provider_type: document.getElementById('provider-type').value,
-        endpoint: document.getElementById('provider-endpoint').value.trim(),
-        model: document.getElementById('provider-model').value.trim(),
-        api_format: document.getElementById('provider-api-format').value,
-        api_key: document.getElementById('provider-api-key').value.trim(),
-        clear_api_key: document.getElementById('provider-clear-key').value === 'true',
-        coord_space: document.getElementById('provider-coord-space').value,
-    };
-}
-
-function setApiKeyMode(mode) {
-    apiKeyMode = mode;
-    const stored = document.getElementById('api-key-stored');
-    const inputWrap = document.getElementById('api-key-input-wrap');
-    const pending = document.getElementById('api-key-pending');
-    const cancelBtn = document.getElementById('api-key-cancel');
-    const input = document.getElementById('provider-api-key');
-    const clearField = document.getElementById('provider-clear-key');
-    const statusEl = document.getElementById('api-key-status');
-
-    if (statusEl) {
-        statusEl.textContent = providerOriginalSettings?.keyConfigured ? t('apiKeyStatusSaved') : t('apiKeyStatusEmpty');
-    }
-
-    if (mode === 'stored') {
-        if (stored) stored.hidden = false;
-        if (inputWrap) inputWrap.hidden = true;
-        if (pending) pending.hidden = true;
-        if (input) input.value = '';
-        if (clearField) clearField.value = '';
-    } else if (mode === 'input') {
-        if (stored) stored.hidden = true;
-        if (inputWrap) inputWrap.hidden = false;
-        if (pending) pending.hidden = true;
-        if (cancelBtn) cancelBtn.hidden = !providerOriginalSettings?.keyConfigured;
-        if (clearField) clearField.value = '';
-        refreshApiKeyPlaceholder();
-        setTimeout(() => input?.focus(), 0);
-    } else if (mode === 'pending-clear') {
-        if (stored) stored.hidden = true;
-        if (inputWrap) inputWrap.hidden = true;
-        if (pending) pending.hidden = false;
-        if (input) input.value = '';
-        if (clearField) clearField.value = 'true';
-    }
-}
-
-function refreshApiKeyPlaceholder() {
-    const input = document.getElementById('provider-api-key');
-    if (!input) return;
-    if (apiKeyMode === 'input' && providerOriginalSettings?.keyConfigured) {
-        input.placeholder = t('enterNewApiKey');
-    } else {
-        input.placeholder = t('keepApiKeyPlaceholder');
-    }
-}
-
-function updateProviderTypeVisibility() {
-    const type = document.getElementById('provider-type')?.value || 'openai';
-    document.querySelectorAll('.provider-openai-only').forEach(el => {
-        el.style.display = type === 'openai' ? '' : 'none';
-    });
-    const endpoint = document.getElementById('provider-endpoint');
-    const model = document.getElementById('provider-model');
-    if (!providerOriginalSettings?.name) {
-        if (type === 'anthropic') {
-            if (!endpoint.value || endpoint.value === 'https://api.openai.com/v1') endpoint.value = 'https://api.anthropic.com/v1';
-            if (!model.value || model.value === 'gpt-4o-mini') model.value = 'claude-haiku-4-5';
-        } else {
-            if (!endpoint.value || endpoint.value === 'https://api.anthropic.com/v1') endpoint.value = 'https://api.openai.com/v1';
-            if (!model.value || model.value === 'claude-haiku-4-5') model.value = 'gpt-4o-mini';
-        }
-    }
-}
-
-function openProviderModal(id = null) {
-    const modal = document.getElementById('provider-modal');
-    if (!modal) return;
-    const p = id ? providerById(id) : null;
-    const providerType = p?.provider_type || p?.settings?.provider_type || 'openai';
-    const displayName = p?.display_name || p?.settings?.name || '';
-    const endpoint = p?.settings?.endpoint || p?.default_endpoint || (providerType === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1');
-    const model = p?.settings?.model || p?.default_model || (providerType === 'anthropic' ? 'claude-haiku-4-5' : 'gpt-4o-mini');
-
-    providerOriginalSettings = {
-        name: p?.name || '',
-        keyConfigured: !!p?.settings?.api_key_configured,
-    };
-
-    document.getElementById('provider-modal-title').textContent = p ? t('providerEditTitle') : t('providerAddTitle');
-    document.getElementById('provider-name').value = p?.name || '';
-    document.getElementById('provider-type').value = providerType;
-    document.getElementById('provider-display-name').value = displayName;
-    document.getElementById('provider-endpoint').value = endpoint;
-    document.getElementById('provider-model').value = model;
-    document.getElementById('provider-api-format').value = p?.settings?.api_format || '';
-    document.getElementById('provider-coord-space').value = p?.settings?.coord_space || '';
-    document.getElementById('provider-api-key').value = '';
-    document.getElementById('provider-clear-key').value = '';
-    setTextById('provider-endpoint-hint', p?.default_endpoint ? t('providerEndpointHintDefault')(p.default_endpoint) : '');
-    setTextById('provider-model-hint', p?.default_model ? t('providerModelHintDefault')(p.default_model) : '');
-    setApiKeyMode(providerOriginalSettings.keyConfigured ? 'stored' : 'input');
-    updateProviderTypeVisibility();
-    snapshotDirtyGroup('provider');
-    markDirty('provider', false);
-    modal.classList.add('show');
-    setTimeout(() => document.getElementById(p ? 'provider-display-name' : 'provider-type')?.focus(), 0);
-}
-
-function closeProviderModal() {
-    providerOriginalSettings = null;
-    document.getElementById('provider-modal')?.classList.remove('show');
-    markDirty('provider', false);
-}
-
-async function saveProviderModal() {
-    const id = document.getElementById('provider-name').value;
-    const body = providerPayloadFromModal();
-    if (!body.name) {
-        toast(t('newProviderNameRequired'), 'err');
-        return;
-    }
-    let saved;
-    if (id) {
-        saved = await putJson(`${CONSOLE_API}/providers/${encodeURIComponent(id)}`, body);
-        toast(t('providerSaved'), 'ok');
-    } else {
-        saved = await postJson(`${CONSOLE_API}/providers`, body);
-        toast(t('providerCreated'), 'ok');
-    }
-    closeProviderModal();
-    await loadProviders();
-    const savedId = saved.id || id;
-    if (!agentDefaultProvider && savedId) await setDefaultProvider(savedId, { silent: true });
-}
-
-async function testProvider(id) {
-    const p = providerById(id);
-    if (!p) return;
-    toast(t('testRunning'), 'ok');
-    const body = {
-        name: p.display_name || p.settings?.name || p.name,
-        provider_type: p.provider_type || p.settings?.provider_type || 'openai',
-        endpoint: p.settings?.endpoint || p.default_endpoint || '',
-        model: p.settings?.model || p.default_model || '',
-        api_format: p.settings?.api_format || '',
-        coord_space: p.settings?.coord_space || '',
-    };
-    const r = await fetch(`${CONSOLE_API}/providers/${encodeURIComponent(id)}/test`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const d = await parseJsonResponse(r);
-    if (!r.ok) throw new Error(d.error || r.statusText);
-    if (d.ok) {
-        const parts = [`${t('testOk')} ${d.latency_ms}ms`];
-        if (d.preview) parts.push(`"${d.preview}"`);
-        toast(parts.join(' · '), 'ok');
-    } else {
-        const sc = d.status_code ? `HTTP ${d.status_code}` : '';
-        const msg = [sc, d.error].filter(Boolean).join(' · ');
-        toast(`${t('testFailed')} ${msg}`, 'err');
-    }
-}
-
-async function deleteProvider(id) {
-    if (!id || !confirm(t('providerDeleteConfirm'))) return;
-    const r = await fetch(`${CONSOLE_API}/providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    const d = await parseJsonResponse(r);
-    if (!r.ok) throw new Error(d.error || r.statusText);
-    toast(t('providerDeleted'), 'ok');
-    await loadProviders();
-    await loadAgentConfig();
-}
-
-async function setDefaultProvider(id, opts = {}) {
-    const cfg = await fetchJson(`${CONSOLE_API}/agent-config`);
-    cfg.default_provider = id;
-    await putJson(`${CONSOLE_API}/agent-config`, cfg);
-    agentDefaultProvider = id;
-    if (!opts.silent) toast(t('providerDefaultSet'), 'ok');
-    await loadProviders();
-    await loadAgentConfig();
-}
 
 // ---------- Runs ----------
 
-async function loadRuns() {
-    try {
-        const d = await fetchJson(`${CONSOLE_API}/agent-runs`);
-        runsCache = d.runs || [];
-        renderRunsFilterChips();
-        renderRunsList();
-        updateNewTaskButtonState();
-    } catch (e) {
-        toast(t('fetchFailed') + e, 'err');
-    }
-}
-
-async function loadNewTaskPanel() {
-    const select = document.getElementById('new-task-provider');
-    if (!select) return;
-    try {
-        const [providers, agentCfg] = await Promise.all([
-            fetchJson(`${CONSOLE_API}/providers`).catch(() => ({ providers: [] })),
-            fetchJson(`${CONSOLE_API}/agent-config`).catch(() => ({}))
-        ]);
-        const list = providers.providers || [];
-        const previous = select.value;
-        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.display_name || p.name)}</option>`).join('');
-        const preferred = previous && list.find(p => p.name === previous)
-            ? previous
-            : (agentCfg.default_provider || (list[0]?.name || ''));
-        if (preferred) select.value = preferred;
-    } catch (_) {
-        // leave the select empty; the user will see no options
-    }
-}
-
-function updateNewTaskButtonState() {
-    const btn = document.getElementById('new-task-start');
-    const statusEl = document.getElementById('new-task-status');
-    if (!btn) return;
-    if (btn.dataset.pending === '1') return;
-    const hasRunning = (runsCache || []).some(r => runStateClass(r) === 'running');
-    btn.disabled = hasRunning;
-    btn.textContent = t('newTaskStart');
-    if (statusEl) statusEl.textContent = hasRunning ? t('newTaskRunning') : '';
-}
-
-async function startTask() {
-    const btn = document.getElementById('new-task-start');
-    const statusEl = document.getElementById('new-task-status');
-    if (!btn || btn.dataset.pending === '1') return;
-    const taskEl = document.getElementById('new-task-task');
-    const providerEl = document.getElementById('new-task-provider');
-    const maxStepsEl = document.getElementById('new-task-max-steps');
-    const maxWallEl = document.getElementById('new-task-max-wall');
-    const task = (taskEl.value || '').trim();
-    const provider = providerEl.value || '';
-    if (!task) { toast(t('newTaskTaskRequired'), 'err'); taskEl.focus(); return; }
-    if (!provider) { toast(t('newTaskProviderRequired'), 'err'); return; }
-    const body = { task, provider };
-    const maxSteps = parseInt(maxStepsEl.value, 10);
-    const maxWall = parseInt(maxWallEl.value, 10);
-    const budget = {};
-    if (Number.isFinite(maxSteps) && maxSteps > 0) budget.max_steps = maxSteps;
-    if (Number.isFinite(maxWall) && maxWall > 0) budget.max_wall_seconds = maxWall;
-    if (Object.keys(budget).length) body.budget = budget;
-
-    btn.dataset.pending = '1';
-    btn.disabled = true;
-    btn.textContent = t('newTaskStarting');
-    if (statusEl) statusEl.textContent = '';
-    try {
-        const r = await fetch(`${CONSOLE_API}/agent-start`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-        const d = await parseJsonResponse(r);
-        if (r.status === 409) {
-            toast(t('newTaskAlreadyActive'), 'err');
-            if (statusEl && d.run_id) statusEl.textContent = `run_id: ${d.run_id}`;
-            await loadRuns();
-            return;
-        }
-        if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-        toast(t('newTaskStarted'), 'ok');
-        taskEl.value = '';
-        await loadRuns();
-        if (d.run_id) {
-            const newRun = (runsCache || []).find(rr => rr.run_id === d.run_id);
-            if (newRun) openRunDetail(newRun);
-        }
-    } catch (e) {
-        toast(t('newTaskFailed') + (e.message || e), 'err');
-    } finally {
-        delete btn.dataset.pending;
-        updateNewTaskButtonState();
-    }
-}
-
-function runStateClass(run) {
-    const reason = run.finish_reason || { kind: 'running' };
-    if (reason.kind === 'running') return 'running';
-    if (reason.kind === 'done') return reason.success === false ? 'failed' : 'done';
-    if (reason.kind === 'ask') return 'ask';
-    if (reason.kind === 'safety') return 'safety';
-    if (reason.kind === 'interrupted') return 'interrupted';
-    if (reason.kind === 'budget_exceeded') return 'budget';
-    if (reason.kind === 'max_steps_reached') return 'max-steps';
-    if (reason.kind === 'provider_error') return 'provider-error';
-    return 'interrupted';
-}
-
-function runStateLabel(run) {
-    const cls = runStateClass(run);
-    return t('runState_' + cls.replace(/-/g, '_'));
-}
-
-function renderRunsFilterChips() {
-    const container = document.getElementById('runs-filter-chips');
-    if (!container) return;
-    const counts = { all: runsCache.length };
-    runsCache.forEach(r => {
-        const cls = runStateClass(r);
-        counts[cls] = (counts[cls] || 0) + 1;
-    });
-    const order = ['all', 'running', 'done', 'failed', 'ask', 'safety', 'interrupted', 'budget', 'max-steps', 'provider-error'];
-    container.innerHTML = order
-        .filter(k => k === 'all' || (counts[k] || 0) > 0)
-        .map(k => {
-            const label = k === 'all' ? t('runsFilterAll') : t('runState_' + k.replace(/-/g, '_'));
-            const count = counts[k] || 0;
-            const active = k === runsFilter;
-            return `<button type="button" class="runs-filter-chip${active ? ' active' : ''}" data-filter="${esc(k)}">
-                ${esc(label)}<span class="chip-count">${count}</span>
-            </button>`;
-        })
-        .join('');
-    container.querySelectorAll('.runs-filter-chip').forEach(btn => {
-        btn.addEventListener('click', () => {
-            runsFilter = btn.dataset.filter;
-            renderRunsFilterChips();
-            renderRunsList();
-        });
-    });
-}
-
-function renderRunsList() {
-    const list = document.getElementById('runs-list');
-    if (!list) return;
-    list.innerHTML = '';
-
-    const search = runsSearchTerm.trim().toLowerCase();
-    const filtered = runsCache.filter(r => {
-        if (runsFilter !== 'all' && runStateClass(r) !== runsFilter) return false;
-        if (search) {
-            const hay = `${r.run_id || ''} ${r.task || ''}`.toLowerCase();
-            if (!hay.includes(search)) return false;
-        }
-        return true;
-    });
-
-    if (!filtered.length) {
-        const isFiltering = runsFilter !== 'all' || !!search;
-        list.innerHTML = `<div class="empty-block">
-            <div class="empty-icon" aria-hidden="true">∅</div>
-            <strong>${esc(isFiltering ? t('emptyRunsFilterTitle') : t('emptyRunsTitle'))}</strong>
-            <div>${esc(isFiltering ? t('noRunsMatch') : t('noRunsHint'))}</div>
-        </div>`;
-        return;
-    }
-
-    const fragment = document.createDocumentFragment();
-    filtered.forEach(run => renderRunCard(run, fragment));
-    list.appendChild(fragment);
-}
-
-function renderRunCard(run, parent) {
-    const card = document.createElement('div');
-    card.className = 'run-card run-card-clickable';
-    card.setAttribute('role', 'button');
-    card.tabIndex = 0;
-    const cls = runStateClass(run);
-    const stateLabel = runStateLabel(run);
-    const idShort = (run.run_id || '').slice(0, 12);
-    const taskText = run.task || '—';
-    const wall = formatDuration(run.wall_ms);
-    const steps = run.steps_taken ?? 0;
-    const tokenIn = run.tokens_in ?? 0;
-    const tokenOut = run.tokens_out ?? 0;
-    const path = run.trajectory_path || '';
-    const eventPath = run.event_path || '';
-    const startedMs = run.started_at_ms || 0;
-    const startedShort = startedMs ? formatDateTimeShort(startedMs) : '';
-    const startedFull = startedMs ? formatDateTime(startedMs) : '';
-
-    const reason = (run.finish_reason && run.finish_reason.kind) || 'running';
-    let previewHtml = '';
-    if (reason !== 'running') {
-        const out = (run.output || '').trim();
-        const pq = (run.pending_question || '').trim();
-        if (out) {
-            previewHtml = `<div class="run-card-output"><span class="rco-dot"></span>${esc(truncate(out, 120))}</div>`;
-        } else if (pq) {
-            previewHtml = `<div class="run-card-output warn"><span class="rco-dot warn"></span>${esc(truncate(pq.split(/\r?\n/)[0], 120))}</div>`;
-        }
-    }
-    const scheduled = run.source && run.source.kind === 'schedule';
-    const badgeHtml = scheduled
-        ? `<span class="run-badge-scheduled" title="${esc(run.source.id || '')}">⏰ ${esc(t('badgeScheduled'))}</span>`
-        : '';
-
-    card.innerHTML = `
-        <div class="run-card-status">
-            <span class="run-state-pill state-${esc(cls)}">${esc(stateLabel)}</span>
-        </div>
-        <div class="run-card-main">
-            <span class="run-card-id" title="${esc(run.run_id || '')}" data-action="copy-id">
-                <span aria-hidden="true">⧉</span>${esc(idShort)}
-            </span>
-            <div class="run-card-task">${esc(taskText)}${badgeHtml}</div>
-            ${previewHtml}
-            <div class="run-card-meta">
-                ${startedShort ? `<span title="${esc(t('runsStartedAt'))} ${esc(startedFull)}">🕐 ${esc(startedShort)}</span>` : ''}
-                <span>⏱ ${esc(wall)}</span>
-                <span>↻ ${esc(formatNumber(steps))} ${esc(t('runsMetricSteps'))}</span>
-                <span>⇅ ${esc(formatNumber(tokenIn))} / ${esc(formatNumber(tokenOut))} ${esc(t('runsMetricTokens'))}</span>
-            </div>
-        </div>
-        <div class="run-card-actions">
-            ${path
-                ? `<button type="button" class="btn-link" data-action="copy-path" title="${esc(path)}">${esc(t('runsCopyPath'))}</button>`
-                : `<span class="muted-hint">${esc(t('runsNoPath'))}</span>`}
-            ${eventPath
-                ? `<button type="button" class="btn-link" data-action="copy-event-path" title="${esc(eventPath)}">${esc(t('runsCopyEventPath'))}</button>`
-                : ''}
-        </div>`;
-
-    card.querySelector('[data-action="copy-id"]')?.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        try { await copyText(run.run_id || ''); toast(t('runsIdCopied'), 'ok'); }
-        catch { toast(t('copyFailed'), 'err'); }
-    });
-    if (path) {
-        card.querySelector('[data-action="copy-path"]')?.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            try { await copyText(path); toast(t('runsPathCopied'), 'ok'); }
-            catch { toast(t('copyFailed'), 'err'); }
-        });
-    }
-    if (eventPath) {
-        card.querySelector('[data-action="copy-event-path"]')?.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            try { await copyText(eventPath); toast(t('runsPathCopied'), 'ok'); }
-            catch { toast(t('copyFailed'), 'err'); }
-        });
-    }
-    card.addEventListener('click', () => {
-        const sel = window.getSelection();
-        if (sel && sel.toString().length > 0) return;
-        openRunDetail(run);
-    });
-    card.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openRunDetail(run); }
-    });
-    parent.appendChild(card);
-}
-
 // ---------- Run detail ----------
 
-let runDetailRun = null;
-let runDetailSteps = [];
-let runDetailEvents = [];
-let runDetailActionFilter = 'all';
-let runDetailTimer = null;
 
 function truncate(s, n) {
     s = String(s ?? '');
     return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-function frameBasename(p) {
-    const parts = String(p).split(/[\\/]/);
-    return parts[parts.length - 1] || '';
-}
-
-function actionKind(a) { return (a && a.kind) || 'unknown'; }
-
-function actionCategory(kind) {
-    if (kind && kind.startsWith('mouse_')) return 'pointer';
-    if (kind && kind.startsWith('window_')) return 'window';
-    if (['type_text', 'key_chord', 'key_hold', 'clipboard_write', 'clipboard_read'].includes(kind)) return 'input';
-    if (['scroll', 'zoom', 'wait', 'screenshot'].includes(kind)) return 'view';
-    if (kind === 'done') return 'done';
-    if (kind === 'ask') return 'ask';
-    return 'other';
-}
-
-function actionBrief(a) {
-    if (!a) return '—';
-    switch (a.kind) {
-        case 'mouse_move': return `(${a.x}, ${a.y})${a.label ? ' · ' + a.label : ''}`;
-        case 'mouse_click': return `${a.button || ''} (${a.x}, ${a.y})${a.click_count > 1 ? ' ×' + a.click_count : ''}${a.label ? ' · ' + a.label : ''}`;
-        case 'mouse_down': return `${a.button || ''} (${a.x}, ${a.y})`;
-        case 'mouse_up': return `${a.button || ''} (${a.x}, ${a.y})`;
-        case 'mouse_drag': return `${(a.path || []).length} pts`;
-        case 'scroll': return `dx=${a.dx} dy=${a.dy}`;
-        case 'zoom': return `Δ${a.level_delta}`;
-        case 'type_text': return `"${truncate(a.text, 80)}"${a.press_enter ? ' ⏎' : ''}`;
-        case 'key_chord': return a.combo || '';
-        case 'key_hold': return `${a.key} ${a.ms}ms`;
-        case 'clipboard_write': return `"${truncate(a.text, 40)}"`;
-        case 'clipboard_read': return '';
-        case 'window_focus': return `#${a.id}`;
-        case 'window_close': return `#${a.id}`;
-        case 'wait': return `${a.ms}ms`;
-        case 'screenshot': return '';
-        case 'done': return `${a.success ? '✓' : '✗'}${a.reason ? ' · ' + truncate(a.reason, 100) : ''}`;
-        case 'ask': return `"${truncate(a.question, 100)}"`;
-        default: return '';
-    }
-}
-
-function resultInfo(r) {
-    if (!r) return { ok: true, text: t('stepResultOk') };
-    switch (r.kind) {
-        case 'ok': return { ok: true, text: t('stepResultOk') };
-        case 'out_of_bounds': return { ok: false, text: `out of bounds (${r.x}, ${r.y})` };
-        case 'unsupported_action': return { ok: false, text: 'unsupported: ' + truncate(r.message, 60) };
-        case 'executor_error': return { ok: false, text: 'error: ' + truncate(r.message, 60) };
-        default: return { ok: false, text: r.kind };
-    }
-}
-
-async function openRunDetail(run) {
-    stopRunDetailPolling();
-    runDetailRun = run;
-    runDetailSteps = [];
-    runDetailEvents = [];
-    runDetailActionFilter = 'all';
-    const overlay = document.getElementById('run-detail-overlay');
-    if (!overlay) return;
-    renderRunDetailHeader(run);
-    renderRunDetailResult(run);
-    renderRunDetailSummary(run);
-    document.getElementById('run-detail-filter').innerHTML = '';
-    const stepsEl = document.getElementById('run-detail-steps');
-    stepsEl.innerHTML = `<div class="run-detail-loading">${esc(t('runDetailLoading'))}</div>`;
-    overlay.classList.add('show');
-    try {
-        const d = await fetchJson(`${CONSOLE_API}/agent-runs/${encodeURIComponent(run.run_id)}/steps`);
-        runDetailSteps = d.steps || [];
-        runDetailEvents = d.events || [];
-        if (d.report) {
-            runDetailRun = d.report;
-            renderRunDetailHeader(d.report);
-        }
-        renderRunDetailResult(runDetailRun);
-        renderRunDetailSummary(runDetailRun);
-        renderRunDetailFilter();
-        renderRunDetailSteps();
-    } catch (e) {
-        stepsEl.innerHTML = `<div class="empty-block">
-            <div class="empty-icon" aria-hidden="true">∅</div>
-            <strong>${esc(t('runDetailEmpty'))}</strong>
-            <div>${esc(t('runDetailEmptyHint'))}</div>
-        </div>`;
-    }
-    // Keep the detail live while the run is still in progress.
-    if (runStateClass(runDetailRun || {}) === 'running') startRunDetailPolling();
-}
-
-function closeRunDetail() {
-    stopRunDetailPolling();
-    document.getElementById('run-detail-overlay')?.classList.remove('show');
-    runDetailRun = null;
-    runDetailSteps = [];
-    runDetailEvents = [];
-}
-
-function startRunDetailPolling() {
-    stopRunDetailPolling();
-    if (runStateClass(runDetailRun || {}) !== 'running') return;
-    runDetailTimer = setInterval(pollRunDetail, 2000);
-}
-
-function stopRunDetailPolling() {
-    if (runDetailTimer) { clearInterval(runDetailTimer); runDetailTimer = null; }
-}
-
 // Quiet refresh of the open detail overlay: re-fetch steps + report and
 // re-render in place, preserving the user's filter, expanded rows and scroll.
-async function pollRunDetail() {
-    const run = runDetailRun;
-    if (!run || !run.run_id) { stopRunDetailPolling(); return; }
-    const runId = run.run_id;
-    let d;
-    try {
-        d = await fetchJson(`${CONSOLE_API}/agent-runs/${encodeURIComponent(runId)}/steps`);
-    } catch (e) {
-        return; // transient (e.g. trajectory not flushed yet) — keep polling
-    }
-    // The overlay may have been closed or switched to another run while awaiting.
-    if (!runDetailRun || runDetailRun.run_id !== runId) return;
-
-    const stepsEl = document.getElementById('run-detail-steps');
-    const expanded = collectExpandedSteps(stepsEl);
-    const pinBottom = stepsEl
-        ? (stepsEl.scrollHeight - stepsEl.scrollTop - stepsEl.clientHeight < 40)
-        : false;
-    const prevTop = stepsEl ? stepsEl.scrollTop : 0;
-
-    runDetailSteps = d.steps || [];
-    runDetailEvents = d.events || [];
-    if (d.report) runDetailRun = d.report;
-    renderRunDetailHeader(runDetailRun);
-    renderRunDetailResult(runDetailRun);
-    renderRunDetailSummary(runDetailRun);
-    renderRunDetailFilter();
-    renderRunDetailSteps();
-
-    restoreExpandedSteps(stepsEl, expanded);
-    if (stepsEl) stepsEl.scrollTop = pinBottom ? stepsEl.scrollHeight : prevTop;
-
-    if (runStateClass(runDetailRun || {}) !== 'running') stopRunDetailPolling();
-}
-
-function collectExpandedSteps(container) {
-    const set = new Set();
-    container?.querySelectorAll('.step-row.expanded').forEach(r => {
-        if (r.dataset.stepIdx != null) set.add(r.dataset.stepIdx);
-    });
-    return set;
-}
-
-function restoreExpandedSteps(container, set) {
-    if (!container || !set || !set.size) return;
-    set.forEach(idx => {
-        container.querySelector(`.step-row[data-step-idx="${idx}"]`)?.classList.add('expanded');
-    });
-}
-
-function renderRunDetailHeader(run) {
-    const pill = document.getElementById('run-detail-pill');
-    if (pill) {
-        pill.className = 'run-state-pill state-' + runStateClass(run);
-        pill.textContent = runStateLabel(run);
-    }
-    const task = document.getElementById('run-detail-task');
-    if (task) {
-        task.textContent = run.task || '—';
-        task.title = `${run.run_id || ''}`;
-    }
-}
-
-function runIsOk(run) {
-    const r = run.finish_reason;
-    return r && r.kind === 'done' && r.success !== false;
-}
-
-function renderRunDetailResult(run) {
-    const el = document.getElementById('run-detail-result');
-    if (!el) return;
-    const reason = (run.finish_reason && run.finish_reason.kind) || 'running';
-    const output = (run.output || '').trim();
-    const warnings = Array.isArray(run.warnings) ? run.warnings.filter(Boolean) : [];
-
-    let cls, headHtml, bodyHtml;
-    let copyPayload = '';
-
-    if (reason === 'running') {
-        cls = 'running';
-        headHtml = `<span class="rd-result-title">${esc(t('resultTitle'))}</span>`;
-        bodyHtml = `<div class="rd-result-placeholder">${esc(t('resultRunning'))}</div>`;
-    } else if (runIsOk(run) && output) {
-        cls = 'ok';
-        copyPayload = run.output;
-        headHtml = `<span class="rd-result-title">${esc(t('resultTitle'))}</span>
-            <button type="button" class="rd-result-copy" data-action="copy-result">⧉ ${esc(t('resultCopy'))}</button>`;
-        bodyHtml = `<pre class="rd-result-body">${esc(run.output)}</pre>`;
-    } else if (runIsOk(run)) {
-        cls = 'muted';
-        headHtml = `<span class="rd-result-title">${esc(t('resultTitle'))}</span>`;
-        bodyHtml = `<div class="rd-result-placeholder">${esc(t('resultEmpty'))}</div>`;
-    } else {
-        cls = 'warn';
-        const msg = (run.pending_question || '').trim() || runStateLabel(run);
-        copyPayload = msg;
-        headHtml = `<span class="rd-result-title">${esc(t('resultFailed'))}</span>
-            <button type="button" class="rd-result-copy" data-action="copy-result">⧉ ${esc(t('resultCopy'))}</button>`;
-        const partial = output ? `<pre class="rd-result-body">${esc(run.output)}</pre>` : '';
-        bodyHtml = `<div class="rd-result-msg">${esc(msg)}</div>${partial}`;
-    }
-
-    let warnHtml = '';
-    if (warnings.length) {
-        warnHtml = `<div class="rd-result-warnings">
-            <span class="rd-result-warntitle">⚠ ${esc(t('resultWarnings'))}</span>
-            <ul>${warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>
-        </div>`;
-    }
-
-    el.className = 'run-detail-result rd-result-' + cls;
-    el.innerHTML = `<div class="rd-result-head">${headHtml}</div>${bodyHtml}${warnHtml}`;
-
-    el.querySelector('[data-action="copy-result"]')?.addEventListener('click', async () => {
-        try { await copyText(copyPayload); toast(t('resultCopied'), 'ok'); }
-        catch { toast(t('copyFailed'), 'err'); }
-    });
-}
-
-function renderRunDetailSummary(run) {
-    const el = document.getElementById('run-detail-summary');
-    if (!el) return;
-    const startedMs = run.started_at_ms || 0;
-    const running = run.finish_reason && run.finish_reason.kind === 'running';
-    const finishedMs = startedMs ? startedMs + (run.wall_ms || 0) : 0;
-    const items = [
-        [t('runDetailStarted'), startedMs ? formatDateTime(startedMs) : '—'],
-        [t('runDetailFinished'), running || !finishedMs ? '—' : formatDateTime(finishedMs)],
-        [t('runDetailDuration'), formatDuration(run.wall_ms)],
-        [t('runDetailSteps'), formatNumber(run.steps_taken ?? runDetailSteps.length)],
-        [t('runDetailEvents'), formatNumber(runDetailEvents.length)],
-        [t('runDetailTokens'), `${formatNumber(run.tokens_in || 0)} / ${formatNumber(run.tokens_out || 0)}`],
-    ];
-    if (run.budget_exceeded && run.budget_exceeded.kind) {
-        items.push([t('runDetailBudget'), run.budget_exceeded.kind]);
-    }
-    el.innerHTML = items.map(([k, v]) =>
-        `<div class="rd-stat"><span class="rd-stat-k">${esc(k)}</span><span class="rd-stat-v">${esc(v)}</span></div>`
-    ).join('');
-}
-
-function renderRunDetailFilter() {
-    const el = document.getElementById('run-detail-filter');
-    if (!el) return;
-    const counts = { all: runDetailSteps.length };
-    runDetailSteps.forEach(s => {
-        const k = actionKind(s.action);
-        counts[k] = (counts[k] || 0) + 1;
-    });
-    const kinds = ['all', ...Object.keys(counts).filter(k => k !== 'all').sort()];
-    el.innerHTML = kinds.map(k => {
-        const label = k === 'all' ? t('runDetailFilterAll') : k;
-        const active = k === runDetailActionFilter;
-        return `<button type="button" class="runs-filter-chip${active ? ' active' : ''}" data-akind="${esc(k)}">${esc(label)}<span class="chip-count">${counts[k] || 0}</span></button>`;
-    }).join('');
-    el.querySelectorAll('[data-akind]').forEach(b => b.addEventListener('click', () => {
-        runDetailActionFilter = b.dataset.akind;
-        renderRunDetailFilter();
-        renderRunDetailSteps();
-    }));
-}
-
-function renderRunDetailSteps() {
-    const el = document.getElementById('run-detail-steps');
-    if (!el) return;
-    if (!runDetailSteps.length) {
-        el.innerHTML = `<div class="empty-block">
-            <div class="empty-icon" aria-hidden="true">∅</div>
-            <strong>${esc(t('runDetailEmpty'))}</strong>
-            <div>${esc(t('runDetailEmptyHint'))}</div>
-        </div>`;
-        return;
-    }
-    const startMs = runDetailRun?.started_at_ms || runDetailSteps[0]?.ts_ms || 0;
-    let cumIn = 0, cumOut = 0, prevTs = startMs;
-    const rows = runDetailSteps.map((s, idx) => {
-        const u = s.provider_usage || {};
-        cumIn += u.input_tokens || 0;
-        cumOut += u.output_tokens || 0;
-        const gap = prevTs ? (s.ts_ms - prevTs) : 0;
-        prevTs = s.ts_ms;
-        return renderStepRow(s, idx, { startMs, cumIn, cumOut, gap });
-    });
-    el.innerHTML = rows.filter(Boolean).join('');
-
-    el.querySelectorAll('.step-row-head').forEach(h => h.addEventListener('click', () => {
-        h.closest('.step-row')?.classList.toggle('expanded');
-    }));
-    el.querySelectorAll('[data-copy-step]').forEach(b => b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const idx = +b.dataset.copyStep;
-        copyText(JSON.stringify(runDetailSteps[idx], null, 2))
-            .then(() => toast(t('stepJsonCopied'), 'ok'))
-            .catch(() => toast(t('copyFailed'), 'err'));
-    }));
-    el.querySelectorAll('[data-frame]').forEach(img => img.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openFrameLightbox(img.dataset.frame);
-    }));
-}
-
-function renderStepRow(s, idx, ctx) {
-    if (runDetailActionFilter !== 'all' && actionKind(s.action) !== runDetailActionFilter) return '';
-    const offset = ctx.startMs ? formatOffset(s.ts_ms - ctx.startMs) : '';
-    const absTime = formatDateTime(s.ts_ms);
-    const ak = actionKind(s.action);
-    const brief = actionBrief(s.action);
-    const res = resultInfo(s.result);
-    const u = s.provider_usage || {};
-    const obs = s.observation || {};
-    const sha = (obs.sha256 || '').slice(0, 8);
-    const frameName = obs.frame_path ? frameBasename(obs.frame_path) : null;
-    const frameUrl = frameName && runDetailRun?.run_id
-        ? `${CONSOLE_API}/agent-runs/${encodeURIComponent(runDetailRun.run_id)}/frames/${encodeURIComponent(frameName)}`
-        : null;
-    const rawJson = esc(JSON.stringify(s, null, 2));
-    return `<div class="step-row${res.ok ? '' : ' step-row-err'}" data-step-idx="${esc(idx)}">
-        <div class="step-row-head">
-            <span class="step-idx">#${esc(s.step ?? idx)}</span>
-            <span class="step-time" title="${esc(absTime)}">${esc(offset)}</span>
-            <span class="step-action-badge cat-${esc(actionCategory(ak))}">${esc(ak)}</span>
-            <span class="step-brief">${esc(brief)}</span>
-            <span class="step-result ${res.ok ? 'ok' : 'err'}">${esc(res.text)}</span>
-            <span class="step-chevron" aria-hidden="true">▸</span>
-        </div>
-        <div class="step-row-body">
-            ${frameUrl ? `<div class="step-frame"><img data-frame="${esc(frameUrl)}" src="${esc(frameUrl)}" loading="lazy" alt="frame"></div>` : ''}
-            <div class="step-info">
-                <div class="step-metrics">
-                    <span title="provider latency">⚡ ${esc(t('stepLatency'))} ${esc(formatDuration(u.provider_latency_ms || 0))}</span>
-                    <span title="step elapsed">⏲ ${esc(formatDuration(s.elapsed_ms || 0))}</span>
-                    <span title="wall gap">⌛ ${esc(t('stepGap'))} ${esc(formatDuration(ctx.gap))}</span>
-                    <span title="tokens in/out">⇅ ${esc(formatNumber(u.input_tokens || 0))} / ${esc(formatNumber(u.output_tokens || 0))}</span>
-                    ${sha ? `<span class="step-sha" title="screen sha256">⌗ ${esc(sha)}</span>` : ''}
-                </div>
-                <div class="step-cumulative">${esc(t('stepCumulative'))}: ⇅ ${esc(formatNumber(ctx.cumIn))} / ${esc(formatNumber(ctx.cumOut))}</div>
-                <button type="button" class="btn-link step-copy" data-copy-step="${esc(idx)}">${esc(t('stepCopyJson'))}</button>
-                <pre class="step-json">${rawJson}</pre>
-            </div>
-        </div>
-    </div>`;
-}
-
-function openFrameLightbox(url) {
-    const lb = document.getElementById('frame-lightbox');
-    const img = document.getElementById('frame-lightbox-img');
-    if (!lb || !img) return;
-    img.src = url;
-    lb.classList.add('show');
-}
-
-function closeFrameLightbox() {
-    document.getElementById('frame-lightbox')?.classList.remove('show');
-}
-
 // ---------- Misc ----------
-
-async function stopAgent() {
-    try {
-        await fetchJson(`${CONSOLE_API}/agent-stop`, { method: 'POST' });
-        toast(t('stopAgent'), 'ok');
-        loadOverview();
-    } catch (e) {
-        toast(t('actionFailed') + e, 'err');
-    }
-}
 
 async function fetchJson(url, options = {}) {
     const r = await fetch(url, { cache: 'no-store', ...options });
@@ -2513,7 +977,7 @@ function reconcileDirty(group) {
 }
 
 function bindDirtyTracking() {
-    ['settings', 'agent', 'provider'].forEach(group => {
+    ['settings'].forEach(group => {
         document.querySelectorAll(`[data-dirty-group="${group}"]`).forEach(el => {
             const evt = el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input';
             el.addEventListener(evt, () => reconcileDirty(group));
@@ -2842,194 +1306,6 @@ function updateAppTypeVisibility() {
     }
 }
 
-let schedulesCache = [];
-let schedulesEditId = null;
-
-async function loadSchedules() {
-    try {
-        const d = await fetchJson(`${CONSOLE_API}/schedules`);
-        schedulesCache = d.schedules || [];
-        renderSchedulesList();
-    } catch (e) {
-        toast(t('fetchFailed') + (e.message || e), 'err');
-    }
-}
-
-function renderSchedulesList() {
-    const list = document.getElementById('schedules-list');
-    if (!list) return;
-    if (!schedulesCache.length) {
-        list.innerHTML = `<div class="schedules-empty">${esc(t('schedulesEmpty'))}</div>`;
-        return;
-    }
-    list.innerHTML = schedulesCache.map(renderScheduleRow).join('');
-    list.querySelectorAll('[data-action="edit"]').forEach(b => b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const id = b.dataset.id;
-        const st = schedulesCache.find(s => s.id === id);
-        if (st) openScheduleEditor(st);
-    }));
-    list.querySelectorAll('[data-action="delete"]').forEach(b => b.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (!confirm(t('scheduleDeleteConfirm'))) return;
-        try {
-            const r = await fetch(`${CONSOLE_API}/schedules/${encodeURIComponent(b.dataset.id)}`, { method: 'DELETE' });
-            const d = await parseJsonResponse(r);
-            if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-            toast(t('scheduleDeleted'), 'ok');
-            loadSchedules();
-        } catch (err) { toast(t('scheduleDeleteFailed') + (err.message || err), 'err'); }
-    }));
-    list.querySelectorAll('[data-action="run-now"]').forEach(b => b.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        try {
-            const r = await fetch(`${CONSOLE_API}/schedules/${encodeURIComponent(b.dataset.id)}/run-now`, { method: 'POST' });
-            const d = await parseJsonResponse(r);
-            if (r.status === 409) { toast(t('newTaskAlreadyActive'), 'err'); return; }
-            if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-            toast(t('scheduleRunStarted'), 'ok');
-            loadSchedules();
-            loadRuns().catch(() => {});
-        } catch (err) { toast(t('scheduleRunFailed') + (err.message || err), 'err'); }
-    }));
-    list.querySelectorAll('[data-action="toggle"]').forEach(cb => cb.addEventListener('change', async (e) => {
-        const id = cb.dataset.id;
-        const st = schedulesCache.find(s => s.id === id);
-        if (!st) return;
-        const updated = { ...st, enabled: cb.checked };
-        delete updated.id; delete updated.next_fire_ms; delete updated.last_run_ms;
-        delete updated.last_run_id; delete updated.last_outcome; delete updated.last_skip_reason;
-        try {
-            const r = await fetch(`${CONSOLE_API}/schedules/${encodeURIComponent(id)}`, {
-                method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(updated)
-            });
-            const d = await parseJsonResponse(r);
-            if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-            loadSchedules();
-        } catch (err) {
-            toast(t('scheduleSaveFailed') + (err.message || err), 'err');
-            cb.checked = !cb.checked;
-        }
-    }));
-}
-
-function renderScheduleRow(st) {
-    const next = st.next_fire_ms ? formatDateTime(st.next_fire_ms) : t('scheduleNever');
-    const last = st.last_run_ms ? formatDateTime(st.last_run_ms) : t('scheduleNever');
-    const outcomeLabel = st.last_outcome === 'started' ? t('scheduleOutcomeStarted')
-        : st.last_outcome === 'skipped' ? t('scheduleOutcomeSkipped')
-        : st.last_outcome === 'failed' ? t('scheduleOutcomeFailed')
-        : (st.last_outcome || '');
-    const outcomeClass = st.last_outcome === 'failed' ? 'sched-outcome-failed'
-        : st.last_outcome === 'skipped' ? 'sched-outcome-skipped'
-        : st.last_outcome === 'started' ? 'sched-outcome-started'
-        : '';
-    const skipReason = st.last_skip_reason ? `<span class="sched-skip-reason" title="${esc(st.last_skip_reason)}">${esc(st.last_skip_reason)}</span>` : '';
-    return `
-        <div class="schedule-row${st.enabled ? '' : ' disabled'}" data-id="${esc(st.id)}">
-            <div class="sched-main">
-                <div class="sched-name">${esc(st.name)}</div>
-                <div class="sched-meta">
-                    <code class="sched-cron">${esc(st.cron)}</code>
-                    <span class="sched-provider">${esc(st.provider)}</span>
-                </div>
-                <div class="sched-task">${esc(truncate(st.task || '', 140))}</div>
-            </div>
-            <div class="sched-side">
-                <div class="sched-times">
-                    <div><span class="sched-label">${esc(t('scheduleNextRun'))}</span> ${esc(next)}</div>
-                    <div><span class="sched-label">${esc(t('scheduleLastRun'))}</span> ${esc(last)} ${outcomeLabel ? `<span class="sched-outcome ${outcomeClass}">${esc(outcomeLabel)}</span>` : ''}</div>
-                    ${skipReason}
-                </div>
-                <div class="sched-actions">
-                    <label class="sched-toggle">
-                        <input type="checkbox" data-action="toggle" data-id="${esc(st.id)}" ${st.enabled ? 'checked' : ''}>
-                        <span>${esc(t('scheduleEnabled'))}</span>
-                    </label>
-                    <button class="btn btn-cancel btn-sm" data-action="run-now" data-id="${esc(st.id)}" type="button">${esc(t('scheduleRunNow'))}</button>
-                    <button class="btn btn-cancel btn-sm" data-action="edit" data-id="${esc(st.id)}" type="button">${esc(t('scheduleEdit'))}</button>
-                    <button class="btn btn-cancel btn-sm sched-delete" data-action="delete" data-id="${esc(st.id)}" type="button">${esc(t('scheduleDelete'))}</button>
-                </div>
-            </div>
-        </div>
-    `;
-}
-
-async function fillScheduleProviderSelect() {
-    const select = document.getElementById('schedule-provider');
-    if (!select) return;
-    try {
-        const providers = await fetchJson(`${CONSOLE_API}/providers`).catch(() => ({ providers: [] }));
-        const list = providers.providers || [];
-        const prev = select.value;
-        select.innerHTML = list.map(p => `<option value="${esc(p.name)}">${esc(p.display_name || p.name)}</option>`).join('');
-        if (prev && list.find(p => p.name === prev)) select.value = prev;
-    } catch (_) {}
-}
-
-function openScheduleEditor(st) {
-    const panel = document.getElementById('schedule-edit-panel');
-    if (!panel) return;
-    panel.classList.remove('hidden');
-    schedulesEditId = st && st.id ? st.id : null;
-    setTextById('schedule-edit-title', t(schedulesEditId ? 'scheduleEditTitle' : 'scheduleEditNewTitle'));
-    document.getElementById('schedule-name').value = st?.name || '';
-    document.getElementById('schedule-cron').value = st?.cron || '0 9 * * *';
-    document.getElementById('schedule-task').value = st?.task || '';
-    document.getElementById('schedule-max-steps').value = st?.budget?.max_steps || '';
-    document.getElementById('schedule-max-wall').value = st?.budget?.max_wall_seconds || '';
-    document.getElementById('schedule-enabled').checked = st?.enabled !== false;
-    document.getElementById('schedule-edit-status').textContent = '';
-    fillScheduleProviderSelect().then(() => {
-        if (st?.provider) document.getElementById('schedule-provider').value = st.provider;
-    });
-}
-
-function closeScheduleEditor() {
-    document.getElementById('schedule-edit-panel')?.classList.add('hidden');
-    schedulesEditId = null;
-}
-
-async function saveSchedule() {
-    const name = document.getElementById('schedule-name').value.trim();
-    const cron = document.getElementById('schedule-cron').value.trim();
-    const task = document.getElementById('schedule-task').value.trim();
-    const provider = document.getElementById('schedule-provider').value;
-    const maxSteps = parseInt(document.getElementById('schedule-max-steps').value, 10);
-    const maxWall = parseInt(document.getElementById('schedule-max-wall').value, 10);
-    const enabled = document.getElementById('schedule-enabled').checked;
-    if (!name || !cron || !task || !provider) {
-        document.getElementById('schedule-edit-status').textContent = t('newTaskTaskRequired');
-        return;
-    }
-    const body = { name, cron, task, provider, enabled };
-    if (Number.isFinite(maxSteps) && maxSteps > 0 || Number.isFinite(maxWall) && maxWall > 0) {
-        const budget = {};
-        if (Number.isFinite(maxSteps) && maxSteps > 0) budget.max_steps = maxSteps;
-        if (Number.isFinite(maxWall) && maxWall > 0) budget.max_wall_seconds = maxWall;
-        body.budget = budget;
-    }
-    const isUpdate = !!schedulesEditId;
-    const url = isUpdate
-        ? `${CONSOLE_API}/schedules/${encodeURIComponent(schedulesEditId)}`
-        : `${CONSOLE_API}/schedules`;
-    try {
-        const r = await fetch(url, {
-            method: isUpdate ? 'PUT' : 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-        const d = await parseJsonResponse(r);
-        if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-        toast(t('scheduleSaved'), 'ok');
-        closeScheduleEditor();
-        loadSchedules();
-    } catch (e) {
-        document.getElementById('schedule-edit-status').textContent = (e.message || e);
-        toast(t('scheduleSaveFailed') + (e.message || e), 'err');
-    }
-}
 
 document.addEventListener('DOMContentLoaded', () => {
     document.body.dataset.section = activeSection;
@@ -3059,58 +1335,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('modal-save').addEventListener('click', saveApp);
     document.getElementById('settings-save').addEventListener('click', () => saveSettings().catch(e => toast(t('actionFailed') + e, 'err')));
     document.getElementById('request-keyframe').addEventListener('click', () => requestKeyframe().catch(e => toast(t('actionFailed') + e, 'err')));
-    document.getElementById('agent-save').addEventListener('click', () => saveAgentConfig().catch(e => toast(t('actionFailed') + e, 'err')));
-    document.getElementById('provider-add')?.addEventListener('click', () => openProviderModal());
-    document.getElementById('provider-modal-close')?.addEventListener('click', closeProviderModal);
-    document.getElementById('provider-modal-cancel')?.addEventListener('click', closeProviderModal);
-    document.getElementById('provider-modal-save')?.addEventListener('click', () => saveProviderModal().catch(e => toast(t('actionFailed') + e, 'err')));
-    document.getElementById('provider-type')?.addEventListener('change', updateProviderTypeVisibility);
-    document.getElementById('runs-refresh').addEventListener('click', loadRuns);
-    document.getElementById('new-task-start')?.addEventListener('click', () => startTask().catch(e => toast(t('newTaskFailed') + (e.message || e), 'err')));
-    document.getElementById('runs-search')?.addEventListener('input', (e) => {
-        runsSearchTerm = e.target.value;
-        renderRunsList();
-    });
-    document.getElementById('run-detail-back')?.addEventListener('click', closeRunDetail);
-    document.getElementById('run-detail-close')?.addEventListener('click', closeRunDetail);
-    document.getElementById('run-detail-overlay')?.addEventListener('click', (e) => {
-        if (e.target.id === 'run-detail-overlay') closeRunDetail();
-    });
-    document.getElementById('frame-lightbox')?.addEventListener('click', closeFrameLightbox);
-    document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
-        const lb = document.getElementById('frame-lightbox');
-        if (lb?.classList.contains('show')) { closeFrameLightbox(); return; }
-        const ov = document.getElementById('run-detail-overlay');
-        if (ov?.classList.contains('show')) closeRunDetail();
-    });
-    document.getElementById('overview-agent-stop').addEventListener('click', stopAgent);
-
-    document.getElementById('schedules-refresh')?.addEventListener('click', loadSchedules);
-    document.getElementById('schedule-new')?.addEventListener('click', () => openScheduleEditor(null));
-    document.getElementById('schedule-edit-save')?.addEventListener('click', () => saveSchedule().catch(e => toast(t('scheduleSaveFailed') + (e.message || e), 'err')));
-    document.getElementById('schedule-edit-cancel')?.addEventListener('click', closeScheduleEditor);
-    document.getElementById('schedule-edit-close')?.addEventListener('click', closeScheduleEditor);
-
     // Quick action / overview jump buttons
     document.addEventListener('click', (e) => {
         const btn = e.target.closest('[data-jump]');
         if (btn) switchSection(btn.dataset.jump);
-    });
-
-    // API key control
-    document.getElementById('api-key-replace')?.addEventListener('click', () => setApiKeyMode('input'));
-    document.getElementById('api-key-clear')?.addEventListener('click', () => {
-        setApiKeyMode('pending-clear');
-        reconcileDirty('provider');
-    });
-    document.getElementById('api-key-cancel')?.addEventListener('click', () => {
-        setApiKeyMode('stored');
-        reconcileDirty('provider');
-    });
-    document.getElementById('api-key-undo-clear')?.addEventListener('click', () => {
-        setApiKeyMode('stored');
-        reconcileDirty('provider');
     });
 
     bindDirtyTracking();
@@ -3119,7 +1347,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(() => {
         if (activeSection === 'apps') load();
         if (activeSection === 'overview') loadOverview();
-        if (activeSection === 'runs') loadRuns();
     }, 5000);
     setInterval(() => {
         if (activeSection === 'overview') updateOverviewMeta();

@@ -11,16 +11,12 @@
         <aside class="console-sidebar">
             <div class="brand-block">
                 <div class="brand-title" id="page-title">管理控制台</div>
-                <div class="brand-subtitle" id="console-subtitle">管理应用、运行参数和 Agent</div>
+                <div class="brand-subtitle" id="console-subtitle">管理应用与运行参数</div>
             </div>
             <nav class="nav-list" aria-label="Console sections">
                 <button class="nav-item active" data-section="overview" id="nav-overview" type="button">概览</button>
                 <button class="nav-item" data-section="apps" id="nav-apps" type="button">应用</button>
                 <button class="nav-item" data-section="settings" id="nav-settings" type="button">连接质量</button>
-                <button class="nav-item" data-section="agent" id="nav-agent" type="button">MCP / Agent</button>
-                <button class="nav-item" data-section="providers" id="nav-providers" type="button">Provider</button>
-                <button class="nav-item" data-section="runs" id="nav-runs" type="button">日志 / 轨迹</button>
-                <button class="nav-item" data-section="schedules" id="nav-schedules" type="button">定时任务</button>
             </nav>
             <div class="sidebar-footer">
                 <button class="lang-toggle" id="lang-toggle" type="button">English</button>
@@ -42,26 +38,6 @@
                     <span id="overview-meta-text">最后刷新 刚刚</span>
                     <span class="meta-sep">·</span>
                     <span id="overview-meta-auto">自动刷新 5s</span>
-                </div>
-                <div class="two-column">
-                    <div class="panel">
-                        <div class="panel-header">
-                            <h2 id="overview-providers-title">Provider 状态</h2>
-                            <button class="btn-link" data-jump="providers" type="button" id="overview-jump-providers">配置 →</button>
-                        </div>
-                        <div class="compact-list" id="overview-providers"></div>
-                    </div>
-                    <div class="panel">
-                        <div class="panel-header">
-                            <h2 id="overview-agent-title">Agent 状态</h2>
-                            <button class="btn btn-stop btn-sm" id="overview-agent-stop" type="button">停止 Agent</button>
-                        </div>
-                        <div id="overview-agent-card"></div>
-                        <details class="raw-json-details">
-                            <summary id="overview-agent-raw-summary">原始数据</summary>
-                            <pre class="json-box" id="overview-agent-json">{}</pre>
-                        </details>
-                    </div>
                 </div>
                 <div class="quick-actions" id="overview-quick-actions"></div>
             </section>
@@ -173,251 +149,13 @@
                 </div>
             </section>
 
-            <section class="section" id="section-agent">
-                <div class="panel">
-                    <div class="panel-section">
-                        <div class="panel-section-header">
-                            <h3 id="agent-budget-title">运行限额</h3>
-                            <span class="muted-hint" id="agent-budget-hint">控制单次 Agent run 的最大资源消耗</span>
-                        </div>
-                        <div class="settings-grid">
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-agent-max-steps">Max steps</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-agent-max-steps">单次任务允许的最大决策步数，达到后自动停止。</span>
-                                    </span>
-                                </label>
-                                <div class="input-suffix">
-                                    <input id="agent-max-steps" type="number" min="1" data-dirty-group="agent">
-                                    <span class="suffix" id="suffix-agent-max-steps">步</span>
-                                </div>
-                            </div>
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-agent-max-wall">Max wall time</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-agent-max-wall">单次任务的最长运行秒数，超过后自动结束。</span>
-                                    </span>
-                                </label>
-                                <div class="input-suffix">
-                                    <input id="agent-max-wall" type="number" min="1" data-dirty-group="agent">
-                                    <span class="suffix" id="suffix-agent-max-wall">秒</span>
-                                </div>
-                            </div>
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-agent-screenshot-bytes">Screenshot max size</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-agent-screenshot-bytes">发送给模型的单张截图最大字节数，用于控制请求体大小。</span>
-                                    </span>
-                                </label>
-                                <div class="input-suffix">
-                                    <input id="agent-screenshot-bytes" type="number" min="10000" data-dirty-group="agent">
-                                    <span class="suffix" id="suffix-agent-screenshot-bytes">字节</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
 
-                    <div class="panel-divider" aria-hidden="true"></div>
 
-                    <div class="panel-section">
-                        <div class="panel-section-header">
-                            <h3 id="agent-behavior-title">Provider 与行为</h3>
-                            <span class="dirty-indicator" id="agent-dirty" hidden>● 未保存改动</span>
-                        </div>
-                        <div class="settings-grid">
-                            <div class="form-line">
-                                <label class="form-label info-label">
-                                    <span id="label-agent-provider">Default provider</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-agent-provider">新建 Agent run 默认使用的 VLM Provider。</span>
-                                    </span>
-                                </label>
-                                <select id="agent-provider" data-dirty-group="agent"></select>
-                            </div>
-                            <div class="form-line param-check">
-                                <label class="form-label info-label">
-                                    <span id="label-agent-record-trajectory">Record trajectory</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-agent-record-trajectory">保存 Agent 的观察、动作和结果，便于复盘问题。</span>
-                                    </span>
-                                </label>
-                                <label class="checkbox-row settings-checkbox"><input id="agent-record-trajectory" type="checkbox" data-dirty-group="agent"><span id="toggle-agent-record-trajectory">启用</span></label>
-                            </div>
-                            <div class="form-line param-check">
-                                <label class="form-label info-label">
-                                    <span id="label-agent-dry-run">Dry run</span>
-                                    <span class="info-tip">
-                                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-agent-dry-run">只生成计划和动作，不真正控制桌面，适合调试 Provider。</span>
-                                    </span>
-                                </label>
-                                <label class="checkbox-row settings-checkbox"><input id="agent-dry-run" type="checkbox" data-dirty-group="agent"><span id="toggle-agent-dry-run">启用</span></label>
-                            </div>
-                        </div>
-                        <div class="panel-section-footer">
-                            <span class="muted-hint" id="agent-save-hint">默认值会用于后续通过 MCP 或控制台启动的 Agent run。</span>
-                            <button class="btn btn-save" id="agent-save" type="button">保存</button>
-                        </div>
-                    </div>
-                </div>
-            </section>
 
-            <section class="section" id="section-providers">
-                <div class="section-actions">
-                    <button class="btn btn-add" id="provider-add" type="button">添加供应商</button>
-                </div>
-                <div class="card">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th id="th-provider-name">名称</th>
-                                <th id="th-provider-type">类型</th>
-                                <th id="th-provider-config">配置</th>
-                                <th id="th-provider-status">状态</th>
-                                <th id="th-provider-actions">操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="provider-list">
-                            <tr><td colspan="5" class="empty" id="provider-loading-text">加载中...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section class="section" id="section-runs">
-                <div class="panel new-task-panel" id="new-task-panel">
-                    <div class="new-task-header">
-                        <h2 class="new-task-title" id="new-task-title">新建任务</h2>
-                        <span class="new-task-hint" id="new-task-hint">单条任务即可启动一次 Agent 运行</span>
-                    </div>
-                    <div class="new-task-body">
-                        <textarea class="new-task-task" id="new-task-task" rows="3" placeholder="请描述要让 Agent 完成的任务"></textarea>
-                        <div class="new-task-row">
-                            <label class="new-task-field">
-                                <span class="new-task-label" id="new-task-provider-label">Provider</span>
-                                <select class="new-task-select" id="new-task-provider"></select>
-                            </label>
-                            <label class="new-task-field">
-                                <span class="new-task-label" id="new-task-steps-label">最大步数</span>
-                                <input class="new-task-input" id="new-task-max-steps" type="number" min="1" step="1" placeholder="使用默认">
-                            </label>
-                            <label class="new-task-field">
-                                <span class="new-task-label" id="new-task-wall-label">最长时长 (秒)</span>
-                                <input class="new-task-input" id="new-task-max-wall" type="number" min="1" step="1" placeholder="使用默认">
-                            </label>
-                        </div>
-                        <div class="new-task-actions">
-                            <span class="new-task-status" id="new-task-status"></span>
-                            <button class="btn btn-save" id="new-task-start" type="button">启动</button>
-                        </div>
-                    </div>
-                </div>
-                <div class="panel">
-                    <div class="runs-toolbar">
-                        <div class="runs-filter-group" id="runs-filter-chips"></div>
-                        <div class="runs-toolbar-right">
-                            <div class="search-box">
-                                <input id="runs-search" type="search" placeholder="按 run ID 或任务搜索">
-                            </div>
-                            <button class="btn btn-cancel btn-sm" id="runs-refresh" type="button">刷新</button>
-                        </div>
-                    </div>
-                    <div class="runs-list" id="runs-list"></div>
-                </div>
-            </section>
-
-            <section class="section" id="section-schedules">
-                <div class="panel schedules-panel" id="schedules-panel">
-                    <div class="schedules-header">
-                        <h2 class="schedules-title" id="schedules-title">定时任务</h2>
-                        <div class="schedules-actions">
-                            <button class="btn btn-cancel btn-sm" id="schedules-refresh" type="button">刷新</button>
-                            <button class="btn btn-save btn-sm" id="schedule-new" type="button">新建</button>
-                        </div>
-                    </div>
-                    <p class="schedules-hint" id="schedules-hint">cron 五段表达式，使用服务器本地时区。运行重叠时跳过本次。</p>
-                    <div class="schedules-list" id="schedules-list"></div>
-                </div>
-
-                <div class="panel schedule-edit-panel hidden" id="schedule-edit-panel">
-                    <div class="schedule-edit-header">
-                        <h3 class="schedule-edit-title" id="schedule-edit-title">编辑定时任务</h3>
-                        <button class="modal-close" id="schedule-edit-close" type="button" aria-label="关闭">×</button>
-                    </div>
-                    <div class="schedule-edit-body">
-                        <label class="schedule-field">
-                            <span class="schedule-label" id="schedule-name-label">名称</span>
-                            <input class="schedule-input" id="schedule-name" type="text" maxlength="80">
-                        </label>
-                        <label class="schedule-field">
-                            <span class="schedule-label" id="schedule-cron-label">cron (5 段)</span>
-                            <input class="schedule-input schedule-input-mono" id="schedule-cron" type="text" placeholder="0 9 * * *">
-                        </label>
-                        <label class="schedule-field">
-                            <span class="schedule-label" id="schedule-task-label">任务描述</span>
-                            <textarea class="schedule-textarea" id="schedule-task" rows="3"></textarea>
-                        </label>
-                        <div class="schedule-row">
-                            <label class="schedule-field">
-                                <span class="schedule-label" id="schedule-provider-label">Provider</span>
-                                <select class="schedule-select" id="schedule-provider"></select>
-                            </label>
-                            <label class="schedule-field">
-                                <span class="schedule-label" id="schedule-max-steps-label">最大步数</span>
-                                <input class="schedule-input" id="schedule-max-steps" type="number" min="1" step="1">
-                            </label>
-                            <label class="schedule-field">
-                                <span class="schedule-label" id="schedule-max-wall-label">最长时长 (秒)</span>
-                                <input class="schedule-input" id="schedule-max-wall" type="number" min="1" step="1">
-                            </label>
-                        </div>
-                        <label class="schedule-field schedule-field-inline">
-                            <input class="schedule-checkbox" id="schedule-enabled" type="checkbox">
-                            <span id="schedule-enabled-label">启用</span>
-                        </label>
-                        <div class="schedule-edit-actions">
-                            <span class="schedule-edit-status" id="schedule-edit-status"></span>
-                            <button class="btn btn-cancel" id="schedule-edit-cancel" type="button">取消</button>
-                            <button class="btn btn-save" id="schedule-edit-save" type="button">保存</button>
-                        </div>
-                    </div>
-                </div>
-            </section>
         </main>
     </div>
 
-    <!-- 轨迹详情覆盖层 -->
-    <div class="run-detail-overlay" id="run-detail-overlay">
-        <div class="run-detail-panel">
-            <div class="run-detail-header">
-                <button class="run-detail-back" id="run-detail-back" type="button" aria-label="返回">
-                    <span aria-hidden="true">←</span><span id="run-detail-back-label">返回</span>
-                </button>
-                <span class="run-state-pill" id="run-detail-pill"></span>
-                <div class="run-detail-title" id="run-detail-task"></div>
-                <button class="modal-close" id="run-detail-close" type="button" aria-label="关闭">×</button>
-            </div>
-            <div class="run-detail-result" id="run-detail-result"></div>
-            <div class="run-detail-summary" id="run-detail-summary"></div>
-            <div class="run-detail-toolbar">
-                <div class="run-detail-filter" id="run-detail-filter"></div>
-            </div>
-            <div class="run-detail-steps" id="run-detail-steps"></div>
-        </div>
-    </div>
 
-    <!-- 截图灯箱 -->
-    <div class="frame-lightbox" id="frame-lightbox">
-        <img id="frame-lightbox-img" alt="screenshot">
-    </div>
 
     <!-- 模态框：添加/编辑 -->
     <div class="modal-bg" id="modal">
@@ -565,7 +303,7 @@
                         <span id="label-cli-env">执行环境变量</span>
                         <span class="info-tip">
                             <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                            <span class="default-text" id="label-cli-env-default">（可选，agent 调用该 CLI 时附加，每行 KEY=value）</span>
+                            <span class="default-text" id="label-cli-env-default">（可选，调用该 CLI 时附加，每行 KEY=value）</span>
                         </span>
                     </label>
                     <textarea id="f-cli-env" rows="5" placeholder="NO_COLOR=1&#10;AGENT_BROWSER_SESSION=ivnc-default"></textarea>
@@ -581,110 +319,6 @@
 
     <div class="toast" id="toast"></div>
 
-    <!-- 模态框：添加 Provider -->
-    <div class="modal-bg" id="provider-modal">
-        <div class="modal app-modal">
-            <div class="modal-header">
-                <h2 id="provider-modal-title">添加 Provider</h2>
-                <button class="modal-close" id="provider-modal-close" type="button" aria-label="关闭">×</button>
-            </div>
-            <input type="hidden" id="provider-name">
-            <div class="form-line">
-                <label class="form-label required-label">
-                    <span id="label-provider-type">API format</span>
-                    <span class="required-mark">*</span>
-                </label>
-                <select id="provider-type" data-dirty-group="provider">
-                    <option value="openai">OpenAI compatible</option>
-                    <option value="anthropic">Anthropic</option>
-                </select>
-            </div>
-            <div class="form-line">
-                <label class="form-label required-label">
-                    <span id="label-provider-display-name">Name</span>
-                    <span class="required-mark">*</span>
-                </label>
-                <input id="provider-display-name" type="text" placeholder="cc-switch-market" data-dirty-group="provider">
-            </div>
-            <div class="form-line">
-                <label class="form-label info-label">
-                    <span id="label-provider-endpoint">Base URL</span>
-                    <span class="info-tip">
-                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                        <span class="default-text" id="help-provider-endpoint">Provider 的 API 基础地址，留空使用内置默认值。</span>
-                    </span>
-                </label>
-                <input id="provider-endpoint" type="text" placeholder="https://api.openai.com/v1" data-dirty-group="provider">
-                <span class="field-hint" id="provider-endpoint-hint"></span>
-            </div>
-            <div class="form-line">
-                <label class="form-label info-label">
-                    <span id="label-provider-model">Model</span>
-                    <span class="info-tip">
-                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                        <span class="default-text" id="help-provider-model">调用的模型名称，需与所选 Provider 支持的模型一致。</span>
-                    </span>
-                </label>
-                <input id="provider-model" type="text" placeholder="gpt-4o-mini" data-dirty-group="provider">
-                <span class="field-hint" id="provider-model-hint"></span>
-            </div>
-            <div class="form-line provider-openai-only">
-                <label class="form-label info-label">
-                    <span id="label-provider-api-format">OpenAI API 类型</span>
-                    <span class="info-tip">
-                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                        <span class="default-text" id="help-provider-api-format">Provider 使用的 OpenAI 接口协议。Responses 会请求 /responses，Chat Completions 会请求 /chat/completions。</span>
-                    </span>
-                </label>
-                <select id="provider-api-format" data-dirty-group="provider">
-                    <option value="">Chat Completions</option>
-                    <option value="responses">Responses</option>
-                </select>
-            </div>
-            <div class="form-line provider-openai-only">
-                <label class="form-label info-label">
-                    <span id="label-provider-coord-space">Coordinate space</span>
-                    <span class="info-tip">
-                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                        <span class="default-text" id="help-provider-coord-space">Provider 返回坐标的空间类型，默认使用该 Provider 的内置约定。</span>
-                    </span>
-                </label>
-                <select id="provider-coord-space" data-dirty-group="provider"><option value="">默认</option><option value="image">image</option><option value="screen">screen</option><option value="normalized">normalized</option></select>
-            </div>
-            <div class="form-line">
-                <label class="form-label info-label">
-                    <span id="label-provider-api-key">API Key</span>
-                    <span class="info-tip">
-                        <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                        <span class="default-text" id="help-provider-api-key">Provider 凭据。已配置时显示遮罩；点击"替换"输入新值，或"清除"删除已保存的密钥。</span>
-                    </span>
-                </label>
-                <div class="api-key-control" id="api-key-control">
-                    <div class="api-key-stored" id="api-key-stored" hidden>
-                        <span class="api-key-mask">••••••••••••</span>
-                        <span class="api-key-status" id="api-key-status">已保存</span>
-                        <div class="api-key-actions">
-                            <button type="button" class="btn-link" id="api-key-replace">替换</button>
-                            <button type="button" class="btn-link btn-link-danger" id="api-key-clear">清除</button>
-                        </div>
-                    </div>
-                    <div class="api-key-input" id="api-key-input-wrap">
-                        <input id="provider-api-key" type="password" placeholder="保持为空表示不修改" data-dirty-group="provider">
-                        <button type="button" class="btn-link" id="api-key-cancel" hidden>取消</button>
-                    </div>
-                    <div class="api-key-pending" id="api-key-pending" hidden>
-                        <span class="badge-warn-pill" id="api-key-pending-text">将在保存时清除已存 API Key</span>
-                        <button type="button" class="btn-link" id="api-key-undo-clear">撤销</button>
-                    </div>
-                </div>
-                <input type="hidden" id="provider-clear-key">
-            </div>
-            <div class="modal-actions">
-                <button class="btn btn-cancel" id="provider-modal-cancel" type="button">取消</button>
-                <button class="btn btn-save" id="provider-modal-save" type="button">保存</button>
-            </div>
-        </div>
-    </div>
 
     <!-- 模态框：日志 -->
     <div class="modal-bg" id="log-modal">
