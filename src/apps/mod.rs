@@ -4,7 +4,6 @@
 
 pub mod api;
 pub mod app;
-pub mod cdp;
 pub mod datadir;
 pub mod desktop_entry;
 pub mod native;

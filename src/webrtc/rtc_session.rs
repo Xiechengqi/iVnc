@@ -646,16 +646,7 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
     if ctx.runtime_settings.handle_simple_message(text) {
         return;
     }
-    #[cfg(feature = "agent")]
-    if text == "agent_stop" {
-        ctx.shared_state.request_agent_stop();
-        return;
-    }
     if text == "kr" {
-        #[cfg(feature = "agent")]
-        if ctx.shared_state.agent_exclusive() {
-            return;
-        }
         let _ = ctx.input_tx.send(InputEventData {
             event_type: InputEvent::KeyboardReset,
             ..Default::default()
@@ -705,10 +696,6 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         return;
     }
     if text.starts_with("focus,") {
-        #[cfg(feature = "agent")]
-        if ctx.shared_state.agent_exclusive() {
-            return;
-        }
         if let Ok(window_id) = text.trim_start_matches("focus,").parse::<u32>() {
             let mut event = InputEventData::default();
             event.event_type = InputEvent::WindowFocus;
@@ -718,10 +705,6 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         return;
     }
     if text.starts_with("close,") {
-        #[cfg(feature = "agent")]
-        if ctx.shared_state.agent_exclusive() {
-            return;
-        }
         if let Ok(window_id) = text.trim_start_matches("close,").parse::<u32>() {
             let mut event = InputEventData::default();
             event.event_type = InputEvent::WindowClose;
@@ -734,10 +717,6 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
     // Fall through to input event parsing (mouse, keyboard, etc.)
     match InputDataChannel::parse_input_text(text) {
         Ok(event) => {
-            #[cfg(feature = "agent")]
-            if ctx.shared_state.agent_exclusive() {
-                return;
-            }
             ctx.shared_state
                 .record_connection_input_activity(&session.id);
             let _ = ctx.input_tx.send(event);

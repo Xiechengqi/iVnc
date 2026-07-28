@@ -14,14 +14,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
-#[cfg(feature = "agent")]
-use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-#[cfg(feature = "agent")]
-use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh64::xxh64;
 
 /// Connection information for a WebRTC session
@@ -68,21 +64,6 @@ pub struct SharedState {
     /// Input event sender
     pub input_sender: mpsc::UnboundedSender<InputEventData>,
 
-    /// Agent input ownership guard: 0 = shared, 1 = MCP/agent exclusive.
-    #[cfg(feature = "agent")]
-    pub agent_control: Arc<AtomicU8>,
-
-    /// Cooperative cancellation for in-process agent runs.
-    #[cfg(feature = "agent")]
-    pub agent_cancel: Arc<Mutex<CancellationToken>>,
-
-    #[cfg(feature = "agent")]
-    pub agent_runs: crate::agent::run_store::RunStore,
-
-    #[cfg(feature = "agent")]
-    pub schedule_state:
-        Arc<Mutex<std::collections::HashMap<String, crate::agent::schedule::ScheduleRuntime>>>,
-
     /// Display dimensions
     pub display_size: Arc<Mutex<(u32, u32)>>,
 
@@ -100,9 +81,6 @@ pub struct SharedState {
 
     /// Current compositor/encoder render state.
     render_state: Arc<AtomicU64>,
-
-    /// Keep the compositor active briefly after MCP/agent input injection.
-    automation_wakeup_until_ms: Arc<AtomicU64>,
 
     /// UI configuration
     pub ui_config: Arc<UiConfig>,
@@ -147,15 +125,7 @@ pub struct SharedState {
     /// Password override (set via /api/change-password, takes precedence over config)
     pub password_override: Arc<RwLock<Option<String>>>,
 
-    /// MCP frame capture channel: MCP tools send oneshot senders here,
-    /// main loop responds with (width, height, xrgb_pixels)
-    #[cfg(feature = "mcp")]
-    pub frame_capture_tx: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<(u32, u32, Vec<u8>)>>,
-    #[cfg(feature = "mcp")]
-    pub frame_capture_rx:
-        Arc<Mutex<mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<(u32, u32, Vec<u8>)>>>>,
-
-    /// Cached latest taskbar JSON for MCP list_windows tool
+    /// Cached latest taskbar JSON for the window list
     pub last_taskbar_json: Arc<Mutex<Option<String>>>,
 
     /// Active WebRTC connections
@@ -194,33 +164,18 @@ impl SharedState {
         runtime_settings: Arc<RuntimeSettings>,
     ) -> Self {
         let (clipboard_incoming_tx, clipboard_incoming_rx) = mpsc::unbounded_channel();
-        #[cfg(feature = "mcp")]
-        let (frame_capture_tx, frame_capture_rx) = mpsc::unbounded_channel();
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
 
         Self {
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
             input_sender,
-            #[cfg(feature = "agent")]
-            agent_control: Arc::new(AtomicU8::new(0)),
-            #[cfg(feature = "agent")]
-            agent_cancel: Arc::new(Mutex::new(CancellationToken::new())),
-            #[cfg(feature = "agent")]
-            agent_runs: {
-                let store = crate::agent::run_store::RunStore::default();
-                store.load_from_disk();
-                store
-            },
-            #[cfg(feature = "agent")]
-            schedule_state: Arc::new(Mutex::new(std::collections::HashMap::new())),
             display_size,
             clipboard: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
             pending_resize: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(RuntimeStats::default())),
             render_state: Arc::new(AtomicU64::new(RenderState::Active as u64)),
-            automation_wakeup_until_ms: Arc::new(AtomicU64::new(0)),
             start_time: std::time::Instant::now(),
             webrtc_session_count: Arc::new(AtomicU64::new(0)),
             datachannel_open_count: Arc::new(AtomicU64::new(0)),
@@ -236,10 +191,6 @@ impl SharedState {
             audio_subscribers: Arc::new(Mutex::new(Vec::new())),
             text_subscribers: Arc::new(Mutex::new(Vec::new())),
             password_override: Arc::new(RwLock::new(None)),
-            #[cfg(feature = "mcp")]
-            frame_capture_tx,
-            #[cfg(feature = "mcp")]
-            frame_capture_rx: Arc::new(Mutex::new(frame_capture_rx)),
             last_taskbar_json: Arc::new(Mutex::new(None)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             ipv4_address: Arc::new(RwLock::new(String::new())),
@@ -314,54 +265,6 @@ impl SharedState {
             Err(err) => warn!("Failed to launch command '{}': {}", cmd, err),
         }
         true
-    }
-
-    #[cfg(feature = "agent")]
-    pub fn request_agent_stop(&self) {
-        self.agent_cancel.lock().unwrap().cancel();
-        self.agent_control.store(0, Ordering::SeqCst);
-        self.send_text("mcp_control,{\"active\":false,\"reason\":\"user_interrupt\"}".to_string());
-    }
-
-    #[cfg(feature = "agent")]
-    pub fn reset_agent_stop(&self) {
-        let mut token = self.agent_cancel.lock().unwrap();
-        if token.is_cancelled() {
-            *token = CancellationToken::new();
-        }
-    }
-
-    #[cfg(feature = "agent")]
-    pub fn agent_stop_requested(&self) -> bool {
-        self.agent_cancel.lock().unwrap().is_cancelled()
-    }
-
-    #[cfg(feature = "agent")]
-    pub fn agent_cancel_token(&self) -> CancellationToken {
-        self.agent_cancel.lock().unwrap().clone()
-    }
-
-    #[cfg(feature = "agent")]
-    pub fn set_agent_exclusive(&self, active: bool, reason: &str) {
-        self.agent_control
-            .store(if active { 1 } else { 0 }, Ordering::SeqCst);
-        self.send_text(format!(
-            "mcp_control,{{\"active\":{},\"reason\":\"{}\"}}",
-            active, reason
-        ));
-    }
-
-    #[cfg(feature = "agent")]
-    pub fn agent_exclusive(&self) -> bool {
-        self.agent_control.load(Ordering::SeqCst) == 1
-    }
-
-    #[cfg(feature = "agent")]
-    pub fn clipboard_preview(&self, max_chars: usize) -> Option<String> {
-        let b64 = self.clipboard.lock().unwrap().clone()?;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-        let text = String::from_utf8_lossy(&decoded);
-        Some(text.chars().take(max_chars).collect())
     }
 
     /// Send a text message to all sessions.
@@ -486,26 +389,6 @@ impl SharedState {
 
     pub fn render_state(&self) -> RenderState {
         RenderState::from_u64(self.render_state.load(Ordering::Relaxed))
-    }
-
-    pub fn request_automation_wakeup(&self, duration: std::time::Duration) {
-        let until = now_millis().saturating_add(duration.as_millis() as u64);
-        let mut current = self.automation_wakeup_until_ms.load(Ordering::Relaxed);
-        while until > current {
-            match self.automation_wakeup_until_ms.compare_exchange_weak(
-                current,
-                until,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
-    }
-
-    pub fn automation_wakeup_active(&self) -> bool {
-        now_millis() <= self.automation_wakeup_until_ms.load(Ordering::Relaxed)
     }
 
     /// Build UI configuration JSON payload

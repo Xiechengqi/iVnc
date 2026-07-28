@@ -26,24 +26,6 @@ pub struct AppsState {
     pub service: ServiceProcessManager,
 }
 
-/// Outcome of `launch_named` — distinguishes a fresh start (where any
-/// URL appended to the launch command was actually delivered) from a
-/// reuse of an existing process (where it was not). Callers passing a
-/// URL must handle these differently: a running process won't navigate
-/// just because we re-invoked the launch command.
-#[derive(Debug, Clone)]
-pub enum LaunchOutcome {
-    Started {
-        pid: Option<u32>,
-    },
-    AlreadyRunning {
-        pid: Option<u32>,
-    },
-    /// The app was already running and we delivered the requested URL into the
-    /// live instance (e.g. a new Chrome tab via DevTools) instead of dropping it.
-    OpenedInExisting,
-}
-
 impl AppsState {
     pub fn new() -> Result<Self, String> {
         let store = Arc::new(AppStore::new()?);
@@ -193,77 +175,6 @@ impl AppsState {
         }
     }
 
-    /// Launch a managed app selected by id or (case-insensitive) name. When a
-    /// non-empty `url` is supplied it is appended to the desktop launch command
-    /// (single-quoted) so e.g. Chrome opens directly at that address.
-    ///
-    /// Returns the started pid when available; if the app is already running the
-    /// existing pid is returned instead of erroring.
-    pub async fn launch_named(
-        &self,
-        query: &str,
-        url: Option<&str>,
-    ) -> Result<LaunchOutcome, String> {
-        let q = query.trim();
-        if q.is_empty() {
-            return Err("empty app name".to_string());
-        }
-        let apps = self.store.list()?;
-        let ql = q.to_lowercase();
-        let mut app = apps
-            .iter()
-            .find(|a| a.id.eq_ignore_ascii_case(q) || a.name.eq_ignore_ascii_case(q))
-            .or_else(|| {
-                apps.iter().find(|a| {
-                    a.name.to_lowercase().contains(&ql) || a.id.to_lowercase().contains(&ql)
-                })
-            })
-            .cloned()
-            .ok_or_else(|| {
-                let available: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
-                format!(
-                    "no app matching {:?}; available: {}",
-                    query,
-                    available.join(", ")
-                )
-            })?;
-
-        let trimmed_url = url.map(str::trim).filter(|u| !u.is_empty());
-        if let Some(url) = trimmed_url {
-            if app.app_type == AppType::DesktopApp {
-                if let Some(cmd) = app.exec_command.as_mut() {
-                    cmd.push(' ');
-                    cmd.push_str(&shell_single_quote(url));
-                }
-            }
-        }
-
-        match self.start_app_processes(&app).await {
-            Ok(pid) => Ok(LaunchOutcome::Started { pid }),
-            Err(e) if e == "App is already running" => {
-                // Re-invoking the launch command does nothing for a live process,
-                // so the URL would be dropped. For the built-in Chrome we instead
-                // hand the URL to the running browser over its DevTools port,
-                // opening it in a new tab of the existing window.
-                if let Some(url) = trimmed_url {
-                    if app.id == "builtin-chrome" {
-                        match chrome_open_url_in_existing(url).await {
-                            Ok(()) => return Ok(LaunchOutcome::OpenedInExisting),
-                            Err(err) => log::warn!(
-                                "Chrome already running; DevTools open-url failed, falling back to no-op: {}",
-                                err
-                            ),
-                        }
-                    }
-                }
-                Ok(LaunchOutcome::AlreadyRunning {
-                    pid: self.app_pid(&app),
-                })
-            }
-            Err(e) => Err(e),
-        }
-    }
-
     fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
         match app.app_type {
             AppType::DesktopApp => self.process.stop(&app.id),
@@ -293,39 +204,6 @@ impl AppsState {
         }
     }
 
-    pub fn find_app(&self, query: &str) -> Result<ManagedApp, String> {
-        let q = query.trim();
-        if q.is_empty() {
-            return Err("empty app name".to_string());
-        }
-        let apps = self.store.list()?;
-        let ql = q.to_lowercase();
-        apps.iter()
-            .find(|a| a.id.eq_ignore_ascii_case(q) || a.name.eq_ignore_ascii_case(q))
-            .cloned()
-            .or_else(|| {
-                apps.into_iter().find(|a| {
-                    a.name.to_lowercase().contains(&ql) || a.id.to_lowercase().contains(&ql)
-                })
-            })
-            .ok_or_else(|| format!("no app matching {:?}", query))
-    }
-}
-
-/// Wrap a string in single quotes for safe inclusion in a `sh -c` command line,
-/// escaping any embedded single quotes. Prevents shell injection via URLs/args.
-fn shell_single_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
@@ -550,35 +428,6 @@ pub(crate) fn chrome_devtools_port() -> u16 {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(9222)
-}
-
-/// Open `url` in a new tab of the already-running built-in Chrome via its
-/// DevTools HTTP endpoint, so a second `launch_app` actually navigates instead
-/// of dropping the URL. Chrome >= 111 requires PUT for `/json/new`; older
-/// builds accept GET, so we fall back on a 405.
-async fn chrome_open_url_in_existing(url: &str) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| format!("build devtools client: {e}"))?;
-    let endpoint = format!("http://127.0.0.1:{}/json/new?{url}", chrome_devtools_port());
-    let mut resp = client
-        .put(&endpoint)
-        .send()
-        .await
-        .map_err(|e| format!("devtools PUT failed: {e}"))?;
-    if resp.status().as_u16() == 405 {
-        resp = client
-            .get(&endpoint)
-            .send()
-            .await
-            .map_err(|e| format!("devtools GET failed: {e}"))?;
-    }
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!("devtools returned status {}", resp.status()))
-    }
 }
 
 pub fn router(state: Arc<AppsState>) -> Router {

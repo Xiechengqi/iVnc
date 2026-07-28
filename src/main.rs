@@ -2,8 +2,6 @@
 //!
 //! Wayland compositor + WebRTC streaming using smithay and GStreamer.
 
-#[cfg(feature = "agent")]
-mod agent;
 mod apps;
 mod args;
 mod audio;
@@ -11,13 +9,10 @@ mod capabilities;
 mod clipboard;
 mod compositor;
 mod config;
-#[cfg(feature = "agent")]
 mod console_config;
 mod file_upload;
 mod gstreamer;
 mod input;
-#[cfg(feature = "mcp")]
-mod mcp;
 mod proxy_panel;
 mod runtime_settings;
 mod system_clipboard;
@@ -264,7 +259,6 @@ fn main() {
         input_rx,
         width,
         height,
-        &args,
     ) {
         eprintln!("Fatal error: {}", e);
         error!("Fatal error: {}", e);
@@ -279,7 +273,6 @@ fn run(
     mut input_rx: mpsc::UnboundedReceiver<InputEventData>,
     width: u32,
     height: u32,
-    #[cfg_attr(not(feature = "mcp"), allow(unused))] args: &RunArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let running = Arc::new(AtomicBool::new(true));
     shared_state.set_shutdown_flag(running.clone());
@@ -440,12 +433,7 @@ fn run(
         let r = running.clone();
         let c = config.clone();
         let rs = runtime_settings.clone();
-        #[cfg(feature = "mcp")]
-        let mcp_stdio = args.mcp_stdio;
         tokio_rt.spawn(async move {
-            #[cfg(feature = "mcp")]
-            let result = run_async_services(c, st, rs, r, mcp_stdio).await;
-            #[cfg(not(feature = "mcp"))]
             let result = run_async_services(c, st, rs, r).await;
             if let Err(e) = result {
                 error!("Async services error: {}", e);
@@ -872,23 +860,6 @@ fn run(
                             "render_frame returned None (windows={})",
                             comp.space.elements().count()
                         );
-                    }
-                }
-            }
-        }
-
-        // MCP frame capture: drain pending requests and respond with current frame
-        #[cfg(feature = "mcp")]
-        {
-            let mut fc_rx = shared_state.frame_capture_rx.lock().unwrap();
-            while let Ok(sender) = fc_rx.try_recv() {
-                match backend.render_frame(&mut comp) {
-                    Some(pixels) => {
-                        let (w, h) = shared_state.display_size();
-                        let _ = sender.send((w, h, pixels));
-                    }
-                    None => {
-                        let _ = sender.send((0, 0, Vec::new()));
                     }
                 }
             }
@@ -1611,21 +1582,6 @@ fn desired_render_state(
     shared: &web::SharedState,
     last_visual_activity_at: Instant,
 ) -> RenderState {
-    // While an agent run is active, keep rendering even with no transport
-    // viewer. Wayland clients only paint frames they were given a frame
-    // callback for; those callbacks are only sent in the Active state. Without
-    // this, a headless agent run sees the client's first paint frozen forever
-    // (e.g. a browser stuck on "Loading…") and the captured screenshot never
-    // updates, so the agent believes its actions had no effect.
-    #[cfg(feature = "agent")]
-    if shared.agent_exclusive() {
-        return RenderState::Active;
-    }
-
-    if shared.automation_wakeup_active() {
-        return RenderState::Active;
-    }
-
     let has_transport_viewers = shared.webrtc_sessions() > 0 || shared.rtp_receiver_count() > 0;
     if !has_transport_viewers {
         return RenderState::NoViewerIdle;
@@ -1747,7 +1703,6 @@ async fn run_async_services(
     shared: Arc<web::SharedState>,
     runtime_settings: Arc<runtime_settings::RuntimeSettings>,
     _running: Arc<AtomicBool>,
-    #[cfg(feature = "mcp")] mcp_stdio: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let proxy_startup = if config.ui_features.proxy_enabled {
         shared.proxy_panel.clone().start_watchdog();
@@ -1796,26 +1751,6 @@ async fn run_async_services(
         None
     };
 
-    // MCP stdio mode: run MCP server on stdin/stdout alongside HTTP
-    #[cfg(feature = "mcp")]
-    if mcp_stdio {
-        info!("Starting MCP server on stdio (HTTP server will also start)");
-        let mcp_server = mcp::McpServer::new(shared.clone());
-        let transport = rmcp::transport::io::stdio();
-        use rmcp::ServiceExt;
-        let service = mcp_server.serve(transport).await.map_err(
-            |e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("MCP stdio error: {}", e).into()
-            },
-        )?;
-        tokio::spawn(async move {
-            if let Err(e) = service.waiting().await {
-                log::error!("MCP stdio session ended with error: {}", e);
-            } else {
-                log::info!("MCP stdio session ended");
-            }
-        });
-    }
 
     // Apps manager
     let apps_state = match crate::apps::api::AppsState::new() {
@@ -1858,13 +1793,6 @@ async fn run_async_services(
     info!("Starting HTTP server on port {}", port);
     if let Some(ps) = &apps_state {
         shared.set_apps_state(ps.clone());
-    }
-    #[cfg(feature = "agent")]
-    {
-        let scheduler_state = shared.clone();
-        tokio::spawn(async move {
-            crate::agent::schedule::run_loop(scheduler_state).await;
-        });
     }
     web::run_http_server_with_webrtc(
         port,
