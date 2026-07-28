@@ -255,7 +255,6 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 env_vars: None,
                 cli_binary_path: None,
                 cli_env_vars: None,
-                skill_paths: None,
                 created_at: chrono_now(),
             };
             match store.add(&app) {
@@ -271,10 +270,6 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
 }
 
 fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String> {
-    let skill_path = "/root/.config/ivnc/skills/agent-browser/SKILL.md".to_string();
-    if let Err(err) = ensure_agent_browser_skill(&skill_path) {
-        log::warn!("Failed to ensure default agent-browser skill: {}", err);
-    }
     match store.get("builtin-agent-browser") {
         Ok(mut app) => {
             let mut changed = false;
@@ -307,10 +302,6 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 app.cli_env_vars = Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())]));
                 changed = true;
             }
-            if app.skill_paths.as_ref().map_or(true, Vec::is_empty) {
-                app.skill_paths = Some(vec![skill_path]);
-                changed = true;
-            }
             if changed {
                 store.update(&app)?;
                 log::info!("Updated built-in agent-browser CLI app defaults");
@@ -331,7 +322,6 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 env_vars: None,
                 cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
                 cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
-                skill_paths: Some(vec![skill_path]),
                 created_at: chrono_now(),
             };
             match store.add(&app) {
@@ -342,37 +332,6 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
         }
     }
     Ok(())
-}
-
-fn ensure_agent_browser_skill(path: &str) -> Result<(), String> {
-    let path = PathBuf::from(path);
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create skill directory {}: {}",
-                parent.display(),
-                e
-            )
-        })?;
-    }
-    let content = r#"Use the registered CLI app `agent-browser` through `cli_app_run`.
-
-Always prefer JSON output when available. Do not parse human-readable output if a `--json` flag can be used.
-
-Common commands:
-- Inspect browser state: `cli_app_run(app="agent-browser", args=["snapshot", "--json"])`
-- Open a page: `cli_app_run(app="agent-browser", args=["open", "https://example.com", "--json"])`
-- Click an accessibility ref from a snapshot: `cli_app_run(app="agent-browser", args=["click", "@e3", "--json"])`
-- Fill text into an accessibility ref: `cli_app_run(app="agent-browser", args=["fill", "@e3", "text", "--json"])`
-- Press a key: `cli_app_run(app="agent-browser", args=["press", "Enter", "--json"])`
-
-After every mutating command, inspect stdout/stderr and verify browser state with another snapshot before calling done.
-"#;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write default agent-browser skill: {}", e))
 }
 
 fn ivnc_config_dir() -> PathBuf {
@@ -487,23 +446,6 @@ fn parse_optional_string(value: Option<&serde_json::Value>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn parse_string_list(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
-    let values = value.and_then(|v| v.as_array()).map(|items| {
-        items
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>()
-    })?;
-    if values.is_empty() {
-        None
-    } else {
-        Some(values)
-    }
-}
-
 pub fn cli_install_status(app: &ManagedApp) -> (bool, &'static str, Option<String>) {
     if app.app_type != AppType::CliApp {
         return (false, "not_cli", None);
@@ -572,7 +514,6 @@ fn app_json(
         "data_size_bytes": data_bytes,
         "data_size_human": datadir::size_human(data_bytes),
         "created_at": app.created_at,
-        "skill_paths": app.skill_paths,
     });
 
     match app.app_type {
@@ -643,7 +584,6 @@ async fn add_app(
         env_vars,
         cli_binary_path,
         cli_env_vars,
-        skill_paths,
     ) = match app_type {
         AppType::BackgroundApp => {
             let url = parse_optional_string(body.get("url"));
@@ -681,7 +621,6 @@ async fn add_app(
                 None,
                 None,
                 None,
-                parse_string_list(body.get("skill_paths")),
             )
         }
         AppType::DesktopApp => {
@@ -705,7 +644,6 @@ async fn add_app(
                 env_vars,
                 None,
                 None,
-                parse_string_list(body.get("skill_paths")),
             )
         }
         AppType::CliApp => {
@@ -714,7 +652,6 @@ async fn add_app(
                 _ => return err_response(StatusCode::BAD_REQUEST, "missing cli_binary_path"),
             };
             let cli_env_vars = parse_env_vars(body.get("cli_env_vars"));
-            let skill_paths = parse_string_list(body.get("skill_paths"));
             (
                 None,
                 None,
@@ -725,7 +662,6 @@ async fn add_app(
                 None,
                 cli_binary_path,
                 cli_env_vars,
-                skill_paths,
             )
         }
     };
@@ -749,7 +685,6 @@ async fn add_app(
         env_vars,
         cli_binary_path,
         cli_env_vars,
-        skill_paths,
         created_at: chrono_now(),
     };
 
@@ -863,9 +798,6 @@ async fn update_app(
             }
             app.cli_env_vars = parse_env_vars(body.get("cli_env_vars"));
         }
-    }
-    if body.get("skill_paths").is_some() {
-        app.skill_paths = parse_string_list(body.get("skill_paths"));
     }
 
     if let Some(autostart) = body.get("autostart").and_then(|v| v.as_bool()) {

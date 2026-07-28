@@ -1,6 +1,6 @@
 use super::types::{
-    tool_id_for, CapabilityDiagnostic, CapabilitySkill, CapabilityTool, ConcurrencyPolicy,
-    PermissionLevel, PermissionPolicy, SkillSource, ToolSource,
+    tool_id_for, CapabilityDiagnostic, CapabilityTool, ConcurrencyPolicy, PermissionLevel,
+    PermissionPolicy, ToolSource,
 };
 use crate::apps::app::ManagedApp;
 use serde::Deserialize;
@@ -16,8 +16,6 @@ const DESCRIBE_CACHE_TTL: Duration = Duration::from_secs(30);
 pub struct CliManifest {
     #[serde(default)]
     pub commands: Vec<CliCommandSpec>,
-    #[serde(default)]
-    pub skills: Vec<CliSkillSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,25 +40,9 @@ pub struct CliParamSpec {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CliSkillSpec {
-    pub name: String,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub steps: Vec<CliSkillStep>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CliSkillStep {
-    #[serde(rename = "use")]
-    pub use_command: String,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct CliDescribeOutput {
     pub tools: Vec<CapabilityTool>,
-    pub skills: Vec<CapabilitySkill>,
     pub diagnostics: Vec<CapabilityDiagnostic>,
 }
 
@@ -191,24 +173,8 @@ pub fn from_manifest(app: &ManagedApp, binary: &str, manifest: CliManifest) -> C
             }
         })
         .collect();
-    let skills = manifest
-        .skills
-        .into_iter()
-        .filter(|skill| !skill.name.trim().is_empty())
-        .map(|skill| CapabilitySkill {
-            id: tool_id_for(&app.id, &skill.name),
-            app_id: app.id.clone(),
-            name: skill.name,
-            summary: skill.summary.unwrap_or_default(),
-            content: None,
-            source: SkillSource::Manifest {
-                steps: skill.steps.into_iter().map(|s| s.use_command).collect(),
-            },
-        })
-        .collect();
     CliDescribeOutput {
         tools,
-        skills,
         diagnostics: Vec::new(),
     }
 }
@@ -351,7 +317,6 @@ mod tests {
             env_vars: None,
             cli_binary_path: Some("/tmp/twitter-cli".to_string()),
             cli_env_vars: None,
-            skill_paths: None,
             created_at: "now".to_string(),
         }
     }
@@ -384,13 +349,6 @@ mod tests {
                     params: Vec::new(),
                 },
             ],
-            skills: vec![CliSkillSpec {
-                name: "monitor_keyword".to_string(),
-                summary: Some("Monitor keyword".to_string()),
-                steps: vec![CliSkillStep {
-                    use_command: "search".to_string(),
-                }],
-            }],
         };
         let described = from_manifest(&app(), "/tmp/twitter-cli", manifest);
         assert_eq!(described.tools.len(), 3);
@@ -401,7 +359,6 @@ mod tests {
             PermissionPolicy::Confirm
         );
         assert_eq!(described.tools[2].permission_policy, PermissionPolicy::Deny);
-        assert_eq!(described.skills[0].id, "twitter_cli_monitor_keyword");
     }
 
     #[test]

@@ -65,9 +65,5 @@ pub struct ManagedApp {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_env_vars: Option<HashMap<String, String>>,
 
-    // Agent guidance for this app.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_paths: Option<Vec<String>>,
-
     pub created_at: String,
 }

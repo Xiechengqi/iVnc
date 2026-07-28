@@ -32,14 +32,12 @@ impl AppStore {
                 launch_cwd TEXT,
                 launch_wait_timeout_secs INTEGER,
                 cli_binary_path TEXT,
-                cli_env_vars TEXT,
-                skill_paths TEXT
+                cli_env_vars TEXT
             );",
         )
         .map_err(|e| format!("Failed to init db: {}", e))?;
         Self::ensure_column(&conn, "cli_binary_path", "TEXT")?;
         Self::ensure_column(&conn, "cli_env_vars", "TEXT")?;
-        Self::ensure_column(&conn, "skill_paths", "TEXT")?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -89,21 +87,16 @@ impl AppStore {
             .as_ref()
             .and_then(|v| serde_json::to_string(v).ok())
             .unwrap_or_default();
-        let skill_paths_json = app
-            .skill_paths
-            .as_ref()
-            .and_then(|v| serde_json::to_string(v).ok())
-            .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, skill_paths)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 app.id, app.name, app.app_type.as_str(), url,
                 app.autostart as i32, exec_command, env_vars_json, app.created_at,
                 app.launch_command.as_deref(), launch_env_vars_json,
                 app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64),
-                app.cli_binary_path.as_deref(), cli_env_vars_json, skill_paths_json,
+                app.cli_binary_path.as_deref(), cli_env_vars_json,
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -135,15 +128,10 @@ impl AppStore {
             .as_ref()
             .and_then(|v| serde_json::to_string(v).ok())
             .unwrap_or_default();
-        let skill_paths_json = app
-            .skill_paths
-            .as_ref()
-            .and_then(|v| serde_json::to_string(v).ok())
-            .unwrap_or_default();
 
         let changed = conn.execute(
-            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11, skill_paths=?12 WHERE id=?13",
-            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, skill_paths_json, app.id],
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11 WHERE id=?12",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", app.id));
@@ -165,7 +153,7 @@ impl AppStore {
     pub fn get(&self, id: &str) -> Result<ManagedApp, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, skill_paths FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).map_err(|e| format!("App not found: {}", e))
@@ -174,7 +162,7 @@ impl AppStore {
     pub fn list(&self) -> Result<Vec<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, skill_paths FROM apps ORDER BY created_at"
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars FROM apps ORDER BY created_at"
         ).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -208,8 +196,6 @@ impl AppStore {
         let cli_binary_path: Option<String> = row.get(12).ok().filter(|s: &String| !s.is_empty());
         let cli_env_vars_json: Option<String> = row.get(13).ok().filter(|s: &String| !s.is_empty());
         let cli_env_vars = cli_env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
-        let skill_paths_json: Option<String> = row.get(14).ok().filter(|s: &String| !s.is_empty());
-        let skill_paths = skill_paths_json.and_then(|json| serde_json::from_str(&json).ok());
 
         ManagedApp {
             id: row.get(0).unwrap_or_default(),
@@ -225,7 +211,6 @@ impl AppStore {
             env_vars,
             cli_binary_path,
             cli_env_vars,
-            skill_paths,
             created_at: row.get(7).unwrap_or_default(),
         }
     }

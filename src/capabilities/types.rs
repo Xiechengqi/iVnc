@@ -6,7 +6,6 @@ use std::collections::HashMap;
 pub struct CapabilitySnapshot {
     pub apps: Vec<CapabilityApp>,
     pub tools: Vec<CapabilityTool>,
-    pub skills: Vec<CapabilitySkill>,
     pub diagnostics: Vec<CapabilityDiagnostic>,
 }
 
@@ -18,7 +17,6 @@ pub struct CapabilityApp {
     pub status: String,
     pub capabilities: Vec<String>,
     pub tool_count: usize,
-    pub skill_count: usize,
     pub diagnostics: Vec<CapabilityDiagnostic>,
 }
 
@@ -57,24 +55,6 @@ pub enum ToolSource {
         path: String,
     },
     DesktopAction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapabilitySkill {
-    pub id: String,
-    pub app_id: String,
-    pub name: String,
-    pub summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    pub source: SkillSource,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SkillSource {
-    LocalPath { path: String },
-    Manifest { steps: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

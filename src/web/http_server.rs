@@ -155,11 +155,6 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/capabilities", get(capabilities_handler))
         .route("/api/capabilities/apps", get(capability_apps_handler))
         .route("/api/capabilities/tools", get(capability_tools_handler))
-        .route("/api/capabilities/skills", get(capability_skills_handler))
-        .route(
-            "/api/capabilities/skills/{skill_id}",
-            get(capability_skill_get_handler),
-        )
         .route("/api/capabilities/calls", get(capability_calls_handler))
         .route(
             "/api/capabilities/tools/{tool_id}/call",
@@ -1008,43 +1003,6 @@ async fn capability_tools_handler(State(state): State<Arc<SharedState>>) -> Resp
         StatusCode::OK,
         json!({ "tools": snapshot.tools, "diagnostics": snapshot.diagnostics }),
     )
-}
-
-async fn capability_skills_handler(State(state): State<Arc<SharedState>>) -> Response {
-    let Some(apps) = state.apps_state().cloned() else {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error": "apps manager is not initialized"}),
-        );
-    };
-    let snapshot = crate::capabilities::build_snapshot(&apps).await;
-    json_response(
-        StatusCode::OK,
-        json!({ "skills": snapshot.skills, "diagnostics": snapshot.diagnostics }),
-    )
-}
-
-async fn capability_skill_get_handler(
-    State(state): State<Arc<SharedState>>,
-    Path(skill_id): Path<String>,
-) -> Response {
-    let Some(apps) = state.apps_state().cloned() else {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error": "apps manager is not initialized"}),
-        );
-    };
-    let snapshot = crate::capabilities::build_snapshot(&apps).await;
-    let Some(mut skill) = snapshot.skills.into_iter().find(|s| s.id == skill_id) else {
-        return json_response(StatusCode::NOT_FOUND, json!({"error": "unknown skill"}));
-    };
-    if let crate::capabilities::SkillSource::LocalPath { path } = &skill.source {
-        match crate::capabilities::read_skill_content(path).await {
-            Ok(content) => skill.content = Some(content),
-            Err(err) => return json_response(StatusCode::BAD_REQUEST, json!({"error": err})),
-        }
-    }
-    json_response(StatusCode::OK, json!({ "skill": skill }))
 }
 
 async fn capability_calls_handler() -> Response {
