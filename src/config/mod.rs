@@ -517,7 +517,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
-    use std::path::PathBuf;
 
     #[test]
     fn validate_rejects_invalid_dimensions() {
@@ -553,7 +552,7 @@ port = 9000
         assert_eq!(cfg.display.refresh_rate, 60);
         assert_eq!(cfg.http.host, "0.0.0.0");
         assert_eq!(cfg.http.port, 9000);
-        assert_eq!(cfg.server.pidfile, PathBuf::from("/var/run/ivnc.pid"));
+        assert_eq!(cfg.server.pidfile, crate::paths::default_pidfile());
         assert!(cfg.terminal.enabled);
         assert_eq!(cfg.terminal.shell, "/bin/bash");
     }
@@ -571,7 +570,7 @@ port = 9000
 }
 
 fn default_pidfile() -> PathBuf {
-    PathBuf::from("/var/run/ivnc.pid")
+    crate::paths::default_pidfile()
 }
 
 fn default_display_width() -> u32 {
@@ -634,7 +633,7 @@ fn default_file_transfers() -> Vec<String> {
 }
 
 fn default_upload_dir() -> String {
-    "~/Desktop".to_string()
+    crate::paths::default_upload_dir_string()
 }
 
 fn default_log_level() -> String {

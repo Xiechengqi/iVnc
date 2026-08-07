@@ -65,8 +65,14 @@ pub async fn describe_cli_app(app: &ManagedApp) -> CliDescribeOutput {
 
     let mut command = tokio::process::Command::new(binary);
     command.args(["describe", "--json"]);
-    if let Some(env) = app.cli_env_vars.as_ref() {
+    let base_env = app.cli_env_vars.clone().unwrap_or_default();
+    if let Ok(env) = crate::paths::merge_cli_isolation_env(&app.id, &base_env) {
         command.envs(env);
+    } else {
+        command.envs(&base_env);
+    }
+    for key in crate::paths::APP_ENV_REMOVE {
+        command.env_remove(key);
     }
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
@@ -148,7 +154,8 @@ fn put_describe_cache(cache_key: String, output: CliDescribeOutput) {
 }
 
 pub fn from_manifest(app: &ManagedApp, binary: &str, manifest: CliManifest) -> CliDescribeOutput {
-    let env = app.cli_env_vars.clone().unwrap_or_default();
+    let base_env = app.cli_env_vars.clone().unwrap_or_default();
+    let env = crate::paths::merge_cli_isolation_env(&app.id, &base_env).unwrap_or(base_env);
     let tools = manifest
         .commands
         .into_iter()
@@ -272,7 +279,11 @@ pub fn raw_cli_tool(app: &ManagedApp) -> Option<CapabilityTool> {
         summary: format!("Run CLI app {}", app.name),
         source: ToolSource::CliRaw {
             binary_path: binary.to_string(),
-            env: app.cli_env_vars.clone().unwrap_or_default(),
+            env: crate::paths::merge_cli_isolation_env(
+                &app.id,
+                &app.cli_env_vars.clone().unwrap_or_default(),
+            )
+            .unwrap_or_else(|_| app.cli_env_vars.clone().unwrap_or_default()),
         },
         input_schema: json!({
             "type": "object",

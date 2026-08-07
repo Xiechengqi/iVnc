@@ -17,10 +17,7 @@ impl AppRunningState {
     }
 
     fn state_file() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/root/.config"))
-            .join("ivnc")
-            .join("app_running_state.json")
+        crate::paths::app_running_state()
     }
 
     /// Save running apps state to file

@@ -12,6 +12,7 @@ pub mod console_config;
 pub mod file_upload;
 pub mod gstreamer;
 pub mod input;
+pub mod paths;
 pub mod proxy_panel;
 pub mod runtime_settings;
 pub mod system_clipboard;

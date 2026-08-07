@@ -6,11 +6,7 @@ use std::process::{Command, Stdio};
 
 /// Log file path for a managed app.
 pub fn log_path(app_id: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/root/.config"))
-        .join("ivnc")
-        .join("apps")
-        .join(app_id);
+    let dir = crate::paths::app_log_dir(app_id);
     let _ = fs::create_dir_all(&dir);
     dir.join("app.log")
 }
@@ -55,6 +51,8 @@ fn build_desktop_command(app: &ManagedApp) -> Result<Command, String> {
             info!("  Env: {}={}", key, value);
         }
     }
+
+    crate::paths::apply_std_command_isolation(&mut cmd, &app.id)?;
 
     cmd.env_remove("LD_PRELOAD");
     cmd.env_remove("DBUS_SYSTEM_BUS_ADDRESS");

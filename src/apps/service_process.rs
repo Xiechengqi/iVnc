@@ -212,11 +212,7 @@ pub fn has_launch_command(app: &ManagedApp) -> bool {
 }
 
 pub fn service_log_path(app_id: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/root/.config"))
-        .join("ivnc")
-        .join("apps")
-        .join(app_id);
+    let dir = crate::paths::app_log_dir(app_id);
     let _ = fs::create_dir_all(&dir);
     dir.join("service.log")
 }
@@ -253,6 +249,18 @@ fn build_service_command(app: &ManagedApp) -> Result<Command, String> {
         for (key, value) in env_vars {
             cmd.env(key, value);
         }
+    }
+
+    crate::paths::apply_std_command_isolation(&mut cmd, &app.id)?;
+
+    if let Ok(val) = std::env::var("WAYLAND_DISPLAY") {
+        cmd.env("WAYLAND_DISPLAY", &val);
+    }
+    if let Ok(val) = std::env::var("XDG_RUNTIME_DIR") {
+        cmd.env("XDG_RUNTIME_DIR", &val);
+    }
+    if let Ok(val) = std::env::var("DISPLAY") {
+        cmd.env("DISPLAY", &val);
     }
 
     let log_file = service_log_path(&app.id);

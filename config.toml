@@ -4,8 +4,8 @@
 [server]
 # Run in foreground (true) or daemonize (false)
 foreground = true
-# PID file path
-pidfile = "/var/run/ivnc.pid"
+# PID file path (default: $HOME/.ivnc/ivnc.pid when omitted)
+# pidfile = "/root/.ivnc/ivnc.pid"
 
 [display]
 # Display width
@@ -46,8 +46,8 @@ enable_binary_clipboard = false
 enable_commands = false
 # Allowed file transfer directions (use [] or ["download"] to disable uploads)
 file_transfers = ["upload", "download"]
-# Directory to store uploaded files
-upload_dir = "~/Desktop"
+# Directory to store uploaded files (default: $HOME/.ivnc/Desktop)
+upload_dir = "~/.ivnc/Desktop"
 # Mouse sensitivity multiplier
 mouse_sensitivity = 1.0
 

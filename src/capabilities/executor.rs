@@ -209,7 +209,18 @@ async fn execute_command(
     call_id: String,
     started: Instant,
 ) -> ToolCallOutcome {
-    command.envs(env);
+    let isolated = crate::paths::merge_cli_isolation_env(&tool.app_id, env)
+        .unwrap_or_else(|_| env.clone());
+    command.envs(&isolated);
+    for key in crate::paths::APP_ENV_REMOVE {
+        command.env_remove(key);
+    }
+    if let Ok(val) = std::env::var("XDG_RUNTIME_DIR") {
+        command.env("XDG_RUNTIME_DIR", val);
+    }
+    if let Ok(val) = std::env::var("WAYLAND_DISPLAY") {
+        command.env("WAYLAND_DISPLAY", val);
+    }
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());

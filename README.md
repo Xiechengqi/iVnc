@@ -272,7 +272,8 @@ candidate_from_host_header = true
 
 | 环境变量 | 说明 |
 |----------|------|
-| `XDG_RUNTIME_DIR` | PulseAudio/PipeWire socket 目录（音频捕获必需） |
+| `IVNC_HOME` | 持久化数据根目录（默认 `$HOME/.ivnc`） |
+| `XDG_RUNTIME_DIR` | PulseAudio/PipeWire socket 目录（音频捕获必需；不迁入 IVNC_HOME） |
 | `PULSE_SOURCE` | 指定 PulseAudio 音频源（默认自动检测 monitor source） |
 | `IVNC_ENCODER` | 编码器选项（逗号分隔） |
 | `IVNC_FRAMERATE` | 帧率或帧率范围（如 `30` 或 `15-60`） |
@@ -286,6 +287,21 @@ candidate_from_host_header = true
 | `IVNC_UI_SHOW_SIDEBAR` | 显示侧边栏 |
 
 UI 相关环境变量值后加 `|locked` 可锁定前端不可修改。
+
+### 数据目录
+
+所有持久化数据默认位于 `$HOME/.ivnc`（可用 `IVNC_HOME` 覆盖）：
+
+```
+$IVNC_HOME/
+  apps.db / console.json / app_running_state.json
+  capability_calls.jsonl / ivnc.pid / Desktop/
+  applications/   # .desktop 入口
+  miao/           # 代理面板
+  apps/<id>/      # 日志、隔离 HOME、data、chrome profile
+```
+
+首次启动会尝试从旧路径（`~/.config/ivnc`、`/tmp/ivnc-apps` 等）自动迁移。
 
 ## API 参考
 

@@ -13,6 +13,7 @@ mod console_config;
 mod file_upload;
 mod gstreamer;
 mod input;
+mod paths;
 mod proxy_panel;
 mod runtime_settings;
 mod system_clipboard;
@@ -53,15 +54,7 @@ fn resolve_display_name(app_id: &str) -> Option<String> {
         return None;
     }
 
-    let data_home = env::var("XDG_DATA_HOME")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })?;
-    let apps_dir = data_home.join("applications");
+    let apps_dir = crate::paths::applications_dir();
     let entries = std::fs::read_dir(&apps_dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();

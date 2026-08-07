@@ -1,8 +1,9 @@
 //! Console-managed runtime settings.
 //!
 //! Persists the handful of streaming knobs the web console can change at
-//! runtime to `~/.config/ivnc/console.json`. Unknown fields are ignored on
-//! load, so config files written by older builds still parse.
+//! runtime to `$IVNC_HOME/console.json` (default `$HOME/.ivnc/console.json`).
+//! Unknown fields are ignored on load, so config files written by older builds
+//! still parse.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -28,10 +29,7 @@ pub struct RuntimeConsoleConfig {
 }
 
 pub fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("/root/.config"))
-        .join("ivnc")
-        .join("console.json")
+    crate::paths::console_json()
 }
 
 pub fn load() -> ConsoleConfig {

@@ -103,9 +103,9 @@ pub struct RunArgs {
     #[arg(long, action)]
     pub tls: bool,
 
-    /// PID file path
-    #[arg(long, default_value = "/var/run/ivnc.pid")]
-    pub pidfile: PathBuf,
+    /// PID file path (empty = $IVNC_HOME/ivnc.pid)
+    #[arg(long, default_value = "")]
+    pub pidfile: String,
 }
 
 impl RunArgs {

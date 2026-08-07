@@ -45,10 +45,7 @@ impl AppStore {
     }
 
     fn db_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/root/.config"))
-            .join("ivnc")
-            .join("apps.db")
+        crate::paths::apps_db()
     }
 
     fn ensure_column(conn: &Connection, name: &str, ty: &str) -> Result<(), String> {

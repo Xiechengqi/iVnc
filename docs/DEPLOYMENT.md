@@ -159,6 +159,10 @@ sudo vi /etc/ivnc.toml
 
 编辑 `/etc/ivnc.toml`：
 
+持久化数据默认写在 `$HOME/.ivnc`（可用环境变量 `IVNC_HOME` 覆盖），包括 apps.db、
+Chrome profile、代理面板、上传目录等。Wayland/Pulse 运行时仍使用系统 `XDG_RUNTIME_DIR`。
+首次启动会从旧路径（`~/.config/ivnc`、`/tmp/ivnc-apps`）自动迁移。
+
 ### 基础配置
 
 ```toml

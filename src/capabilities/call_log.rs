@@ -29,10 +29,7 @@ pub struct CapabilityCallRecord {
 }
 
 pub fn call_log_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("/root/.local/share"))
-        .join("ivnc")
-        .join("capability_calls.jsonl")
+    crate::paths::capability_calls()
 }
 
 pub async fn append(record: &CapabilityCallRecord) -> Result<(), String> {

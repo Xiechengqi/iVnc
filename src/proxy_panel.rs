@@ -298,21 +298,18 @@ fn cleanup_legacy_runtime_link() -> Result<(), String> {
 }
 
 fn data_dir() -> Result<PathBuf, String> {
-    let dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("/root/.config"))
-        .join("ivnc")
-        .join("miao");
+    let dir = crate::paths::miao_dir();
     fs::create_dir_all(&dir).map_err(|err| format!("failed to create miao dir: {}", err))?;
     Ok(dir)
 }
 
 fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
+    crate::paths::ivnc_home().to_string_lossy().into_owned()
 }
 
 fn log_tail() -> String {
     let path = data_dir()
-        .unwrap_or_else(|_| PathBuf::from("/root/.config/ivnc/miao"))
+        .unwrap_or_else(|_| crate::paths::miao_dir())
         .join("miao.log");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|err| format!("failed to read {}: {}", path.display(), err));

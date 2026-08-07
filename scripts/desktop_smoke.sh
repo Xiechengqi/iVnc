@@ -4,8 +4,8 @@
 # iVnc desktop, app management and capability surface. Run after every major
 # change.
 #
-# It boots a fully isolated ivnc instance (own XDG_RUNTIME_DIR / config / data
-# dirs, own HTTP port, own Chrome DevTools port, basic-auth disabled) and
+# It boots a fully isolated ivnc instance (own XDG_RUNTIME_DIR / IVNC_HOME,
+# own HTTP port, own Chrome DevTools port, basic-auth disabled) and
 # exercises the HTTP surface. It needs no API keys and contacts no external
 # network. All output goes to stdout.
 #
@@ -111,13 +111,12 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# Isolated sandbox: own runtime/config/data dirs + ports.
+# Isolated sandbox: own runtime + IVNC_HOME + ports.
 # ----------------------------------------------------------------------------
 TMP="$(mktemp -d /tmp/ivnc-smoke.XXXXXX)"
 export XDG_RUNTIME_DIR="$TMP/run"
-export XDG_CONFIG_HOME="$TMP/config"
-export XDG_DATA_HOME="$TMP/data"
-mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+export IVNC_HOME="$TMP/ivnc-home"
+mkdir -p "$XDG_RUNTIME_DIR" "$IVNC_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"  # Wayland refuses a runtime dir that isn't 0700
 
 HTTP_PORT="$(free_port)"
@@ -198,7 +197,7 @@ check_eq "settings applied (fps)"     "24"   "$(jq -r '.current.target_fps'     
 check_eq "settings applied (bitrate)" "4321" "$(jq -r '.current.video_bitrate_kbps' <<<"$resp")"
 check_eq "settings persisted (fps)"   "24"   "$(jq -r '.saved.target_fps'          <<<"$resp")"
 check_eq "console.json written" "24" \
-  "$(jq -r '.runtime.target_fps' "$XDG_CONFIG_HOME/ivnc/console.json" 2>/dev/null)"
+  "$(jq -r '.runtime.target_fps' "$IVNC_HOME/console.json" 2>/dev/null)"
 
 check_status "keyframe request 200" "200" "$BASE/api/console/keyframe" -X POST
 
@@ -210,6 +209,9 @@ resp="$(curl -sS -m 10 "$BASE/api/apps")"
 check_contains "builtin-chrome present"        '"builtin-chrome"'        "$resp"
 check_contains "builtin-agent-browser present" '"builtin-agent-browser"' "$resp"
 check_eq "apps carry no skill_paths" "0" "$(grep -c 'skill_paths' <<<"$resp")"
+check_eq "apps.db under IVNC_HOME" "1" "$(test -f "$IVNC_HOME/apps.db" && echo 1 || echo 0)"
+check_eq "chrome profile dir ready" "1" \
+  "$(test -d "$IVNC_HOME/apps/builtin-chrome/profile" && echo 1 || echo 0)"
 
 hdr "apps: CRUD on a CLI app"
 resp="$(curl -sS -m 10 -X POST "$BASE/api/apps" -H 'content-type: application/json' \

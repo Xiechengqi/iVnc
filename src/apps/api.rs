@@ -28,6 +28,8 @@ pub struct AppsState {
 
 impl AppsState {
     pub fn new() -> Result<Self, String> {
+        crate::paths::migrate_legacy();
+        crate::paths::ensure_layout()?;
         let store = Arc::new(AppStore::new()?);
         ensure_builtin_apps(&store)?;
         let mut process = ProcessManager::new();
@@ -334,14 +336,8 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
     Ok(())
 }
 
-fn ivnc_config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("/root/.config"))
-        .join("ivnc")
-}
-
 fn builtin_chrome_data_dir() -> Result<PathBuf, String> {
-    let dir = ivnc_config_dir().join("chrome");
+    let dir = crate::paths::chrome_profile();
     std::fs::create_dir_all(&dir).map_err(|err| {
         format!(
             "Failed to create Chrome data dir {}: {}",
@@ -366,16 +362,27 @@ fn shell_quote(value: &str) -> String {
 
 fn builtin_chrome_command() -> Result<String, String> {
     let data_dir = builtin_chrome_data_dir()?;
+    let crash_dir = crate::paths::chrome_crash_dumps_dir();
+    std::fs::create_dir_all(&crash_dir).map_err(|err| {
+        format!(
+            "Failed to create Chrome crash dumps dir {}: {}",
+            crash_dir.display(),
+            err
+        )
+    })?;
     let data_dir = shell_quote(&data_dir.to_string_lossy());
+    let crash_dir = shell_quote(&crash_dir.to_string_lossy());
     let debug_port = chrome_devtools_port();
     Ok(format!(
         "profile_dir={data_dir}; \
+crash_dir={crash_dir}; \
 rm -f \"$profile_dir/SingletonLock\" \"$profile_dir/SingletonSocket\" \"$profile_dir/SingletonCookie\"; \
+rm -rf /tmp/com.google.Chrome.*; \
 proxy_arg=''; \
 if [ \"${{IVNC_PROXY_PANEL_ENABLED:-1}}\" != '0' ] && grep -qiE '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-Fa-f]+:0438[[:space:]]+[0-9A-Fa-f]+:[0-9A-Fa-f]+[[:space:]]+0A[[:space:]]' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then \
   proxy_arg='--proxy-server=socks5://127.0.0.1:1080'; \
 fi; \
-exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
+exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --crash-dumps-dir=\"$crash_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
     ))
 }
 
@@ -549,7 +556,7 @@ async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
                 .map(|app| {
                     let st = state.app_status(app);
                     let pid = state.app_pid(app);
-                    let size = datadir::dir_size(&datadir::data_dir(app));
+                    let size = datadir::durable_size(app);
                     app_json(app, &format!("{:?}", st).to_lowercase(), pid, size)
                 })
                 .collect();
@@ -713,7 +720,7 @@ async fn add_app(
 
     let status = state.app_status(&app);
     let pid = state.app_pid(&app);
-    let size = datadir::dir_size(&datadir::data_dir(&app));
+    let size = datadir::durable_size(&app);
     json_response(
         StatusCode::CREATED,
         json!({"ok": true, "app": app_json(&app, &format!("{:?}", status).to_lowercase(), pid, size)}),
@@ -725,7 +732,7 @@ async fn get_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) ->
         Ok(app) => {
             let st = state.app_status(&app);
             let pid = state.app_pid(&app);
-            let size = datadir::dir_size(&datadir::data_dir(&app));
+            let size = datadir::durable_size(&app);
             json_response(
                 StatusCode::OK,
                 app_json(&app, &format!("{:?}", st).to_lowercase(), pid, size),
@@ -866,8 +873,8 @@ async fn data_size(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
-    let dir = datadir::data_dir(&app);
-    let bytes = datadir::dir_size(&dir);
+    let dir = datadir::app_root(&app);
+    let bytes = datadir::durable_size(&app);
     json_response(
         StatusCode::OK,
         json!({

@@ -4,17 +4,7 @@ use std::path::PathBuf;
 use xxhash_rust::xxh64::xxh64;
 
 fn applications_dir() -> Result<PathBuf, String> {
-    let data_home = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|home| PathBuf::from(home).join(".local/share"))
-        })
-        .ok_or("Failed to resolve applications dir: HOME/XDG_DATA_HOME not set")?;
-
-    let dir = data_home.join("applications");
+    let dir = crate::paths::applications_dir();
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create applications dir {}: {}", dir.display(), e))?;
     Ok(dir)
