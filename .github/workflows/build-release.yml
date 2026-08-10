@@ -134,6 +134,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Compute GHCR image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -144,11 +155,14 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: docker.io/xiechengqi/ivnc
+          images: |
+            ${{ steps.image.outputs.name }}
+            docker.io/xiechengqi/ivnc
           tags: |
             type=raw,value=latest
 
       - name: Build and push Docker image
+        id: docker-build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -160,6 +174,16 @@ jobs:
           build-args: |
             IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
             IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
+
+      - name: Verify published Docker images
+        env:
+          GHCR_IMAGE: ${{ steps.image.outputs.name }}
+          DOCKERHUB_IMAGE: docker.io/xiechengqi/ivnc
+          IMAGE_DIGEST: ${{ steps.docker-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${GHCR_IMAGE}@${IMAGE_DIGEST}"
+          docker buildx imagetools inspect "${DOCKERHUB_IMAGE}@${IMAGE_DIGEST}"
 
   release:
     needs:
@@ -191,6 +215,10 @@ jobs:
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Current version: v${VERSION}"
+
+      - name: Compute GHCR image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Delete existing latest release and tag
         run: |
@@ -225,6 +253,11 @@ jobs:
             | AMD64 | `ivnc-linux-amd64` |
 
             ### Docker 镜像
+
+            GitHub Container Registry:
+            ```bash
+            docker pull ${{ steps.image.outputs.name }}:latest
+            ```
 
             Docker Hub:
             ```bash
