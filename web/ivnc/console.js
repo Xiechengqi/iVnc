@@ -479,7 +479,6 @@ function applyTranslations() {
 
     const coordDefault = document.querySelector('#provider-coord-space option[value=""]');
     if (coordDefault) coordDefault.textContent = t('defaultOption');
-    refreshApiKeyPlaceholder();
 
     setText('lang-toggle', 'langToggle');
     setText('add-app-btn', 'addApp');
@@ -1317,7 +1316,11 @@ document.addEventListener('DOMContentLoaded', () => {
     onLangChange((lang) => {
         currentLang = lang;
         lastDataHash = '';
-        applyTranslations();
+        try {
+            applyTranslations();
+        } catch (e) {
+            console.error('[console] applyTranslations failed:', e);
+        }
         loadSection();
     });
     document.getElementById('f-app-type').addEventListener('change', updateAppTypeVisibility);
@@ -1340,7 +1343,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     bindDirtyTracking();
-    applyTranslations();
+    try {
+        applyTranslations();
+    } catch (e) {
+        console.error('[console] applyTranslations failed:', e);
+    }
     loadSection();
     setInterval(() => {
         if (activeSection === 'apps') load();

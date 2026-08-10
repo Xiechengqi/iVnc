@@ -203,13 +203,11 @@ impl FileUploadHandler {
             ));
         }
 
-        if target_dir != upload_root {
-            if let Err(err) = fs::create_dir_all(&target_dir) {
-                return Err(format!(
-                    "Failed to create upload directory {:?}: {}",
-                    target_dir, err
-                ));
-            }
+        if let Err(err) = fs::create_dir_all(&target_dir) {
+            return Err(format!(
+                "Failed to create upload directory {:?}: {}",
+                target_dir, err
+            ));
         }
 
         let root_canon = fs::canonicalize(&upload_root).map_err(|err| {
@@ -275,10 +273,7 @@ fn resolve_upload_dir(raw: &str) -> Option<PathBuf> {
         PathBuf::from(trimmed)
     };
 
-    if let Err(err) = fs::create_dir_all(&expanded) {
-        warn!("Could not create upload directory {:?}: {}", expanded, err);
-        return None;
-    }
+    // Defer create_dir_all until an actual upload starts.
     Some(expanded)
 }
 

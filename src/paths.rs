@@ -107,7 +107,6 @@ pub fn ensure_layout() -> Result<(), String> {
     let home = ivnc_home();
     for dir in [
         home.clone(),
-        desktop_dir(),
         applications_dir(),
         miao_dir(),
         home.join("apps"),
