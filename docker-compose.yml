@@ -12,8 +12,14 @@ services:
     environment:
       - DISPLAY=:99
       - IVNC_LOG=info
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - ./config.toml:/etc/ivnc.toml:ro
+      - ./ivnc-data:/root/.ivnc
+      - ./miao-data:/root/.miao
     restart: unless-stopped
     networks:
       - ivnc-net

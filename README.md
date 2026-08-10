@@ -178,6 +178,22 @@ CMD mkdir -p $XDG_RUNTIME_DIR && \
     ivnc --config /etc/ivnc.toml
 ```
 
+使用发布镜像时，iVnc 数据与 miao 数据应分别挂载。miao 默认的全局和进程模式还需要 TUN 设备与 `NET_ADMIN`：
+
+```bash
+docker run -itd \
+  -p "${PORT}:8008" \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun \
+  -v /etc/hosts:/etc/hosts:ro \
+  -v "${PWD}/ivnc-data:/root/.ivnc" \
+  -v "${PWD}/miao-data:/root/.miao" \
+  --name "${NAME}" \
+  "${IMAGE}"
+```
+
+只使用 miao 代理池模式时不创建 TUN，可以省略 `--cap-add` 和 `--device`；代理池端口如需从容器外访问，还需额外发布对应端口范围。
+
 ## 配置
 
 ### 命令行参数
@@ -290,16 +306,18 @@ UI 相关环境变量值后加 `|locked` 可锁定前端不可修改。
 
 ### 数据目录
 
-所有持久化数据默认位于 `$HOME/.ivnc`（可用 `IVNC_HOME` 覆盖）：
+iVnc 持久化数据默认位于 `$HOME/.ivnc`（可用 `IVNC_HOME` 覆盖）：
 
 ```
 $IVNC_HOME/
   apps.db / console.json / app_running_state.json
   capability_calls.jsonl / ivnc.pid / Desktop/
   applications/   # .desktop 入口
-  miao/           # 代理面板
+  miao/           # 内置 miao 二进制与 miao.log
   apps/<id>/      # 日志、隔离 HOME、data、chrome profile
 ```
+
+miao 自身的配置、订阅缓存和运行状态遵循 miao 的目录约定，位于 `$HOME/.miao`。Docker 部署应同时持久化 `/root/.ivnc` 与 `/root/.miao`。
 
 首次启动会尝试从旧路径（`~/.config/ivnc`、`/tmp/ivnc-apps` 等）自动迁移。
 

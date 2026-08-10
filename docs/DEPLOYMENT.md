@@ -295,6 +295,24 @@ ENV XDG_RUNTIME_DIR=/run/user/0
 CMD ["ivnc", "-c", "/etc/ivnc.toml"]
 ```
 
+### miao 数据与权限
+
+内置 miao 使用 `$HOME/.miao` 保存配置、订阅缓存和运行状态，需与 iVnc 的 `$HOME/.ivnc` 分别持久化。miao 的全局和进程模式会创建 TUN，容器必须映射 `/dev/net/tun` 并授予 `NET_ADMIN`：
+
+```bash
+docker run -itd \
+  -p "${PORT}:8008" \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun \
+  -v /etc/hosts:/etc/hosts:ro \
+  -v "${PWD}/ivnc-data:/root/.ivnc" \
+  -v "${PWD}/miao-data:/root/.miao" \
+  --name "${NAME}" \
+  "${IMAGE}"
+```
+
+只使用代理池模式时可以省略 TUN 相关参数；需要从容器外连接代理池节点时，还需发布对应的代理池端口。
+
 ## 验证
 
 ```bash
