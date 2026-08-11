@@ -190,10 +190,12 @@ impl XdgShellHandler for Compositor {
             }
 
             // Undo fullscreen: let the app use its preferred dialog size
+            let decoration_mode = self.decoration_mode_for(&surface);
             surface.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Fullscreen);
                 state.states.unset(xdg_toplevel::State::Maximized);
                 state.size = None;
+                state.decoration_mode = Some(decoration_mode);
             });
             surface.send_pending_configure();
         }

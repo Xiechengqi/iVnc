@@ -198,26 +198,62 @@ impl OutputHandler for Compositor {}
 delegate_output!(Compositor);
 delegate_text_input_manager!(Compositor);
 
+// Main surfaces stay borderless; dialogs need CSD for native close controls.
+fn decoration_mode_for_dialog(is_dialog: bool) -> Mode {
+    if is_dialog {
+        Mode::ClientSide
+    } else {
+        Mode::ServerSide
+    }
+}
+
+impl Compositor {
+    pub(super) fn decoration_mode_for(&self, toplevel: &ToplevelSurface) -> Mode {
+        let surface_id = toplevel.wl_surface().id().protocol_id();
+        decoration_mode_for_dialog(self.dialog_surfaces.contains(&surface_id))
+    }
+
+    fn configure_toplevel_decoration(&self, toplevel: &ToplevelSurface) {
+        let mode = self.decoration_mode_for(toplevel);
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(mode);
+        });
+
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+}
+
 impl XdgDecorationHandler for Compositor {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
-        toplevel.send_pending_configure();
+        self.configure_toplevel_decoration(&toplevel);
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: Mode) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
-        toplevel.send_pending_configure();
+        self.configure_toplevel_decoration(&toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
-        toplevel.send_pending_configure();
+        self.configure_toplevel_decoration(&toplevel);
     }
 }
 delegate_xdg_decoration!(Compositor);
+
+#[cfg(test)]
+mod tests {
+    use super::{decoration_mode_for_dialog, Mode};
+
+    #[test]
+    fn dialogs_use_client_side_decorations() {
+        assert!(matches!(decoration_mode_for_dialog(true), Mode::ClientSide));
+    }
+
+    #[test]
+    fn main_windows_keep_server_side_decorations() {
+        assert!(matches!(
+            decoration_mode_for_dialog(false),
+            Mode::ServerSide
+        ));
+    }
+}
