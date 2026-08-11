@@ -111,11 +111,8 @@ impl ProxyPanelManager {
         let bin = ensure_binary()?;
         cleanup_legacy_runtime_link()?;
         let home = crate::paths::host_home();
-        let config_path = miao_config_path(&home);
-        if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("failed to create miao data dir: {}", err))?;
-        }
+        fs::create_dir_all(home.join(".miao"))
+            .map_err(|err| format!("failed to create miao data dir: {}", err))?;
         let log_path = dir.join("miao.log");
         let stdout = OpenOptions::new()
             .create(true)
@@ -128,8 +125,6 @@ impl ProxyPanelManager {
 
         let mut cmd = Command::new(&bin);
         cmd.current_dir(&dir)
-            .arg("--config")
-            .arg(&config_path)
             .env("HOME", &home)
             .env("MIAO_PORT", MIAO_PORT.to_string())
             .stdout(Stdio::from(stdout))
@@ -148,10 +143,9 @@ impl ProxyPanelManager {
             .map_err(|err| format!("failed to start miao proxy panel: {}", err))?;
         let pid = child.id();
         info!(
-            "Started miao proxy panel (pid={}, port={}, config={}, log={})",
+            "Started miao proxy panel (pid={}, port={}, log={})",
             pid,
             MIAO_PORT,
-            config_path.display(),
             log_path.display()
         );
         *self.process.lock().unwrap() = Some(RunningProxy { child, pid });
@@ -312,10 +306,6 @@ fn data_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn miao_config_path(home: &Path) -> PathBuf {
-    home.join(".miao").join("config.yaml")
-}
-
 fn log_tail() -> String {
     let path = data_dir()
         .unwrap_or_else(|_| crate::paths::miao_dir())
@@ -325,18 +315,4 @@ fn log_tail() -> String {
     let lines: Vec<&str> = content.lines().rev().take(40).collect();
     let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
     format!("miao log tail ({}):\n{}", path.display(), tail)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::miao_config_path;
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn miao_config_uses_real_user_home() {
-        assert_eq!(
-            miao_config_path(Path::new("/root")),
-            PathBuf::from("/root/.miao/config.yaml")
-        );
-    }
 }
