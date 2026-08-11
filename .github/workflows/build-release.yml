@@ -10,6 +10,10 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: build-release
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -163,6 +167,46 @@ jobs:
 
       - name: Build and push Docker image
         id: docker-build
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
+            IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
+
+      - name: Wait before first Docker push retry
+        if: steps.docker-build.outcome == 'failure'
+        run: sleep 180
+
+      - name: Retry build and push Docker image
+        id: docker-build-retry
+        if: steps.docker-build.outcome == 'failure'
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
+            IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
+
+      - name: Wait before final Docker push retry
+        if: steps.docker-build-retry.outcome == 'failure'
+        run: sleep 300
+
+      - name: Final build and push Docker image retry
+        id: docker-build-final
+        if: steps.docker-build-retry.outcome == 'failure'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -179,7 +223,7 @@ jobs:
         env:
           GHCR_IMAGE: ${{ steps.image.outputs.name }}
           DOCKERHUB_IMAGE: docker.io/xiechengqi/ivnc
-          IMAGE_DIGEST: ${{ steps.docker-build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.docker-build-final.outputs.digest || steps.docker-build-retry.outputs.digest || steps.docker-build.outputs.digest }}
         run: |
           set -euo pipefail
           docker buildx imagetools inspect "${GHCR_IMAGE}@${IMAGE_DIGEST}"
