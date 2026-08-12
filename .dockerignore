@@ -5,7 +5,6 @@ target/
 !README.md
 .gitignore
 .dockerignore
-docker-compose.yml
 Dockerfile
 *.sh
 !docker-entrypoint.sh

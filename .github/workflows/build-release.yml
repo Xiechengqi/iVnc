@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         include:
@@ -115,7 +115,7 @@ jobs:
           path: output/ivnc-linux-${{ matrix.arch }}
 
   docker:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: build
 
     steps:
@@ -164,6 +164,10 @@ jobs:
             docker.io/xiechengqi/ivnc
           tags: |
             type=raw,value=latest
+            type=raw,value=noble
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.base.name=ubuntu:24.04
 
       - name: Build and push Docker image
         id: docker-build
@@ -177,6 +181,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            RUNTIME_IMAGE=ubuntu:24.04
+            EXPECTED_RUNTIME_VERSION=24.04
             IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
             IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
 
@@ -197,6 +203,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            RUNTIME_IMAGE=ubuntu:24.04
+            EXPECTED_RUNTIME_VERSION=24.04
             IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
             IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
 
@@ -216,6 +224,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            RUNTIME_IMAGE=ubuntu:24.04
+            EXPECTED_RUNTIME_VERSION=24.04
             IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
             IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
 
@@ -233,7 +243,7 @@ jobs:
     needs:
       - build
       - docker
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -258,6 +268,7 @@ jobs:
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
           echo "Current version: v${VERSION}"
 
       - name: Compute GHCR image name
@@ -301,6 +312,8 @@ jobs:
             GitHub Container Registry:
             ```bash
             docker pull ${{ steps.image.outputs.name }}:latest
+            docker pull ${{ steps.image.outputs.name }}:noble
+            docker pull ${{ steps.image.outputs.name }}:sha-${{ steps.version.outputs.short_sha }}
             ```
 
             Docker Hub:
@@ -310,7 +323,7 @@ jobs:
 
             ### 运行时依赖
 
-            Docker 镜像已经包含 iVnc 所需运行时依赖。
+            Docker 镜像基于 Ubuntu 24.04 LTS，并已包含 iVnc 所需运行时依赖。
           files: release-files/*
           prerelease: false
           draft: false

@@ -138,61 +138,24 @@ apt-get install intel-media-va-driver-non-free
 
 ### Docker 部署
 
-```dockerfile
-FROM rust:1.75 AS builder
-
-RUN apt-get update && apt-get install -y \
-    pkg-config cmake libxcb1-dev libxkbcommon-dev \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libpulse-dev libopus-dev libwayland-dev libpixman-1-dev \
-    libinput-dev libudev-dev libseat-dev
-
-WORKDIR /build
-COPY . .
-RUN cargo build --release
-
-FROM ubuntu:22.04
-
-RUN apt-get update && apt-get install -y \
-    libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
-    libpixman-1-0 libxkbcommon0 libpulse0 libopus0 \
-    pulseaudio pulseaudio-utils \
-    gstreamer1.0-tools gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly gstreamer1.0-x \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /build/target/release/ivnc /usr/local/bin/
-COPY config.example.toml /etc/ivnc.toml
-
-EXPOSE 8008
-
-ENV XDG_RUNTIME_DIR=/run/user/0
-
-# Start PulseAudio with virtual sink, then iVnc
-CMD mkdir -p $XDG_RUNTIME_DIR && \
-    pulseaudio --start --exit-idle-time=-1 && \
-    pactl load-module module-null-sink sink_name=ivnc_sink \
-      sink_properties=device.description=iVnc_Output \
-      rate=48000 channels=2 format=s16le && \
-    ivnc --config /etc/ivnc.toml
-```
-
-使用发布镜像时，iVnc 数据与 miao 数据应分别挂载。miao 默认的全局和进程模式还需要 TUN 设备与 `NET_ADMIN`：
+正式 Docker 镜像使用 Ubuntu 24.04 LTS 运行时。默认从 GHCR 启动：
 
 ```bash
-docker run -itd \
-  -p "${PORT}:8008" \
-  --cap-add NET_ADMIN \
-  --device /dev/net/tun \
-  -v /etc/hosts:/etc/hosts:ro \
-  -v "${PWD}/ivnc-data:/root/.ivnc" \
-  -v "${PWD}/miao-data:/root/.miao" \
-  --name "${NAME}" \
-  "${IMAGE}"
+./docker-run.sh
+
+# 覆盖默认端口、容器名或镜像
+PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```
 
-只使用 miao 代理池模式时不创建 TUN，可以省略 `--cap-add` 和 `--device`；代理池端口如需从容器外访问，还需额外发布对应端口范围。
+脚本将仓库下的 `ivnc-data` 和 `miao-data` 分别挂载到 `/root/.ivnc` 和
+`/root/.miao`，并为 miao 全局和进程代理模式提供 `/dev/net/tun` 与 `NET_ADMIN`。
+容器默认使用 `--restart unless-stopped`。宿主机必须已安装 Docker 且提供 TUN 设备。
+
+可用镜像标签包括滚动更新的 `latest`、固定 Ubuntu 24.04 运行时的 `noble`，以及
+不可变的 `sha-<提交短哈希>`。需要回滚时，将 `IMAGE` 指向此前的提交标签或镜像摘要。
+
+> 正式 Docker 镜像使用 `--no-default-features` 构建，当前不包含音频捕获；源码构建和
+> 独立发布二进制的默认 feature 仍包含 PulseAudio。
 
 ## 配置
 

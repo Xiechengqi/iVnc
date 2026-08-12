@@ -1,3 +1,6 @@
+ARG RUNTIME_IMAGE=ubuntu:24.04
+ARG EXPECTED_RUNTIME_VERSION=24.04
+
 FROM node:20-bookworm-slim AS web-builder
 
 WORKDIR /build/web/ivnc
@@ -46,9 +49,10 @@ RUN IVNC_REFRESH_MIAO=1 \
     cargo build --release --no-default-features --bin ivnc
 
 
-FROM ubuntu:22.04
+FROM ${RUNTIME_IMAGE}
 
 ARG AGENT_BROWSER_VERSION=0.29.0
+ARG EXPECTED_RUNTIME_VERSION
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -66,24 +70,33 @@ RUN apt-get update && \
     libxkbcommon0 \
     libxcb1 \
     libx11-6 \
-    wget \
+    gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-x \
-    && wget -O /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && curl -fL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/google-chrome-stable_current_amd64.deb \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/google-chrome-stable_current_amd64.deb \
     && rm -f /tmp/google-chrome-stable_current_amd64.deb \
     && curl -fsSL "https://github.com/vercel-labs/agent-browser/releases/download/v${AGENT_BROWSER_VERSION}/agent-browser-linux-x64" -o /usr/local/bin/agent-browser \
     && chmod +x /usr/local/bin/agent-browser \
     && fc-cache -f \
+    && grep -qx "VERSION_ID=\"${EXPECTED_RUNTIME_VERSION}\"" /etc/os-release \
+    && google-chrome --version \
+    && agent-browser --version \
+    && gst-inspect-1.0 x264enc >/dev/null \
+    && gst-inspect-1.0 rtph264pay >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/ivnc /usr/local/bin/ivnc
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY config.example.toml /etc/ivnc.toml
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc \
+    && ldd /usr/local/bin/ivnc > /tmp/ivnc-ldd \
+    && cat /tmp/ivnc-ldd \
+    && ! grep -q 'not found' /tmp/ivnc-ldd \
+    && rm -f /tmp/ivnc-ldd
 
 ENV XDG_RUNTIME_DIR=/run/user/0
 

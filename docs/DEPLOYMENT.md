@@ -260,58 +260,42 @@ sudo systemctl start ivnc
 
 ## Docker 部署
 
-### Dockerfile
-
-```dockerfile
-FROM rust:1.75 AS builder
-
-RUN apt-get update && apt-get install -y \
-    pkg-config cmake libx11-dev libxcb1-dev libxkbcommon-dev libssl-dev \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libpulse-dev libopus-dev libwayland-dev libpixman-1-dev \
-    libinput-dev libudev-dev libseat-dev
-
-WORKDIR /build
-COPY . .
-RUN cargo build --release
-
-FROM ubuntu:22.04
-
-RUN apt-get update && apt-get install -y \
-    libx11-6 libxcb1 libpulse0 \
-    pipewire pipewire-pulse \
-    gstreamer1.0-tools gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly gstreamer1.0-x \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /build/target/release/ivnc /usr/local/bin/
-COPY config.example.toml /etc/ivnc.toml
-
-EXPOSE 8008
-
-ENV XDG_RUNTIME_DIR=/run/user/0
-
-CMD ["ivnc", "-c", "/etc/ivnc.toml"]
-```
-
-### miao 数据与权限
-
-内置 miao 使用 `$HOME/.miao` 保存配置、订阅缓存和运行状态，需与 iVnc 的 `$HOME/.ivnc` 分别持久化。miao 的全局和进程模式会创建 TUN，容器必须映射 `/dev/net/tun` 并授予 `NET_ADMIN`：
+正式镜像以 Ubuntu 24.04 LTS 为运行时，内置 Smithay headless 合成器，不需要
+Xvfb、Openbox 或外部 `DISPLAY`。在仓库目录中运行：
 
 ```bash
-docker run -itd \
-  -p "${PORT}:8008" \
-  --cap-add NET_ADMIN \
-  --device /dev/net/tun \
-  -v /etc/hosts:/etc/hosts:ro \
-  -v "${PWD}/ivnc-data:/root/.ivnc" \
-  -v "${PWD}/miao-data:/root/.miao" \
-  --name "${NAME}" \
-  "${IMAGE}"
+./docker-run.sh
 ```
 
-只使用代理池模式时可以省略 TUN 相关参数；需要从容器外连接代理池节点时，还需发布对应的代理池端口。
+`docker-run.sh` 支持以下环境变量：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PORT` | `8008` | 宿主机 HTTP/WebRTC 端口 |
+| `NAME` | `ivnc` | Docker 容器名 |
+| `IMAGE` | `ghcr.io/xiechengqi/ivnc:latest` | 镜像引用 |
+
+```bash
+PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
+```
+
+脚本会创建并持久化仓库目录下的 `ivnc-data` 和 `miao-data`。miao 的全局和进程
+代理模式会创建 TUN，因此宿主机必须提供 `/dev/net/tun`，容器也需要脚本中授予的
+`NET_ADMIN`。代理池端口如需从容器外连接，需要按实际端口范围扩展脚本的发布参数。
+
+### 镜像版本与回滚
+
+- `latest`：随主分支滚动更新
+- `noble`：随主分支滚动更新，明确使用 Ubuntu 24.04 LTS 运行时
+- `sha-<提交短哈希>`：不可变构建，用于精确部署和回滚
+
+回滚时可将 `IMAGE` 设置为此前的提交标签，也可以使用 registry 中记录的镜像摘要。
+Dockerfile 还提供 `RUNTIME_IMAGE` 和 `EXPECTED_RUNTIME_VERSION` 构建参数，便于在发现
+Noble 系统级回归时构建临时的旧运行时镜像。
+
+独立发布二进制仍在 Ubuntu 22.04 容器中构建，以保持较低的 glibc 兼容基线；这不影响
+Docker 镜像使用 Ubuntu 24.04。正式 Docker 镜像使用 `--no-default-features` 构建，当前
+不包含音频捕获功能，音频相关验证只适用于默认 feature 的源码或独立二进制部署。
 
 ## 验证
 
