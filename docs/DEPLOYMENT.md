@@ -123,7 +123,9 @@ cd /path/to/iVnc
 # 使用 build.sh（推荐）
 bash build.sh --release
 
-# 或直接使用 cargo
+# 或先构建配套 Miao，再直接使用 cargo
+bash scripts/build-miao.sh --release
+export IVNC_MIAO_BIN="$PWD/target/release/miao-rust"
 cargo build --release
 ```
 
@@ -141,6 +143,8 @@ cargo build --release --features qsv
 ```
 
 构建产物位于 `target/release/ivnc`，`build.sh` 会自动复制到项目根目录。
+
+`build.sh` 默认从相邻的 `../miao` 构建配套面板，也可设置 `MIAO_SOURCE_DIR` 或提供 `IVNC_MIAO_BIN`。Docker / CI 下载的 Miao 发布产物必须支持嵌入协议 v1；发布顺序和端口、持久化说明见 [Miao 后台应用](MIAO.md)。
 
 ## 安装
 

@@ -1,5 +1,7 @@
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -12,6 +14,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=IVNC_BUILD_GIT_MESSAGE");
     println!("cargo:rerun-if-env-changed=IVNC_MIAO_BIN");
     println!("cargo:rerun-if-env-changed=IVNC_REFRESH_MIAO");
+    println!("cargo:rerun-if-env-changed=IVNC_MIAO_URL");
+    println!("cargo:rerun-if-changed=web/ivnc/dist");
 
     emit_build_metadata();
 
@@ -24,15 +28,22 @@ fn main() {
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let url = env::var("IVNC_MIAO_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| MIAO_URL.to_string());
+    let mut cache_key = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut cache_key);
     let cache_file = manifest_dir
         .join("target")
         .join("miao-cache")
+        .join(format!("{:x}", cache_key.finish()))
         .join(MIAO_BIN);
     let refresh = env::var("IVNC_REFRESH_MIAO")
         .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
     if refresh || !cache_file.exists() {
-        download_binary(&cache_file);
+        download_binary(&cache_file, &url);
     }
     copy_binary(&cache_file, &out_file);
 }
@@ -78,6 +89,7 @@ fn copy_binary(src: &Path, dst: &Path) {
     if !src.exists() {
         panic!("miao binary not found at {}", src.display());
     }
+    println!("cargo:rerun-if-changed={}", src.display());
     fs::create_dir_all(dst.parent().expect("out parent")).expect("create OUT_DIR");
     fs::copy(src, dst).unwrap_or_else(|err| {
         panic!(
@@ -87,14 +99,26 @@ fn copy_binary(src: &Path, dst: &Path) {
             err
         )
     });
+    fs::set_permissions(dst, fs::Permissions::from_mode(0o755))
+        .expect("make embedded Miao executable");
+    if env::var("HOST").ok() == env::var("TARGET").ok() {
+        let output = Command::new(dst)
+            .arg("--ivnc-integration-version")
+            .output()
+            .unwrap_or_else(|error| panic!("cannot validate Miao {}: {error}", src.display()));
+        assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1",
+            "Miao at {} lacks iVnc integration v1. Build the paired Miao source with scripts/build-miao.sh, then set IVNC_MIAO_BIN to that binary. Old standalone releases are incompatible.", src.display());
+    } else {
+        panic!("Cross compilation requires native validation of the paired Miao binary; build iVnc in a container for the target architecture");
+    }
 }
 
-fn download_binary(dst: &Path) {
+fn download_binary(dst: &Path, url: &str) {
     fs::create_dir_all(dst.parent().expect("cache parent")).expect("create miao cache dir");
     let tmp = dst.with_extension("tmp");
     let curl_status = Command::new("curl")
         .arg("-fsSL")
-        .arg(MIAO_URL)
+        .arg(&url)
         .arg("-o")
         .arg(&tmp)
         .status();
@@ -106,7 +130,7 @@ fn download_binary(dst: &Path) {
                 .arg("-q")
                 .arg("-O")
                 .arg(&tmp)
-                .arg(MIAO_URL)
+                .arg(&url)
                 .status(),
             Ok(status) if status.success()
         );
@@ -115,7 +139,7 @@ fn download_binary(dst: &Path) {
         let _ = fs::remove_file(&tmp);
         panic!(
             "failed to download miao binary from {}; install curl/wget or set IVNC_MIAO_BIN",
-            MIAO_URL
+            url
         );
     }
 

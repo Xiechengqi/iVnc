@@ -138,6 +138,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/connections/{id}/disconnect", post(disconnect_handler))
         .route("/api/ipv4", get(ipv4_handler))
         .route("/api/proxy/status", get(proxy_status_handler))
+        .route("/api/proxy/start", post(proxy_start_handler))
         .route("/api/proxy/restart", post(proxy_restart_handler))
         .route("/proxy", get(proxy_panel_root_handler))
         .route("/proxy/", any(proxy_panel_handler))
@@ -269,7 +270,8 @@ pub async fn run_http_server_with_webrtc(
 
     // Accept loop with first-byte protocol splitting
     loop {
-        let (tcp_stream, peer_addr) = match listener.accept().await {
+        #[allow(unused_mut)] // TLS redirects write to the socket before the HTTP service owns it.
+        let (mut tcp_stream, peer_addr) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 warn!("TCP accept error: {}", e);
@@ -1085,7 +1087,6 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
-
 async fn proxy_status_handler(State(state): State<Arc<SharedState>>) -> Response {
     if !state.config.ui_features.proxy_enabled {
         return proxy_disabled_response();
@@ -1102,6 +1103,19 @@ async fn proxy_restart_handler(State(state): State<Arc<SharedState>>) -> Respons
         Err(err) => proxy_json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             json!({"ok": false, "error": err}),
+        ),
+    }
+}
+
+async fn proxy_start_handler(State(state): State<Arc<SharedState>>) -> Response {
+    if !state.config.ui_features.proxy_enabled {
+        return proxy_disabled_response();
+    }
+    match state.proxy_panel.start().await {
+        Ok(pid) => proxy_json_response(StatusCode::OK, json!({"ok":true, "pid":pid})),
+        Err(error) => proxy_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ok":false, "error":error}),
         ),
     }
 }
@@ -1132,13 +1146,14 @@ async fn proxy_panel_handler(
 
 async fn proxy_panel_ws_handler(
     State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
     uri: Uri,
 ) -> Response {
     if !state.config.ui_features.proxy_enabled {
         return proxy_disabled_response();
     }
-    if let Err(err) = state.proxy_panel.ensure_running().await {
+    if let Err(err) = state.proxy_panel.require_running() {
         return proxy_json_response(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"ok": false, "error": err}),
@@ -1154,12 +1169,32 @@ async fn proxy_panel_ws_handler(
     };
     let upstream = format!(
         "ws://127.0.0.1:{}{}",
-        crate::proxy_panel::MIAO_PORT,
+        state.proxy_panel.port(),
         upstream_path
     );
 
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = upstream.into_client_request().unwrap();
+    for name in [header::HOST, header::ORIGIN, header::COOKIE] {
+        if let Some(value) = headers.get(&name) {
+            request.headers_mut().insert(name, value.clone());
+        }
+    }
+    let upstream_socket = match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => socket,
+        Err(error) => {
+            let status = match &error {
+                tokio_tungstenite::tungstenite::Error::Http(response) => response.status(),
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            return proxy_json_response(
+                status,
+                json!({"ok":false,"error":"Miao websocket authentication or connection failed"}),
+            );
+        }
+    };
     ws.on_upgrade(move |socket| async move {
-        proxy_miao_websocket(socket, upstream).await;
+        proxy_miao_websocket(socket, upstream_socket).await;
     })
     .into_response()
 }
@@ -1179,7 +1214,10 @@ async fn proxy_panel_absolute_path_middleware(
         .unwrap_or(false);
     let should_proxy = path.starts_with("/_next/")
         || path.starts_with("/miao-inject/")
-        || (path.starts_with("/api/") && referer_from_proxy);
+        || (path.starts_with("/api/")
+            && referer_from_proxy
+            && !is_console_management_path(path)
+            && !path.starts_with("/api/proxy/"));
 
     if !should_proxy {
         return next.run(req).await;
@@ -1204,7 +1242,10 @@ async fn proxy_to_miao(
     if !state.config.ui_features.proxy_enabled {
         return proxy_disabled_response();
     }
-    if let Err(err) = state.proxy_panel.ensure_running().await {
+    if let Err(err) = state.proxy_panel.require_running() {
+        if method == Method::GET && (uri.path() == "/proxy/" || uri.path() == "/proxy") {
+            return proxy_stopped_response();
+        }
         return proxy_json_response(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"ok": false, "error": err}),
@@ -1224,11 +1265,12 @@ async fn proxy_to_miao(
     };
     let upstream = format!(
         "http://127.0.0.1:{}{}",
-        crate::proxy_panel::MIAO_PORT,
+        state.proxy_panel.port(),
         upstream_path
     );
 
     let client = match reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(60))
         .build()
@@ -1254,10 +1296,18 @@ async fn proxy_to_miao(
 
     let mut req = client.request(method, upstream).body(body_bytes);
     for (name, value) in headers.iter() {
-        if name == header::HOST
+        // Preserve Host and Origin together for Miao's same-origin checks.
+        // iVnc's Basic credentials are not upstream Miao credentials.
+        if name == header::AUTHORIZATION
             || name == header::CONTENT_LENGTH
             || name == header::CONNECTION
             || name == header::ACCEPT_ENCODING
+            || name == header::TRANSFER_ENCODING
+            || name == header::UPGRADE
+            || name == header::TRAILER
+            || name == header::TE
+            || name == header::PROXY_AUTHORIZATION
+            || name == header::PROXY_AUTHENTICATE
         {
             continue;
         }
@@ -1290,6 +1340,10 @@ async fn proxy_to_miao(
                 if name == header::CONTENT_LENGTH
                     || name == header::CONNECTION
                     || name == header::TRANSFER_ENCODING
+                    || name == header::UPGRADE
+                    || name == header::TRAILER
+                    || name == header::TE
+                    || name == header::PROXY_AUTHENTICATE
                 {
                     continue;
                 }
@@ -1311,17 +1365,24 @@ fn proxy_disabled_response() -> Response {
     )
 }
 
-async fn proxy_miao_websocket(client_socket: AxumWebSocket, upstream: String) {
+fn proxy_stopped_response() -> Response {
+    Response::builder().status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Miao</title></head>
+<body style="font:16px system-ui;margin:3rem;line-height:1.7"><h1>Miao</h1><p id="message">Miao 已停止或正在启动。访问面板不会自动启动服务。<br>Miao is stopped or starting. Opening this page does not start the service.</p>
+<button id="start" type="button">启动 Miao / Start Miao</button> <a href="/console" target="_top">应用列表 / Applications</a>
+<script>document.getElementById('start').onclick=async function(){this.disabled=true;try{const r=await fetch('/api/proxy/start',{method:'POST'});const d=await r.json();if(!r.ok)throw Error(d.error||'Start failed');location.reload()}catch(e){document.getElementById('message').textContent=e.message;this.disabled=false}};</script></body></html>"#)).unwrap()
+}
+
+async fn proxy_miao_websocket(
+    client_socket: AxumWebSocket,
+    upstream_socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
-
-    let upstream_socket = match tokio_tungstenite::connect_async(&upstream).await {
-        Ok((socket, _)) => socket,
-        Err(err) => {
-            warn!("failed to connect miao websocket {}: {}", upstream, err);
-            return;
-        }
-    };
 
     let (mut client_tx, mut client_rx) = client_socket.split();
     let (mut upstream_tx, mut upstream_rx) = upstream_socket.split();
@@ -1382,7 +1443,7 @@ fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
   window.__ivncProxyPanelRewrite = true;
   const mapPath = (value) => {
     if (typeof value !== "string") return value;
-    if (value.startsWith("/api/") || value === "/login" || value.startsWith("/dashboard")) {
+    if (value.startsWith("/api/") || value === "/favicon.svg" || value === "/login" || value.startsWith("/dashboard")) {
       return `/proxy${value}`;
     }
     return value;
@@ -1392,6 +1453,7 @@ fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
     if (typeof input === "string") return nativeFetch(mapPath(input), init);
     if (input instanceof Request) {
       const url = new URL(input.url);
+      if (url.origin !== window.location.origin) return nativeFetch(input, init);
       const mapped = mapPath(`${url.pathname}${url.search}`);
       if (mapped !== `${url.pathname}${url.search}`) {
         input = new Request(mapped, input);
@@ -1403,7 +1465,7 @@ fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
   window.WebSocket = function(url, protocols) {
     try {
       const parsed = new URL(String(url), window.location.href);
-      if (parsed.pathname.startsWith("/api/")) {
+      if (parsed.host === window.location.host && parsed.pathname.startsWith("/api/")) {
         const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
         url = `${scheme}//${window.location.host}/proxy-ws${parsed.pathname}${parsed.search}`;
       }
@@ -1411,6 +1473,7 @@ fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
     return protocols ? new NativeWebSocket(url, protocols) : new NativeWebSocket(url);
   };
   window.WebSocket.prototype = NativeWebSocket.prototype;
+  Object.setPrototypeOf(window.WebSocket, NativeWebSocket);
 })();
 </script>"#;
 
@@ -1420,6 +1483,7 @@ fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
     if html.contains("__ivncProxyPanelRewrite") {
         return Bytes::from(html);
     }
+    html = html.replace("href=\"/favicon.svg\"", "href=\"/proxy/favicon.svg\"");
     if let Some(index) = html.find("<head>") {
         html.insert_str(index + "<head>".len(), SCRIPT);
     } else {

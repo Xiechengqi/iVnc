@@ -42,8 +42,10 @@ COPY --from=web-builder /build/web/ivnc/dist ./web/ivnc/dist
 
 ARG IVNC_BUILD_GIT_COMMIT=unknown
 ARG IVNC_BUILD_GIT_MESSAGE=unknown
+ARG IVNC_MIAO_URL
 
 RUN IVNC_REFRESH_MIAO=1 \
+    IVNC_MIAO_URL="$IVNC_MIAO_URL" \
     IVNC_BUILD_GIT_COMMIT="$IVNC_BUILD_GIT_COMMIT" \
     IVNC_BUILD_GIT_MESSAGE="$IVNC_BUILD_GIT_MESSAGE" \
     cargo build --release --no-default-features --bin ivnc

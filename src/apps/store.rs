@@ -1,5 +1,5 @@
 use super::app::{AppType, ManagedApp};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -17,6 +17,15 @@ impl AppStore {
         let conn =
             Connection::open(&db_path).map_err(|e| format!("Failed to open apps.db: {}", e))?;
 
+        Self::from_connection(conn)
+    }
+
+    #[cfg(test)]
+    pub fn in_memory() -> Self {
+        Self::from_connection(Connection::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn from_connection(conn: Connection) -> Result<Self, String> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS apps (
                 id TEXT PRIMARY KEY,
@@ -148,12 +157,17 @@ impl AppStore {
     }
 
     pub fn get(&self, id: &str) -> Result<ManagedApp, String> {
+        self.get_optional(id)?
+            .ok_or_else(|| format!("App not found: {}", id))
+    }
+
+    pub fn get_optional(&self, id: &str) -> Result<Option<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
-        ).map_err(|e| format!("App not found: {}", e))
+        ).optional().map_err(|e| format!("Failed to read app: {}", e))
     }
 
     pub fn list(&self) -> Result<Vec<ManagedApp>, String> {

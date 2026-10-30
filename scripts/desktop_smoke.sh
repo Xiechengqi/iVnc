@@ -152,7 +152,7 @@ say "binary      : $IVNC_BIN"
 say "http port   : $HTTP_PORT"
 say "debug port  : $DEBUG_PORT"
 say "sandbox     : $TMP"
-"$IVNC_BIN" --http-port "$HTTP_PORT" --basic-auth-enabled false \
+"$IVNC_BIN" --http-port "$HTTP_PORT" --basic-auth-enabled false --proxy-enabled false \
   > "$TMP/ivnc.log" 2>&1 &
 IVNC_PID=$!
 say "ivnc pid    : $IVNC_PID"

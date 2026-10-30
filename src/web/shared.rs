@@ -165,6 +165,7 @@ impl SharedState {
     ) -> Self {
         let (clipboard_incoming_tx, clipboard_incoming_rx) = mpsc::unbounded_channel();
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
+        let proxy_panel = Arc::new(ProxyPanelManager::new(config.ui_features.proxy_enabled));
 
         Self {
             config: Arc::new(config),
@@ -194,7 +195,7 @@ impl SharedState {
             last_taskbar_json: Arc::new(Mutex::new(None)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             ipv4_address: Arc::new(RwLock::new(String::new())),
-            proxy_panel: Arc::new(ProxyPanelManager::new()),
+            proxy_panel,
             apps_state: std::sync::OnceLock::new(),
             shutdown_flag: std::sync::OnceLock::new(),
         }

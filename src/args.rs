@@ -67,7 +67,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub terminal_enabled: Option<bool>,
 
-    /// Enable or disable the browser toolbar proxy panel (true/false)
+    /// Enable or disable the built-in Miao app and toolbar proxy panel (true/false)
     #[arg(long)]
     pub proxy_enabled: Option<bool>,
 

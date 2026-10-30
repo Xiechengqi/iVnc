@@ -6,6 +6,7 @@ use super::process::ProcessManager;
 use super::service_process::{self, ServiceProcessManager};
 use super::state_recovery::AppRunningState;
 use super::store::AppStore;
+use crate::proxy_panel::{ProxyPanelManager, BUILTIN_MIAO_ID};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -21,22 +22,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct AppsState {
+    pub proxy_panel: Arc<ProxyPanelManager>,
     pub store: Arc<AppStore>,
     pub process: ProcessManager,
     pub service: ServiceProcessManager,
 }
 
 impl AppsState {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(proxy_panel: Arc<ProxyPanelManager>) -> Result<Self, String> {
         crate::paths::migrate_legacy();
         crate::paths::ensure_layout()?;
         let store = Arc::new(AppStore::new()?);
         ensure_builtin_apps(&store)?;
+        ensure_builtin_miao(&store)?;
+        proxy_panel.start_watchdog();
         let mut process = ProcessManager::new();
         process.set_store(store.clone());
         let mut service = ServiceProcessManager::new();
         service.set_store(store.clone());
         Ok(Self {
+            proxy_panel,
             store,
             process,
             service,
@@ -57,10 +62,11 @@ impl AppsState {
         state.save()
     }
 
-    pub fn shutdown_running_apps_with_state(&self) -> Result<(), String> {
+    pub async fn shutdown_running_apps_with_state(&self) -> Result<(), String> {
         let apps = self.store.list()?;
         let running_ids: Vec<String> = apps
             .iter()
+            .filter(|app| app.id != BUILTIN_MIAO_ID)
             .filter(|app| matches!(self.app_status(app), AppStatus::Running))
             .map(|app| app.id.clone())
             .collect();
@@ -80,7 +86,7 @@ impl AppsState {
                         app.name,
                         app.id
                     );
-                    if let Err(err) = self.stop_app_processes(&app) {
+                    if let Err(err) = self.stop_app_processes(&app).await {
                         log::warn!("Failed to stop app {} during shutdown: {}", app.id, err);
                     }
                 }
@@ -99,6 +105,7 @@ impl AppsState {
         let apps = self.store.list()?;
         Ok(apps
             .iter()
+            .filter(|app| app.id != BUILTIN_MIAO_ID)
             .filter(|app| matches!(self.app_status(app), AppStatus::Running))
             .map(|app| app.id.clone())
             .collect())
@@ -124,6 +131,9 @@ impl AppsState {
         log::info!("Restoring {} running apps", state.app_ids.len());
 
         for app_id in &state.app_ids {
+            if app_id == BUILTIN_MIAO_ID {
+                continue;
+            }
             match self.store.get(app_id) {
                 Ok(app) => {
                     log::info!("Restoring app: {} ({})", app.name, app_id);
@@ -150,7 +160,10 @@ impl AppsState {
 
     pub async fn start_autostart_apps(&self) -> Result<(), String> {
         let apps = self.store.list()?;
-        for app in apps.iter().filter(|app| app.autostart) {
+        for app in apps
+            .iter()
+            .filter(|app| app.autostart && app.id != BUILTIN_MIAO_ID)
+        {
             let result = self.start_app_processes(app).await.map(|_| ());
 
             match result {
@@ -165,6 +178,12 @@ impl AppsState {
     }
 
     async fn start_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
+        if app.id == BUILTIN_MIAO_ID {
+            return self.proxy_panel.start().await;
+        }
+        if app.id == "builtin-chrome" {
+            self.proxy_panel.prepare_chrome_proxy().await;
+        }
         match app.app_type {
             AppType::DesktopApp => Ok(Some(self.process.start(app)?)),
             AppType::BackgroundApp => {
@@ -177,7 +196,10 @@ impl AppsState {
         }
     }
 
-    fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
+    async fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
+        if app.id == BUILTIN_MIAO_ID {
+            return self.proxy_panel.stop().await;
+        }
         match app.app_type {
             AppType::DesktopApp => self.process.stop(&app.id),
             AppType::BackgroundApp => self.service.stop(&app.id),
@@ -186,11 +208,24 @@ impl AppsState {
     }
 
     async fn restart_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
-        let _ = self.stop_app_processes(app);
+        if app.id == BUILTIN_MIAO_ID {
+            return self.proxy_panel.restart().await;
+        }
+        let _ = self.stop_app_processes(app).await;
         self.start_app_processes(app).await
     }
 
     pub fn app_status(&self, app: &ManagedApp) -> AppStatus {
+        if app.id == BUILTIN_MIAO_ID {
+            let status = self.proxy_panel.status();
+            return if status.running {
+                AppStatus::Running
+            } else if status.desired_running {
+                AppStatus::Crashed
+            } else {
+                AppStatus::Stopped
+            };
+        }
         match app.app_type {
             AppType::DesktopApp => self.process.status(&app.id),
             AppType::BackgroundApp => self.service.status(&app.id),
@@ -199,6 +234,9 @@ impl AppsState {
     }
 
     fn app_pid(&self, app: &ManagedApp) -> Option<u32> {
+        if app.id == BUILTIN_MIAO_ID {
+            return self.proxy_panel.status().pid;
+        }
         match app.app_type {
             AppType::DesktopApp => self.process.pid(&app.id),
             AppType::BackgroundApp => self.service.pid(&app.id),
@@ -206,6 +244,54 @@ impl AppsState {
         }
     }
 
+    pub async fn start_builtin_apps(&self) -> Result<(), String> {
+        let app = self.store.get(BUILTIN_MIAO_ID)?;
+        if app.autostart && self.proxy_panel.status().enabled {
+            self.proxy_panel.start().await?;
+        } else {
+            self.proxy_panel.cleanup_inactive_instance().await?;
+        }
+        Ok(())
+    }
+}
+
+fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
+    match store.get_optional(BUILTIN_MIAO_ID)? {
+        Some(mut app) => {
+            // The startup preference is user-owned, including across upgrades.
+            if app.app_type != AppType::BackgroundApp {
+                app.app_type = AppType::BackgroundApp;
+                store.update(&app)?;
+            }
+        }
+        None => {
+            // Names are unique; a user-created Miao app must not disable all app management.
+            let names: Vec<_> = store.list()?.into_iter().map(|app| app.name).collect();
+            let mut name = "Miao".to_string();
+            let mut suffix = 1;
+            while names.contains(&name) {
+                name = format!("Miao (iVnc {suffix})");
+                suffix += 1;
+            }
+            store.add(&ManagedApp {
+                id: BUILTIN_MIAO_ID.into(),
+                name,
+                app_type: AppType::BackgroundApp,
+                autostart: true,
+                url: None,
+                launch_command: None,
+                launch_env_vars: None,
+                launch_cwd: None,
+                launch_wait_timeout_secs: None,
+                exec_command: None,
+                env_vars: None,
+                cli_binary_path: None,
+                cli_env_vars: None,
+                created_at: chrono_now(),
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
@@ -373,17 +459,23 @@ fn builtin_chrome_command() -> Result<String, String> {
     let data_dir = shell_quote(&data_dir.to_string_lossy());
     let crash_dir = shell_quote(&crash_dir.to_string_lossy());
     let debug_port = chrome_devtools_port();
+    let proxy_file = shell_quote(
+        &crate::paths::miao_dir()
+            .join("chrome-proxy")
+            .to_string_lossy(),
+    );
     Ok(format!(
-        "profile_dir={data_dir}; \
-crash_dir={crash_dir}; \
-rm -f \"$profile_dir/SingletonLock\" \"$profile_dir/SingletonSocket\" \"$profile_dir/SingletonCookie\"; \
-rm -rf /tmp/com.google.Chrome.*; \
-proxy_arg=''; \
-if [ \"${{IVNC_PROXY_PANEL_ENABLED:-1}}\" != '0' ] && grep -qiE '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-Fa-f]+:0438[[:space:]]+[0-9A-Fa-f]+:[0-9A-Fa-f]+[[:space:]]+0A[[:space:]]' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then \
-  proxy_arg='--proxy-server=socks5://127.0.0.1:1080'; \
-fi; \
-exec google-chrome ${{proxy_arg:+$proxy_arg}} --user-data-dir=\"$profile_dir\" --crash-dumps-dir=\"$crash_dir\" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
-    ))
+        r#"profile_dir={data_dir};
+crash_dir={crash_dir};
+rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonSocket" "$profile_dir/SingletonCookie";
+set --;
+if [ "${{IVNC_PROXY_PANEL_ENABLED:-1}}" != '0' ] && [ -s {proxy_file} ]; then
+  IFS= read -r proxy_server < {proxy_file};
+  set -- "--proxy-server=$proxy_server";
+fi;
+exec google-chrome "$@" --user-data-dir="$profile_dir" --crash-dumps-dir="$crash_dir" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
+"#
+    ).replace('\n', " "))
 }
 
 /// DevTools remote-debugging port the built-in Chrome is launched with
@@ -506,6 +598,7 @@ pub fn cli_install_status(app: &ManagedApp) -> (bool, &'static str, Option<Strin
 }
 
 fn app_json(
+    state: &AppsState,
     app: &ManagedApp,
     status: &str,
     pid: Option<u32>,
@@ -522,6 +615,27 @@ fn app_json(
         "data_size_human": datadir::size_human(data_bytes),
         "created_at": app.created_at,
     });
+
+    if app.id == BUILTIN_MIAO_ID {
+        let proxy = state.proxy_panel.status();
+        obj["status"] = json!(if proxy.running {
+            "running"
+        } else if proxy.desired_running {
+            "crashed"
+        } else {
+            "stopped"
+        });
+        obj["pid"] = json!(proxy.pid);
+        obj["builtin"] = json!(true);
+        obj["managed_by"] = json!("ivnc");
+        obj["panel_url"] = json!("/proxy/");
+        obj["enabled"] = json!(proxy.enabled);
+        obj["ready"] = json!(proxy.ready);
+        obj["error"] = json!(proxy.error);
+        obj["can_delete"] = json!(false);
+        obj["can_clear_data"] = json!(false);
+        return obj;
+    }
 
     match app.app_type {
         AppType::BackgroundApp => {
@@ -557,7 +671,7 @@ async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
                     let st = state.app_status(app);
                     let pid = state.app_pid(app);
                     let size = datadir::durable_size(app);
-                    app_json(app, &format!("{:?}", st).to_lowercase(), pid, size)
+                    app_json(&state, app, &format!("{:?}", st).to_lowercase(), pid, size)
                 })
                 .collect();
             json_response(StatusCode::OK, json!({"apps": items}))
@@ -723,7 +837,7 @@ async fn add_app(
     let size = datadir::durable_size(&app);
     json_response(
         StatusCode::CREATED,
-        json!({"ok": true, "app": app_json(&app, &format!("{:?}", status).to_lowercase(), pid, size)}),
+        json!({"ok": true, "app": app_json(&state, &app, &format!("{:?}", status).to_lowercase(), pid, size)}),
     )
 }
 
@@ -735,7 +849,7 @@ async fn get_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) ->
             let size = datadir::durable_size(&app);
             json_response(
                 StatusCode::OK,
-                app_json(&app, &format!("{:?}", st).to_lowercase(), pid, size),
+                app_json(&state, &app, &format!("{:?}", st).to_lowercase(), pid, size),
             )
         }
         Err(e) => err_response(StatusCode::NOT_FOUND, &e),
@@ -751,6 +865,31 @@ async fn update_app(
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
+
+    if id == BUILTIN_MIAO_ID {
+        if body.as_object().is_none_or(|obj| {
+            obj.keys()
+                .any(|key| key != "autostart" && key != "app_type")
+        }) || body
+            .get("app_type")
+            .is_some_and(|value| value.as_str() != Some("background"))
+        {
+            return err_response(
+                StatusCode::FORBIDDEN,
+                "Miao launch settings are managed by iVnc; use its panel for proxy configuration",
+            );
+        }
+        if let Some(value) = body.get("autostart") {
+            let Some(value) = value.as_bool() else {
+                return err_response(StatusCode::BAD_REQUEST, "autostart must be a boolean");
+            };
+            app.autostart = value;
+        }
+        return match state.store.update(&app) {
+            Ok(()) => json_response(StatusCode::OK, json!({"ok":true})),
+            Err(error) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+        };
+    }
 
     match app.app_type {
         AppType::BackgroundApp => {
@@ -818,9 +957,15 @@ async fn update_app(
 }
 
 async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    if id == BUILTIN_MIAO_ID {
+        return err_response(
+            StatusCode::FORBIDDEN,
+            "Built-in Miao cannot be deleted; disable autostart instead",
+        );
+    }
     // Clean up data directory before removing from store
     if let Ok(app) = state.store.get(&id) {
-        let _ = state.stop_app_processes(&app);
+        let _ = state.stop_app_processes(&app).await;
         let _ = std::fs::remove_dir_all(datadir::app_root(&app));
     }
     match state.store.delete(&id) {
@@ -830,6 +975,9 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
 }
 
 async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    if id == BUILTIN_MIAO_ID && !state.proxy_panel.status().enabled {
+        return err_response(StatusCode::FORBIDDEN, "Proxy disabled by administrator");
+    }
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
@@ -838,7 +986,9 @@ async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
     match state.start_app_processes(&app).await {
         Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
         Err(e) => {
-            let _ = state.stop_app_processes(&app);
+            if id != BUILTIN_MIAO_ID {
+                let _ = state.stop_app_processes(&app).await;
+            }
             err_response(StatusCode::INTERNAL_SERVER_ERROR, &e)
         }
     }
@@ -850,13 +1000,16 @@ async fn stop_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
 
-    match state.stop_app_processes(&app) {
+    match state.stop_app_processes(&app).await {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(e) => err_response(StatusCode::BAD_REQUEST, &e),
     }
 }
 
 async fn restart_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    if id == BUILTIN_MIAO_ID && !state.proxy_panel.status().enabled {
+        return err_response(StatusCode::FORBIDDEN, "Proxy disabled by administrator");
+    }
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
@@ -886,12 +1039,18 @@ async fn data_size(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
 }
 
 async fn clear_data(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    if id == BUILTIN_MIAO_ID {
+        return err_response(
+            StatusCode::FORBIDDEN,
+            "Miao data is shared persistent proxy configuration and cannot be cleared here",
+        );
+    }
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
     // Stop app before clearing data
-    let _ = state.stop_app_processes(&app);
+    let _ = state.stop_app_processes(&app).await;
     match datadir::clear(&app) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -902,6 +1061,13 @@ async fn get_logs(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -
     // Verify app exists
     if let Err(e) = state.store.get(&id) {
         return err_response(StatusCode::NOT_FOUND, &e);
+    }
+    if id == BUILTIN_MIAO_ID {
+        let path = state.proxy_panel.log_path();
+        return json_response(
+            StatusCode::OK,
+            json!({"logs":crate::proxy_panel::read_log_tail(&path, 200), "path":path}),
+        );
     }
     let log_file = native::log_path(&id);
     let service_log_file = service_process::service_log_path(&id);
@@ -984,4 +1150,93 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
         days -= md;
     }
     (y, mo as u64, days + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> Arc<AppsState> {
+        let store = Arc::new(AppStore::in_memory());
+        ensure_builtin_miao(&store).unwrap();
+        Arc::new(AppsState {
+            store,
+            proxy_panel: Arc::new(ProxyPanelManager::isolated(
+                false,
+                &std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()),
+            )),
+            process: ProcessManager::new(),
+            service: ServiceProcessManager::new(),
+        })
+    }
+
+    #[test]
+    fn miao_registration_defaults_once_and_preserves_preference_and_name_collisions() {
+        let store = AppStore::in_memory();
+        ensure_builtin_miao(&store).unwrap();
+        let mut app = store.get(BUILTIN_MIAO_ID).unwrap();
+        assert!(app.autostart);
+        assert_eq!(app.app_type, AppType::BackgroundApp);
+        app.autostart = false;
+        store.update(&app).unwrap();
+        ensure_builtin_miao(&store).unwrap();
+        assert!(!store.get(BUILTIN_MIAO_ID).unwrap().autostart);
+        let other = AppStore::in_memory();
+        app.id = "user-miao".into();
+        other.add(&app).unwrap();
+        ensure_builtin_miao(&other).unwrap();
+        assert_eq!(other.list().unwrap().len(), 2);
+        assert_ne!(other.get(BUILTIN_MIAO_ID).unwrap().name, "Miao");
+    }
+
+    #[tokio::test]
+    async fn miao_api_protects_managed_fields_and_allows_only_startup_preference() {
+        let state = state();
+        let id = || Path(BUILTIN_MIAO_ID.to_string());
+        let update = |body| update_app(State(state.clone()), id(), axum::Json(body));
+        for body in [
+            json!({"launch_command":"false"}),
+            json!({"app_type":"desktop"}),
+            json!({"name":"Changed"}),
+            json!({"env_vars":{"HOME":"/tmp"}}),
+        ] {
+            assert_eq!(update(body).await.status(), StatusCode::FORBIDDEN);
+        }
+        assert_eq!(
+            update(json!({"autostart":"false"})).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            update(json!({"app_type":"background", "autostart":false}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        ensure_builtin_miao(&state.store).unwrap();
+        assert!(!state.store.get(BUILTIN_MIAO_ID).unwrap().autostart);
+        assert_eq!(
+            delete_app(State(state.clone()), id()).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            clear_data(State(state.clone()), id()).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            start_app(State(state.clone()), id()).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            restart_app(State(state.clone()), id()).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        state.start_builtin_apps().await.unwrap();
+        assert!(!state.proxy_panel.status().desired_running);
+        let app = state.store.get(BUILTIN_MIAO_ID).unwrap();
+        let json = app_json(&state, &app, "stopped", None, 0);
+        assert_eq!(json["panel_url"], "/proxy/");
+        assert_eq!(json["can_delete"], false);
+        assert_eq!(json["can_clear_data"], false);
+        assert_eq!(json["enabled"], false);
+    }
 }

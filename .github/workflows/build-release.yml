@@ -98,6 +98,7 @@ jobs:
             -v "$(pwd)/output:/output" \
             -v "$(pwd)/docker-build.sh:/docker-build.sh" \
             -e ARCH=${{ matrix.arch }} \
+            -e IVNC_MIAO_URL="${{ vars.IVNC_MIAO_URL }}" \
             -e IVNC_BUILD_GIT_COMMIT="${{ steps.build-meta.outputs.commit }}" \
             -e IVNC_BUILD_GIT_MESSAGE="${{ steps.build-meta.outputs.message }}" \
             ubuntu:22.04 \
@@ -183,6 +184,7 @@ jobs:
           build-args: |
             RUNTIME_IMAGE=ubuntu:24.04
             EXPECTED_RUNTIME_VERSION=24.04
+            IVNC_MIAO_URL=${{ vars.IVNC_MIAO_URL }}
             IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
             IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
 
@@ -205,6 +207,7 @@ jobs:
           build-args: |
             RUNTIME_IMAGE=ubuntu:24.04
             EXPECTED_RUNTIME_VERSION=24.04
+            IVNC_MIAO_URL=${{ vars.IVNC_MIAO_URL }}
             IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
             IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
 
@@ -226,6 +229,7 @@ jobs:
           build-args: |
             RUNTIME_IMAGE=ubuntu:24.04
             EXPECTED_RUNTIME_VERSION=24.04
+            IVNC_MIAO_URL=${{ vars.IVNC_MIAO_URL }}
             IVNC_BUILD_GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
             IVNC_BUILD_GIT_MESSAGE=${{ steps.build-meta.outputs.message }}
 

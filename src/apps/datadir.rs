@@ -11,11 +11,17 @@ pub fn data_dir(app: &ManagedApp) -> PathBuf {
 
 /// App root under `$IVNC_HOME/apps/<id>` (data + home + profile + logs).
 pub fn app_root(app: &ManagedApp) -> PathBuf {
+    if app.id == crate::proxy_panel::BUILTIN_MIAO_ID {
+        return crate::paths::host_home().join(".miao");
+    }
     crate::paths::app_dir(&app.id)
 }
 
 /// Directories that hold durable app state (cleared by clear-data).
 fn durable_dirs(app: &ManagedApp) -> Vec<PathBuf> {
+    if app.id == crate::proxy_panel::BUILTIN_MIAO_ID {
+        return vec![app_root(app)];
+    }
     let mut dirs = vec![
         crate::paths::app_data_dir(&app.id),
         crate::paths::app_home(&app.id),
@@ -63,6 +69,9 @@ pub fn durable_size(app: &ManagedApp) -> u64 {
 }
 
 pub fn clear(app: &ManagedApp) -> Result<(), String> {
+    if app.id == crate::proxy_panel::BUILTIN_MIAO_ID {
+        return Err("Miao configuration cannot be cleared as ordinary app data".into());
+    }
     for dir in durable_dirs(app) {
         if dir.exists() {
             std::fs::remove_dir_all(&dir)
@@ -159,9 +168,13 @@ mod tests {
     fn chrome_durable_dirs_include_sidecars() {
         let dirs = durable_dirs(&chrome_app());
         assert!(dirs.iter().any(|p| p.ends_with("profile")));
-        assert!(dirs.iter().any(|p| {
-            p.file_name().and_then(|n| n.to_str()) == Some("google-chrome")
-        }));
-        assert!(dirs.len() >= 5, "expected data+home+profile+2 sidecars, got {}", dirs.len());
+        assert!(dirs
+            .iter()
+            .any(|p| { p.file_name().and_then(|n| n.to_str()) == Some("google-chrome") }));
+        assert!(
+            dirs.len() >= 5,
+            "expected data+home+profile+2 sidecars, got {}",
+            dirs.len()
+        );
     }
 }

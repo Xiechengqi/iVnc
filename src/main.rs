@@ -925,14 +925,16 @@ fn run(
 
     info!("Shutting down...");
     running.store(false, Ordering::SeqCst);
+    shared_state.proxy_panel.begin_shutdown();
     if let Some(apps_state) = shared_state.apps_state().cloned() {
-        if let Err(err) = apps_state.shutdown_running_apps_with_state() {
+        if let Err(err) = tokio_rt.block_on(apps_state.shutdown_running_apps_with_state()) {
             warn!(
                 "Failed to save and stop running apps during shutdown: {}",
                 err
             );
         }
     }
+    tokio_rt.block_on(shared_state.proxy_panel.shutdown());
     let _ = pipeline.stop();
     tokio_rt.shutdown_timeout(Duration::from_secs(3));
     cleanup_env_file();
@@ -1697,21 +1699,6 @@ async fn run_async_services(
     runtime_settings: Arc<runtime_settings::RuntimeSettings>,
     _running: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let proxy_startup = if config.ui_features.proxy_enabled {
-        shared.proxy_panel.clone().start_watchdog();
-        let proxy_panel = shared.proxy_panel.clone();
-        Some(tokio::spawn(async move {
-            match proxy_panel.ensure_running().await {
-                Ok(Some(pid)) => info!("miao proxy panel startup completed: pid={}", pid),
-                Ok(None) => warn!("miao proxy panel startup completed without a running pid"),
-                Err(err) => warn!("miao proxy panel startup failed: {}", err),
-            }
-        }))
-    } else {
-        info!("miao proxy panel disabled");
-        None
-    };
-
     let upload_settings = file_upload::FileUploadSettings::from_config(&config);
 
     // Session manager (WebRTC)
@@ -1744,9 +1731,8 @@ async fn run_async_services(
         None
     };
 
-
     // Apps manager
-    let apps_state = match crate::apps::api::AppsState::new() {
+    let apps_state = match crate::apps::api::AppsState::new(shared.proxy_panel.clone()) {
         Ok(ps) => {
             info!("Apps manager initialized");
             let ps_arc = std::sync::Arc::new(ps);
@@ -1754,13 +1740,11 @@ async fn run_async_services(
             // Restore previously running apps after update
             let ps_clone = ps_arc.clone();
             tokio::spawn(async move {
+                if let Err(error) = ps_clone.start_builtin_apps().await {
+                    log::warn!("Miao autostart failed: {}", error);
+                }
                 // Wait a bit for the system to stabilize
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                if let Some(proxy_startup) = proxy_startup {
-                    if let Err(err) = proxy_startup.await {
-                        log::warn!("miao proxy panel startup task failed: {}", err);
-                    }
-                }
                 if let Err(e) = ps_clone.restore_running_state().await {
                     log::warn!("Failed to restore running apps: {}", e);
                 } else {

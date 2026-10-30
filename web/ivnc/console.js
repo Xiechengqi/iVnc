@@ -4,6 +4,7 @@ const API = '/api/apps';
 const CONSOLE_API = '/api/console';
 const CAP_API = '/api/capabilities';
 let editId = null;
+let editBuiltin = false;
 let lastDataHash = '';
 let currentLang = getLang();
 let activeSection = 'overview';
@@ -95,6 +96,10 @@ const I18N = {
         namePlaceholder: 'App display name',
         appType: 'App Type',
         autostart: 'Autostart',
+        miaoService: 'Built-in proxy service',
+        configureProxy: 'Configure proxy',
+        miaoSettings: 'Autostart takes effect when iVnc next starts. Manage nodes, subscriptions, and proxy mode in the Miao panel. The running status here refers to the panel service.',
+        disabledByAdmin: 'Disabled by administrator',
         launchCommand: 'Launch Command',
         launchCwd: 'Working Directory',
         launchCwdDefault: '(Optional, default: current directory)',
@@ -271,6 +276,10 @@ const I18N = {
         namePlaceholder: '应用显示名称',
         appType: '应用类型',
         autostart: '开机启动',
+        miaoService: '内置代理服务',
+        configureProxy: '配置代理',
+        miaoSettings: '自启动设置在下次 iVnc 启动时生效。节点、订阅和代理模式请在 Miao 面板中配置。此处运行状态表示面板服务状态。',
+        disabledByAdmin: '管理员已禁用',
         launchCommand: '启动命令',
         launchCwd: '工作目录',
         launchCwdDefault: '（可选，默认值：当前目录）',
@@ -385,6 +394,10 @@ function getHash(data) {
         url: a.url,
         exec: a.exec_command,
         launch: a.launch_command,
+        autostart: a.autostart,
+        ready: a.ready,
+        enabled: a.enabled,
+        error: a.error,
         cli: a.cli_binary_path,
         install: a.install_status,
         skills: a.skill_paths
@@ -498,6 +511,8 @@ function applyTranslations() {
     if (dtOpt) dtOpt.textContent = t('desktopOption');
     if (cliOpt) cliOpt.textContent = t('cliOption');
     setText('label-autostart', 'autostart');
+    setText('miao-settings-help', 'miaoSettings');
+    setText('miao-panel-link', 'configureProxy');
     setText('label-skill-paths', 'skillPaths');
     setText('label-skill-paths-default', 'skillPathsDefault');
     setText('label-launch-command', 'launchCommand');
@@ -609,14 +624,14 @@ async function load() {
             const cap = capByApp.get(a.id);
             const type = a.app_type === 'desktop' ? t('desktop') : (a.app_type === 'cli' ? t('cli') : t('background'));
             const capLines = cap ? capabilitySummaryLines(cap) : [];
-            const configStr = a.app_type === 'desktop'
+            const configStr = a.builtin ? t('miaoService') : a.app_type === 'desktop'
                 ? (a.exec_command || '')
                 : a.app_type === 'cli'
                     ? [a.cli_binary_path || '', ...capLines, ...(a.skill_paths || []).map(p => `skill: ${p}`)].filter(Boolean).join('\n')
                     : [a.url ? `${t('visit')}: ${a.url}` : '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
             const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
             const statusKey = a.app_type === 'cli' ? (a.install_status || 'missing') : a.status;
-            const statusText = t(statusKey) || statusKey;
+            const statusText = a.enabled === false ? t('disabledByAdmin') : (t(statusKey) || statusKey);
             const statusClass = a.app_type === 'cli'
                 ? (a.installed ? 'running' : 'stopped')
                 : a.status;
@@ -629,7 +644,7 @@ async function load() {
                 <td>
                     <div class="status-wrapper">
                         <span class="status status-${statusClass}"></span>
-                        <span title="${esc(a.install_error || '')}">${esc(statusText)}</span>
+                        <span title="${esc(a.error || a.install_error || '')}">${esc(statusText)}</span>
                     </div>
                 </td>
                 <td class="data-size">${esc(dataText)}</td>
@@ -642,15 +657,17 @@ async function load() {
                 if (a.status === 'running') {
                     const stopBtn = createBtn(t('stop'), 'btn-stop btn-sm', () => act(a.id, 'stop'));
                     const restartBtn = createBtn(t('restart'), 'btn-restart btn-sm', () => act(a.id, 'restart'));
+                    restartBtn.disabled = a.enabled === false;
                     actionsCell.append(stopBtn, restartBtn);
                 } else {
                     const startBtn = createBtn(t('start'), 'btn-start btn-sm', () => act(a.id, 'start'));
+                    startBtn.disabled = a.enabled === false;
                     actionsCell.append(startBtn);
                 }
             }
 
             const editBtn = createBtn(t('edit'), 'btn-edit btn-sm', () => showEdit(a.id));
-            if (a.app_type !== 'cli' && a.status === 'running') {
+            if (!a.builtin && a.app_type !== 'cli' && a.status === 'running') {
                 editBtn.disabled = true;
                 editBtn.title = t('editDisabled');
             }
@@ -660,13 +677,18 @@ async function load() {
             const delBtn = createBtn(t('delete'), 'btn-delete btn-sm', () => del(a.id, a.name));
 
             actionsCell.append(editBtn);
-            if (a.app_type !== 'desktop' && a.url) {
+            if (a.panel_url) {
+                const panelBtn = createBtn(t('configureProxy'), 'btn-visit btn-sm', () => window.open(a.panel_url, '_blank', 'noopener'));
+                panelBtn.disabled = a.enabled === false;
+                actionsCell.append(panelBtn);
+            } else if (a.app_type !== 'desktop' && a.url) {
                 actionsCell.append(createBtn(t('visit'), 'btn-visit btn-sm', () => copyAccessUrl(a.url)));
             }
             if (a.app_type !== 'cli') {
-                actionsCell.append(logBtn, clearBtn);
+                actionsCell.append(logBtn);
+                if (a.can_clear_data !== false) actionsCell.append(clearBtn);
             }
-            actionsCell.append(delBtn);
+            if (a.can_delete !== false) actionsCell.append(delBtn);
             fragment.appendChild(tr);
         });
 
@@ -1022,6 +1044,7 @@ async function copyText(text) {
 
 function showAdd() {
     editId = null;
+    editBuiltin = false;
     const modal = document.getElementById('modal');
     modal.querySelector('#modal-title').textContent = t('addModal');
     modal.querySelector('#modal-save').textContent = t('addSave');
@@ -1051,6 +1074,7 @@ async function showEdit(id) {
         const r = await fetch(API + '/' + id);
         const a = await r.json();
         editId = id;
+        editBuiltin = a.builtin === true && a.managed_by === 'ivnc';
         const modal = document.getElementById('modal');
         modal.querySelector('#modal-title').textContent = t('editModal');
         modal.querySelector('#modal-save').textContent = t('editSave');
@@ -1093,6 +1117,7 @@ async function showEdit(id) {
 
 function hideModal() {
     editId = null;
+    editBuiltin = false;
     document.getElementById('modal').classList.remove('show');
 }
 
@@ -1148,7 +1173,9 @@ async function saveApp() {
         if (!body.name) return toast(t('missingName'), 'err');
     }
 
-    if (appType === 'desktop') {
+    if (editBuiltin) {
+        delete body.skill_paths;
+    } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         if (!body.exec_command) return toast(t('missingExec'), 'err');
 
@@ -1183,8 +1210,9 @@ async function saveApp() {
             toast(d.error, 'err');
             return;
         }
+        const wasEditing = !!editId;
         hideModal();
-        toast(editId ? t('updated') : t('added'), 'ok');
+        toast(wasEditing ? t('updated') : t('added'), 'ok');
         load();
     } catch (e) {
         toast(t('actionFailed') + e, 'err');
@@ -1281,12 +1309,16 @@ function updateAppTypeVisibility() {
     const backgroundSlot = document.getElementById('background-autostart-slot');
     const desktopSlot = document.getElementById('desktop-autostart-slot');
 
-    document.getElementById('background-config').style.display = type === 'background' ? 'block' : 'none';
+    document.getElementById('background-config').style.display = type === 'background' && !editBuiltin ? 'block' : 'none';
+    document.getElementById('miao-config').hidden = !editBuiltin;
+    document.getElementById('f-skill-paths').closest('.form-line').style.display = editBuiltin ? 'none' : '';
     document.getElementById('desktop-config').style.display = type === 'desktop' ? 'block' : 'none';
     document.getElementById('cli-config').style.display = type === 'cli' ? 'block' : 'none';
 
     autostartControl.classList.remove('inline-slot');
-    if (type === 'desktop') {
+    if (editBuiltin) {
+        generalSlot.appendChild(autostartControl);
+    } else if (type === 'desktop') {
         desktopSlot.appendChild(autostartControl);
         autostartControl.classList.add('inline-slot');
     } else if (type === 'background') {

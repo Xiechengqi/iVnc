@@ -20,5 +20,8 @@
     "vite-plugin-env-compatible": "^2.0.1",
     "vite-plugin-minify": "^2.1.0",
     "vite-plugin-restart": "^0.4.2"
+  },
+  "devDependencies": {
+    "ws": "^8.22.0"
   }
 }

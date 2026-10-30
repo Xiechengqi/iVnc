@@ -135,7 +135,10 @@ pub const APP_ENV_REMOVE: &[&str] = &["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_C
 
 /// Apply isolation env to a std::process::Command (HOME + clear XDG overrides).
 /// Keeps Wayland/runtime vars from the parent environment.
-pub fn apply_std_command_isolation(cmd: &mut std::process::Command, app_id: &str) -> Result<(), String> {
+pub fn apply_std_command_isolation(
+    cmd: &mut std::process::Command,
+    app_id: &str,
+) -> Result<(), String> {
     let home = prepare_app_home(app_id)?;
     cmd.env("HOME", &home);
     for key in APP_ENV_REMOVE {
@@ -162,6 +165,10 @@ pub fn merge_cli_isolation_env(
 /// One-shot migration from legacy XDG /tmp locations into `$IVNC_HOME`.
 /// Existing new paths are left untouched; legacy sources are moved when possible.
 pub fn migrate_legacy() {
+    migrate_legacy_with_tmp_apps(Path::new("/tmp/ivnc-apps"));
+}
+
+fn migrate_legacy_with_tmp_apps(tmp_apps: &Path) {
     let home = ivnc_home();
     if let Err(err) = ensure_layout() {
         log::warn!("ivnc layout ensure failed: {}", err);
@@ -211,8 +218,7 @@ pub fn migrate_legacy() {
     }
 
     // /tmp/ivnc-apps/<id>/{desktop,background,cli} → apps/<id>/data/
-    let tmp_apps = PathBuf::from("/tmp/ivnc-apps");
-    if let Ok(entries) = fs::read_dir(&tmp_apps) {
+    if let Ok(entries) = fs::read_dir(tmp_apps) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(app_id) = name.to_str() else {
@@ -368,47 +374,57 @@ fn copy_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Environment variables are process-wide. Run path fixtures in a subprocess so
+    // concurrent configuration/app tests cannot observe a temporary data home.
+    fn isolated_fixture(test_name: &str) -> Option<PathBuf> {
+        if let Some(root) = env::var_os("IVNC_PATHS_TEST_CHILD") {
+            return Some(PathBuf::from(root));
+        }
+        let tmp = env::temp_dir().join(format!("ivnc-paths-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(tmp.join("home")).unwrap();
+        let result = std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", test_name, "--test-threads=1"])
+            .env("IVNC_PATHS_TEST_CHILD", &tmp)
+            .env("HOME", tmp.join("home"))
+            .env("IVNC_HOME", tmp.join("ivnc-home"))
+            .env("XDG_CONFIG_HOME", tmp.join("legacy-config"))
+            .env("XDG_DATA_HOME", tmp.join("legacy-data"))
+            .env("XDG_CACHE_HOME", tmp.join("legacy-cache"))
+            .output();
+        let _ = fs::remove_dir_all(&tmp);
+        let output = result.expect("run isolated path test");
+        assert!(
+            output.status.success(),
+            "isolated path test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        None
+    }
 
     #[test]
     fn ivnc_home_respects_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!("ivnc-paths-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        env::set_var("IVNC_HOME", &tmp);
-        assert_eq!(ivnc_home(), tmp);
-        env::remove_var("IVNC_HOME");
-        let _ = fs::remove_dir_all(&tmp);
+        let Some(tmp) = isolated_fixture("paths::tests::ivnc_home_respects_override") else {
+            return;
+        };
+        assert_eq!(ivnc_home(), tmp.join("ivnc-home"));
     }
 
     #[test]
     fn migrate_moves_legacy_apps_db() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!("ivnc-migrate-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        let ivnc = tmp.join("ivnc-home");
+        let Some(tmp) = isolated_fixture("paths::tests::migrate_moves_legacy_apps_db") else {
+            return;
+        };
         let legacy = tmp.join("legacy-config").join("ivnc");
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("apps.db"), b"sqlite").unwrap();
 
-        env::set_var("IVNC_HOME", &ivnc);
-        // Point dirs::* by setting XDG_CONFIG_HOME
-        env::set_var("XDG_CONFIG_HOME", tmp.join("legacy-config"));
-        env::set_var("XDG_DATA_HOME", tmp.join("legacy-data"));
-        env::set_var("XDG_CACHE_HOME", tmp.join("legacy-cache"));
         fs::create_dir_all(tmp.join("legacy-data")).unwrap();
         fs::create_dir_all(tmp.join("legacy-cache")).unwrap();
 
-        migrate_legacy();
+        migrate_legacy_with_tmp_apps(&tmp.join("legacy-tmp-apps"));
         assert!(apps_db().exists());
         assert_eq!(fs::read(apps_db()).unwrap(), b"sqlite");
-
-        env::remove_var("IVNC_HOME");
-        env::remove_var("XDG_CONFIG_HOME");
-        env::remove_var("XDG_DATA_HOME");
-        env::remove_var("XDG_CACHE_HOME");
-        let _ = fs::remove_dir_all(&tmp);
     }
 }

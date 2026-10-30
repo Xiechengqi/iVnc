@@ -67,7 +67,8 @@ bash build.sh --release --features tls
 也可以直接使用 cargo：
 
 ```bash
-cargo build --release
+bash scripts/build-miao.sh --release
+IVNC_MIAO_BIN="$PWD/target/release/miao-rust" cargo build --release
 # 输出：target/release/ivnc
 ```
 
@@ -281,6 +282,8 @@ $IVNC_HOME/
 ```
 
 miao 自身的配置、订阅缓存和运行状态遵循 miao 的目录约定，位于 `$HOME/.miao`。Docker 部署应同时持久化 `/root/.ivnc` 与 `/root/.miao`。
+
+Miao 以内置后台应用显示在控制台应用列表，首次默认随 iVnc 启动，之后保留用户的自启动选择。可直接启动、停止、重启、查看日志并打开代理配置。详细行为、配套版本和构建方式见 [Miao 后台应用](docs/MIAO.md)。
 
 首次启动会尝试从旧路径（`~/.config/ivnc`、`/tmp/ivnc-apps` 等）自动迁移。
 

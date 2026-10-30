@@ -379,7 +379,7 @@ pub struct UiFeaturesConfig {
     #[serde(default = "default_ui_feature_enabled")]
     pub terminal_enabled: bool,
 
-    /// Show and allow the miao proxy panel.
+    /// Allow the built-in Miao background app and show its proxy panel entry.
     #[serde(default = "default_ui_feature_enabled")]
     pub proxy_enabled: bool,
 
