@@ -61,6 +61,7 @@ RUN apt-get update && \
     tzdata \
     bash \
     curl \
+    openssh-client \
     ca-certificates \
     fontconfig \
     fonts-wqy-microhei \
@@ -85,6 +86,7 @@ RUN apt-get update && \
     && fc-cache -f \
     && grep -qx "VERSION_ID=\"${EXPECTED_RUNTIME_VERSION}\"" /etc/os-release \
     && google-chrome --version \
+    && ssh -V \
     && agent-browser --version \
     && gst-inspect-1.0 x264enc >/dev/null \
     && gst-inspect-1.0 rtph264pay >/dev/null \

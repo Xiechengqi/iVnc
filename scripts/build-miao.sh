@@ -24,8 +24,8 @@ CARGO_ARGS=()
 if [[ "$BUILD_MODE" == --release ]]; then CARGO_ARGS+=(--release); fi
 cargo build --locked --bin miao-rust "${CARGO_ARGS[@]}"
 PROFILE="${BUILD_MODE#--}"
-if [[ "$("$TASK_TARGET_DIR/$PROFILE/miao-rust" --ivnc-integration-version)" != 1 ]]; then
-    echo "The paired Miao must support iVnc integration v1" >&2
+if [[ "$("$TASK_TARGET_DIR/$PROFILE/miao-rust" --ivnc-integration-version)" != 2 ]]; then
+    echo "The paired Miao must support iVnc integration v2 (--nopasswd)" >&2
     exit 1
 fi
 echo "Paired Miao: $TASK_TARGET_DIR/$PROFILE/miao-rust"

@@ -15,6 +15,7 @@ use tokio::sync::Mutex as AsyncMutex;
 const MIAO_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/miao-rust-linux-amd64"));
 pub const BUILTIN_MIAO_ID: &str = "builtin-miao";
 pub const MIAO_PORT: u16 = 6161;
+const MIAO_INTEGRATION_VERSION: u32 = 2;
 
 #[derive(Debug)]
 struct RunningProxy {
@@ -62,6 +63,7 @@ struct Health {
     service_pid: u32,
     embedded: bool,
     integration_version: u32,
+    password_required: bool,
     initializing: bool,
     proxy_running: bool,
     socks_listen: String,
@@ -352,6 +354,7 @@ impl ProxyPanelManager {
             let stderr = stdout.try_clone().map_err(|e| e.to_string())?;
             let mut command = Command::new(&bin);
             command
+                .arg("--nopasswd")
                 .current_dir(dir)
                 .env("HOME", home)
                 .env("MIAO_EMBEDDED", "ivnc")
@@ -426,7 +429,8 @@ impl ProxyPanelManager {
         if !response.success
             || response.data.service != "miao"
             || !response.data.embedded
-            || response.data.integration_version != 1
+            || response.data.integration_version != MIAO_INTEGRATION_VERSION
+            || response.data.password_required
             || response.data.service_pid != expected_pid
             || self.status().pid != Some(expected_pid)
         {
@@ -657,11 +661,12 @@ mod tests {
             manager.dir = self.0.join(instance);
             let script = self.0.join("panel.py");
             fs::write(&script, r#"#!/usr/bin/env python3
-import http.server, json, os, signal, subprocess, time
+import http.server, json, os, signal, subprocess, sys, time
+assert sys.argv[1:] == ['--nopasswd']
 class Panel(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         payload = dict(success=True, data=dict(service='miao', service_pid=os.getpid(), embedded=True,
-            integration_version=1, initializing=False, proxy_running=True, socks_listen='::', socks_port=19081))
+            integration_version=2, password_required=False, initializing=False, proxy_running=True, socks_listen='::', socks_port=19081))
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()

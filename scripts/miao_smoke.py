@@ -60,6 +60,10 @@ class Instance:
         self.config.parent.mkdir()
         self.saved_config = f"port: {port()}\nsocks_listen: 127.0.0.1\nsocks_port: {port()}\nmode: pool\n"
         self.config.write_text(self.saved_config)
+        self.saved_auth = json.dumps({"password": "existing-panel-password", "revision": "a" * 64})
+        self.auth_path = self.config.with_suffix(".auth.json")
+        self.auth_path.write_text(self.saved_auth)
+        self.auth_path.chmod(0o600)
         self.process = None
         self.log = None
         self.miao_pids = set()
@@ -151,18 +155,22 @@ def scenario(binary, root, tls, browser=False):
         assert instance.config.read_text() == instance.saved_config
         status = instance.request("/proxy/api/auth/status")[0]["data"]
         assert status["service_pid"] == app["pid"] and status["embedded"] and not status["proxy_running"]
+        assert status["integration_version"] == 2 and not status["password_required"]
         panel, headers = instance.request("/proxy/")
         assert "__ivncProxyPanelRewrite" in panel and headers["x-frame-options"] == "SAMEORIGIN"
+        # Passwordless Miao remains behind iVnc's configured outer authentication.
+        instance.request("/proxy/", headers={"Authorization": ""}, status=401)
+        instance.request("/proxy/api/auth/login", "POST", {}, {"Authorization": ""}, status=401)
         instance.request("/proxy/api/status", status=401)
-        password = "isolated-panel-password"
-        result, headers = instance.request("/proxy/api/auth/setup", "POST",
-                                           {"password": password, "confirm_password": password})
+        instance.request("/proxy/api/auth/setup", "POST",
+                         {"password": "replacement", "confirm_password": "replacement"}, status=403)
+        result, headers = instance.request("/proxy/api/auth/login", "POST", {})
         assert result["success"]
         cookie, csrf = headers["set-cookie"].split(";", 1)[0], result["data"]["csrf"]
         assert ("; Secure" in headers["set-cookie"]) == tls
         session = {"Cookie": cookie, "X-Miao-CSRF": csrf}
         if browser:
-            browser_env = dict(instance.env, MIAO_SMOKE_AUTH=instance.auth, MIAO_SMOKE_COOKIE=cookie)
+            browser_env = dict(instance.env, MIAO_SMOKE_AUTH=instance.auth)
             subprocess.run(["node", str(Path(__file__).with_name("miao_console_smoke.mjs")),
                             instance.origin, str(root)], env=browser_env, check=True, timeout=60)
         instance.request("/proxy/api/status", headers=session)
@@ -205,10 +213,11 @@ def scenario(binary, root, tls, browser=False):
         instance.request("/proxy/", status=503)
         instance.request("/api/proxy/start", "POST")
         eventually(instance.ready)
-        # Authentication and the original YAML survive process and iVnc restarts.
-        result, _ = instance.request("/proxy/api/auth/login", "POST", {"password": password})
+        # Passwordless startup preserves saved credentials and the original YAML.
+        result, _ = instance.request("/proxy/api/auth/login", "POST", {})
         assert result["success"]
         assert instance.config.read_text() == instance.saved_config
+        assert instance.auth_path.read_text() == instance.saved_auth
         instance.request(app_path, "PUT", {"autostart": True})
         instance.stop()
         instance.boot(enabled=False)

@@ -8,6 +8,7 @@ use std::process::Command;
 const MIAO_URL: &str =
     "https://github.com/iVnc-Org/miao/releases/download/latest/miao-rust-linux-amd64";
 const MIAO_BIN: &str = "miao-rust-linux-amd64";
+const MIAO_INTEGRATION_VERSION: &str = "2";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=IVNC_BUILD_GIT_COMMIT");
@@ -106,8 +107,8 @@ fn copy_binary(src: &Path, dst: &Path) {
             .arg("--ivnc-integration-version")
             .output()
             .unwrap_or_else(|error| panic!("cannot validate Miao {}: {error}", src.display()));
-        assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1",
-            "Miao at {} lacks iVnc integration v1. Build the paired Miao source with scripts/build-miao.sh, then set IVNC_MIAO_BIN to that binary. Old standalone releases are incompatible.", src.display());
+        assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == MIAO_INTEGRATION_VERSION,
+            "Miao at {} lacks iVnc integration v2 (--nopasswd). Build the paired Miao source with scripts/build-miao.sh, then set IVNC_MIAO_BIN to that binary. Old releases are incompatible.", src.display());
     } else {
         panic!("Cross compilation requires native validation of the paired Miao binary; build iVnc in a container for the target architecture");
     }

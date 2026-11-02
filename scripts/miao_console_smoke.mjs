@@ -75,9 +75,6 @@ try {
         console.error(readFileSync(path.join(root, 'browser.log'), 'utf8').slice(-3000));
         throw Error(JSON.stringify(navigation));
     }
-    const [cookieName, cookieValue] = process.env.MIAO_SMOKE_COOKIE.split('=');
-    await call('Network.setCookie', { name: cookieName, value: cookieValue, url: origin,
-        path: '/', httpOnly: true, sameSite: 'Strict', secure: origin.startsWith('https:') });
     // Return a concrete assertion result from the actual shipped console and embedded panel.
     await delay(500);
     const result = await call('Runtime.evaluate', { awaitPromise: true, returnByValue: true,
@@ -109,11 +106,14 @@ try {
             const frame = document.createElement('iframe');
             frame.src = '/proxy/';
             document.body.appendChild(frame);
-            await wait(() => frame.contentDocument?.querySelector('#root')?.children.length > 0);
+            await wait(() => frame.contentDocument?.querySelector('.topbar'));
+            if (frame.contentDocument.querySelector('.auth-page')) throw Error('passwordless panel is showing a login form');
+            const actions = Array.from(frame.contentDocument.querySelectorAll('.topbar button'));
+            if (actions.some(button => /修改密码|退出登录|Change password|Sign out/.test(button.getAttribute('aria-label') || ''))) throw Error('password actions are exposed in passwordless mode');
             if (!frame.contentWindow.__ivncProxyPanelRewrite) throw Error('panel path adapter did not run');
             if (frame.contentWindow.WebSocket.OPEN !== 1 || frame.contentWindow.WebSocket.CONNECTING !== 0) throw Error('WebSocket constants were lost');
             const auth = await (await frame.contentWindow.fetch('/api/auth/status')).json();
-            if (!auth.data.authenticated) throw Error('embedded panel did not retain authentication');
+            if (!auth.data.authenticated || auth.data.password_required) throw Error('embedded panel did not create a passwordless session');
             return { runningEdit: true, savedPreference: true, protectedActions: true, iframe: true, panelAuth: true };
         })()` });
     if (result.exceptionDetails) {

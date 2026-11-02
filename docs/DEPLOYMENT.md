@@ -61,6 +61,15 @@ sudo apt-get install -y pipewire pipewire-pulse pipewire-media-session
 sudo apt-get install -y pulseaudio
 ```
 
+#### Miao VPS 部署
+
+Miao 在本机调用 OpenSSH 客户端，源码或独立二进制部署也需安装；Docker 配套镜像已包含此依赖。
+
+```bash
+sudo apt-get install -y openssh-client
+ssh -V
+```
+
 #### 硬件加速（可选）
 
 ```bash
@@ -80,6 +89,7 @@ sudo dnf install -y \
     libX11-devel \
     libxcb-devel \
     libxkbcommon-devel \
+    openssh-clients \
     openssl-devel \
     gstreamer1-devel \
     gstreamer1-plugins-base-devel \
@@ -100,6 +110,7 @@ sudo pacman -S --needed \
     base-devel cmake \
     libx11 libxcb xcb-util \
     libxkbcommon openssl \
+    openssh \
     gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
     libpulse opus \
     wayland pixman libinput \
@@ -144,7 +155,7 @@ cargo build --release --features qsv
 
 构建产物位于 `target/release/ivnc`，`build.sh` 会自动复制到项目根目录。
 
-`build.sh` 默认从相邻的 `../miao` 构建配套面板，也可设置 `MIAO_SOURCE_DIR` 或提供 `IVNC_MIAO_BIN`。Docker / CI 下载的 Miao 发布产物必须支持嵌入协议 v1；发布顺序和端口、持久化说明见 [Miao 后台应用](MIAO.md)。
+`build.sh` 默认从相邻的 `../miao` 构建配套面板，也可设置 `MIAO_SOURCE_DIR` 或提供 `IVNC_MIAO_BIN`。Docker / CI 下载的 Miao 发布产物必须支持嵌入协议 v2（`--nopasswd`）；发布顺序和端口、持久化说明见 [Miao 后台应用](MIAO.md)。
 
 ## 安装
 
