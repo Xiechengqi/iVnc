@@ -18,6 +18,7 @@
 #      registered CLI app shows up in the tool list.
 #   5. Removed surface: agent, MCP, provider and schedule endpoints are gone.
 #   6. WebRTC signaling: the /webrtc websocket accepts a connection.
+#   7. Chrome launch and saved autostart choices across iVnc restarts.
 #
 # Env knobs (all optional):
 #   IVNC_BIN=path      binary to test          (default: target/release/ivnc)
@@ -114,9 +115,10 @@ fi
 # Isolated sandbox: own runtime + IVNC_HOME + ports.
 # ----------------------------------------------------------------------------
 TMP="$(mktemp -d /tmp/ivnc-smoke.XXXXXX)"
+TEST_HOME="$TMP/home"
 export XDG_RUNTIME_DIR="$TMP/run"
 export IVNC_HOME="$TMP/ivnc-home"
-mkdir -p "$XDG_RUNTIME_DIR" "$IVNC_HOME"
+mkdir -p "$XDG_RUNTIME_DIR" "$IVNC_HOME" "$TEST_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"  # Wayland refuses a runtime dir that isn't 0700
 
 HTTP_PORT="$(free_port)"
@@ -147,32 +149,52 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+boot_ivnc() {
+  env HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" \
+    XDG_DATA_HOME="$TEST_HOME/.local/share" XDG_CACHE_HOME="$TEST_HOME/.cache" \
+    "$IVNC_BIN" --http-port "$HTTP_PORT" --basic-auth-enabled false --proxy-enabled false \
+    > "$TMP/ivnc.log" 2>&1 &
+  IVNC_PID=$!
+  say "ivnc pid    : $IVNC_PID"
+
+  local ready=0
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$IVNC_PID" 2>/dev/null; then
+      say "ERROR: ivnc exited during startup — last log lines:"
+      tail -n 30 "$TMP/ivnc.log" || true
+      fail "ivnc boot"
+      exit 1
+    fi
+    if curl -sS -m 2 "$BASE/api/console/overview" >/dev/null 2>&1; then
+      ready=1; break
+    fi
+    sleep 0.5
+  done
+  if [ "$ready" = "1" ]; then pass "ivnc boot (HTTP ready)"; else
+    fail "ivnc boot (HTTP never became ready)"; tail -n 30 "$TMP/ivnc.log" || true; exit 1
+  fi
+}
+
+restart_ivnc() {
+  kill -TERM "$IVNC_PID" || { fail "signal ivnc for restart"; exit 1; }
+  for _ in $(seq 1 100); do
+    kill -0 "$IVNC_PID" 2>/dev/null || break
+    sleep 0.2
+  done
+  if kill -0 "$IVNC_PID" 2>/dev/null; then
+    fail "ivnc did not stop for restart"; exit 1
+  fi
+  wait "$IVNC_PID" || { fail "ivnc graceful shutdown"; exit 1; }
+  IVNC_PID=""
+  boot_ivnc
+}
+
 hdr "boot isolated ivnc"
 say "binary      : $IVNC_BIN"
 say "http port   : $HTTP_PORT"
 say "debug port  : $DEBUG_PORT"
 say "sandbox     : $TMP"
-"$IVNC_BIN" --http-port "$HTTP_PORT" --basic-auth-enabled false --proxy-enabled false \
-  > "$TMP/ivnc.log" 2>&1 &
-IVNC_PID=$!
-say "ivnc pid    : $IVNC_PID"
-
-READY=0
-for _ in $(seq 1 60); do
-  if ! kill -0 "$IVNC_PID" 2>/dev/null; then
-    say "ERROR: ivnc exited during startup — last log lines:"
-    tail -n 30 "$TMP/ivnc.log" || true
-    fail "ivnc boot"
-    exit 1
-  fi
-  if curl -sS -m 2 "$BASE/api/console/overview" >/dev/null 2>&1; then
-    READY=1; break
-  fi
-  sleep 0.5
-done
-if [ "$READY" = "1" ]; then pass "ivnc boot (HTTP ready)"; else
-  fail "ivnc boot (HTTP never became ready)"; tail -n 30 "$TMP/ivnc.log" || true; exit 1
-fi
+boot_ivnc
 
 # ----------------------------------------------------------------------------
 # 1. Console API.
@@ -301,6 +323,32 @@ if [ "${SKIP_CHROME:-}" != "1" ]; then
   if [ "$UP" = "1" ]; then pass "chrome devtools reachable on $DEBUG_PORT"; else
     fail "chrome devtools never came up"; fi
   check_status "stop chrome 200" "200" "$BASE/api/apps/builtin-chrome/stop" -X POST
+
+  hdr "apps: Chrome autostart survives restart"
+  check_status "save chrome autostart true" "200" "$BASE/api/apps/builtin-chrome" \
+    -X PUT -H 'content-type: application/json' -d '{"autostart":true}'
+  restart_ivnc
+  resp="$(curl -sS -m 10 "$BASE/api/apps/builtin-chrome")"
+  check_eq "chrome autostart true persisted" "true" "$(jq -r '.autostart' <<<"$resp")"
+  UP=0
+  for _ in $(seq 1 40); do
+    if curl -sS -m 2 "http://127.0.0.1:$DEBUG_PORT/json/version" >/dev/null 2>&1; then UP=1; break; fi
+    sleep 0.5
+  done
+  check_eq "chrome DevTools reachable after automatic start" "1" "$UP"
+  resp="$(curl -sS -m 10 "$BASE/api/apps/builtin-chrome")"
+  check_eq "chrome automatically running" "running" "$(jq -r '.status' <<<"$resp")"
+
+  hdr "apps: disabled Chrome autostart survives restart"
+  # Stop first so the recent-running-app snapshot cannot mask the preference.
+  check_status "stop automatically started chrome" "200" "$BASE/api/apps/builtin-chrome/stop" -X POST
+  check_status "save chrome autostart false" "200" "$BASE/api/apps/builtin-chrome" \
+    -X PUT -H 'content-type: application/json' -d '{"autostart":false}'
+  restart_ivnc
+  sleep 3
+  resp="$(curl -sS -m 10 "$BASE/api/apps/builtin-chrome")"
+  check_eq "chrome autostart false persisted" "false" "$(jq -r '.autostart' <<<"$resp")"
+  check_eq "chrome remains stopped after restart" "stopped" "$(jq -r '.status' <<<"$resp")"
 else
   say "SKIP_CHROME=1 — skipping Chrome launch"
 fi

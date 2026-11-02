@@ -307,20 +307,26 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
             }
         }
     }
+    ensure_builtin_chrome(store, &chrome_command)?;
+    desktop_entry::ensure_desktop_entry("Chrome", &chrome_command)?;
+    ensure_builtin_agent_browser_cli(store)?;
+    Ok(())
+}
+
+fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), String> {
     match store.get("builtin-chrome") {
         Ok(mut app) => {
             if app.app_type != AppType::DesktopApp
-                || app.exec_command.as_deref() != Some(chrome_command.as_str())
-                || app.autostart
+                || app.exec_command.as_deref() != Some(chrome_command)
             {
                 app.app_type = AppType::DesktopApp;
-                app.autostart = false;
+                // Refresh managed launch settings without replacing the saved startup preference.
                 app.url = None;
                 app.launch_command = None;
                 app.launch_env_vars = None;
                 app.launch_cwd = None;
                 app.launch_wait_timeout_secs = None;
-                app.exec_command = Some(chrome_command.clone());
+                app.exec_command = Some(chrome_command.to_string());
                 app.env_vars = None;
                 app.cli_binary_path = None;
                 app.cli_env_vars = None;
@@ -339,7 +345,7 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
                 launch_env_vars: None,
                 launch_cwd: None,
                 launch_wait_timeout_secs: None,
-                exec_command: Some(chrome_command.clone()),
+                exec_command: Some(chrome_command.to_string()),
                 env_vars: None,
                 cli_binary_path: None,
                 cli_env_vars: None,
@@ -352,8 +358,6 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
             }
         }
     }
-    desktop_entry::ensure_desktop_entry("Chrome", &chrome_command)?;
-    ensure_builtin_agent_browser_cli(store)?;
     Ok(())
 }
 
@@ -1180,6 +1184,61 @@ mod tests {
             process: ProcessManager::new(),
             service: ServiceProcessManager::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn chrome_autostart_edits_survive_registration_and_command_refresh() {
+        let state = state(None, None);
+        let id = "builtin-chrome";
+        ensure_builtin_chrome(&state.store, "google-chrome --original").unwrap();
+        assert!(!state.store.get(id).unwrap().autostart);
+
+        for (autostart, refreshed_command) in [
+            (true, "google-chrome --updated-enabled"),
+            (false, "google-chrome --updated-disabled"),
+        ] {
+            let response = update_app(
+                State(state.clone()),
+                Path(id.to_string()),
+                axum::Json(json!({"autostart": autostart, "env_vars": {"LANG": "zh_CN.UTF-8"}})),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let saved = state.store.get(id).unwrap();
+            let original_command = saved.exec_command.as_deref().unwrap();
+
+            ensure_builtin_chrome(&state.store, original_command).unwrap();
+            let unchanged = state.store.get(id).unwrap();
+            assert_eq!(unchanged.autostart, autostart);
+            assert_eq!(unchanged.env_vars, saved.env_vars);
+
+            ensure_builtin_chrome(&state.store, refreshed_command).unwrap();
+            let updated = state.store.get(id).unwrap();
+            assert_eq!(updated.autostart, autostart);
+            assert_eq!(updated.exec_command.as_deref(), Some(refreshed_command));
+        }
+    }
+
+    #[test]
+    fn chrome_legacy_type_migration_preserves_autostart() {
+        let store = AppStore::in_memory();
+        ensure_builtin_chrome(&store, "google-chrome").unwrap();
+        for autostart in [true, false] {
+            let mut legacy = store.get("builtin-chrome").unwrap();
+            legacy.app_type = AppType::BackgroundApp;
+            legacy.autostart = autostart;
+            legacy.launch_command = Some("legacy launcher".into());
+            legacy.url = Some("http://127.0.0.1:1234".into());
+            store.update(&legacy).unwrap();
+
+            ensure_builtin_chrome(&store, "google-chrome --wayland").unwrap();
+            let app = store.get("builtin-chrome").unwrap();
+            assert_eq!(app.app_type, AppType::DesktopApp);
+            assert_eq!(app.autostart, autostart);
+            assert_eq!(app.exec_command.as_deref(), Some("google-chrome --wayland"));
+            assert!(app.launch_command.is_none());
+            assert!(app.url.is_none());
+        }
     }
 
     #[test]

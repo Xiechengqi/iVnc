@@ -304,6 +304,8 @@ $IVNC_HOME/
 
 miao 自身的配置、订阅缓存和运行状态遵循 miao 的目录约定，位于 `$HOME/.miao`。Docker 部署应同时持久化 `/root/.ivnc` 与 `/root/.miao`。
 
+Chrome 首次注册默认关闭自启动。在“编辑应用”中保存的“开机启动”选择会保留，iVnc 或容器重启、内置启动命令更新及旧版应用迁移均不会重置它。自启动随 iVnc 服务启动执行。
+
 Miao 以内置后台应用显示在控制台应用列表，首次默认随 iVnc 启动，升级时保留旧版自启动偏好。可直接启动、停止、重启、查看日志并打开代理配置，默认以 `--nopasswd` 免密码进入 Miao 面板。“编辑应用”展示完整只读配置，启动参数通过 iVnc CLI 控制。VPS 部署依赖 OpenSSH 客户端，Docker 镜像已包含。详细行为、配套版本和构建方式见 [Miao 后台应用](docs/MIAO.md)。
 
 首次启动会尝试从旧路径（`~/.config/ivnc`、`/tmp/ivnc-apps` 等）自动迁移。
