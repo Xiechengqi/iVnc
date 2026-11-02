@@ -6,7 +6,7 @@ use super::process::ProcessManager;
 use super::service_process::{self, ServiceProcessManager};
 use super::state_recovery::AppRunningState;
 use super::store::AppStore;
-use crate::proxy_panel::{ProxyPanelManager, BUILTIN_MIAO_ID};
+use crate::proxy_panel::{ProxyPanelManager, BUILTIN_MIAO_ID, MIAO_START_TIMEOUT_SECS};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -246,7 +246,7 @@ impl AppsState {
 
     pub async fn start_builtin_apps(&self) -> Result<(), String> {
         let app = self.store.get(BUILTIN_MIAO_ID)?;
-        if app.autostart && self.proxy_panel.status().enabled {
+        if self.proxy_panel.autostart(app.autostart) && self.proxy_panel.status().enabled {
             self.proxy_panel.start().await?;
         } else {
             self.proxy_panel.cleanup_inactive_instance().await?;
@@ -258,7 +258,7 @@ impl AppsState {
 fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
     match store.get_optional(BUILTIN_MIAO_ID)? {
         Some(mut app) => {
-            // The startup preference is user-owned, including across upgrades.
+            // Preserve the startup preference saved by older versions across upgrades.
             if app.app_type != AppType::BackgroundApp {
                 app.app_type = AppType::BackgroundApp;
                 store.update(&app)?;
@@ -617,7 +617,31 @@ fn app_json(
     });
 
     if app.id == BUILTIN_MIAO_ID {
+        obj["autostart"] = json!(state.proxy_panel.autostart(app.autostart));
         let proxy = state.proxy_panel.status();
+        let command = state.proxy_panel.launch_command();
+        let launch_command = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|arg| shell_quote(&arg.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Show only explicit overrides, never the inherited process environment.
+        let launch_env: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        obj["launch_command"] = json!(launch_command);
+        obj["launch_env_vars"] = json!(launch_env);
+        obj["launch_cwd"] = json!(command.get_current_dir());
+        obj["launch_wait_timeout_secs"] = json!(MIAO_START_TIMEOUT_SECS);
+        obj["url"] = json!(proxy.url);
         obj["status"] = json!(if proxy.running {
             "running"
         } else if proxy.desired_running {
@@ -867,28 +891,10 @@ async fn update_app(
     };
 
     if id == BUILTIN_MIAO_ID {
-        if body.as_object().is_none_or(|obj| {
-            obj.keys()
-                .any(|key| key != "autostart" && key != "app_type")
-        }) || body
-            .get("app_type")
-            .is_some_and(|value| value.as_str() != Some("background"))
-        {
-            return err_response(
-                StatusCode::FORBIDDEN,
-                "Miao launch settings are managed by iVnc; use its panel for proxy configuration",
-            );
-        }
-        if let Some(value) = body.get("autostart") {
-            let Some(value) = value.as_bool() else {
-                return err_response(StatusCode::BAD_REQUEST, "autostart must be a boolean");
-            };
-            app.autostart = value;
-        }
-        return match state.store.update(&app) {
-            Ok(()) => json_response(StatusCode::OK, json!({"ok":true})),
-            Err(error) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
-        };
+        return err_response(
+            StatusCode::FORBIDDEN,
+            "Miao application settings are read-only; configure startup through the iVnc CLI",
+        );
     }
 
     match app.app_type {
@@ -1156,14 +1162,20 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 mod tests {
     use super::*;
 
-    fn state() -> Arc<AppsState> {
+    fn state(
+        proxy_ip: Option<std::net::IpAddr>,
+        autostart_override: Option<bool>,
+    ) -> Arc<AppsState> {
         let store = Arc::new(AppStore::in_memory());
         ensure_builtin_miao(&store).unwrap();
         Arc::new(AppsState {
             store,
             proxy_panel: Arc::new(ProxyPanelManager::isolated(
                 false,
-                &std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()),
+                &std::env::temp_dir()
+                    .join(format!("ivnc-apps-{} space'quote", uuid::Uuid::new_v4())),
+                proxy_ip,
+                autostart_override,
             )),
             process: ProcessManager::new(),
             service: ServiceProcessManager::new(),
@@ -1190,8 +1202,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn miao_api_protects_managed_fields_and_allows_only_startup_preference() {
-        let state = state();
+    async fn miao_api_rejects_all_configuration_edits() {
+        let state = state(None, None);
         let id = || Path(BUILTIN_MIAO_ID.to_string());
         let update = |body| update_app(State(state.clone()), id(), axum::Json(body));
         for body in [
@@ -1199,21 +1211,14 @@ mod tests {
             json!({"app_type":"desktop"}),
             json!({"name":"Changed"}),
             json!({"env_vars":{"HOME":"/tmp"}}),
+            json!({"autostart":false}),
+            json!({"app_type":"background", "autostart":false}),
+            json!({}),
         ] {
             assert_eq!(update(body).await.status(), StatusCode::FORBIDDEN);
         }
-        assert_eq!(
-            update(json!({"autostart":"false"})).await.status(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            update(json!({"app_type":"background", "autostart":false}))
-                .await
-                .status(),
-            StatusCode::OK
-        );
         ensure_builtin_miao(&state.store).unwrap();
-        assert!(!state.store.get(BUILTIN_MIAO_ID).unwrap().autostart);
+        assert!(state.store.get(BUILTIN_MIAO_ID).unwrap().autostart);
         assert_eq!(
             delete_app(State(state.clone()), id()).await.status(),
             StatusCode::FORBIDDEN
@@ -1238,5 +1243,55 @@ mod tests {
         assert_eq!(json["can_delete"], false);
         assert_eq!(json["can_clear_data"], false);
         assert_eq!(json["enabled"], false);
+    }
+
+    #[test]
+    fn miao_json_displays_effective_configuration_instead_of_stale_database_fields() {
+        for ip in [None, Some("203.0.113.10"), Some("2001:db8::10")] {
+            let state = state(ip.map(|ip| ip.parse().unwrap()), None);
+            let mut app = state.store.get(BUILTIN_MIAO_ID).unwrap();
+            app.launch_command = Some("obsolete-command".into());
+            app.launch_cwd = Some("/obsolete-directory".into());
+            app.launch_env_vars = Some(HashMap::from([("OLD_SECRET".into(), "hidden".into())]));
+            app.launch_wait_timeout_secs = Some(999);
+            app.url = Some("http://obsolete-url/".into());
+            let json = app_json(&state, &app, "stopped", None, 0);
+            let cwd = json["launch_cwd"].as_str().unwrap();
+            let executable = format!("{cwd}/miao-rust-linux-amd64");
+            let expected_command = match ip {
+                Some(ip) => format!(
+                    "{} --nopasswd --mode global --vps-host {}",
+                    shell_quote(&executable),
+                    shell_quote(ip)
+                ),
+                None => format!("{} --nopasswd", shell_quote(&executable)),
+            };
+            assert_eq!(json["launch_command"], expected_command);
+            assert!(expected_command.starts_with('\''));
+            assert!(expected_command.contains("'\\''"));
+            assert_eq!(json["url"], "/proxy/");
+            assert_eq!(json["launch_wait_timeout_secs"], 15);
+            let env = json["launch_env_vars"].as_object().unwrap();
+            assert_eq!(env.len(), 4);
+            assert_eq!(env["MIAO_EMBEDDED"], "ivnc");
+            assert_eq!(env["MIAO_PORT"], state.proxy_panel.port().to_string());
+            assert_eq!(env["MIAO_RUNTIME_DIR"], format!("{cwd}/runtime"));
+            assert!(env["HOME"].as_str().unwrap().ends_with("/home"));
+        }
+    }
+
+    #[test]
+    fn miao_autostart_cli_overrides_saved_preferences_without_writing_them() {
+        for saved in [true, false] {
+            for override_value in [None, Some(true), Some(false)] {
+                let state = state(None, override_value);
+                let mut app = state.store.get(BUILTIN_MIAO_ID).unwrap();
+                app.autostart = saved;
+                state.store.update(&app).unwrap();
+                let json = app_json(&state, &app, "stopped", None, 0);
+                assert_eq!(json["autostart"], override_value.unwrap_or(saved));
+                assert_eq!(state.store.get(BUILTIN_MIAO_ID).unwrap().autostart, saved);
+            }
+        }
     }
 }

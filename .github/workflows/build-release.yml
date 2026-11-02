@@ -28,6 +28,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Test Docker entrypoint argument forwarding
+        run: python3 scripts/docker_entrypoint_test.py -v
+
       - name: Resolve build metadata
         id: build-meta
         run: |

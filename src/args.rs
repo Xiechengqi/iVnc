@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::{net::IpAddr, path::PathBuf};
 
 use crate::config;
 
@@ -71,6 +71,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub proxy_enabled: Option<bool>,
 
+    /// Deploy or recover this VPS with Miao and start global proxy mode
+    #[arg(long, value_name = "IP")]
+    pub proxy_ip: Option<IpAddr>,
+
+    /// Override Miao autostart for this iVnc run (true/false)
+    #[arg(long, value_name = "BOOL")]
+    pub proxy_autostart: Option<bool>,
+
     /// Enable or disable remote console access (true/false)
     #[arg(long)]
     pub console_enabled: Option<bool>,
@@ -111,5 +119,89 @@ pub struct RunArgs {
 impl RunArgs {
     pub fn load_config(&self) -> Result<config::Config, Box<dyn std::error::Error>> {
         config::Config::load(&self.config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_autostart_is_an_optional_boolean_in_both_run_forms() {
+        assert!(Cli::try_parse_from(["ivnc"])
+            .unwrap()
+            .run_args
+            .proxy_autostart
+            .is_none());
+        for value in ["true", "false"] {
+            for args in [
+                vec!["ivnc", "--proxy-autostart", value],
+                vec!["ivnc", "run", "--proxy-autostart", value],
+            ] {
+                let cli = Cli::try_parse_from(args).unwrap();
+                let run = match cli.command {
+                    Some(Command::Run(run)) => run,
+                    _ => cli.run_args,
+                };
+                assert_eq!(run.proxy_autostart, Some(value == "true"));
+            }
+        }
+        for args in [
+            vec!["ivnc", "--proxy-autostart"],
+            vec!["ivnc", "--proxy-autostart", "invalid"],
+            vec![
+                "ivnc",
+                "--proxy-autostart",
+                "true",
+                "--proxy-autostart",
+                "false",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn proxy_ip_is_optional_and_accepts_ipv4_and_ipv6_in_both_run_forms() {
+        assert!(Cli::try_parse_from(["ivnc"])
+            .unwrap()
+            .run_args
+            .proxy_ip
+            .is_none());
+        for address in ["203.0.113.10", "2001:db8::10"] {
+            for args in [
+                vec!["ivnc", "--proxy-ip", address],
+                vec!["ivnc", "run", "--proxy-ip", address],
+            ] {
+                let cli = Cli::try_parse_from(args).unwrap();
+                let run = match cli.command {
+                    Some(Command::Run(run)) => run,
+                    _ => cli.run_args,
+                };
+                assert_eq!(run.proxy_ip, Some(address.parse().unwrap()));
+            }
+        }
+        let cli = Cli::try_parse_from(["ivnc", "--proxy-ip=203.0.113.10"]).unwrap();
+        assert_eq!(cli.run_args.proxy_ip, Some("203.0.113.10".parse().unwrap()));
+    }
+
+    #[test]
+    fn proxy_ip_rejects_missing_invalid_or_duplicate_addresses() {
+        for args in [
+            vec!["ivnc", "--proxy-ip"],
+            vec!["ivnc", "--proxy-ip", "999.1.2.3"],
+            vec!["ivnc", "--proxy-ip", "vps.example.com"],
+            vec!["ivnc", "--proxy-ip", "203.0.113.10;echo bad"],
+            vec!["ivnc", "--proxy-ip", "203.0.113.10:22"],
+            vec![
+                "ivnc",
+                "--proxy-ip",
+                "203.0.113.10",
+                "--proxy-ip",
+                "203.0.113.11",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args.clone()).is_err(), "{args:?}");
+        }
     }
 }

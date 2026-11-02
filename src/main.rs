@@ -243,6 +243,8 @@ fn main() {
         ui_config,
         input_tx.clone(),
         runtime_settings.clone(),
+        args.proxy_ip,
+        args.proxy_autostart,
     ));
 
     if let Err(e) = run(

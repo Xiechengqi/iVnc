@@ -147,11 +147,25 @@ apt-get install intel-media-va-driver-non-free
 
 # 覆盖默认端口、容器名或镜像
 PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
+
+# 指定 VPS，Miao 部署/恢复节点并启用全局代理
+./docker-run.sh --proxy-ip 203.0.113.10
 ```
 
 脚本将仓库下的 `ivnc-data` 和 `miao-data` 分别挂载到 `/root/.ivnc` 和
 `/root/.miao`，并为 miao 全局和进程代理模式提供 `/dev/net/tun` 与 `NET_ADMIN`。
 容器默认使用 `--restart unless-stopped`。宿主机必须已安装 Docker 且提供 TUN 设备。
+
+也可直接在镜像名后传入 iVnc 参数：
+
+```bash
+docker run -d --name ivnc --restart unless-stopped \
+  -p 8008:8008 --cap-add NET_ADMIN --device /dev/net/tun \
+  -v "$PWD/ivnc-data:/root/.ivnc" -v "$PWD/miao-data:/root/.miao" \
+  ghcr.io/xiechengqi/ivnc:latest --proxy-ip 203.0.113.10
+```
+
+`--proxy-ip` 接受 IPv4/IPv6，使 Miao 以 `--nopasswd --mode global --vps-host <IP>` 启动，默认使用运行账户的 SSH 密钥或 agent。Docker 若需使用密钥，可将专用 SSH 目录挂载到 `/root/.ssh`；需可写以保存 `known_hosts`。详细行为见 [Miao 后台应用](docs/MIAO.md)。
 
 可用镜像标签包括滚动更新的 `latest`、固定 Ubuntu 24.04 运行时的 `noble`，以及
 不可变的 `sha-<提交短哈希>`。需要回滚时，将 `IMAGE` 指向此前的提交标签或镜像摘要。
@@ -173,6 +187,9 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 # 覆盖端口和分辨率
 ./ivnc -c config.toml --http-port 8008 --width 1920 --height 1080
 
+# 指定 Miao 使用的 VPS 并启动全局代理
+./ivnc --proxy-ip 203.0.113.10
+
 # 启用自签名 HTTPS（需要 tls feature 编译）
 ./ivnc -c config.toml --tls
 
@@ -192,6 +209,9 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) ./ivnc -c config.toml --http-port 8008
 | `--width` | `1920` | 显示宽度 |
 | `--height` | `1080` | 显示高度 |
 | `--http-port` | 配置文件值 | HTTP 端口（同时用于 ICE-TCP） |
+| `--proxy-ip <IP>` | 未指定 | Miao 部署/恢复指定 VPS，并以全局模式启动；接受 IPv4/IPv6 |
+| `--proxy-autostart <true/false>` | 兼容旧版偏好，首次默认开启 | 控制本次 Miao 自启动；关闭后仍可手动启动 |
+| `--proxy-enabled <true/false>` | 配置文件值 | Miao 总开关，关闭后禁止自启动和手动启动 |
 | `--tls` | | 启用自签名 HTTPS |
 | `--basic-auth-enabled` | `true` | 启用基础认证 |
 | `--basic-auth-user` | | 认证用户名 |
@@ -284,7 +304,7 @@ $IVNC_HOME/
 
 miao 自身的配置、订阅缓存和运行状态遵循 miao 的目录约定，位于 `$HOME/.miao`。Docker 部署应同时持久化 `/root/.ivnc` 与 `/root/.miao`。
 
-Miao 以内置后台应用显示在控制台应用列表，首次默认随 iVnc 启动，之后保留用户的自启动选择。可直接启动、停止、重启、查看日志并打开代理配置，默认以 `--nopasswd` 免密码进入 Miao 面板。VPS 部署依赖 OpenSSH 客户端，Docker 镜像已包含。详细行为、配套版本和构建方式见 [Miao 后台应用](docs/MIAO.md)。
+Miao 以内置后台应用显示在控制台应用列表，首次默认随 iVnc 启动，升级时保留旧版自启动偏好。可直接启动、停止、重启、查看日志并打开代理配置，默认以 `--nopasswd` 免密码进入 Miao 面板。“编辑应用”展示完整只读配置，启动参数通过 iVnc CLI 控制。VPS 部署依赖 OpenSSH 客户端，Docker 镜像已包含。详细行为、配套版本和构建方式见 [Miao 后台应用](docs/MIAO.md)。
 
 首次启动会尝试从旧路径（`~/.config/ivnc`、`/tmp/ivnc-apps` 等）自动迁移。
 

@@ -15,6 +15,7 @@ use tokio::sync::Mutex as AsyncMutex;
 const MIAO_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/miao-rust-linux-amd64"));
 pub const BUILTIN_MIAO_ID: &str = "builtin-miao";
 pub const MIAO_PORT: u16 = 6161;
+pub const MIAO_START_TIMEOUT_SECS: u64 = 15;
 const MIAO_INTEGRATION_VERSION: u32 = 2;
 
 #[derive(Debug)]
@@ -78,6 +79,8 @@ pub struct ProxyPanelManager {
     shutting_down: AtomicBool,
     watchdog_started: AtomicBool,
     enabled: bool,
+    proxy_ip: Option<IpAddr>,
+    autostart_override: Option<bool>,
     port: u16,
     dir: PathBuf,
     home: PathBuf,
@@ -86,7 +89,7 @@ pub struct ProxyPanelManager {
 }
 
 impl ProxyPanelManager {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, proxy_ip: Option<IpAddr>, autostart_override: Option<bool>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self {
             runtime: Mutex::new(Runtime::default()),
@@ -95,6 +98,8 @@ impl ProxyPanelManager {
             shutting_down: AtomicBool::new(false),
             watchdog_started: AtomicBool::new(false),
             enabled,
+            proxy_ip,
+            autostart_override,
             port: std::env::var("IVNC_MIAO_PORT")
                 .ok()
                 .and_then(|value| value.parse::<u16>().ok())
@@ -111,9 +116,18 @@ impl ProxyPanelManager {
         self.port
     }
 
+    pub fn autostart(&self, saved_preference: bool) -> bool {
+        self.autostart_override.unwrap_or(saved_preference)
+    }
+
     #[cfg(test)]
-    pub(crate) fn isolated(enabled: bool, root: &Path) -> Self {
-        let mut manager = Self::new(enabled);
+    pub(crate) fn isolated(
+        enabled: bool,
+        root: &Path,
+        proxy_ip: Option<IpAddr>,
+        autostart_override: Option<bool>,
+    ) -> Self {
+        let mut manager = Self::new(enabled, proxy_ip, autostart_override);
         manager.dir = root.join("miao");
         manager.home = root.join("home");
         manager
@@ -129,6 +143,22 @@ impl ProxyPanelManager {
     }
     fn chrome_proxy_path(&self) -> PathBuf {
         self.dir.join("chrome-proxy")
+    }
+
+    /// Build the command used both to spawn Miao and to display its managed configuration.
+    pub fn launch_command(&self) -> Command {
+        let mut command = Command::new(self.binary_path());
+        command.arg("--nopasswd");
+        if let Some(ip) = self.proxy_ip {
+            command.args(["--mode", "global", "--vps-host", &ip.to_string()]);
+        }
+        command
+            .current_dir(&self.dir)
+            .env("HOME", &self.home)
+            .env("MIAO_EMBEDDED", "ivnc")
+            .env("MIAO_PORT", self.port.to_string())
+            .env("MIAO_RUNTIME_DIR", self.runtime_dir());
+        command
     }
 
     pub fn start_watchdog(self: &Arc<Self>) {
@@ -294,7 +324,7 @@ impl ProxyPanelManager {
                 self.stop_process().await;
                 self.spawn().await?
             };
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(MIAO_START_TIMEOUT_SECS);
             loop {
                 if !self.desired_running.load(Ordering::SeqCst) || self.shutting_down.load(Ordering::SeqCst) {
                     return Err("miao startup cancelled".into());
@@ -323,12 +353,11 @@ impl ProxyPanelManager {
 
     async fn spawn(&self) -> Result<u32, String> {
         let dir = self.dir.clone();
-        let home = self.home.clone();
         let data_path = self.data_path();
         let runtime_dir = self.runtime_dir();
         let log_path = self.log_path();
         let bin = self.binary_path();
-        let port = self.port;
+        let mut command = self.launch_command();
         #[cfg(test)]
         let use_embedded = self.binary_override.is_none();
         #[cfg(not(test))]
@@ -352,17 +381,7 @@ impl ProxyPanelManager {
                 .open(log_path)
                 .map_err(|e| e.to_string())?;
             let stderr = stdout.try_clone().map_err(|e| e.to_string())?;
-            let mut command = Command::new(&bin);
-            command
-                .arg("--nopasswd")
-                .current_dir(dir)
-                .env("HOME", home)
-                .env("MIAO_EMBEDDED", "ivnc")
-                .env("MIAO_PORT", port.to_string())
-                .env("MIAO_RUNTIME_DIR", runtime_dir)
-                .stdin(Stdio::null())
-                .stdout(stdout)
-                .stderr(stderr);
+            command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
             unsafe {
                 command.pre_exec(|| {
                     if libc::setpgid(0, 0) != 0 {
@@ -654,15 +673,23 @@ mod tests {
             Self(root)
         }
         fn manager(&self, enabled: bool, instance: &str) -> Arc<ProxyPanelManager> {
+            self.manager_with_proxy_ip(enabled, instance, None)
+        }
+        fn manager_with_proxy_ip(
+            &self,
+            enabled: bool,
+            instance: &str,
+            proxy_ip: Option<IpAddr>,
+        ) -> Arc<ProxyPanelManager> {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let mut manager = ProxyPanelManager::new(enabled);
+            let mut manager = ProxyPanelManager::new(enabled, proxy_ip, None);
             manager.port = listener.local_addr().unwrap().port();
             manager.home = self.0.join("home");
             manager.dir = self.0.join(instance);
             let script = self.0.join("panel.py");
             fs::write(&script, r#"#!/usr/bin/env python3
 import http.server, json, os, signal, subprocess, sys, time
-assert sys.argv[1:] == ['--nopasswd']
+with open('args.json', 'w') as file: json.dump(sys.argv[1:], file)
 class Panel(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         payload = dict(success=True, data=dict(service='miao', service_pid=os.getpid(), embedded=True,
@@ -697,7 +724,8 @@ http.server.HTTPServer(('127.0.0.1', int(os.environ['MIAO_PORT'])), Panel).serve
     #[tokio::test]
     async fn disabled_manager_never_starts_or_recovers() {
         let sandbox = Sandbox::new();
-        let manager = sandbox.manager(false, "disabled");
+        let manager =
+            sandbox.manager_with_proxy_ip(false, "disabled", Some("203.0.113.10".parse().unwrap()));
         manager.start_watchdog();
         assert!(manager.start().await.is_err());
         assert!(manager.restart().await.is_err());
@@ -716,6 +744,13 @@ http.server.HTTPServer(('127.0.0.1', int(os.environ['MIAO_PORT'])), Panel).serve
         let pid = first.unwrap().unwrap();
         assert_eq!(second.unwrap(), Some(pid));
         assert!(manager.status().ready);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(
+                &fs::read_to_string(manager.dir.join("args.json")).unwrap()
+            )
+            .unwrap(),
+            ["--nopasswd"]
+        );
         assert_eq!(
             fs::read_to_string(manager.chrome_proxy_path()).unwrap(),
             "socks5://[::1]:19081\n"
@@ -745,6 +780,47 @@ http.server.HTTPServer(('127.0.0.1', int(os.environ['MIAO_PORT'])), Panel).serve
         assert!(!manager.status().running);
         assert!(manager.start().await.is_err());
         assert!(!manager.status().desired_running);
+    }
+
+    #[tokio::test]
+    async fn proxy_ip_is_passed_as_arguments_on_start_restart_and_recovery() {
+        for ip in ["203.0.113.10", "2001:db8::10"] {
+            let sandbox = Sandbox::new();
+            let manager =
+                sandbox.manager_with_proxy_ip(true, "proxy-ip", Some(ip.parse().unwrap()));
+            manager.start_watchdog();
+            let assert_args = || {
+                let args: Vec<String> = serde_json::from_str(
+                    &fs::read_to_string(manager.dir.join("args.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(args, ["--nopasswd", "--mode", "global", "--vps-host", ip]);
+            };
+            manager.start().await.unwrap();
+            assert_args();
+            manager.restart().await.unwrap();
+            assert_args();
+            manager.stop().await.unwrap();
+            let previous_pid = manager.start().await.unwrap().unwrap();
+            assert_args();
+            unsafe {
+                libc::kill(previous_pid as i32, libc::SIGKILL);
+            }
+            tokio::time::timeout(Duration::from_secs(12), async {
+                loop {
+                    let status = manager.status();
+                    if status.ready && status.pid != Some(previous_pid) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("watchdog should recover Miao with the requested VPS");
+            assert_args();
+            manager.stop().await.unwrap();
+            manager.shutdown().await;
+        }
     }
 
     #[tokio::test]

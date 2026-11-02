@@ -162,10 +162,16 @@ impl SharedState {
         ui_config: UiConfig,
         input_sender: mpsc::UnboundedSender<InputEventData>,
         runtime_settings: Arc<RuntimeSettings>,
+        proxy_ip: Option<std::net::IpAddr>,
+        proxy_autostart: Option<bool>,
     ) -> Self {
         let (clipboard_incoming_tx, clipboard_incoming_rx) = mpsc::unbounded_channel();
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
-        let proxy_panel = Arc::new(ProxyPanelManager::new(config.ui_features.proxy_enabled));
+        let proxy_panel = Arc::new(ProxyPanelManager::new(
+            config.ui_features.proxy_enabled,
+            proxy_ip,
+            proxy_autostart,
+        ));
 
         Self {
             config: Arc::new(config),

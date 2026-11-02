@@ -419,6 +419,7 @@ h1 {
 }
 
 .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+.app-modal [hidden] { display: none !important; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 
 .card {
@@ -700,6 +701,12 @@ tr:hover { background-color: #f8f9fa; }
   padding-top: 10px;
   padding-bottom: 10px;
   line-height: 1.5;
+}
+.app-modal input[readonly], .app-modal textarea[readonly], .app-modal select:disabled {
+  background: #f3f5f8;
+}
+.app-modal input[readonly]::placeholder, .app-modal textarea[readonly]::placeholder {
+  color: transparent;
 }
 .form-line input::placeholder,
 .form-line textarea::placeholder,

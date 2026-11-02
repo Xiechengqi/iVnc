@@ -12,7 +12,9 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import socket
+import sqlite3
 import ssl
 import subprocess
 import tempfile
@@ -103,11 +105,15 @@ class Instance:
             return app
         return False
 
-    def boot(self, enabled=True):
+    def boot(self, enabled=True, autostart=None, proxy_ip=None):
         self.log = (self.root / "ivnc.log").open("a")
         args = [str(self.binary), "--foreground", "--http-port", str(self.http_port),
                 "--basic-auth-enabled", "true", "--basic-auth-user", "smoke",
                 "--basic-auth-password", "isolated-test", "--proxy-enabled", str(enabled).lower()]
+        if autostart is not None:
+            args.extend(["--proxy-autostart", str(autostart).lower()])
+        if proxy_ip is not None:
+            args.extend(["--proxy-ip", proxy_ip])
         if self.tls:
             args.append("--tls")
         self.process = subprocess.Popen(args, cwd=self.root, env=self.env, stdout=self.log, stderr=self.log)
@@ -126,6 +132,12 @@ class Instance:
         if self.log:
             self.log.close()
             self.log = None
+
+    def seed_legacy_autostart(self, value):
+        """Restore an old-version preference while the isolated host is stopped."""
+        assert self.process.poll() is not None
+        with sqlite3.connect(Path(self.env["IVNC_HOME"]) / "apps.db") as db:
+            db.execute("UPDATE apps SET autostart=? WHERE id='builtin-miao'", (int(value),))
 
     def websocket(self, cookie=None, origin=None, status=101):
         conn = self.connection()
@@ -150,6 +162,16 @@ def scenario(binary, root, tls, browser=False):
         app = eventually(instance.ready)
         assert app["autostart"] and app["app_type"] == "background" and app["builtin"]
         assert not app["can_delete"] and not app["can_clear_data"]
+        argv = shlex.split(app["launch_command"])
+        assert argv == [str(Path(instance.env["IVNC_HOME"]) / "miao/miao-rust-linux-amd64"), "--nopasswd"]
+        assert argv == Path(f"/proc/{app['pid']}/cmdline").read_bytes().decode().rstrip("\0").split("\0")
+        assert app["launch_cwd"] == os.readlink(f"/proc/{app['pid']}/cwd")
+        assert app["url"] == "/proxy/" and app["launch_wait_timeout_secs"] == 15
+        assert app["launch_env_vars"] == {
+            "HOME": instance.env["HOME"], "MIAO_EMBEDDED": "ivnc",
+            "MIAO_PORT": str(instance.miao_port),
+            "MIAO_RUNTIME_DIR": str(Path(instance.env["IVNC_HOME"]) / "miao/runtime"),
+        }
         legacy = instance.request("/api/proxy/status")[0]
         assert app["pid"] == legacy["pid"]
         assert instance.config.read_text() == instance.saved_config
@@ -186,8 +208,8 @@ def scenario(binary, root, tls, browser=False):
         instance.request(app_path, "DELETE", status=403)
         instance.request(app_path + "/clear-data", "POST", status=403)
         instance.request(app_path, "PUT", {"launch_command": "false"}, status=403)
-        instance.request(app_path, "PUT", {"autostart": False})
-        assert not instance.app()["autostart"]
+        instance.request(app_path, "PUT", {"autostart": False}, status=403)
+        assert instance.app()["autostart"]
         instance.request(app_path + "/stop", "POST")
         instance.request("/proxy/", status=503)
         instance.websocket(cookie, status=503)
@@ -199,10 +221,11 @@ def scenario(binary, root, tls, browser=False):
         app = eventually(instance.ready)
         os.kill(app["pid"], signal.SIGKILL)
         eventually(lambda: (new := instance.ready()) and new["pid"] != app["pid"])
-        # Simulate a host crash while Miao is manually running with autostart off.
+        # Simulate a host crash, then restore an old-version autostart preference.
         instance.process.kill()
         instance.process.wait()
         instance.stop()
+        instance.seed_legacy_autostart(False)
         # Old state files must never override the explicit Miao autostart preference.
         (Path(instance.env["IVNC_HOME"]) / "app_running_state.json").write_text(
             json.dumps({"app_ids": ["builtin-miao"], "timestamp": int(time.time())}))
@@ -218,11 +241,27 @@ def scenario(binary, root, tls, browser=False):
         assert result["success"]
         assert instance.config.read_text() == instance.saved_config
         assert instance.auth_path.read_text() == instance.saved_auth
-        instance.request(app_path, "PUT", {"autostart": True})
+        instance.request(app_path, "PUT", {"autostart": True}, status=403)
         instance.stop()
-        instance.boot(enabled=False)
+        instance.boot(autostart=True)
+        assert eventually(instance.ready)["autostart"]
+        instance.stop()
+        # A CLI override must not replace the saved old-version preference.
+        with sqlite3.connect(Path(instance.env["IVNC_HOME"]) / "apps.db") as db:
+            assert db.execute("SELECT autostart FROM apps WHERE id='builtin-miao'").fetchone() == (0,)
+        instance.seed_legacy_autostart(True)
+        instance.boot(autostart=False)
         time.sleep(3.5)
-        assert instance.app()["enabled"] is False and instance.app()["status"] == "stopped"
+        assert instance.app()["status"] == "stopped" and not instance.app()["autostart"]
+        instance.request(app_path + "/start", "POST")
+        assert not eventually(instance.ready)["autostart"]
+        instance.stop()
+        instance.boot(enabled=False, autostart=True, proxy_ip="203.0.113.10")
+        time.sleep(3.5)
+        disabled = instance.app()
+        assert disabled["enabled"] is False and disabled["status"] == "stopped" and disabled["autostart"]
+        assert shlex.split(disabled["launch_command"])[1:] == [
+            "--nopasswd", "--mode", "global", "--vps-host", "203.0.113.10"]
         instance.request(app_path + "/start", "POST", status=403)
         instance.request(app_path + "/restart", "POST", status=403)
         instance.request("/api/proxy/start", "POST", status=404)

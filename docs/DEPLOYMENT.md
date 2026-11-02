@@ -292,7 +292,24 @@ Xvfb、Openbox 或外部 `DISPLAY`。在仓库目录中运行：
 
 ```bash
 PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
+
+# 指定 VPS 并启用 Miao 全局代理
+./docker-run.sh --proxy-ip 203.0.113.10
 ```
+
+`docker-run.sh` 的位置参数会原样附加在镜像名后，作为 iVnc CLI 参数。直接执行 Docker 也可使用：
+
+```bash
+docker run -d --name ivnc --restart unless-stopped \
+  -p 8008:8008 --cap-add NET_ADMIN --device /dev/net/tun \
+  -v "$PWD/ivnc-data:/root/.ivnc" -v "$PWD/miao-data:/root/.miao" \
+  -v /path/to/ivnc-ssh:/root/.ssh \
+  ghcr.io/xiechengqi/ivnc:latest --proxy-ip 203.0.113.10
+```
+
+将示例 IP 与 SSH 目录替换为实际值。该目录应包含运行账户可用的密钥，且可写以保存 `known_hosts`。`--proxy-ip` 使 Miao 以 `--nopasswd --mode global --vps-host <IP>` 启动；SSH 默认 root/22、使用现有密钥或 agent。参数支持 IPv4/IPv6；`--proxy-autostart true|false` 控制本次自启动，`--proxy-enabled false` 完全禁用 Miao。启动偏好与重启行为见 [Miao 后台应用](MIAO.md)。
+
+镜像名后不带 iVnc 参数时保持默认启动；自定义前台命令仍可使用 `IMAGE sleep infinity`。同时传 iVnc 参数与前台命令时，使用 `IMAGE --proxy-ip <IP> -- COMMAND ...`。
 
 脚本会创建并持久化仓库目录下的 `ivnc-data` 和 `miao-data`。miao 的全局和进程
 代理模式会创建 TUN，因此宿主机必须提供 `/dev/net/tun`，容器也需要脚本中授予的

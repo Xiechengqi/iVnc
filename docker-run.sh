@@ -47,4 +47,4 @@ exec docker run -itd \
     -v "${ROOT_DIR}/miao-data:/root/.miao" \
     --restart unless-stopped \
     --name "${NAME}" \
-    "${IMAGE}"
+    "${IMAGE}" "$@"

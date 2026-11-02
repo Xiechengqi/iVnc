@@ -98,7 +98,6 @@ const I18N = {
         autostart: 'Autostart',
         miaoService: 'Built-in proxy service',
         configureProxy: 'Configure proxy',
-        miaoSettings: 'Autostart takes effect when iVnc next starts. Manage nodes, subscriptions, and proxy mode in the Miao panel. The running status here refers to the panel service.',
         disabledByAdmin: 'Disabled by administrator',
         launchCommand: 'Launch Command',
         launchCwd: 'Working Directory',
@@ -278,7 +277,6 @@ const I18N = {
         autostart: '开机启动',
         miaoService: '内置代理服务',
         configureProxy: '配置代理',
-        miaoSettings: '自启动设置在下次 iVnc 启动时生效。节点、订阅和代理模式请在 Miao 面板中配置。此处运行状态表示面板服务状态。',
         disabledByAdmin: '管理员已禁用',
         launchCommand: '启动命令',
         launchCwd: '工作目录',
@@ -511,8 +509,6 @@ function applyTranslations() {
     if (dtOpt) dtOpt.textContent = t('desktopOption');
     if (cliOpt) cliOpt.textContent = t('cliOption');
     setText('label-autostart', 'autostart');
-    setText('miao-settings-help', 'miaoSettings');
-    setText('miao-panel-link', 'configureProxy');
     setText('label-skill-paths', 'skillPaths');
     setText('label-skill-paths-default', 'skillPathsDefault');
     setText('label-launch-command', 'launchCommand');
@@ -532,7 +528,7 @@ function applyTranslations() {
     setText('label-cli-binary', 'cliBinary');
     setText('label-cli-env', 'cliEnv');
     setText('label-cli-env-default', 'cliEnvDefault');
-    setText('modal-cancel', 'cancel');
+    setText('modal-cancel', editBuiltin ? 'close' : 'cancel');
     setText('log-close-btn', 'close');
     document.getElementById('modal-close')?.setAttribute('aria-label', t('close'));
     setPlaceholderById('f-name', t('nameInputPlaceholder'));
@@ -1050,9 +1046,7 @@ function showAdd() {
     modal.querySelector('#modal-save').textContent = t('addSave');
 
     document.getElementById('f-name').value = '';
-    document.getElementById('f-name').disabled = false;
     document.getElementById('f-app-type').value = 'background';
-    document.getElementById('f-app-type').disabled = false;
     document.getElementById('f-url').value = '';
     document.getElementById('f-autostart').checked = false;
     document.getElementById('f-launch-command').value = '';
@@ -1080,9 +1074,7 @@ async function showEdit(id) {
         modal.querySelector('#modal-save').textContent = t('editSave');
 
         document.getElementById('f-name').value = a.name;
-        document.getElementById('f-name').disabled = true;
         document.getElementById('f-app-type').value = a.app_type || 'background';
-        document.getElementById('f-app-type').disabled = true;
         document.getElementById('f-autostart').checked = !!a.autostart;
         document.getElementById('f-skill-paths').value = listToText(a.skill_paths);
         document.getElementById('f-url').value = '';
@@ -1160,6 +1152,7 @@ function parseEnvText(text) {
 }
 
 async function saveApp() {
+    if (editBuiltin) return;
     const btn = document.getElementById('modal-save');
     const appType = document.getElementById('f-app-type').value;
     const body = {
@@ -1173,9 +1166,7 @@ async function saveApp() {
         if (!body.name) return toast(t('missingName'), 'err');
     }
 
-    if (editBuiltin) {
-        delete body.skill_paths;
-    } else if (appType === 'desktop') {
+    if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         if (!body.exec_command) return toast(t('missingExec'), 'err');
 
@@ -1309,16 +1300,12 @@ function updateAppTypeVisibility() {
     const backgroundSlot = document.getElementById('background-autostart-slot');
     const desktopSlot = document.getElementById('desktop-autostart-slot');
 
-    document.getElementById('background-config').style.display = type === 'background' && !editBuiltin ? 'block' : 'none';
-    document.getElementById('miao-config').hidden = !editBuiltin;
-    document.getElementById('f-skill-paths').closest('.form-line').style.display = editBuiltin ? 'none' : '';
+    document.getElementById('background-config').style.display = type === 'background' ? 'block' : 'none';
     document.getElementById('desktop-config').style.display = type === 'desktop' ? 'block' : 'none';
     document.getElementById('cli-config').style.display = type === 'cli' ? 'block' : 'none';
 
     autostartControl.classList.remove('inline-slot');
-    if (editBuiltin) {
-        generalSlot.appendChild(autostartControl);
-    } else if (type === 'desktop') {
+    if (type === 'desktop') {
         desktopSlot.appendChild(autostartControl);
         autostartControl.classList.add('inline-slot');
     } else if (type === 'background') {
@@ -1333,6 +1320,17 @@ function updateAppTypeVisibility() {
     if (!autostartControl.parentElement) {
         generalSlot.appendChild(autostartControl);
     }
+
+    const modal = document.getElementById('modal');
+    modal.querySelectorAll('input:not([type="checkbox"]), textarea').forEach(field => {
+        field.readOnly = editBuiltin;
+    });
+    document.getElementById('f-name').disabled = !!editId && !editBuiltin;
+    document.getElementById('f-app-type').disabled = !!editId;
+    document.getElementById('f-autostart').disabled = editBuiltin;
+    document.getElementById('modal-save').hidden = editBuiltin;
+    document.getElementById('modal-save').disabled = editBuiltin;
+    document.getElementById('modal-cancel').textContent = t(editBuiltin ? 'close' : 'cancel');
 }
 
 

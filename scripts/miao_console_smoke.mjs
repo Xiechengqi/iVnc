@@ -93,16 +93,72 @@ try {
             if (row.querySelector('.btn-clear,.btn-delete')) throw Error('protected actions are exposed');
             if (!row.querySelector('.btn-stop')) throw Error('Miao is not displayed as running');
             const edit = row.querySelector('.btn-edit');
-            if (edit.disabled) throw Error('cannot edit startup preference while running');
+            if (edit.disabled) throw Error('cannot view managed configuration while running');
             edit.click();
             await wait(() => document.querySelector('#modal').classList.contains('show'));
-            if (document.querySelector('#miao-config').hidden || getComputedStyle(document.querySelector('#background-config')).display !== 'none') throw Error('wrong managed settings form');
+            const modal = document.querySelector('#modal');
+            if (getComputedStyle(document.querySelector('#background-config')).display === 'none') throw Error('background configuration is hidden');
+            if (modal.querySelector('#miao-config,#miao-settings-help,#miao-panel-link')) throw Error('obsolete managed settings section remains');
+            for (const field of modal.querySelectorAll('input,textarea,select')) {
+                if (!field.getClientRects().length) continue;
+                if (field.type === 'checkbox' || field.tagName === 'SELECT') {
+                    if (!field.disabled) throw Error(field.id + ' is editable');
+                } else if (!field.readOnly || field.disabled) {
+                    throw Error(field.id + ' is not a copyable read-only field');
+                }
+            }
             if (!document.querySelector('#f-autostart').checked) throw Error('autostart default is missing');
-            document.querySelector('#f-autostart').checked = false;
-            document.querySelector('#modal-save').click();
-            await wait(() => !document.querySelector('#modal').classList.contains('show'));
+            if (!document.querySelector('#f-skill-paths').getClientRects().length) throw Error('skill paths field is hidden');
+            const save = document.querySelector('#modal-save');
+            if (!save.hidden || !save.disabled || getComputedStyle(save).display !== 'none') throw Error('read-only form exposes save');
             const saved = await (await fetch('/api/apps/builtin-miao')).json();
-            if (saved.autostart || saved.status !== 'running') throw Error('startup preference was not saved independently of running state');
+            for (const [id, key] of [['f-launch-command', 'launch_command'], ['f-launch-cwd', 'launch_cwd'], ['f-url', 'url'], ['f-launch-timeout', 'launch_wait_timeout_secs']]) {
+                if (document.getElementById(id).value !== String(saved[key])) throw Error(id + ' does not match effective configuration');
+            }
+            if (!document.querySelector('#f-launch-command').value.endsWith(' --nopasswd')) throw Error('actual startup arguments are missing');
+            const envText = Object.entries(saved.launch_env_vars).map(([key, value]) => key + '=' + value).join(String.fromCharCode(10));
+            if (document.querySelector('#f-launch-env').value !== envText) throw Error('effective environment is missing');
+            const rejected = await fetch('/api/apps/builtin-miao', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({autostart: false}) });
+            if (rejected.status !== 403) throw Error('API allows a read-only configuration change');
+            document.querySelector('#modal-cancel').click();
+            await wait(() => !modal.classList.contains('show'));
+
+            document.querySelector('#add-app-btn').click();
+            await wait(() => modal.classList.contains('show'));
+            const assertEditable = () => {
+                for (const field of modal.querySelectorAll('input,textarea')) {
+                    if (field.readOnly || (field.disabled && field.id !== 'f-name')) throw Error(field.id + ' remains read-only');
+                }
+                if (save.hidden || save.disabled || getComputedStyle(save).display === 'none') throw Error('ordinary form cannot save');
+            };
+            assertEditable();
+            if (document.querySelector('#f-name').disabled || document.querySelector('#f-app-type').disabled) throw Error('add form remains locked');
+            const type = document.querySelector('#f-app-type');
+            type.value = 'desktop';
+            type.dispatchEvent(new Event('change'));
+            if (!document.querySelector('#f-exec').getClientRects().length || document.querySelector('#f-exec').readOnly) throw Error('desktop form remains locked');
+            type.value = 'background';
+            type.dispatchEvent(new Event('change'));
+            document.querySelector('#f-name').value = 'Modal regression';
+            document.querySelector('#f-launch-command').value = 'sleep 60';
+            document.querySelector('#f-autostart').checked = false;
+            save.click();
+            await wait(() => !modal.classList.contains('show'));
+            const findNormal = () => Array.from(document.querySelectorAll('#app-list tr')).find(item => item.querySelector('strong')?.textContent === 'Modal regression');
+            await wait(findNormal);
+            findNormal().querySelector('.btn-edit').click();
+            await wait(() => modal.classList.contains('show'));
+            assertEditable();
+            document.querySelector('#f-launch-command').value = 'sleep 61';
+            save.click();
+            await wait(() => !modal.classList.contains('show'));
+            const apps = await (await fetch('/api/apps')).json();
+            const normal = apps.apps.find(app => app.name === 'Modal regression');
+            if (normal.launch_command !== 'sleep 61' || normal.autostart) throw Error('ordinary app cannot be edited after Miao');
+            const removed = await fetch('/api/apps/' + normal.id, { method: 'DELETE' });
+            if (!removed.ok) throw Error('ordinary test app cleanup failed');
+            const current = await (await fetch('/api/apps/builtin-miao')).json();
+            if (!current.autostart || current.status !== 'running') throw Error('viewing configuration changed Miao');
             const frame = document.createElement('iframe');
             frame.src = '/proxy/';
             document.body.appendChild(frame);
@@ -114,14 +170,14 @@ try {
             if (frame.contentWindow.WebSocket.OPEN !== 1 || frame.contentWindow.WebSocket.CONNECTING !== 0) throw Error('WebSocket constants were lost');
             const auth = await (await frame.contentWindow.fetch('/api/auth/status')).json();
             if (!auth.data.authenticated || auth.data.password_required) throw Error('embedded panel did not create a passwordless session');
-            return { runningEdit: true, savedPreference: true, protectedActions: true, iframe: true, panelAuth: true };
+            return { readonlyConfig: true, effectiveCommand: true, ordinaryEditing: true, protectedActions: true, iframe: true, panelAuth: true };
         })()` });
     if (result.exceptionDetails) {
         const page = await call('Runtime.evaluate', { expression: 'location.href + "\\n" + document.body?.innerText?.slice(0, 400)', returnByValue: true });
         throw Error(JSON.stringify({ exception: result.exceptionDetails, page: page.result?.value }));
     }
-    assert.deepEqual(result.result.value, { runningEdit: true, savedPreference: true, protectedActions: true, iframe: true, panelAuth: true });
-    console.log('PASS Chrome UI: running Miao settings, startup preference, protected actions and authenticated iframe');
+    assert.deepEqual(result.result.value, { readonlyConfig: true, effectiveCommand: true, ordinaryEditing: true, protectedActions: true, iframe: true, panelAuth: true });
+    console.log('PASS Chrome UI: complete read-only Miao configuration, ordinary editing, protected actions and authenticated iframe');
 } finally {
     if (socket?.readyState === 1) {
         try { await call('Browser.close'); } catch { /* Chrome may close before acknowledging. */ }
