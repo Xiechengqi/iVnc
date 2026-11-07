@@ -209,7 +209,9 @@ impl AppsState {
                         return Ok(Some(pid));
                     }
                     if self.process.status(&app.id) != AppStatus::Running {
-                        return Err("Application isolation failed; see the application log for missing dependencies or namespace permissions".into());
+                        return Err(crate::remote::worker::failure(&app.id)
+                            .map(|f| f.message)
+                            .unwrap_or_else(|| "Application isolation failed; see the application log for missing dependencies or namespace permissions".into()));
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }

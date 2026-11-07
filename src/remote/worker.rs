@@ -3,7 +3,7 @@
 //! application data, read-only system files, explicitly allowed host paths and
 //! selected service sockets enter the sandbox. Host isolation keeps the host
 //! filesystem, network and environment and only privatizes the display session.
-use super::store::{private_write, DesktopSettings, Isolation, Mount, RemoteStore};
+use super::store::{private_write, truncate, DesktopSettings, Isolation, Mount, RemoteStore};
 use crate::{
     apps::app::{AppType, ManagedApp},
     config::Config,
@@ -33,6 +33,205 @@ static READY_FD: OnceLock<RawFd> = OnceLock::new();
 const CONTROL: &str = "/run/ivnc";
 const STRICT_RUNTIME_DIR: &str = "/run/user/0";
 const LOG_LIMIT: u64 = 8 * 1024 * 1024;
+/// Why the last start of a runtime failed before it became ready.
+const FAILURE_FILE: &str = "failure.json";
+/// Kernel interfaces container runtimes hide in /proc. A strict runtime mounts its
+/// own /proc and its root is iVnc's user, usually the host's root, so they are
+/// hidden there again; bubblewrap already makes sys, sysrq-trigger, irq and bus
+/// read-only.
+const PROC_HIDDEN: &[&str] = &[
+    "/proc/acpi",
+    "/proc/asound",
+    "/proc/fs",
+    "/proc/kcore",
+    "/proc/keys",
+    "/proc/latency_stats",
+    "/proc/sched_debug",
+    "/proc/scsi",
+    "/proc/timer_list",
+    "/proc/timer_stats",
+];
+const CAP_SYS_ADMIN: u32 = 21;
+
+/// Capability sets as exchanged with capget and capset (ABI version 3).
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
+impl CapHeader {
+    fn current_process() -> Self {
+        Self {
+            version: 0x20080522,
+            pid: 0,
+        }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// Whether this process holds `cap` in its effective set.
+fn has_capability(cap: u32) -> bool {
+    let mut header = CapHeader::current_process();
+    let mut data = [CapData::default(); 2];
+    let result = unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) };
+    result == 0 && data[(cap / 32) as usize].effective & (1 << (cap % 32)) != 0
+}
+
+/// Why a runtime failed before it became ready, for the manager to report.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Failure {
+    pub message: String,
+    /// Caused by how the host or container runs iVnc; restarting cannot help.
+    pub environment: bool,
+}
+
+pub fn failure(id: &str) -> Option<Failure> {
+    if !super::valid_id(id) {
+        return None;
+    }
+    serde_json::from_slice(&fs::read(runtime_dir(id).join(FAILURE_FILE)).ok()?).ok()
+}
+
+/// Startup output showing that the host or container does not permit the
+/// sandbox, and what to change.
+const ENVIRONMENT_FAILURES: &[(&[&str], &str)] = &[
+    (
+        &["Can't mount proc"],
+        "/proc is partly hidden, as Docker does by default, so the application sandbox cannot mount its own; for Docker add --security-opt systempaths=unconfined (Podman: --security-opt unmask=ALL)",
+    ),
+    (
+        &["No permissions to creat", "Creating new namespace failed"],
+        "User namespaces are not permitted; for Docker add --security-opt seccomp=unconfined --security-opt apparmor=unconfined, and on Ubuntu 23.10 or later hosts set kernel.apparmor_restrict_unprivileged_userns=0",
+    ),
+    (
+        &["setting up uid map", "Failed to make / slave", "loopback: Failed"],
+        "A security policy blocks the application sandbox; for Docker add --security-opt apparmor=unconfined, and on Ubuntu 23.10 or later hosts set kernel.apparmor_restrict_unprivileged_userns=0",
+    ),
+    (
+        &["/dev/net/tun"],
+        "Application networking needs a TUN device; for Docker add --device /dev/net/tun",
+    ),
+    (
+        &["Cannot enforce application network isolation"],
+        "nftables failed inside the application sandbox; the host kernel must provide nf_tables (load nft_ct and nft_reject_inet on the host)",
+    ),
+    (
+        &["Cannot install the system call filter", "System call filters support"],
+        "Strict isolation needs kernel seccomp filters, which this host or container does not allow",
+    ),
+    (
+        &["Desktop isolation requires"],
+        "Install the missing program or use the iVnc image",
+    ),
+];
+const FAILURE_LENGTH: usize = 400;
+
+/// Explains a runtime that failed before becoming ready, from the supervisor's
+/// error and the startup output iVnc trusts (see `StartupOutput`).
+fn explain_failure(error: &str, output: &str) -> Failure {
+    let lines = || output.lines().chain(std::iter::once(error)).rev();
+    for (needles, hint) in ENVIRONMENT_FAILURES {
+        if let Some(line) = lines().find(|l| needles.iter().any(|n| l.contains(n))) {
+            return Failure {
+                message: truncate(&format!("{hint} ({})", line.trim()), FAILURE_LENGTH),
+                environment: true,
+            };
+        }
+    }
+    // The worker reports why its setup failed before it exits.
+    let reported = lines().find_map(|l| l.strip_prefix("Application isolation failed: "));
+    Failure {
+        message: truncate(reported.unwrap_or(error).trim(), FAILURE_LENGTH),
+        environment: false,
+    }
+}
+
+/// Written by the worker once its setup is complete, just before the
+/// application can exist in the sandbox.
+const WORKER_STARTED: &str = "ivnc: application runtime set up";
+const STARTUP_OUTPUT_LIMIT: usize = 64 * 1024;
+
+/// Copies the output of the sandbox and its helpers to the application log,
+/// and keeps what they wrote while only iVnc ran in them, to explain a failed
+/// start. The application's own output, and the log, which lies in its
+/// writable data, may claim anything.
+struct StartupOutput {
+    text: std::sync::Arc<std::sync::Mutex<String>>,
+    done: (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
+    streams: usize,
+}
+
+impl StartupOutput {
+    fn new() -> Self {
+        Self {
+            text: Default::default(),
+            done: std::sync::mpsc::channel(),
+            streams: 0,
+        }
+    }
+
+    /// A pipe to give a child as stdout and stderr. Its output is kept until a
+    /// line equal to `until`, or entirely without one.
+    fn pipe(&mut self, until: Option<&'static str>) -> Result<(Stdio, Stdio), String> {
+        let (read, write) = pipe()?;
+        let stderr = write.try_clone().map_err(|e| e.to_string())?;
+        let text = self.text.clone();
+        let done = self.done.0.clone();
+        self.streams += 1;
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut source = std::io::BufReader::new(fs::File::from(read));
+            let mut log = std::io::stderr();
+            let mut kept = true;
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match (&mut source)
+                    .take(STARTUP_OUTPUT_LIMIT as u64)
+                    .read_until(b'\n', &mut line)
+                {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                if kept && until.is_some_and(|u| line.trim_ascii_end() == u.as_bytes()) {
+                    kept = false;
+                    let _ = done.send(());
+                    continue;
+                }
+                let _ = log.write_all(&line);
+                if kept {
+                    let mut text = text.lock().unwrap();
+                    if text.len() + line.len() <= STARTUP_OUTPUT_LIMIT {
+                        text.push_str(&String::from_utf8_lossy(&line));
+                    }
+                }
+            }
+            if kept {
+                let _ = done.send(());
+            }
+        });
+        Ok((Stdio::from(write), Stdio::from(stderr)))
+    }
+
+    /// The output kept so far, after briefly waiting for exited children's
+    /// last lines to be read.
+    fn kept(&self) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        for _ in 0..self.streams {
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            if self.done.1.recv_timeout(wait).is_err() {
+                break;
+            }
+        }
+        self.text.lock().unwrap().clone()
+    }
+}
 
 pub fn set_parent_config(config: Config) {
     let _ = PARENT_CONFIG.set(config);
@@ -285,6 +484,7 @@ pub fn command(app: &ManagedApp) -> Result<Command, String> {
     let root = runtime_dir(&app.id);
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(root.join(FAILURE_FILE));
     let desktop = RemoteStore::new()?.policy(&app.id)?.desktop;
     desktop.validate()?;
     let strict = desktop.isolation == Isolation::Strict;
@@ -562,8 +762,33 @@ async fn parent_exited(parent: i32) {
 }
 
 pub async fn supervise(path: &Path) -> Result<(), String> {
-    let mut launch: Launch = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+    let launch: Launch = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    let failure_path = launch.root.join(FAILURE_FILE);
+    let mut output = StartupOutput::new();
+    match start_runtime(launch, &mut output).await {
+        Ok(runtime) => runtime.run().await,
+        Err(error) => {
+            let failure = explain_failure(&error, &output.kept());
+            let _ = private_write(&failure_path, &serde_json::to_vec(&failure).unwrap());
+            Err(failure.message)
+        }
+    }
+}
+
+/// A runtime that became ready, and what the supervisor keeps for it.
+struct Runtime {
+    parent: i32,
+    root: PathBuf,
+    /// Host runtimes' private runtime directory on the host.
+    host_runtime_dir: Option<PathBuf>,
+    child: tokio::process::Child,
+    network: Option<(tokio::process::Child, OwnedFd)>,
+    _lock: fs::File,
+    _runtime_root: fs::File,
+}
+
+async fn start_runtime(mut launch: Launch, output: &mut StartupOutput) -> Result<Runtime, String> {
     // The manager may run spawns on any thread, so lifetime is tied to the parent
     // process here rather than through a thread-bound parent-death signal.
     let parent = unsafe { libc::getppid() };
@@ -721,9 +946,19 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
         ] {
             mount_if_exists(&mut cmd, p);
         }
-        cmd.args([
-            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run",
-        ]);
+        cmd.args(["--proc", "/proc"]);
+        for path in PROC_HIDDEN {
+            match fs::metadata(path) {
+                Ok(meta) if meta.is_dir() => {
+                    cmd.args(["--tmpfs", path, "--remount-ro", path]);
+                }
+                Ok(_) => {
+                    cmd.args(["--ro-bind", "/dev/null", path]);
+                }
+                Err(_) => {}
+            }
+        }
+        cmd.args(["--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]);
         for mount in &launch.mounts {
             cmd.arg(if mount.writable {
                 "--bind"
@@ -759,7 +994,9 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
             "--unshare-pid",
             "--die-with-parent",
         ]);
-        if unsafe { libc::geteuid() } != 0 {
+        // Without CAP_SYS_ADMIN, as in a container, bubblewrap can create the
+        // other namespaces only inside a new user namespace.
+        if unsafe { libc::geteuid() } != 0 || !has_capability(CAP_SYS_ADMIN) {
             cmd.arg("--unshare-user");
         }
         if launch.desktop.x11 {
@@ -807,6 +1044,8 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
         inherited.push(info_write.as_raw_fd());
     }
     inherit_fds(&mut sandbox, inherited);
+    let (stdout, stderr) = output.pipe(Some(WORKER_STARTED))?;
+    sandbox.stdout(stdout).stderr(stderr);
     let mut child = sandbox
         .spawn()
         .map_err(|e| format!("Cannot start application sandbox: {e}"))?;
@@ -857,6 +1096,8 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
             &mut slirp,
             vec![slirp_ready_write.as_raw_fd(), exit_read.as_raw_fd()],
         );
+        let (stdout, stderr) = output.pipe(None)?;
+        slirp.stdout(stdout).stderr(stderr);
         let mut slirp = slirp
             .spawn()
             .map_err(|e| format!("Cannot start isolated networking: {e}"))?;
@@ -895,8 +1136,9 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
         if !application_ready {
             match ready.try_recv() {
                 Ok(data) if data.starts_with(b"ready") => application_ready = true,
-                Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return Err("Application worker exited during startup".into())
+                Ok(data) => return Err(worker_failure(&data)),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(worker_failure(&[]))
                 }
                 Err(_) => {}
             }
@@ -912,6 +1154,15 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
             break;
         }
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            // The worker may have reported why just before it exited.
+            if !application_ready {
+                if let Ok(Ok(data)) = tokio::time::timeout(Duration::from_secs(1), &mut ready).await
+                {
+                    if !data.starts_with(b"ready") && !data.is_empty() {
+                        return Err(worker_failure(&data));
+                    }
+                }
+            }
             return Err(format!("Application worker exited: {status}"));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -930,36 +1181,60 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
         &launch.root.join("endpoint.json"),
         &serde_json::to_vec(&endpoint).unwrap(),
     )?;
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|e| e.to_string())?;
-    let network_stopped = async {
-        match network.as_mut() {
-            Some((slirp, _)) => {
-                let _ = slirp.wait().await;
+    Ok(Runtime {
+        parent,
+        root: launch.root,
+        host_runtime_dir: (!strict).then_some(host_runtime_dir),
+        child,
+        network,
+        _lock: lock,
+        _runtime_root: runtime_root,
+    })
+}
+
+/// Why the worker failed to start the application, from what it wrote to its
+/// readiness channel. The application cannot reach that channel.
+fn worker_failure(data: &[u8]) -> String {
+    match data.strip_prefix(STARTUP_FAILED) {
+        Some(reason) => truncate(&String::from_utf8_lossy(reason), FAILURE_LENGTH),
+        None => "Application worker exited during startup; see the application log".into(),
+    }
+}
+const STARTUP_FAILED: &[u8] = b"failed: ";
+
+impl Runtime {
+    async fn run(mut self) -> Result<(), String> {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| e.to_string())?;
+        let network_stopped = async {
+            match self.network.as_mut() {
+                Some((slirp, _)) => {
+                    let _ = slirp.wait().await;
+                }
+                None => std::future::pending().await,
             }
-            None => std::future::pending().await,
+        };
+        let result = tokio::select! {
+            r=self.child.wait()=>r.map(|s|s.success()).map_err(|e|e.to_string()),
+            _=term.recv()=>Ok(true),
+            _=tokio::signal::ctrl_c()=>Ok(true),
+            _=parent_exited(self.parent)=>Ok(true),
+            _=network_stopped=>Err("Application network stopped".into()),
+        };
+        if let Some(dir) = &self.host_runtime_dir {
+            // Only the empty mount point remains on the host.
+            let _ = fs::remove_dir(dir);
         }
-    };
-    let result = tokio::select! {
-        r=child.wait()=>r.map(|s|s.success()).map_err(|e|e.to_string()),
-        _=term.recv()=>Ok(true),
-        _=tokio::signal::ctrl_c()=>Ok(true),
-        _=parent_exited(parent)=>Ok(true),
-        _=network_stopped=>Err("Application network stopped".into()),
-    };
-    if !strict {
-        // Only the empty mount point remains on the host.
-        let _ = fs::remove_dir(&host_runtime_dir);
-    }
-    let _ = fs::remove_file(launch.root.join("endpoint.json"));
-    let _ = child.kill().await;
-    if let Some((mut slirp, _)) = network {
-        let _ = slirp.kill().await;
-    }
-    if result? {
-        Ok(())
-    } else {
-        Err("Application worker exited unexpectedly".into())
+        let _ = fs::remove_file(self.root.join("endpoint.json"));
+        let _ = self.child.kill().await;
+        if let Some((mut slirp, _)) = self.network {
+            let _ = slirp.kill().await;
+        }
+        if result? {
+            Ok(())
+        } else {
+            Err("Application worker exited unexpectedly".into())
+        }
     }
 }
 
@@ -1048,27 +1323,8 @@ pub fn prepare(path: &Path) -> Result<Config, String> {
                 return Err("Cannot restrict application capability bounding set".into());
             }
         }
-        #[repr(C)]
-        struct Header {
-            version: u32,
-            pid: i32,
-        }
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct Caps {
-            effective: u32,
-            permitted: u32,
-            inheritable: u32,
-        }
-        let header = Header {
-            version: 0x20080522,
-            pid: 0,
-        };
-        let caps = [Caps {
-            effective: 0,
-            permitted: 0,
-            inheritable: 0,
-        }; 2];
+        let header = CapHeader::current_process();
+        let caps = [CapData::default(); 2];
         if unsafe { libc::syscall(libc::SYS_capset, &header, caps.as_ptr()) } != 0
             || unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0
         {
@@ -1078,6 +1334,8 @@ pub fn prepare(path: &Path) -> Result<Config, String> {
         if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
             return Err("Cannot protect application worker memory".into());
         }
+        // Inherited by the worker's helpers and the application.
+        super::seccomp::install(super::seccomp::Profile::Application)?;
     }
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| "Missing runtime directory")?;
     fs::create_dir_all(&runtime_dir).map_err(|e| e.to_string())?;
@@ -1092,6 +1350,8 @@ pub fn prepare(path: &Path) -> Result<Config, String> {
     WORKER
         .set(launch)
         .map_err(|_| "Worker already initialized")?;
+    // Output after this line may come from the application.
+    let _ = std::io::stderr().write_all(format!("{WORKER_STARTED}\n").as_bytes());
     Ok(config)
 }
 
@@ -1145,12 +1405,22 @@ pub fn start_application() -> Result<(), String> {
     std::thread::Builder::new()
         .name("app-launch".into())
         .spawn(|| {
-            let result = start_application_inner().and_then(|_| {
-                let fd = READY_FD.get().ok_or("Missing readiness channel")?;
-                let mut ready = unsafe { fs::File::from_raw_fd(*fd) };
-                ready.write_all(b"ready").map_err(|e| e.to_string())
-            });
-            if let Err(error) = result {
+            let result = start_application_inner();
+            // The supervisor learns the outcome, and why startup failed, over a
+            // channel the application cannot reach.
+            let report = match &result {
+                Ok(()) => b"ready".to_vec(),
+                Err(error) => [STARTUP_FAILED, error.as_bytes()].concat(),
+            };
+            let reported = READY_FD
+                .get()
+                .ok_or_else(|| "Missing readiness channel".to_string())
+                .and_then(|fd| {
+                    unsafe { fs::File::from_raw_fd(*fd) }
+                        .write_all(&report)
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(error) = result.and(reported) {
                 eprintln!("Application startup failed: {error}");
                 unsafe {
                     libc::kill(libc::getpid(), libc::SIGTERM);
@@ -1429,6 +1699,109 @@ mod isolation_tests {
         assert!(resolve_mounts(&[mount("/tmp".into(), false)], &protected).is_err());
         assert!(resolve_mounts(&[mount(root.join("missing"), false)], &protected).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_failures_name_the_container_setting_to_change() {
+        let proc = explain_failure(
+            "Application worker exited during startup",
+            "sent tapfd=5 for tap0\nbwrap: Can't mount proc on /newroot/proc: Operation not permitted\n",
+        );
+        assert!(proc.environment && proc.message.contains("systempaths=unconfined"));
+        assert!(proc.message.contains("bwrap: Can't mount proc"));
+        for output in [
+            "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.",
+            "bwrap: Creating new namespace failed: Operation not permitted",
+        ] {
+            let failure = explain_failure("Sandbox setup failed (exit status: 1)", output);
+            assert!(failure.environment && failure.message.contains("seccomp=unconfined"));
+        }
+        let tun = explain_failure(
+            "Isolated networking exited: exit status: 1",
+            "open(\"/dev/net/tun\"): No such file or directory",
+        );
+        assert!(tun.environment && tun.message.contains("--device /dev/net/tun"));
+        let nft = explain_failure(
+            "Application worker exited during startup",
+            "Error: Could not process rule: No such file or directory\nApplication isolation failed: Cannot enforce application network isolation\n",
+        );
+        assert!(nft.environment && nft.message.contains("nf_tables"));
+        let missing = explain_failure("Desktop isolation requires slirp4netns", "");
+        assert!(missing.environment && missing.message.contains("slirp4netns"));
+        let filter = explain_failure(
+            "Application worker exited during startup; see the application log",
+            "Application isolation failed: Cannot install the system call filter: Invalid argument\n",
+        );
+        assert!(filter.environment && filter.message.contains("seccomp"));
+        // Other failures report the worker's own reason and stay retryable.
+        assert_eq!(
+            explain_failure(
+                &worker_failure(
+                    b"failed: X11 applications require Xwayland: No such file or directory"
+                ),
+                "",
+            ),
+            Failure {
+                message: "X11 applications require Xwayland: No such file or directory".into(),
+                environment: false,
+            }
+        );
+        let unknown = explain_failure(&worker_failure(b""), "");
+        assert!(!unknown.environment && unknown.message.contains("see the application log"));
+        assert_eq!(
+            explain_failure(&"x".repeat(500), "")
+                .message
+                .chars()
+                .count(),
+            FAILURE_LENGTH
+        );
+    }
+
+    #[test]
+    fn startup_output_ignores_what_the_application_writes() {
+        let mut output = StartupOutput::new();
+        let script = format!(
+            "echo 'sent tapfd=5'; echo '{WORKER_STARTED}'; echo \"bwrap: Can't mount proc on /newroot/proc: forged\""
+        );
+        let (stdout, stderr) = output.pipe(Some(WORKER_STARTED)).unwrap();
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(stdout)
+            .stderr(stderr)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // Helpers without a hand-over are kept until they exit.
+        let (stdout, stderr) = output.pipe(None).unwrap();
+        Command::new("sh")
+            .arg("-c")
+            .arg("echo 'open(\"/dev/net/tun\"): No such file or directory' >&2")
+            .stdout(stdout)
+            .stderr(stderr)
+            .status()
+            .unwrap();
+        let kept = output.kept();
+        assert_eq!(
+            kept,
+            "sent tapfd=5\nopen(\"/dev/net/tun\"): No such file or directory\n"
+        );
+        let failure = explain_failure("Application worker exited: exit status: 1", &kept);
+        assert!(failure.message.contains("TUN") && !failure.message.contains("forged"));
+    }
+
+    #[test]
+    fn capability_check_matches_process_status() {
+        let status = fs::read_to_string("/proc/self/status").unwrap();
+        let effective = status
+            .lines()
+            .find_map(|l| l.strip_prefix("CapEff:"))
+            .map(|v| u64::from_str_radix(v.trim(), 16).unwrap())
+            .unwrap();
+        assert_eq!(
+            has_capability(CAP_SYS_ADMIN),
+            effective & (1 << CAP_SYS_ADMIN) != 0
+        );
     }
 
     #[test]

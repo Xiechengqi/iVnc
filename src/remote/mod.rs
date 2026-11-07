@@ -2,6 +2,7 @@
 pub mod gateway;
 pub mod media;
 pub mod proxy;
+pub mod seccomp;
 pub mod store;
 pub mod worker;
 

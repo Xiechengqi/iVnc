@@ -77,7 +77,7 @@ Docker daemon 在本开发环境不可用，因此提供了 `scripts/remote_app_
 | 公网 NAT 地址未自动禁止 | 记录探测到的公网 IPv4 并加入禁止列表 |
 | 应用可读取 worker 密码、在控制目录伪造就绪信号 | 启动描述和就绪信号改用管道；控制目录只读挂载并在每次启动时重建；worker 不可被应用调试 |
 | slirp4netns 可能残留，端口选择有竞争 | 使用 `--ready-fd`/`--exit-fd`，端口转发失败时换端口重试；supervisor 改为监视父进程 |
-| Docker 整体关闭 seccomp | 提供 `docker/seccomp-desktop.json` 并检测宿主机 user namespace 限制 |
+| Docker 整体关闭 seccomp | iVnc 在容器内自行安装系统调用过滤（镜像设置 `IVNC_SECCOMP=container`），严格隔离另加一层禁止命名空间和挂载；检测宿主机 user namespace 限制。原先的 `docker/seccomp-desktop.json` 需单独下载并在 `docker run` 时指定，已删除 |
 | TLS 只设置证书或私钥时静默使用默认值，证书更新需重启 | 要求同时设置；证书文件变化后自动加载 |
 
 本轮整体 review 另外发现并修复：WebSocket 升级未完成时会话占用不释放；生成密码字母表少一个字符；主机模式运行目录路径过长；主机模式 Chrome DevTools 监听所有网卡。将域名交给 Miao 解析会被 DNS 重绑定利用，因此 SOCKS 桥保持“本地解析并只转发已检查的 IP”，代价见 [REMOTE_APPS.md](REMOTE_APPS.md#运行隔离)。

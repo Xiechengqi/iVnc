@@ -117,6 +117,9 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ivnc \
     && rm -f /tmp/ivnc-ldd
 
 ENV XDG_RUNTIME_DIR=/run/user/0
+# The container runs with seccomp=unconfined so that application sandboxes can
+# be built; iVnc filters system calls for itself and everything it starts.
+ENV IVNC_SECCOMP=container
 
 EXPOSE 8008
 

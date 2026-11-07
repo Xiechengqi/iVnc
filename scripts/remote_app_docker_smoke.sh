@@ -8,7 +8,8 @@ IMAGE="${IVNC_TEST_IMAGE:-ivnc:remote-review}"
 docker info >/dev/null
 docker image inspect "$IMAGE" >/dev/null
 exec docker run --rm --init \
-  --security-opt "seccomp=$ROOT/docker/seccomp-desktop.json" --security-opt apparmor=unconfined \
+  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --security-opt systempaths=unconfined --device /dev/net/tun \
   --shm-size=1g --entrypoint bash \
   -v "$ROOT:/smoke:ro" -w /smoke \
   -e IVNC_BIN=/usr/local/bin/ivnc "$IMAGE" -ceu '

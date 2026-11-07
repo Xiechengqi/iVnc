@@ -86,32 +86,44 @@ impl ProcessManager {
     fn watchdog_tick(&self, store: &super::store::AppStore) {
         let _operation = self.operations.lock().unwrap();
         let now = Instant::now();
+        let mut exited = Vec::new();
         {
             let mut procs = self.processes.lock().unwrap();
             let user_stopped = self.stopped_by_user.lock().unwrap();
-            let mut restarts = self.restarts.lock().unwrap();
             procs.retain(|app_id, running| match running.child.try_wait() {
                 Ok(Some(_)) | Err(_) => {
                     if !user_stopped.contains(app_id) {
-                        let next =
-                            next_restart(restarts.get(app_id).copied(), running.started.elapsed(), now);
-                        match next.due {
-                            Some(due) => info!(
-                                "Watchdog: app {} exited unexpectedly; restarting in {}s",
-                                app_id,
-                                due.saturating_duration_since(now).as_secs()
-                            ),
-                            None => warn!(
-                                "Watchdog: app {} failed to start {} times; giving up until it is started again",
-                                app_id, next.failures
-                            ),
-                        }
-                        restarts.insert(app_id.clone(), next);
+                        exited.push((app_id.clone(), running.started.elapsed()));
                     }
                     false
                 }
                 Ok(None) => true,
             });
+        }
+        for (app_id, ran) in exited {
+            // Restarting cannot change how the host or container runs iVnc.
+            let environment = crate::remote::worker::failure(&app_id).filter(|f| f.environment);
+            let mut restarts = self.restarts.lock().unwrap();
+            let mut next = next_restart(restarts.get(&app_id).copied(), ran, now);
+            if let Some(failure) = environment {
+                next.due = None;
+                warn!(
+                    "Watchdog: app {} cannot start in this environment; not restarting: {}",
+                    app_id, failure.message
+                );
+            } else if let Some(due) = next.due {
+                info!(
+                    "Watchdog: app {} exited unexpectedly; restarting in {}s",
+                    app_id,
+                    due.saturating_duration_since(now).as_secs()
+                );
+            } else {
+                warn!(
+                    "Watchdog: app {} failed to start {} times; giving up until it is started again",
+                    app_id, next.failures
+                );
+            }
+            restarts.insert(app_id, next);
         }
         let due: Vec<String> = self
             .restarts

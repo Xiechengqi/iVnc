@@ -209,6 +209,14 @@ fn main() {
             std::process::exit(1)
         })
     });
+    // The iVnc image lifts Docker's seccomp profile so that application sandboxes
+    // can be built, and restores it here for iVnc and everything it starts.
+    if worker_config.is_none() && std::env::var_os("IVNC_SECCOMP").is_some_and(|v| v == "container")
+    {
+        if let Err(error) = remote::seccomp::restrict_container() {
+            eprintln!("warning: {error}; iVnc runs without a system call filter");
+        }
+    }
     check_runtime_deps();
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::new()

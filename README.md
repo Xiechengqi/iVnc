@@ -154,7 +154,8 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```
 
 脚本将仓库下的 `ivnc-data` 和 `miao-data` 分别挂载到 `/root/.ivnc` 和
-`/root/.miao`，并为 miao 全局和进程代理模式提供 `/dev/net/tun` 与 `NET_ADMIN`。
+`/root/.miao`，并为 miao 全局和进程代理模式提供 `/dev/net/tun` 与 `NET_ADMIN`；
+桌面应用的隔离网络同样使用 `/dev/net/tun`。
 容器默认使用 `--restart unless-stopped`。宿主机必须已安装 Docker 且提供 TUN 设备。
 
 也可直接在镜像名后传入 iVnc 参数：
@@ -162,9 +163,14 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```bash
 docker run -d --name ivnc --restart unless-stopped \
   -p 8008:8008 --cap-add NET_ADMIN --device /dev/net/tun \
+  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --security-opt systempaths=unconfined \
   -v "$PWD/ivnc-data:/root/.ivnc" -v "$PWD/miao-data:/root/.miao" \
   ghcr.io/xiechengqi/ivnc:latest --proxy-ip 203.0.113.10
 ```
+
+三个 `security-opt` 都是 Docker 内置选项，不需要额外文件；缺少它们时桌面应用无法创建隔离环境，
+原因见 [远程应用部署](docs/REMOTE_APPS.md#部署与证书)。
 
 `--proxy-ip` 接受 IPv4/IPv6，使 Miao 以 `--nopasswd --mode global --vps-host <IP>` 启动，默认使用运行账户的 SSH 密钥或 agent。Docker 若需使用密钥，可将专用 SSH 目录挂载到 `/root/.ssh`；需可写以保存 `known_hosts`。详细行为见 [Miao 后台应用](docs/MIAO.md)。
 

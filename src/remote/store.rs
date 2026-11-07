@@ -574,7 +574,7 @@ fn verify_password(hash: &str, password: &str) -> bool {
     })
 }
 
-fn truncate(value: &str, max: usize) -> String {
+pub(super) fn truncate(value: &str, max: usize) -> String {
     value
         .chars()
         .filter(|c| !c.is_control())

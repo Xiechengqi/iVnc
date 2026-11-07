@@ -38,7 +38,16 @@ A 的应用列表显示远程应用的最近状态：已连接、B 上未运行�
 | 严格隔离（默认） | 系统程序只读；应用数据可写；仅额外允许的主机路径可见 | 独立网络命名空间，阻止内网和 B 自身地址，仅额外允许的内网网段可达 | 仅语言、时区和输入法变量 | 是 |
 | 主机模式 | 主机文件系统 | 主机网络 | 管理进程的环境（排除 iVnc、显示、音频和会话总线变量） | 否 |
 
-严格隔离使用 bubblewrap、slirp4netns 和 nftables；依赖或权限不足时启动失败，不回退到主机环境。主机模式只需要 bubblewrap，适合需要访问主机文件和内网、且不会共享的应用；它的权限与以前直接在主机运行时相同。
+严格隔离使用 bubblewrap、slirp4netns 和 nftables；依赖或权限不足时启动失败，不回退到主机环境，控制台直接显示原因及需要调整的系统或容器设置。原因只从 iVnc 在应用启动前收到的沙箱及辅助进程输出中识别，应用自己的输出和日志文件不参与，因此应用无法伪造。主机模式只需要 bubblewrap，适合需要访问主机文件和内网、且不会共享的应用；iVnc 有 `CAP_SYS_ADMIN` 时（通常是宿主机上的 root），它的权限与以前直接在主机运行时相同。没有时（例如在容器中），主机模式应用在只映射 iVnc 自身用户的 user namespace 中运行，权限因此变小：属于其他用户的文件显示为 `nobody`，root 也不能越过其权限位；不能使用容器的 `NET_ADMIN` 等 capabilities（例如创建 TUN、修改路由）；set-user-ID 程序不提升权限。需要这些权限的应用不能在这种环境下以主机模式运行。
+
+严格隔离的应用及其 worker 还受 iVnc 安装的系统调用过滤约束，过滤一旦安装不能解除：
+
+- 不能创建或进入命名空间，也不能挂载（`unshare`、`setns`、带命名空间标志的 `clone`、`mount` 及新挂载接口）。`clone3` 返回“不支持”，C 库会自动改用 `clone`。
+- 拒绝 io_uring、bpf、userfaultfd、keyctl、perf_event_open、syslog、kexec、内核模块、配额、交换分区、系统时间等桌面应用不需要的内核接口，以及 x32 调用方式。
+- 32 位 x86 程序（例如 32 位 Wine 程序、Steam 客户端）发起系统调用时被内核直接结束（`SIGSYS`）：过滤按 64 位调用号检查，无法覆盖另一套编号。
+- 应用自己的 `/proc` 中，`acpi`、`asound`、`fs`、`kcore`、`keys`、`scsi`、`timer_list` 等内核接口被隐藏，`sys`、`sysrq-trigger`、`irq`、`bus` 只读。
+
+因此依赖自身命名空间沙箱的程序无法在严格隔离中运行：Flatpak、Podman，以及 Chromium 和基于 Electron 的应用（VS Code、Slack、Obsidian 等）。后者启动时报 `No usable sandbox!`，在启动命令中加 `--no-sandbox` 即可，这时由 iVnc 的沙箱隔离应用；内置 Chrome 已使用该参数。允许嵌套命名空间会让应用接触到 nf_tables 等仅管理员可用的内核代码，这是内核提权漏洞最常见的入口，因此不提供开关。主机模式不安装此过滤。
 
 严格隔离的附加设置：
 
@@ -50,7 +59,7 @@ B 自身地址包括网卡地址、配置的公网 ICE 地址、iVnc 最近探�
 
 内置 Chrome 经 Miao 的 SOCKS5 桥接访问网络。桥接用 B 的系统 DNS 解析域名，所有结果都必须是公网地址，再把检查过的 IP 交给 Miao；解析失败的域名直接拒绝。这样 Miao 不会再次解析出不同的地址（DNS 重绑定），应用无法借代理访问 B 的回环或内网服务。代价是 Miao 只能按 IP 和嗅探到的 TLS/HTTP 域名分流；若 B 的系统 DNS 会被污染，应让系统解析经过可信的 DNS（例如 Miao 的 TUN 模式或加密 DNS），否则被污染的域名在 Chrome 中无法正常访问。支持 IPv4 与 IPv6 目标。
 
-应用由启动命令的整个进程树组成：启动命令在一个专用的回收进程下运行，启动器派生进程后退出不会结束应用，最后一个应用进程退出时应用才停止；运行环境自身的辅助进程不计入。意外退出的应用由看护进程重启；运行不足 30 秒即退出视为启动失败，重试间隔从 6 秒起倍增，连续 5 次失败后停止重试并显示为崩溃。手动启动时立即失败的应用直接报错，不自动重试。
+应用由启动命令的整个进程树组成：启动命令在一个专用的回收进程下运行，启动器派生进程后退出不会结束应用，最后一个应用进程退出时应用才停止；运行环境自身的辅助进程不计入。意外退出的应用由看护进程重启；运行不足 30 秒即退出视为启动失败，重试间隔从 6 秒起倍增，连续 5 次失败后停止重试并显示为崩溃。运行环境不允许建立沙箱（例如缺少下文的容器参数）时直接停止重试。手动启动时立即失败的应用直接报错，不自动重试。
 
 需要 X11 的应用可勾选“X11 兼容环境”，使用本应用的 Xwayland 和 Openbox。特殊 GPU、宿主机设备或桌面协议依赖仍需逐项适配；当前运行环境不挂载宿主机 GPU、摄像头、麦克风或 USB 设备。
 
@@ -74,9 +83,24 @@ sudo apt-get install bubblewrap slirp4netns nftables iproute2 dbus-daemon \
 bash build.sh --release --features tls
 ```
 
-Docker 镜像包含这些运行依赖、音频捕获及 TLS。`docker-run.sh` 使用仓库中的 `docker/seccomp-desktop.json`：保留创建命名空间、挂载和 `pivot_root` 所需的系统调用，拒绝内核模块、kexec、bpf、io_uring、userfaultfd、keyctl 等全局或常被利用的接口；文件缺失时才回退到 `seccomp=unconfined` 并给出警告。Docker 默认 AppArmor 配置禁止挂载，因此仍使用 `apparmor=unconfined`。应用内部仍会安装防火墙、丢弃 capabilities 并设置 `no_new_privs`。不能把应用隔离视为虚拟机级隔离。
+Docker 镜像包含这些运行依赖、音频捕获及 TLS。容器需要以下参数，`docker-run.sh` 已全部包含，且都是 Docker 内置选项，不需要额外文件：
+
+| 参数 | 原因 |
+| --- | --- |
+| `--security-opt seccomp=unconfined` | Docker 默认 seccomp 禁止没有 `CAP_SYS_ADMIN` 的容器创建命名空间和挂载；系统调用过滤改由 iVnc 安装，见下文 |
+| `--security-opt apparmor=unconfined` | Docker 默认 AppArmor 配置禁止挂载 |
+| `--security-opt systempaths=unconfined` | Docker 遮蔽或只读覆盖 `/proc/kcore`、`/proc/sys` 等路径；内核只允许新 user namespace 在已有 `/proc` 完全可见时挂载新的 `/proc`，否则沙箱报 `Can't mount proc on /newroot/proc` |
+| `--device /dev/net/tun` | slirp4netns 为应用创建隔离网络；Miao 的 TUN 模式也需要 |
+
+不需要 `--cap-add SYS_ADMIN`、`--pid=host` 或 `--privileged`。Podman 用 `--security-opt unmask=ALL` 代替 `systempaths=unconfined`。缺少参数时应用启动失败，控制台显示需要补充的参数。
+
+镜像设置了 `IVNC_SECCOMP=container`：iVnc 启动时为自身及其启动的所有进程（Web 终端、主机模式应用、Miao、应用沙箱）安装系统调用过滤，拒绝 io_uring、bpf、userfaultfd、keyctl、perf_event_open、open_by_handle_at、kexec、内核模块、`reboot`、系统时间等接口，与原先的 `docker/seccomp-desktop.json` 相同，但保留沙箱需要的命名空间和挂载；同时设置 `no_new_privs`，set-user-ID 程序不再提升权限。直接在宿主机上运行 iVnc 时不要设置此变量，否则 root 的 Web 终端也会受这些限制。容器内不经 iVnc 启动的进程（例如 `docker exec`）不受过滤。仍可用 `SECCOMP_PROFILE=<文件> ./docker-run.sh` 指定 Docker seccomp 配置，它必须允许命名空间和挂载。
+
+这些参数放宽的是 Docker 对容器本身的限制：容器内以 root 运行、未进入严格隔离的进程（iVnc 主进程、Web 终端、主机模式应用、Miao）不再受 AppArmor 约束，并能写 `/proc/sys` 和 `/proc/sysrq-trigger`，系统调用过滤也不能阻止这一点。未启用 userns-remap 时容器 root 就是宿主机 root，这些进程因此可以影响宿主机内核，部署上应把容器视为可信。多个租户共用一台宿主机时，应启用 Docker userns-remap 或为每个实例使用独立虚拟机。严格隔离的应用不受影响：它们只读访问自己的内核参数，没有 capabilities，且受上述系统调用过滤约束。
 
 Ubuntu 23.10 及以上的宿主机默认限制非特权进程创建 user namespace（`kernel.apparmor_restrict_unprivileged_userns=1`），容器内的应用会启动失败。`docker-run.sh` 会检测并提示；解决方式是 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`（写入 `/etc/sysctl.d` 持久化）或为容器加载允许 userns 的 AppArmor 配置。
+
+严格隔离在沙箱内用 nftables 设置防火墙，宿主机内核需提供 `nf_tables`、`nft_ct` 和 `nft_reject_inet` 模块；常见发行版内核自带并会自动加载，否则在宿主机执行 `sudo modprobe -a nft_ct nft_reject_inet`。
 
 A 和 B 都只需一个入口端口，但该端口必须支持 HTTP(S)、WebSocket 和原始 ICE-TCP。支持直接 TCP 连接、Docker 端口发布及能透明转发这些流量的四层入口。只转发 HTTP/WebSocket 的反向代理或 CDN 不适用于当前媒体通道。A 必须能访问 B；没有自动 NAT 穿透或反向隧道。
 

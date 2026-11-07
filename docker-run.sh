@@ -27,24 +27,13 @@ if [[ -z "${IMAGE}" ]]; then
 fi
 
 if [[ ! -c /dev/net/tun ]]; then
-    echo "/dev/net/tun is required for miao global and process proxy modes" >&2
+    echo "/dev/net/tun is required for desktop application networking and miao proxy modes" >&2
     exit 1
 fi
 
 if docker container inspect "${NAME}" >/dev/null 2>&1; then
     echo "container ${NAME} already exists; remove or rename it before continuing" >&2
     exit 1
-fi
-
-# Desktop applications run in nested user/mount/PID/network namespaces. This
-# profile keeps those available while denying kernel-wide interfaces; it is far
-# narrower than seccomp=unconfined.
-SECCOMP_PROFILE="${SECCOMP_PROFILE:-${ROOT_DIR}/docker/seccomp-desktop.json}"
-if [[ -f "${SECCOMP_PROFILE}" ]]; then
-    SECCOMP_OPT="seccomp=${SECCOMP_PROFILE}"
-else
-    echo "warning: ${SECCOMP_PROFILE} not found; falling back to seccomp=unconfined" >&2
-    SECCOMP_OPT="seccomp=unconfined"
 fi
 
 # Hosts that forbid unprivileged user namespaces cannot start desktop applications.
@@ -65,11 +54,21 @@ fi
 
 mkdir -p "${ROOT_DIR}/ivnc-data" "${ROOT_DIR}/miao-data"
 
+# Each desktop application runs in its own bubblewrap sandbox with nested
+# user/mount/PID/network namespaces and a private /proc. Docker's default seccomp
+# and AppArmor profiles forbid creating namespaces and mounting, and its masked
+# /proc paths stop the sandbox from mounting /proc. The image's iVnc applies a
+# seccomp filter to itself and everything it starts, and a stricter one inside
+# strict sandboxes, so no profile file is needed; SECCOMP_PROFILE can still name
+# one. Container root, which is host root without userns-remap, can write
+# /proc/sys: trust what runs in the container outside strict sandboxes.
+SECCOMP_OPT="seccomp=${SECCOMP_PROFILE:-unconfined}"
 exec docker run -itd \
     -p "${PORT}:8008" \
     --cap-add NET_ADMIN \
     --security-opt "${SECCOMP_OPT}" \
     --security-opt apparmor=unconfined \
+    --security-opt systempaths=unconfined \
     --device /dev/net/tun \
     -v /etc/hosts:/etc/hosts:ro \
     -v "${ROOT_DIR}/ivnc-data:/root/.ivnc" \
