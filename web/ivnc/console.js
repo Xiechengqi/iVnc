@@ -1,3 +1,4 @@
+import {openAppView, showSharing, remoteText} from './remote-apps.js';
 import { getLang, setLang, onLangChange } from './lib/i18n.js?v=1';
 
 const API = '/api/apps';
@@ -618,16 +619,16 @@ async function load() {
         d.apps.forEach(a => {
             const tr = document.createElement('tr');
             const cap = capByApp.get(a.id);
-            const type = a.app_type === 'desktop' ? t('desktop') : (a.app_type === 'cli' ? t('cli') : t('background'));
+            const type = a.app_type === 'remote' ? remoteText('远程应用', 'Remote app') : a.app_type === 'desktop' ? t('desktop') : (a.app_type === 'cli' ? t('cli') : t('background'));
             const capLines = cap ? capabilitySummaryLines(cap) : [];
-            const configStr = a.builtin ? t('miaoService') : a.app_type === 'desktop'
+            const configStr = a.app_type === 'remote' ? (a.url || '') : a.builtin ? t('miaoService') : a.app_type === 'desktop'
                 ? (a.exec_command || '')
                 : a.app_type === 'cli'
                     ? [a.cli_binary_path || '', ...capLines, ...(a.skill_paths || []).map(p => `skill: ${p}`)].filter(Boolean).join('\n')
                     : [a.url ? `${t('visit')}: ${a.url}` : '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
             const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
             const statusKey = a.app_type === 'cli' ? (a.install_status || 'missing') : a.status;
-            const statusText = a.enabled === false ? t('disabledByAdmin') : (t(statusKey) || statusKey);
+            const statusText = a.app_type === 'remote' ? (a.status === 'connected' ? remoteText('已连接', 'Connected') : a.status === 'connecting' ? remoteText('连接中', 'Connecting') : remoteText('未连接', 'Disconnected')) : a.enabled === false ? t('disabledByAdmin') : (t(statusKey) || statusKey);
             const statusClass = a.app_type === 'cli'
                 ? (a.installed ? 'running' : 'stopped')
                 : a.status;
@@ -649,7 +650,7 @@ async function load() {
 
             const actionsCell = tr.querySelector('.actions');
 
-            if (a.app_type !== 'cli') {
+            if (a.app_type !== 'cli' && a.app_type !== 'remote') {
                 if (a.status === 'running') {
                     const stopBtn = createBtn(t('stop'), 'btn-stop btn-sm', () => act(a.id, 'stop'));
                     const restartBtn = createBtn(t('restart'), 'btn-restart btn-sm', () => act(a.id, 'restart'));
@@ -673,14 +674,22 @@ async function load() {
             const delBtn = createBtn(t('delete'), 'btn-delete btn-sm', () => del(a.id, a.name));
 
             actionsCell.append(editBtn);
+            if (a.app_type === 'remote' || a.app_type === 'desktop') {
+                const open = createBtn(remoteText('打开', 'Open'), 'btn-visit btn-sm', () => openAppView(a).catch(e => toast(e.message, 'err')));
+                open.disabled = a.app_type === 'desktop' && a.status !== 'running';
+                actionsCell.append(open);
+            }
+            if (a.app_type === 'desktop') {
+                actionsCell.append(createBtn(remoteText('远程访问', 'Remote access'), 'btn-edit btn-sm', () => showSharing(a.id).catch(e => toast(e.message, 'err'))));
+            }
             if (a.panel_url) {
                 const panelBtn = createBtn(t('configureProxy'), 'btn-visit btn-sm', () => window.open(a.panel_url, '_blank', 'noopener'));
                 panelBtn.disabled = a.enabled === false;
                 actionsCell.append(panelBtn);
-            } else if (a.app_type !== 'desktop' && a.url) {
+            } else if (a.app_type !== 'desktop' && a.app_type !== 'remote' && a.url) {
                 actionsCell.append(createBtn(t('visit'), 'btn-visit btn-sm', () => copyAccessUrl(a.url)));
             }
-            if (a.app_type !== 'cli') {
+            if (a.app_type !== 'cli' && a.app_type !== 'remote') {
                 actionsCell.append(logBtn);
                 if (a.can_clear_data !== false) actionsCell.append(clearBtn);
             }
@@ -1045,6 +1054,8 @@ function showAdd() {
     modal.querySelector('#modal-title').textContent = t('addModal');
     modal.querySelector('#modal-save').textContent = t('addSave');
 
+    document.getElementById('f-remote-url').value = '';
+    document.getElementById('f-remote-password').value = '';
     document.getElementById('f-name').value = '';
     document.getElementById('f-app-type').value = 'background';
     document.getElementById('f-url').value = '';
@@ -1087,6 +1098,8 @@ async function showEdit(id) {
         document.getElementById('f-cli-binary').value = '';
         document.getElementById('f-cli-env').value = '';
 
+        document.getElementById('f-remote-url').value = a.url || '';
+        document.getElementById('f-remote-password').value = '';
         if (a.app_type === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
             document.getElementById('f-env').value = envToText(a.env_vars);
@@ -1157,16 +1170,20 @@ async function saveApp() {
     const appType = document.getElementById('f-app-type').value;
     const body = {
         app_type: appType,
-        autostart: appType !== 'cli' && document.getElementById('f-autostart').checked,
+        autostart: !['cli', 'remote'].includes(appType) && document.getElementById('f-autostart').checked,
         skill_paths: parseListText(document.getElementById('f-skill-paths').value)
     };
 
-    if (!editId) {
+    if (!editId || appType === 'remote') {
         body.name = document.getElementById('f-name').value.trim();
-        if (!body.name) return toast(t('missingName'), 'err');
+        if (!body.name && appType !== 'remote') return toast(t('missingName'), 'err');
     }
 
-    if (appType === 'desktop') {
+    if (appType === 'remote') {
+        body.url = document.getElementById('f-remote-url').value.trim();
+        body.password = document.getElementById('f-remote-password').value;
+        if (!body.url || (!editId && !body.password)) return toast(remoteText('请输入连接地址和应用密码', 'Enter the connection URL and application password'), 'err');
+    } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         if (!body.exec_command) return toast(t('missingExec'), 'err');
 
@@ -1315,7 +1332,9 @@ function updateAppTypeVisibility() {
         generalSlot.appendChild(autostartControl);
     }
 
-    autostartControl.style.display = type === 'cli' ? 'none' : '';
+    autostartControl.style.display = ['cli', 'remote'].includes(type) ? 'none' : '';
+    document.getElementById('remote-config').hidden = type !== 'remote';
+    document.getElementById('f-skill-paths').closest('.form-line').hidden = type === 'remote';
 
     if (!autostartControl.parentElement) {
         generalSlot.appendChild(autostartControl);
@@ -1325,7 +1344,7 @@ function updateAppTypeVisibility() {
     modal.querySelectorAll('input:not([type="checkbox"]), textarea').forEach(field => {
         field.readOnly = editBuiltin;
     });
-    document.getElementById('f-name').disabled = !!editId && !editBuiltin;
+    document.getElementById('f-name').disabled = !!editId && !editBuiltin && type !== 'remote';
     document.getElementById('f-app-type').disabled = !!editId;
     document.getElementById('f-autostart').disabled = editBuiltin;
     document.getElementById('modal-save').hidden = editBuiltin;
@@ -1386,4 +1405,20 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(() => {
         if (activeSection === 'overview') updateOverviewMeta();
     }, 1000);
+});
+
+document.getElementById('remote-test').addEventListener('click', async event => {
+    const result = document.getElementById('remote-test-result');
+    event.target.disabled = true;
+    result.textContent = remoteText('正在验证…', 'Verifying…');
+    try {
+        const response = await fetch('/api/remote/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+            url:document.getElementById('f-remote-url').value.trim(),password:document.getElementById('f-remote-password').value
+        })});
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error || response.statusText);
+        result.textContent = data.name + ' — ' + (data.status === 'running' ? remoteText('运行中', 'Running') : remoteText('应用未运行', 'Application is stopped'));
+        if (!document.getElementById('f-name').value.trim()) document.getElementById('f-name').value=data.name;
+    } catch(error) { result.textContent=error.message; }
+    finally { event.target.disabled=false; }
 });

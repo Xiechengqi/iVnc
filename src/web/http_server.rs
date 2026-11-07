@@ -31,7 +31,6 @@ use std::net::SocketAddr;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 #[cfg(feature = "tls")]
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -101,7 +100,8 @@ pub async fn run_http_server_with_webrtc(
     enable_tls: bool,
     apps_state: Option<Arc<AppsState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = format!("0.0.0.0:{}", port);
+    let bind_host = state.config.http.host.clone();
+    let addr = (bind_host.as_str(), port);
 
     // Check for embedded assets first, then fall back to filesystem
     let use_embedded = has_embedded_assets() && std::env::var("IVNC_WEB_ROOT").is_err();
@@ -124,6 +124,8 @@ pub async fn run_http_server_with_webrtc(
         .route("/index.html", get(index_handler))
         .route("/connect", get(index_handler))
         .route("/health", get(health_handler))
+        .route("/app/files", get(crate::remote::worker::files))
+        .route("/app/files/{*path}", get(crate::remote::worker::download))
         .route("/version", get(public_version_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
@@ -174,10 +176,13 @@ pub async fn run_http_server_with_webrtc(
                 .get(axum::http::header::HOST)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
+            let owner = headers.get("x-ivnc-owner").is_some_and(|h| h == "true");
             async move {
                 ws.on_upgrade(move |socket| async move {
-                    crate::transport::handle_signaling_connection(socket, state, manager, host_str)
-                        .await;
+                    crate::transport::handle_signaling_connection(
+                        socket, state, manager, host_str, owner,
+                    )
+                    .await;
                 })
             }
         };
@@ -210,6 +215,10 @@ pub async fn run_http_server_with_webrtc(
     // Merge apps routes after with_state (both are Router<()> now)
     if let Some(ref apps) = apps_state {
         app = app.merge(crate::apps::api::router(apps.clone()));
+        app = app.merge(crate::remote::gateway::router(
+            apps.clone(),
+            auth_state.clone(),
+        ));
     }
 
     let app = app
@@ -224,9 +233,10 @@ pub async fn run_http_server_with_webrtc(
         .layer(middleware::from_fn_with_state(
             auth_state,
             console_remote_access_middleware,
-        ));
+        ))
+        .layer(middleware::from_fn(worker_boundary));
 
-    let listener = TcpListener::bind(&addr).await?;
+    let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
     // TLS setup
@@ -281,6 +291,7 @@ pub async fn run_http_server_with_webrtc(
 
         let app = app.clone();
         let sm = session_manager.clone();
+        let media_router = metrics_state.media_router.clone();
         let conn_state = metrics_state.clone();
         #[cfg(feature = "tls")]
         let tls_acceptor = tls_acceptor.clone();
@@ -360,7 +371,7 @@ pub async fn run_http_server_with_webrtc(
                         let _ = tcp_stream.shutdown().await;
                     }
                     ConnectionType::IceTcp | ConnectionType::Unknown | ConnectionType::Tls => {
-                        handle_ice_connection(tcp_stream, peer_addr, sm).await;
+                        handle_ice_connection(tcp_stream, peer_addr, sm, media_router).await;
                     }
                 }
                 return;
@@ -368,7 +379,9 @@ pub async fn run_http_server_with_webrtc(
 
             // Non-TLS mode: first-byte classification
             match kind {
-                ConnectionType::IceTcp => handle_ice_connection(tcp_stream, peer_addr, sm).await,
+                ConnectionType::IceTcp => {
+                    handle_ice_connection(tcp_stream, peer_addr, sm, media_router).await
+                }
                 ConnectionType::Http | ConnectionType::Tls => {
                     serve_http(TokioIo::new(tcp_stream), app, peer_addr).await;
                 }
@@ -406,37 +419,51 @@ async fn handle_ice_connection(
     mut stream: tokio::net::TcpStream,
     peer_addr: std::net::SocketAddr,
     sm: Option<Arc<SessionManager>>,
+    media: Arc<crate::remote::media::MediaRouter>,
 ) {
+    let first = match crate::remote::media::first_frame(&mut stream).await {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let (stream, first) = match media.try_relay(stream, first).await {
+        Ok(Some(v)) => v,
+        _ => return,
+    };
     if let Some(sm) = sm {
-        let ice_local_addr = sm.listen_addr();
-        let mut buf = vec![0u8; 8192];
-        match stream.read(&mut buf).await {
-            Ok(0) => return,
-            Ok(n) => {
-                buf.truncate(n);
-                info!(
-                    "ICE-TCP connection from {} ({} bytes, first16={:02x?})",
-                    peer_addr,
-                    n,
-                    &buf[..n.min(16)]
-                );
-                if let Err(e) = sm
-                    .handle_ice_tcp_connection(stream, peer_addr, ice_local_addr, &buf)
-                    .await
-                {
-                    warn!("ICE-TCP session match failed from {}: {}", peer_addr, e);
-                }
-            }
-            Err(e) => {
-                debug!("ICE-TCP read error from {}: {}", peer_addr, e);
-            }
+        if let Err(e) = sm
+            .handle_ice_tcp_connection(stream, peer_addr, sm.listen_addr(), &first)
+            .await
+        {
+            debug!("ICE session rejected: {}", e);
         }
-    } else {
-        debug!(
-            "ICE-TCP connection from {} but no session manager",
-            peer_addr
-        );
     }
+}
+
+async fn worker_boundary(req: Request<Body>, next: middleware::Next) -> Response {
+    let path = req.uri().path();
+    if crate::remote::worker::is_worker()
+        && !matches!(
+            path,
+            "/health"
+                | "/webrtc"
+                | "/ui-config"
+                | "/ws-config"
+                | "/api/render-status"
+                | "/app/files"
+        )
+        && !path.starts_with("/app/files/")
+    {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    if (path.starts_with("/api/apps")
+        || path.starts_with("/api/remote/")
+        || path.starts_with("/app-view/"))
+        && req.method() != Method::GET
+        && !crate::remote::gateway::same_origin(req.headers())
+    {
+        return (StatusCode::FORBIDDEN, "Invalid request origin").into_response();
+    }
+    next.run(req).await
 }
 
 #[cfg(feature = "tls")]
@@ -444,21 +471,48 @@ fn create_tls_acceptor() -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error
     use rustls::ServerConfig;
     use std::sync::Arc as StdArc;
 
-    let cert = rcgen::generate_simple_self_signed(vec![
-        "localhost".to_string(),
-        "ivnc.local".to_string(),
-    ])?;
-    let cert_der = rustls::pki_types::CertificateDer::from(cert.cert);
-    let key_der = rustls::pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())
-        .map_err(|e| format!("TLS key error: {}", e))?;
+    use rustls::pki_types::pem::PemObject;
+    let root = crate::paths::ivnc_home().join("tls");
+    std::fs::create_dir_all(&root)?;
+    let cert_path = std::env::var_os("IVNC_TLS_CERT_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("cert.pem"));
+    let key_path = std::env::var_os("IVNC_TLS_KEY_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("key.pem"));
+    let custom = std::env::var_os("IVNC_TLS_CERT_FILE").is_some()
+        || std::env::var_os("IVNC_TLS_KEY_FILE").is_some();
+    if !custom && !cert_path.exists() && !key_path.exists() {
+        let mut names = vec![
+            "localhost".to_string(),
+            "ivnc.local".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ];
+        if let Ok(extra) = std::env::var("IVNC_TLS_NAMES") {
+            names.extend(
+                extra
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        let cert = rcgen::generate_simple_self_signed(names)?;
+        crate::remote::store::private_write(&key_path, cert.key_pair.serialize_pem().as_bytes())?;
+        crate::remote::store::private_write(&cert_path, cert.cert.pem().as_bytes())?;
+    }
+    let cert_der = rustls::pki_types::CertificateDer::pem_file_iter(cert_path)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let key_der = rustls::pki_types::PrivateKeyDer::from_pem_file(key_path)?;
 
     let config =
         ServerConfig::builder_with_provider(StdArc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)?;
+            .with_single_cert(cert_der, key_der)?;
 
-    info!("TLS enabled with self-signed certificate");
+    info!("TLS enabled with configured certificate");
     Ok(tokio_rustls::TlsAcceptor::from(StdArc::new(config)))
 }
 
@@ -549,7 +603,7 @@ async fn basic_auth_middleware(
     req: Request<Body>,
     next: middleware::Next,
 ) -> Response {
-    if !state.config.http.basic_auth_enabled {
+    if req.uri().path().starts_with("/remote/v1/apps/") || !state.config.http.basic_auth_enabled {
         return next.run(req).await;
     }
 
@@ -644,6 +698,8 @@ fn is_console_management_path(path: &str) -> bool {
         || path.starts_with("/api/console/")
         || path == "/api/apps"
         || path.starts_with("/api/apps/")
+        || path.starts_with("/api/remote/")
+        || path.starts_with("/api/desktop/")
         || path == "/api/capabilities"
         || path.starts_with("/api/capabilities/")
 }

@@ -519,3 +519,24 @@ debug!("Session {} DC parse error: {}", session.id, e);
 
 *文档版本: 2.0*
 *最后更新: 2026-02-16*
+
+## 应用级远程共享（v1）
+
+桌面共享的具体授权与部署边界见 [远程桌面应用](REMOTE_APPS.md)。管理接口仍使用所在实例的管理认证。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET/PUT /api/apps/{id}/sharing` | 本地桌面应用的共享策略、密码重设、X11/后台服务设置和远程连接列表 |
+| `POST /api/apps/{id}/view` | 为本地或远程应用创建有时限的应用视图 |
+| `DELETE /api/apps/{id}/sessions/{session}` | B 所有者断开指定远程连接 |
+| `POST /api/remote/test` | 用应用地址和密码验证连接，返回目标信息并撤销临时凭据 |
+| `POST /remote/v1/apps/{id}/authenticate` | 用应用密码换取仅绑定此应用的凭据 |
+| `GET /remote/v1/apps/{id}/info` | 持应用 Bearer 凭据读取名称、状态、节点身份和协议版本 |
+| `GET /remote/v1/apps/{id}/socket` | 持应用 Bearer 凭据建立中继信令 WebSocket |
+| `GET /remote/v1/apps/{id}/data/{path}` | 仅转发 UI 配置、渲染状态和应用 Downloads；不代理管理 API |
+| `DELETE /remote/v1/apps/{id}/credential` | 撤销当前 Bearer 凭据 |
+| `POST /app-view/{token}/close` | 关闭 A 的应用视图及关联媒体和下载 |
+
+应用视图信令沿用 SDP 协议并扩展：客户端发送 `{"ivnc_control":"claim"}`、`"release"` 或仅所有者可用的 `"takeover"`；服务端返回 `{"ivnc_control":{"controller":true,"owner":false}}`。撤销消息 `{"ivnc_revoked":true}` 要求停止自动重连，用户需重新打开视图或更新连接凭据。
+
+ICE-TCP 通过已授权 SDP 中的 ICE ufrag 路由，仍需完成工作进程的 ICE/DTLS 握手。信令、媒体与文件均绑定同一应用和运行代次，应用重启不复用旧媒体会话。

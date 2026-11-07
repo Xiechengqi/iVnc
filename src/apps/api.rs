@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct AppsState {
+    pub shared: std::sync::OnceLock<std::sync::Weak<crate::web::SharedState>>,
+    pub remote: Arc<crate::remote::store::RemoteStore>,
     pub proxy_panel: Arc<ProxyPanelManager>,
     pub store: Arc<AppStore>,
     pub process: ProcessManager,
@@ -41,11 +43,20 @@ impl AppsState {
         let mut service = ServiceProcessManager::new();
         service.set_store(store.clone());
         Ok(Self {
+            shared: std::sync::OnceLock::new(),
+            remote: Arc::new(crate::remote::store::RemoteStore::new()?),
             proxy_panel,
             store,
             process,
             service,
         })
+    }
+
+    pub fn revoke_views(&self, id: &str) {
+        if let Some(shared) = self.shared.get().and_then(std::sync::Weak::upgrade) {
+            shared.app_views.revoke(id, false);
+            shared.media_router.revoke(id, false);
+        }
     }
 
     /// Save current running apps state
@@ -185,25 +196,41 @@ impl AppsState {
             self.proxy_panel.prepare_chrome_proxy().await;
         }
         match app.app_type {
-            AppType::DesktopApp => Ok(Some(self.process.start(app)?)),
+            AppType::DesktopApp => {
+                let pid = self.process.start(app)?;
+                for _ in 0..200 {
+                    if crate::remote::worker::endpoint(&app.id).is_ok() {
+                        return Ok(Some(pid));
+                    }
+                    if self.process.status(&app.id) != AppStatus::Running {
+                        return Err("Application isolation failed; see the application log for missing dependencies or namespace permissions".into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err("Application runtime did not become ready; check its log".into())
+            }
             AppType::BackgroundApp => {
                 if !service_process::has_launch_command(app) {
                     return Err("background app requires launch_command".to_string());
                 }
                 self.service.start_and_wait(app).await
             }
+            AppType::RemoteApp => {
+                Err("Remote applications can only be connected; manage their process on B".into())
+            }
             AppType::CliApp => Err("CLI apps are one-shot tools and cannot be started".to_string()),
         }
     }
 
     async fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
+        self.revoke_views(&app.id);
         if app.id == BUILTIN_MIAO_ID {
             return self.proxy_panel.stop().await;
         }
         match app.app_type {
             AppType::DesktopApp => self.process.stop(&app.id),
             AppType::BackgroundApp => self.service.stop(&app.id),
-            AppType::CliApp => Ok(()),
+            AppType::CliApp | AppType::RemoteApp => Ok(()),
         }
     }
 
@@ -229,7 +256,7 @@ impl AppsState {
         match app.app_type {
             AppType::DesktopApp => self.process.status(&app.id),
             AppType::BackgroundApp => self.service.status(&app.id),
-            AppType::CliApp => AppStatus::Stopped,
+            AppType::CliApp | AppType::RemoteApp => AppStatus::Stopped,
         }
     }
 
@@ -240,7 +267,7 @@ impl AppsState {
         match app.app_type {
             AppType::DesktopApp => self.process.pid(&app.id),
             AppType::BackgroundApp => self.service.pid(&app.id),
-            AppType::CliApp => None,
+            AppType::CliApp | AppType::RemoteApp => None,
         }
     }
 
@@ -473,7 +500,9 @@ fn builtin_chrome_command() -> Result<String, String> {
 crash_dir={crash_dir};
 rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonSocket" "$profile_dir/SingletonCookie";
 set --;
-if [ "${{IVNC_PROXY_PANEL_ENABLED:-1}}" != '0' ] && [ -s {proxy_file} ]; then
+if [ -n "${{IVNC_CHROME_PROXY:-}}" ]; then
+  set -- "--proxy-server=$IVNC_CHROME_PROXY";
+elif [ "${{IVNC_PROXY_PANEL_ENABLED:-1}}" != '0' ] && [ -s {proxy_file} ]; then
   IFS= read -r proxy_server < {proxy_file};
   set -- "--proxy-server=$proxy_server";
 fi;
@@ -666,6 +695,22 @@ fn app_json(
     }
 
     match app.app_type {
+        AppType::RemoteApp => {
+            if let Ok(target) = state.remote.target(&app.id) {
+                obj["remote"] = json!(target);
+                obj["url"] = json!(format!(
+                    "{}/remote/v1/apps/{}",
+                    target.base_url, target.app_id
+                ));
+            }
+            obj["status"] = json!(state
+                .shared
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .map(|s| s.app_views.connection_status(&app.id))
+                .unwrap_or("disconnected"));
+            obj["can_clear_data"] = json!(false);
+        }
         AppType::BackgroundApp => {
             obj["url"] = json!(app.url);
             obj["launch_command"] = json!(app.launch_command);
@@ -712,8 +757,9 @@ async fn add_app(
     State(state): State<Arc<AppsState>>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
-    let name = match body.get("name").and_then(|v| v.as_str()) {
+    let mut name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ if body["app_type"] == "remote" => String::new(),
         _ => return err_response(StatusCode::BAD_REQUEST, "missing name"),
     };
 
@@ -721,7 +767,27 @@ async fn add_app(
         .get("app_type")
         .and_then(|v| v.as_str())
         .unwrap_or("background");
-    let app_type = AppType::from_str(app_type_str).unwrap_or(AppType::BackgroundApp);
+    let app_type = match AppType::from_str(app_type_str) {
+        Some(t) => t,
+        None => return err_response(StatusCode::BAD_REQUEST, "Invalid application type"),
+    };
+    let remote_target = if app_type == AppType::RemoteApp {
+        match crate::remote::gateway::connect_target(&body).await {
+            Ok(target) => Some(target),
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, &e),
+        }
+    } else {
+        None
+    };
+
+    if name.is_empty() {
+        if let Some(target) = &remote_target {
+            name = target.name.clone();
+        }
+    }
+    if name.len() > 256 {
+        return err_response(StatusCode::BAD_REQUEST, "Application name is too long");
+    }
 
     let (
         url,
@@ -734,6 +800,7 @@ async fn add_app(
         cli_binary_path,
         cli_env_vars,
     ) = match app_type {
+        AppType::RemoteApp => (None, None, None, None, None, None, None, None, None),
         AppType::BackgroundApp => {
             let url = parse_optional_string(body.get("url"));
             let launch_command = match body
@@ -818,7 +885,7 @@ async fn add_app(
         .get("autostart")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-        && app_type != AppType::CliApp;
+        && !matches!(app_type, AppType::CliApp | AppType::RemoteApp);
 
     let app = ManagedApp {
         id: uuid::Uuid::new_v4().to_string(),
@@ -838,9 +905,19 @@ async fn add_app(
     };
 
     if let Err(e) = state.store.add(&app) {
+        if let Some(target) = &remote_target {
+            crate::remote::gateway::forget_target(target).await;
+        }
         return err_response(StatusCode::CONFLICT, &e);
     }
 
+    if let Some(target) = remote_target {
+        if let Err(e) = state.remote.save_target(&app.id, &target) {
+            let _ = state.store.delete(&app.id);
+            crate::remote::gateway::forget_target(&target).await;
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
+    }
     if app.app_type == AppType::DesktopApp {
         let exec_command = app
             .exec_command
@@ -901,7 +978,47 @@ async fn update_app(
         );
     }
 
+    if app.app_type == AppType::RemoteApp {
+        if let Some(name) = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|n| !n.trim().is_empty())
+        {
+            app.name = name.trim().to_owned();
+        }
+    }
     match app.app_type {
+        AppType::RemoteApp => {
+            if body["password"].as_str().is_some_and(|s| !s.is_empty()) {
+                match crate::remote::gateway::connect_target(&body).await {
+                    Ok(target) => {
+                        let previous = state.remote.target(&app.id).ok();
+                        if let Err(e) = state.remote.save_target(&app.id, &target) {
+                            crate::remote::gateway::forget_target(&target).await;
+                            return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+                        }
+                        state.revoke_views(&app.id);
+                        if let Some(previous) = previous {
+                            crate::remote::gateway::forget_target(&previous).await;
+                        }
+                    }
+                    Err(e) => return err_response(StatusCode::BAD_REQUEST, &e),
+                }
+            } else if let Some(url) = body["url"].as_str() {
+                let old = state.remote.target(&app.id).ok();
+                if old
+                    .as_ref()
+                    .map(|t| format!("{}/remote/v1/apps/{}", t.base_url, t.app_id))
+                    .as_deref()
+                    != Some(url.trim())
+                {
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        "Enter the password when changing the remote address",
+                    );
+                }
+            }
+        }
         AppType::BackgroundApp => {
             if body.get("url").is_some() {
                 app.url = parse_optional_string(body.get("url"));
@@ -957,7 +1074,7 @@ async fn update_app(
     }
 
     if let Some(autostart) = body.get("autostart").and_then(|v| v.as_bool()) {
-        app.autostart = app.app_type != AppType::CliApp && autostart;
+        app.autostart = !matches!(app.app_type, AppType::CliApp | AppType::RemoteApp) && autostart;
     }
 
     if let Err(e) = state.store.update(&app) {
@@ -978,6 +1095,11 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
         let _ = state.stop_app_processes(&app).await;
         let _ = std::fs::remove_dir_all(datadir::app_root(&app));
     }
+    state.revoke_views(&id);
+    if let Ok(target) = state.remote.target(&id) {
+        crate::remote::gateway::forget_target(&target).await;
+    }
+    let _ = state.remote.delete(&id);
     match state.store.delete(&id) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(e) => err_response(StatusCode::NOT_FOUND, &e),
@@ -995,8 +1117,11 @@ async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
 
     match state.start_app_processes(&app).await {
         Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
+        Err(e) if e == "App is already running" => {
+            json_response(StatusCode::OK, json!({"ok":true,"pid":state.app_pid(&app)}))
+        }
         Err(e) => {
-            if id != BUILTIN_MIAO_ID {
+            if id != BUILTIN_MIAO_ID && app.app_type != AppType::RemoteApp {
                 let _ = state.stop_app_processes(&app).await;
             }
             err_response(StatusCode::INTERNAL_SERVER_ERROR, &e)
@@ -1059,6 +1184,12 @@ async fn clear_data(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
     };
+    if app.app_type == AppType::RemoteApp {
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            "Remote application data is managed on its source instance",
+        );
+    }
     // Stop app before clearing data
     let _ = state.stop_app_processes(&app).await;
     match datadir::clear(&app) {
@@ -1173,6 +1304,8 @@ mod tests {
         let store = Arc::new(AppStore::in_memory());
         ensure_builtin_miao(&store).unwrap();
         Arc::new(AppsState {
+            shared: std::sync::OnceLock::new(),
+            remote: Arc::new(crate::remote::store::RemoteStore::in_memory()),
             store,
             proxy_panel: Arc::new(ProxyPanelManager::isolated(
                 false,

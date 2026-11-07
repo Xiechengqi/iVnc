@@ -41,6 +41,8 @@ mkdir -p "${ROOT_DIR}/ivnc-data" "${ROOT_DIR}/miao-data"
 exec docker run -itd \
     -p "${PORT}:8008" \
     --cap-add NET_ADMIN \
+    --security-opt seccomp=unconfined \
+    --security-opt apparmor=unconfined \
     --device /dev/net/tun \
     -v /etc/hosts:/etc/hosts:ro \
     -v "${ROOT_DIR}/ivnc-data:/root/.ivnc" \

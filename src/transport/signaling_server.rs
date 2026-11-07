@@ -47,6 +47,7 @@ pub async fn handle_signaling_connection(
     state: Arc<SharedState>,
     session_manager: Arc<SessionManager>,
     client_host: Option<String>,
+    owner: bool,
 ) {
     info!(
         "New signaling WebSocket connection established (host: {:?})",
@@ -55,12 +56,19 @@ pub async fn handle_signaling_connection(
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Create a channel for sending messages
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(64);
 
     // Spawn task to forward messages to WebSocket
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+            if !matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    ws_sender.send(Message::Text(msg.into()))
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 break;
             }
         }
@@ -71,13 +79,46 @@ pub async fn handle_signaling_connection(
     let mut wire_format = WireFormat::Selkies;
 
     // Process incoming messages
-    while let Some(result) = ws_receiver.next().await {
+    let mut control_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        if tx.is_closed() || tx.capacity() == 0 {
+            break;
+        }
+        let result = tokio::select! {
+            msg = ws_receiver.next() => match msg { Some(result) => result, None => break },
+            _ = control_tick.tick(), if crate::remote::worker::is_worker() => {
+                if let Some(sid) = &session_id {
+                    let _ = tx.try_send(json!({"ivnc_control":{"controller":state.can_control(sid),"owner":owner}}).to_string());
+                }
+                continue;
+            }
+        };
         match result {
             Ok(Message::Text(text)) => {
                 let text_str: &str = text.as_ref();
 
+                if crate::remote::worker::is_worker() {
+                    if let Ok(value) = serde_json::from_str::<Value>(text_str) {
+                        if let Some(action) = value["ivnc_control"].as_str() {
+                            if let Some(sid) = &session_id {
+                                match action {
+                                    "claim" => {
+                                        state.claim_control(sid, false);
+                                    }
+                                    "takeover" if owner => {
+                                        state.claim_control(sid, true);
+                                    }
+                                    "release" => state.release_control(sid),
+                                    _ => {}
+                                }
+                                let _ = tx.try_send(json!({"ivnc_control":{"controller":state.can_control(sid),"owner":owner}}).to_string());
+                            }
+                            continue;
+                        }
+                    }
+                }
                 if let Some(reply) = handle_gstreamer_control_message(text_str, &mut wire_format) {
-                    let _ = tx.send(reply);
+                    let _ = tx.try_send(reply);
                     continue;
                 }
 
@@ -94,7 +135,7 @@ pub async fn handle_signaling_connection(
                     )
                     .await
                     {
-                        let _ = tx.send(response);
+                        let _ = tx.try_send(response);
                     }
                     continue;
                 }
@@ -112,7 +153,7 @@ pub async fn handle_signaling_connection(
                         )
                         .await
                         {
-                            let _ = tx.send(response);
+                            let _ = tx.try_send(response);
                         }
                     }
                     Err(e) => {
@@ -123,7 +164,7 @@ pub async fn handle_signaling_connection(
                             session_id.clone(),
                         );
                         if let Some(msg) = format_signaling_message(&error, wire_format) {
-                            let _ = tx.send(msg);
+                            let _ = tx.try_send(msg);
                         }
                     }
                 }
@@ -152,6 +193,10 @@ pub async fn handle_signaling_connection(
     // Clean up pending session if the WebSocket closes before ICE-TCP connects
     if let Some(ref sid) = session_id {
         session_manager.remove_pending_session(sid).await;
+        state.release_control(sid);
+        if crate::remote::worker::is_worker() {
+            state.disconnect_connection(sid);
+        }
     }
 
     info!(
@@ -172,7 +217,7 @@ async fn handle_signaling_message(
     session_id: &mut Option<String>,
     state: &Arc<SharedState>,
     session_manager: &Arc<SessionManager>,
-    tx: &mpsc::UnboundedSender<String>,
+    tx: &mpsc::Sender<String>,
     wire_format: WireFormat,
     client_host: Option<&str>,
 ) -> Option<String> {
@@ -181,6 +226,11 @@ async fn handle_signaling_message(
             sdp,
             session_id: provided_session_id,
         } => {
+            if let Some(old) = session_id.take() {
+                session_manager.remove_pending_session(&old).await;
+                state.release_control(&old);
+                state.disconnect_connection(&old);
+            }
             // Create session and accept offer in one step
             match session_manager
                 .create_session_with_offer(&sdp, client_host)
@@ -188,6 +238,9 @@ async fn handle_signaling_message(
             {
                 Ok((sid, answer_sdp)) => {
                     *session_id = Some(sid.clone());
+                    if crate::remote::worker::is_worker() {
+                        state.claim_control(&sid, false);
+                    }
                     info!("Session {} created with SDP answer", sid);
 
                     // Send ready notification (Selkies format)
@@ -198,7 +251,7 @@ async fn handle_signaling_message(
                             "input",
                         );
                         if let Some(payload) = format_signaling_message(&ready, wire_format) {
-                            let _ = tx.send(payload);
+                            let _ = tx.try_send(payload);
                         }
                     }
 
@@ -208,7 +261,7 @@ async fn handle_signaling_message(
                             session_id: sid.clone(),
                         };
                         if let Some(payload) = format_signaling_message(&complete, wire_format) {
-                            let _ = tx.send(payload);
+                            let _ = tx.try_send(payload);
                         }
                     }
 
@@ -270,7 +323,12 @@ async fn handle_signaling_message(
                 "Bitrate change requested for session {}: {} kbps",
                 target, bitrate_kbps
             );
-            state.runtime_settings.set_video_bitrate_kbps(bitrate_kbps);
+            if session_id
+                .as_deref()
+                .is_some_and(|sid| state.can_control(sid))
+            {
+                state.runtime_settings.set_video_bitrate_kbps(bitrate_kbps);
+            }
             None
         }
 
@@ -283,10 +341,13 @@ async fn handle_signaling_message(
             session_id: msg_session_id,
             reason,
         } => {
-            let target = session_id.clone().unwrap_or(msg_session_id);
+            let Some(target) = session_id.take() else {
+                return None;
+            };
+            let _ = msg_session_id;
             info!("Session close requested: {} (reason: {:?})", target, reason);
             session_manager.remove_pending_session(&target).await;
-            *session_id = None;
+            state.disconnect_connection(&target);
             None
         }
 

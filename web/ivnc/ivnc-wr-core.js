@@ -1,3 +1,4 @@
+import { attachAppControls, isActiveAppView } from './remote-apps.js';
 /*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -2408,7 +2409,7 @@ export default function webrtc() {
 		if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') return;
 		const payload = {
 			event,
-			visible: document.visibilityState !== 'hidden',
+			visible: document.visibilityState !== 'hidden' && !window.__ivncRootViewSuspended && (!window.__IVNC_APP_VIEW__ || window.__ivncViewActive),
 			focused: document.hasFocus(),
 			input: Boolean(input),
 			ts: Date.now(),
@@ -3025,6 +3026,7 @@ export default function webrtc() {
 	});
 
 	function uploadFileObject(file, pathToSend) {
+        if (!isActiveAppView()) return Promise.reject(new Error('Activate this application and obtain control before uploading.'));
 		return new Promise((resolve, reject) => {
 			// Start a heartbeat to prevent connection timeout during upload
 			const heartbeatInterval = setInterval(() => {
@@ -3063,6 +3065,7 @@ export default function webrtc() {
 					return;
 				}
 				try {
+                    if (!isActiveAppView()) throw new Error('Upload interrupted: application is no longer active or controlled.');
 					const prefixedView = new Uint8Array(1 + e.target.result.byteLength);
 					prefixedView[0] = 0x01; // Data prefix for file chunk
 					prefixedView.set(new Uint8Array(e.target.result), 1);
@@ -3413,6 +3416,7 @@ export default function webrtc() {
 
 	var _lastSentClipboard = '';
 	function handleWindowFocus() {
+        if (!isActiveAppView()) return;
 		if (webrtc._send_channel === null || webrtc._send_channel.readyState !== 'open') return;
 		// reset keyboard to avoid stuck keys.
 		webrtc.sendDataChannelMessage("kr");
@@ -3421,7 +3425,7 @@ export default function webrtc() {
 			// Send clipboard contents if changed.
 			navigator.clipboard.readText()
 				.then(text => {
-						if (text && text !== _lastSentClipboard) {
+						if (isActiveAppView() && text && text !== _lastSentClipboard) {
 							_lastSentClipboard = text;
 							webrtc.sendDataChannelMessage(`cw,${stringToBase64(text)}`);
 						}
@@ -3583,7 +3587,7 @@ export default function webrtc() {
 				e.stopPropagation();
 				showChangePasswordModal();
 			});
-			taskbar.appendChild(pwdBtn);
+			if (!window.__IVNC_APP_VIEW__) taskbar.appendChild(pwdBtn);
 
 			// File upload button
 			const uploadSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
@@ -3618,9 +3622,9 @@ export default function webrtc() {
 				e.stopPropagation();
 				showForceUpdateModal();
 			});
-			taskbar.appendChild(updateBtn);
+			if (!window.__IVNC_APP_VIEW__) taskbar.appendChild(updateBtn);
 
-			if (toolbarFeatureEnabled('proxy')) {
+			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('proxy')) {
 				const proxySvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
 				const proxyBtn = document.createElement('div');
 				proxyBtn.className = 'taskbar-pin';
@@ -3637,7 +3641,7 @@ export default function webrtc() {
 				taskbar.appendChild(proxyBtn);
 			}
 
-			if (toolbarFeatureEnabled('terminal')) {
+			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('terminal')) {
 				const terminalSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
 				const terminalBtn = document.createElement('div');
 				terminalBtn.className = 'taskbar-pin';
@@ -3654,7 +3658,7 @@ export default function webrtc() {
 				taskbar.appendChild(terminalBtn);
 			}
 
-			if (toolbarFeatureEnabled('console')) {
+			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console')) {
 				const consoleSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
 				const consoleBtn = document.createElement('div');
 				consoleBtn.className = 'taskbar-pin';
@@ -3779,8 +3783,45 @@ export default function webrtc() {
 			var pathname = window.location.pathname;
 			pathname = pathname.slice(0, pathname.lastIndexOf("/") + 1);
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
-			var signaling = new WebRTCDemoSignaling(new URL(protocol + window.location.host + pathname + appName + "/signaling/"));
+			var signaling = new WebRTCDemoSignaling(new URL(protocol + window.location.host + pathname + (window.__IVNC_APP_VIEW__ ? "webrtc" : appName + "/signaling/")));
 			webrtc = new WebRTCDemo(signaling, videoElement, 1);
+            window.__ivncWebRTC = webrtc;
+            attachAppControls(signaling);
+            let wasController = false;
+            window.addEventListener('ivnc-control', event => {
+                if (event.detail.controller && !wasController && webrtc._send_channel?.readyState === 'open') {
+                    sendClientPersistedSettings();
+                    if (isActiveAppView()) enableAutoResize();
+                }
+                wasController = !!event.detail.controller;
+            });
+            const sendOriginal = webrtc.sendDataChannelMessage.bind(webrtc);
+            let rootAudioMuted;
+            window.addEventListener('ivnc-root-view-state', () => {
+                if (webrtc._audioElement) {
+                    if (window.__ivncRootViewSuspended) {
+                        rootAudioMuted ??= webrtc._audioElement.muted;
+                        webrtc._audioElement.muted = true;
+                    } else if (rootAudioMuted !== undefined) {
+                        webrtc._audioElement.muted = rootAudioMuted;
+                        rootAudioMuted = undefined;
+                    }
+                }
+                sendClientActivity('view-switch');
+            });
+            webrtc.sendDataChannelMessage = data => {
+                const housekeeping = typeof data === 'string' && (data === 'pong' || data.startsWith('pong,') || data.startsWith('_client_') || data.startsWith('_stats_'));
+                const active = isActiveAppView();
+                if (housekeeping || active) sendOriginal(data);
+            };
+            window.addEventListener('message', event => {
+                if (event.origin !== location.origin || event.source !== window.parent || event.data?.type !== 'ivnc-view-active') return;
+                if (!event.data.active && window.__ivncCanControl) sendOriginal('kr');
+                window.__ivncViewActive = !!event.data.active;
+                if (webrtc._audioElement) webrtc._audioElement.muted = !event.data.active;
+                sendClientActivity('view-switch');
+                if (event.data.active) window.focus();
+            });
 			const send = (data) => {
 				webrtc.sendDataChannelMessage(data);
 			}
@@ -3795,18 +3836,23 @@ export default function webrtc() {
 				console.log("[signaling] " + message);
 			};
 			signaling.onerror = (message) => {
+                window.dispatchEvent(new CustomEvent('ivnc-view-error', {detail:message}));
 				logEntries.push(applyTimestamp("[signaling] [ERROR] " + message))
 				console.log("[signaling ERROR] " + message);
 			};
 
 			signaling.ondisconnect = (reconnect) => {
+                if (window.__IVNC_APP_VIEW__) {
+                    window.__ivncCanControl = false;
+                    window.dispatchEvent(new Event('ivnc-view-disconnected'));
+                }
 				videoElement.style.cursor = "auto";
 				if (reconnect) {
 					// If WebRTC media is already flowing, don't tear it down
 					// just because the signaling WebSocket was closed by a proxy.
 					// Only reset when the peer connection is actually dead.
 					var pc = webrtc.peerConnection;
-					if (pc && (pc.connectionState === 'connected' || pc.connectionState === 'connecting')) {
+					if (!window.__IVNC_APP_VIEW__ && pc && (pc.connectionState === 'connected' || pc.connectionState === 'connecting')) {
 						console.log("[signaling] WebSocket closed but WebRTC still alive, reconnecting signaling only");
 						status = 'connected';
 						signaling.connect();
@@ -3859,7 +3905,7 @@ export default function webrtc() {
 						enableStatWatch();
 					}
 					resetNetworkQuality('unknown');
-				} else if (videoConnected === "failed") {
+				} else if (videoConnected === "failed" && !window.__FORCE_DISCONNECTED__) {
 					// WebRTC connection died — reset and reconnect
 					console.log("[webrtc] Connection failed, resetting");
 					status = 'connecting';
@@ -3966,7 +4012,7 @@ export default function webrtc() {
 			var _programmaticCopy = false;
 
 			webrtc.onclipboardcontent = (content) => {
-				if (clipboardStatus !== 'enabled') return;
+				if (clipboardStatus !== 'enabled' || !isActiveAppView()) return;
 				webrtc._remoteClipboard = content;
 				if (navigator.clipboard && navigator.clipboard.writeText) {
 					navigator.clipboard.writeText(content).catch(() => {
@@ -3978,6 +4024,7 @@ export default function webrtc() {
 			}
 
 			function doCopyToSystem(text) {
+                if (!isActiveAppView()) return;
 				_clipTA.value = text;
 				_clipTA.select();
 				_programmaticCopy = true;
@@ -4009,7 +4056,7 @@ export default function webrtc() {
 					_overlayRef.readOnly = true;
 					_overlayRef.value = '';
 				}
-				if (clipboardStatus !== 'enabled') return;
+				if (clipboardStatus !== 'enabled' || !isActiveAppView()) return;
 				var now = Date.now();
 				if (now - _lastPasteTime < 1000) {
 					e.preventDefault();

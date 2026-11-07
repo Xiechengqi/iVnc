@@ -81,7 +81,7 @@ function setStatusTitle(state, cpuPercent) {
 
 async function updateBrowserStatus() {
 	try {
-		const response = await fetch(`/api/render-status?ts=${Date.now()}`, {
+		const response = await fetch(`${window.__IVNC_APP_VIEW__ ? location.pathname : '/'}api/render-status?ts=${Date.now()}`, {
 			cache: "no-store",
 			credentials: "same-origin",
 		});

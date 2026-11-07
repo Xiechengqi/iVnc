@@ -14,6 +14,7 @@ pub mod gstreamer;
 pub mod input;
 pub mod paths;
 pub mod proxy_panel;
+pub mod remote;
 pub mod runtime_settings;
 pub mod system_clipboard;
 pub mod terminal;

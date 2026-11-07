@@ -58,6 +58,9 @@ struct ClientActivityReport {
 /// Shared state for the application
 #[derive(Clone)]
 pub struct SharedState {
+    pub media_router: Arc<crate::remote::media::MediaRouter>,
+    pub app_views: Arc<crate::remote::gateway::Views>,
+    pub app_controller: Arc<Mutex<Option<String>>>,
     /// Configuration
     pub config: Arc<Config>,
 
@@ -116,11 +119,11 @@ pub struct SharedState {
     pub keyframe_cache: Arc<Mutex<Vec<Vec<u8>>>>,
 
     /// Per-session mpsc senders for RTP (reliable cross-thread wakeup)
-    pub rtp_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<Vec<u8>>>>>,
+    pub rtp_subscribers: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>,
     /// Per-session mpsc senders for audio
-    pub audio_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<AudioPacket>>>>,
+    pub audio_subscribers: Arc<Mutex<Vec<mpsc::Sender<AudioPacket>>>>,
     /// Per-session mpsc senders for text
-    pub text_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
+    pub text_subscribers: Arc<Mutex<Vec<mpsc::Sender<String>>>>,
 
     /// Password override (set via /api/change-password, takes precedence over config)
     pub password_override: Arc<RwLock<Option<String>>>,
@@ -174,6 +177,9 @@ impl SharedState {
         ));
 
         Self {
+            media_router: Arc::new(crate::remote::media::MediaRouter::default()),
+            app_views: Arc::new(crate::remote::gateway::Views::default()),
+            app_controller: Arc::new(Mutex::new(None)),
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
             input_sender,
@@ -205,6 +211,35 @@ impl SharedState {
             apps_state: std::sync::OnceLock::new(),
             shutdown_flag: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn can_control(&self, session: &str) -> bool {
+        !crate::remote::worker::is_worker()
+            || self.app_controller.lock().unwrap().as_deref() == Some(session)
+    }
+
+    pub fn claim_control(&self, session: &str, force: bool) -> bool {
+        let mut controller = self.app_controller.lock().unwrap();
+        if (force || controller.is_none()) && controller.as_deref() != Some(session) {
+            self.reset_app_input();
+            *controller = Some(session.to_owned());
+        }
+        controller.as_deref() == Some(session)
+    }
+
+    pub fn release_control(&self, session: &str) {
+        let mut controller = self.app_controller.lock().unwrap();
+        if controller.as_deref() == Some(session) {
+            self.reset_app_input();
+            *controller = None;
+        }
+    }
+
+    fn reset_app_input(&self) {
+        let _ = self.input_sender.send(crate::input::InputEventData {
+            event_type: crate::input::InputEvent::KeyboardReset,
+            ..Default::default()
+        });
     }
 
     /// Attach the apps manager once it has been constructed during startup.
@@ -428,7 +463,7 @@ impl SharedState {
     /// Broadcast an RTP packet to all WebRTC sessions
     pub fn broadcast_rtp(&self, packet: Vec<u8>) {
         let mut subs = self.rtp_subscribers.lock().unwrap();
-        subs.retain(|tx| tx.send(packet.clone()).is_ok());
+        subs.retain(|tx| tx.try_send(packet.clone()).is_ok());
     }
 
     /// Get current RTP subscriber count
@@ -437,22 +472,22 @@ impl SharedState {
     }
 
     /// Subscribe to RTP packets via mpsc (reliable cross-thread wakeup)
-    pub fn subscribe_rtp_mpsc(&self) -> mpsc::UnboundedReceiver<Vec<u8>> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn subscribe_rtp_mpsc(&self) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel(2048);
         self.rtp_subscribers.lock().unwrap().push(tx);
         rx
     }
 
     /// Subscribe to audio packets via mpsc
-    pub fn subscribe_audio_mpsc(&self) -> mpsc::UnboundedReceiver<AudioPacket> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn subscribe_audio_mpsc(&self) -> mpsc::Receiver<AudioPacket> {
+        let (tx, rx) = mpsc::channel(128);
         self.audio_subscribers.lock().unwrap().push(tx);
         rx
     }
 
     /// Subscribe to text messages via mpsc
-    pub fn subscribe_text_mpsc(&self) -> mpsc::UnboundedReceiver<String> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn subscribe_text_mpsc(&self) -> mpsc::Receiver<String> {
+        let (tx, rx) = mpsc::channel(256);
         self.text_subscribers.lock().unwrap().push(tx);
         rx
     }
@@ -460,13 +495,13 @@ impl SharedState {
     /// Broadcast audio to all subscribers
     pub fn broadcast_audio(&self, packet: AudioPacket) {
         let mut subs = self.audio_subscribers.lock().unwrap();
-        subs.retain(|tx| tx.send(packet.clone()).is_ok());
+        subs.retain(|tx| tx.try_send(packet.clone()).is_ok());
     }
 
     /// Broadcast text to all subscribers
     pub fn broadcast_text(&self, msg: String) {
         let mut subs = self.text_subscribers.lock().unwrap();
-        subs.retain(|tx| tx.send(msg.clone()).is_ok());
+        subs.retain(|tx| tx.try_send(msg.clone()).is_ok());
     }
 
     /// Update the keyframe cache with a new set of RTP packets
@@ -682,6 +717,20 @@ impl SharedState {
     /// Remove a connection
     pub fn remove_connection(&self, id: &str) {
         self.connections.lock().unwrap().remove(id);
+        self.release_control(id);
+    }
+
+    pub fn disconnect_connection(&self, id: &str) {
+        if let Some(tx) = self
+            .connections
+            .lock()
+            .unwrap()
+            .remove(id)
+            .and_then(|c| c.shutdown_tx)
+        {
+            let _ = tx.send(());
+        }
+        self.release_control(id);
     }
 
     /// Get all connections as JSON

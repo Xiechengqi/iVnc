@@ -17,6 +17,16 @@ impl AppStore {
         let conn =
             Connection::open(&db_path).map_err(|e| format!("Failed to open apps.db: {}", e))?;
 
+        // SQLite produces a consistent, one-time configuration snapshot before
+        // managed desktops are launched in their independent runtimes.
+        let backup = db_path.with_file_name("apps.before-isolation.db");
+        if !backup.exists() {
+            conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+                .map_err(|e| format!("Cannot back up application configuration: {e}"))?;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+        }
         Self::from_connection(conn)
     }
 
@@ -136,8 +146,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = conn.execute(
-            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11 WHERE id=?12",
-            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id],
+            "UPDATE apps SET name=?13, app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11 WHERE id=?12",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, app.name],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(format!("App '{}' not found", app.id));

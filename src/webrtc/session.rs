@@ -423,6 +423,7 @@ async fn reap_stale_sessions(
         for id in &stale {
             map.remove(id);
             shared_state.decrement_webrtc_sessions();
+            shared_state.release_control(id);
             warn!("Reaped stale pending session: {}", id);
         }
     }

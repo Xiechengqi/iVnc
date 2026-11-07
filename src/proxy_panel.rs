@@ -30,6 +30,15 @@ struct RunningProxy {
 impl Drop for RunningProxy {
     fn drop(&mut self) {
         terminate_group(&mut self.child, self.pid);
+        // A concurrent fork can briefly inherit this open file description
+        // until exec closes it. Release ownership explicitly after reaping our
+        // process group so stop -> start cannot retain a stale flock.
+        unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&self._instance_lock),
+                libc::LOCK_UN,
+            );
+        }
     }
 }
 
@@ -865,6 +874,17 @@ http.server.HTTPServer(('127.0.0.1', int(os.environ['MIAO_PORT'])), Panel).serve
             .unwrap_err()
             .contains("another iVnc instance"));
         assert!(!second.status().running);
+        // Model a descriptor inherited by an unrelated concurrent fork.
+        let _inherited_lock = first
+            .runtime
+            .lock()
+            .unwrap()
+            .process
+            .as_ref()
+            .unwrap()
+            ._instance_lock
+            .try_clone()
+            .unwrap();
         first.stop().await.unwrap();
         fs::create_dir_all(&second.dir).unwrap();
         fs::write(second.dir.join("spawn-child"), "").unwrap();

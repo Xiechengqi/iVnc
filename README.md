@@ -18,7 +18,8 @@
 - **Web UI** - 内置 Web 界面，支持 PWA 安装
 - **HTTP API** - 健康检查和 Prometheus 指标端点
 - **Basic Auth** - 内置 HTTP 基础认证
-- **TLS** - 可选自签名 HTTPS（`--tls`）
+- **远程桌面应用** - 应用独立运行与授权，A 中继 B 的画面、输入、声音和文件，多人观看与单人控制
+- **TLS** - 支持持久化自签名或指定证书（构建启用 `tls`，运行加 `--tls`）
 
 ## 快速开始
 
@@ -296,10 +297,13 @@ iVnc 持久化数据默认位于 `$HOME/.ivnc`（可用 `IVNC_HOME` 覆盖）：
 ```
 $IVNC_HOME/
   apps.db / console.json / app_running_state.json
+  remote.db / remote.key / apps.before-isolation.db
   capability_calls.jsonl / ivnc.pid / Desktop/
   applications/   # .desktop 入口
   miao/           # 内置 miao 二进制与 miao.log
   apps/<id>/      # 日志、隔离 HOME、data、chrome profile
+  runtimes/<id>/  # 内部运行代次与端点
+  tls/           # 持久化 TLS 证书与私钥
 ```
 
 miao 自身的配置、订阅缓存和运行状态遵循 miao 的目录约定，位于 `$HOME/.miao`。Docker 部署应同时持久化 `/root/.ivnc` 与 `/root/.miao`。
@@ -309,6 +313,12 @@ Chrome 首次注册默认关闭自启动。在“编辑应用”中保存的“�
 Miao 以内置后台应用显示在控制台应用列表，首次默认随 iVnc 启动，升级时保留旧版自启动偏好。可直接启动、停止、重启、查看日志并打开代理配置，默认以 `--nopasswd` 免密码进入 Miao 面板。“编辑应用”展示完整只读配置，启动参数通过 iVnc CLI 控制。VPS 部署依赖 OpenSSH 客户端，Docker 镜像已包含。详细行为、配套版本和构建方式见 [Miao 后台应用](docs/MIAO.md)。
 
 首次启动会尝试从旧路径（`~/.config/ivnc`、`/tmp/ivnc-apps` 等）自动迁移。
+
+### 远程应用
+
+在 B 的桌面应用“远程访问”中设置应用密码并复制连接地址，在 A 添加“远程应用”后打开即可连接原有进程。浏览器只连接 A；关闭或删除 A 中的连接不会停止 B 的应用。B 关闭共享或修改密码会断开远程会话，B 所有者可以接管控制权。
+
+桌面应用使用 bubblewrap、slirp4netns、nftables 的独立环境，需要相应依赖和命名空间权限。允许访问的本机后台服务由 B 逐应用授权。使用步骤、证书、Docker 权限、升级和验证范围见 [远程桌面应用](docs/REMOTE_APPS.md)。
 
 ## API 参考
 

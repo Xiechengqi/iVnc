@@ -36,6 +36,8 @@ pub struct FileUploadHandler {
     settings: FileUploadSettings,
     active_path: Option<PathBuf>,
     active_file: Option<File>,
+    active_parent: Option<File>,
+    active_name: Option<std::ffi::CString>,
     expected_size: Option<u64>,
     written_size: u64,
 }
@@ -46,6 +48,8 @@ impl FileUploadHandler {
             settings,
             active_path: None,
             active_file: None,
+            active_parent: None,
+            active_name: None,
             expected_size: None,
             written_size: 0,
         }
@@ -124,13 +128,8 @@ impl FileUploadHandler {
         if let Some(mut file) = self.active_file.take() {
             let _ = file.flush();
         }
-        if let Some(path) = self.active_path.take() {
-            if let Err(err) = fs::remove_file(&path) {
-                warn!("Failed to remove incomplete upload {:?}: {}", path, err);
-            } else {
-                info!("Purged incomplete upload {:?}", path);
-            }
-        }
+        self.remove_active_file();
+        self.active_path = None;
         self.expected_size = None;
         self.written_size = 0;
     }
@@ -148,7 +147,7 @@ impl FileUploadHandler {
                         "Upload size mismatch for {:?}: expected {}, got {}",
                         path, expected, self.written_size
                     );
-                    let _ = fs::remove_file(&path);
+                    self.remove_active_file();
                 } else {
                     info!("Upload finished: {:?}", path);
                 }
@@ -156,8 +155,20 @@ impl FileUploadHandler {
                 info!("Upload finished: {:?}", path);
             }
         }
+        self.active_parent = None;
+        self.active_name = None;
         self.expected_size = None;
         self.written_size = 0;
+    }
+
+    fn remove_active_file(&mut self) {
+        use std::os::fd::AsRawFd;
+        if let (Some(parent), Some(name)) = (self.active_parent.take(), self.active_name.take()) {
+            // The directory fd pins the validated parent even if the app renames it.
+            unsafe {
+                libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0);
+            }
+        }
     }
 
     fn is_upload_allowed(&self) -> bool {
@@ -189,61 +200,15 @@ impl FileUploadHandler {
         let safe_rel = sanitize_relative_path(rel_path)
             .ok_or_else(|| format!("Invalid relative path: {}", rel_path))?;
 
-        let upload_root = upload_dir.to_path_buf();
-        let target_path = upload_root.join(&safe_rel);
-        let target_dir = target_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| upload_root.clone());
-
-        if !target_dir.starts_with(&upload_root) {
-            return Err(format!(
-                "Path escape attempt detected: {:?} is outside {:?}",
-                target_path, upload_root
-            ));
-        }
-
-        if let Err(err) = fs::create_dir_all(&target_dir) {
-            return Err(format!(
-                "Failed to create upload directory {:?}: {}",
-                target_dir, err
-            ));
-        }
-
-        let root_canon = fs::canonicalize(&upload_root).map_err(|err| {
-            format!(
-                "Failed to canonicalize upload root {:?}: {}",
-                upload_root, err
-            )
-        })?;
-        let target_dir_canon = fs::canonicalize(&target_dir).map_err(|err| {
-            format!(
-                "Failed to canonicalize upload target {:?}: {}",
-                target_dir, err
-            )
-        })?;
-        if !target_dir_canon.starts_with(&root_canon) {
-            return Err(format!(
-                "Path escape attempt detected via symlink: {:?} is outside {:?}",
-                target_dir_canon, root_canon
-            ));
-        }
-        if let Ok(meta) = fs::symlink_metadata(&target_path) {
-            if meta.file_type().is_symlink() {
-                return Err(format!(
-                    "Refusing to follow symlink target {:?}",
-                    target_path
-                ));
-            }
-        }
-
+        let upload_dir = upload_dir.clone();
         if self.active_file.is_some() {
-            warn!("Closing previous upload before starting new one");
             self.finish_upload();
         }
-
-        let file = File::create(&target_path)
-            .map_err(|err| format!("Failed to create upload file {:?}: {}", target_path, err))?;
+        let target_path = upload_dir.join(&safe_rel);
+        let (parent, name, file) = open_upload(&upload_dir, &safe_rel)
+            .map_err(|e| format!("Cannot create upload: {e}"))?;
+        self.active_parent = Some(parent);
+        self.active_name = Some(name);
         self.active_file = Some(file);
         self.active_path = Some(target_path.clone());
         self.expected_size = Some(size);
@@ -297,5 +262,104 @@ fn sanitize_relative_path(rel_path: &str) -> Option<PathBuf> {
         None
     } else {
         Some(safe)
+    }
+}
+
+fn open_upload(
+    root: &std::path::Path,
+    relative: &std::path::Path,
+) -> std::io::Result<(File, std::ffi::CString, File)> {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{
+                ffi::OsStrExt,
+                fs::{MetadataExt, OpenOptionsExt},
+            },
+        },
+    };
+    fs::create_dir_all(root)?;
+    let mut parent = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)?;
+    let parts: Vec<_> = relative.components().collect();
+    for (index, part) in parts.iter().enumerate() {
+        let Component::Normal(part) = part else {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        };
+        let name = CString::new(part.as_bytes()).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+        if index + 1 == parts.len() {
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let file = unsafe { File::from_raw_fd(fd) };
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.nlink() != 1 {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            file.set_len(0)?;
+            return Ok((parent, name, file));
+        }
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0
+            && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        parent = unsafe { File::from_raw_fd(fd) };
+    }
+    Err(std::io::ErrorKind::InvalidInput.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn upload_rejects_symlinks_and_hardlinks_and_keeps_renamed_parent() {
+        let root = std::env::temp_dir().join(format!("ivnc-upload-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("downloads")).unwrap();
+        fs::write(root.join("secret"), b"secret").unwrap();
+        std::os::unix::fs::symlink(&root, root.join("downloads/out")).unwrap();
+        fs::hard_link(root.join("secret"), root.join("downloads/link")).unwrap();
+        for name in ["out/secret", "link", "../secret"] {
+            assert!(open_upload(&root.join("downloads"), std::path::Path::new(name)).is_err());
+        }
+        let (_dir, _name, mut file) =
+            open_upload(&root.join("downloads"), std::path::Path::new("nested/ok")).unwrap();
+        fs::rename(root.join("downloads/nested"), root.join("saved")).unwrap();
+        std::os::unix::fs::symlink(&root, root.join("downloads/nested")).unwrap();
+        file.write_all(b"hello").unwrap();
+        assert_eq!(fs::read(root.join("saved/ok")).unwrap(), b"hello");
+        assert_eq!(fs::read(root.join("secret")).unwrap(), b"secret");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+impl Drop for FileUploadHandler {
+    fn drop(&mut self) {
+        self.abort_active();
     }
 }

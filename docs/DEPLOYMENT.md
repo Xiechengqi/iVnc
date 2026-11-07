@@ -10,6 +10,11 @@
 - PulseAudio 或 PipeWire（音频捕获）
 - 硬件编码器驱动（可选）
 
+托管桌面应用还需要 Linux 5.6+、可用的 user/mount/PID/network namespace，以及
+`bubblewrap slirp4netns nftables iproute2 dbus-daemon`。X11 兼容使用
+`xwayland openbox x11-xkb-utils`；独立应用音频使用 `pulseaudio pulseaudio-utils`。
+完整边界与用法见 [远程桌面应用](REMOTE_APPS.md)。
+
 ## 依赖安装
 
 ### Ubuntu/Debian
@@ -276,7 +281,7 @@ sudo systemctl start ivnc
 ## Docker 部署
 
 正式镜像以 Ubuntu 24.04 LTS 为运行时，内置 Smithay headless 合成器，不需要
-Xvfb、Openbox 或外部 `DISPLAY`。在仓库目录中运行：
+外部 X11/Wayland 服务；X11 应用使用各自的 Xwayland 和 Openbox。在仓库目录中运行：
 
 ```bash
 ./docker-run.sh
@@ -302,6 +307,7 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```bash
 docker run -d --name ivnc --restart unless-stopped \
   -p 8008:8008 --cap-add NET_ADMIN --device /dev/net/tun \
+  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   -v "$PWD/ivnc-data:/root/.ivnc" -v "$PWD/miao-data:/root/.miao" \
   -v /path/to/ivnc-ssh:/root/.ssh \
   ghcr.io/xiechengqi/ivnc:latest --proxy-ip 203.0.113.10
@@ -315,6 +321,11 @@ docker run -d --name ivnc --restart unless-stopped \
 代理模式会创建 TUN，因此宿主机必须提供 `/dev/net/tun`，容器也需要脚本中授予的
 `NET_ADMIN`。代理池端口如需从容器外连接，需要按实际端口范围扩展脚本的发布参数。
 
+两个 `security-opt` 允许桌面应用建立嵌套命名空间；缺少权限时应用会启动失败。
+应用内部仍强制配置防火墙并丢弃 capabilities。HTTP(S)、信令和原始 ICE-TCP
+共用发布端口，因此纯 HTTP 反向代理不能替代透明 TCP 入口。
+证书与私有 CA 配置见 [远程应用部署](REMOTE_APPS.md#部署与证书)。
+
 ### 镜像版本与回滚
 
 - `latest`：随主分支滚动更新
@@ -326,8 +337,8 @@ Dockerfile 还提供 `RUNTIME_IMAGE` 和 `EXPECTED_RUNTIME_VERSION` 构建参数
 Noble 系统级回归时构建临时的旧运行时镜像。
 
 独立发布二进制仍在 Ubuntu 22.04 容器中构建，以保持较低的 glibc 兼容基线；这不影响
-Docker 镜像使用 Ubuntu 24.04。正式 Docker 镜像使用 `--no-default-features` 构建，当前
-不包含音频捕获功能，音频相关验证只适用于默认 feature 的源码或独立二进制部署。
+Docker 镜像使用 Ubuntu 24.04。正式镜像和发布二进制保留默认 PulseAudio feature，
+并启用 `tls` feature；音频仍需在配置中启用，HTTPS 运行时使用 `--tls`。
 
 ## 验证
 

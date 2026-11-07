@@ -30,6 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libinput-dev \
     libudev-dev \
     libseat-dev \
+    libpulse-dev \
+    libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -48,7 +50,7 @@ RUN IVNC_REFRESH_MIAO=1 \
     IVNC_MIAO_URL="$IVNC_MIAO_URL" \
     IVNC_BUILD_GIT_COMMIT="$IVNC_BUILD_GIT_COMMIT" \
     IVNC_BUILD_GIT_MESSAGE="$IVNC_BUILD_GIT_MESSAGE" \
-    cargo build --release --no-default-features --bin ivnc
+    cargo build --release --features tls --bin ivnc
 
 
 FROM ${RUNTIME_IMAGE}
@@ -62,6 +64,18 @@ RUN apt-get update && \
     bash \
     curl \
     openssh-client \
+    bubblewrap \
+    slirp4netns \
+    nftables \
+    iproute2 \
+    dbus-daemon \
+    xwayland \
+    openbox \
+    x11-xkb-utils \
+    pulseaudio \
+    pulseaudio-utils \
+    libpulse0 \
+    libopus0 \
     ca-certificates \
     fontconfig \
     fonts-wqy-microhei \

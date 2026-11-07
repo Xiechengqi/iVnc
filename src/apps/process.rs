@@ -12,6 +12,7 @@ struct RunningApp {
 }
 
 pub struct ProcessManager {
+    operations: Arc<Mutex<()>>,
     processes: Arc<Mutex<HashMap<String, RunningApp>>>,
     /// App IDs that were explicitly stopped by the user (should not auto-restart)
     stopped_by_user: Arc<Mutex<HashSet<String>>>,
@@ -22,6 +23,7 @@ pub struct ProcessManager {
 impl ProcessManager {
     pub fn new() -> Self {
         Self {
+            operations: Arc::new(Mutex::new(())),
             processes: Arc::new(Mutex::new(HashMap::new())),
             stopped_by_user: Arc::new(Mutex::new(HashSet::new())),
             store: None,
@@ -34,6 +36,7 @@ impl ProcessManager {
     }
 
     fn start_watchdog(&self, store: Arc<super::store::AppStore>) {
+        let operations = self.operations.clone();
         let processes = self.processes.clone();
         let stopped_by_user = self.stopped_by_user.clone();
 
@@ -41,6 +44,7 @@ impl ProcessManager {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
+                let _operation = operations.lock().unwrap();
                 // Find crashed apps that were not stopped by user
                 let crashed: Vec<String> = {
                     let mut procs = processes.lock().unwrap();
@@ -87,6 +91,7 @@ impl ProcessManager {
     }
 
     pub fn start(&self, app: &ManagedApp) -> Result<u32, String> {
+        let _operation = self.operations.lock().unwrap();
         if self.is_running(&app.id) {
             return Err("App is already running".into());
         }
@@ -107,6 +112,7 @@ impl ProcessManager {
     }
 
     pub fn stop(&self, app_id: &str) -> Result<(), String> {
+        let _operation = self.operations.lock().unwrap();
         // Mark as user-stopped so watchdog won't restart it
         self.stopped_by_user
             .lock()
@@ -173,15 +179,9 @@ impl ProcessManager {
         let mut procs = self.processes.lock().unwrap();
         if let Some(running) = procs.get_mut(app_id) {
             match running.child.try_wait() {
-                Ok(Some(_)) => {
-                    procs.remove(app_id);
-                    AppStatus::Crashed
-                }
+                Ok(Some(_)) => AppStatus::Crashed,
                 Ok(None) => AppStatus::Running,
-                Err(_) => {
-                    procs.remove(app_id);
-                    AppStatus::Crashed
-                }
+                Err(_) => AppStatus::Crashed,
             }
         } else {
             AppStatus::Stopped

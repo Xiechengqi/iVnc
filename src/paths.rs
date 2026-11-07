@@ -122,6 +122,17 @@ pub fn ensure_layout() -> Result<(), String> {
 
 /// Ensure per-app directories exist and return the isolated HOME path.
 pub fn prepare_app_home(app_id: &str) -> Result<PathBuf, String> {
+    if !crate::remote::valid_id(app_id) {
+        return Err("Invalid application ID".into());
+    }
+    for path in [app_dir(app_id), app_home(app_id), app_data_dir(app_id)] {
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "Application directory must not be a symbolic link: {}",
+                path.display()
+            ));
+        }
+    }
     let home = app_home(app_id);
     fs::create_dir_all(&home)
         .map_err(|e| format!("Failed to create app home {}: {}", home.display(), e))?;

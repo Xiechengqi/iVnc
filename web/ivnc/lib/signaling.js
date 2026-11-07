@@ -256,6 +256,7 @@ export class WebRTCDemoSignaling {
         }
 
         if (event.data.startsWith("ERROR")) {
+            this._setError(event.data.slice(6));
             if (event.data === "ERROR peer '0' not found") {
                 this._setDebug("Peer not found. Retrying...");
                 setTimeout(() => {
@@ -278,7 +279,12 @@ export class WebRTCDemoSignaling {
             return;
         }
 
-        if (msg.sdp != null) {
+        if (msg.ivnc_revoked) {
+            window.__FORCE_DISCONNECTED__ = true;
+            window.__ivncCanControl = false;
+        } else if (msg.ivnc_control != null) {
+            window.dispatchEvent(new CustomEvent("ivnc-control", {detail:msg.ivnc_control}));
+        } else if (msg.sdp != null) {
             this._setSDP(new RTCSessionDescription(msg.sdp));
         } else if (msg.ice != null) {
             var icecandidate = new RTCIceCandidate(msg.ice);

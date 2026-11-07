@@ -13,6 +13,10 @@
   <div id="app"></div>
   <script>
     (function() {
+      window.__IVNC_APP_VIEW__ = window.location.pathname.startsWith('/app-view/');
+      window.__ivncViewActive = window.parent === window;
+      window.__ivncCanControl = !window.__IVNC_APP_VIEW__;
+      const configBase = window.__IVNC_APP_VIEW__ ? window.location.pathname : '/';
       window.__IVNC_WS_HOST__ = window.location.hostname;
       // Server replaces __IVNC_INJECTED_PORT__ with actual port (e.g., "8007")
       // The variable name __IVNC_WS_PORT__ is preserved
@@ -24,9 +28,9 @@
       }
       window.__IVNC_TCP_ONLY__ = false;
       Promise.all([
-        fetch(`/ws-config?ts=${Date.now()}`, { cache: 'no-store' })
+        fetch(`${configBase}ws-config?ts=${Date.now()}`, { cache: 'no-store' })
           .then((resp) => resp.ok ? resp.json() : null),
-        fetch(`/ui-config?ts=${Date.now()}`, { cache: 'no-store' })
+        fetch(`${configBase}ui-config?ts=${Date.now()}`, { cache: 'no-store' })
           .then((resp) => resp.ok ? resp.json() : null)
       ])
         .then(([wsConfig, uiConfig]) => {
@@ -51,7 +55,9 @@
           document.head.appendChild(script);
         });
     })();
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+    if (!window.__IVNC_APP_VIEW__ && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(err => console.warn('Service worker unavailable', err));
+    }
   </script>
 </body>
 </html>

@@ -180,6 +180,7 @@
                     <option value="background">后台应用</option>
                     <option value="desktop">桌面应用</option>
                     <option value="cli">CLI 应用</option>
+                    <option value="remote">远程应用 / Remote app</option>
                 </select>
             </div>
 
@@ -200,6 +201,13 @@
                 <textarea id="f-skill-paths" rows="3" placeholder="/root/.config/ivnc/skills/app/SKILL.md"></textarea>
             </div>
             
+            <div id="remote-config" hidden>
+                <div class="form-line"><label class="form-label" for="f-remote-url">应用连接地址 / Application URL</label><input id="f-remote-url" type="url" placeholder="https://B/remote/v1/apps/…"></div>
+                <div class="form-line"><label class="form-label" for="f-remote-password">应用密码 / Application password</label><input id="f-remote-password" type="password" autocomplete="new-password" placeholder="编辑时留空保留连接 / Leave blank to keep connection"></div>
+                <button type="button" id="remote-test" class="btn btn-sm">测试连接 / Test connection</button>
+                <span id="remote-test-result" role="status"></span>
+                <p>保存时验证目标应用。关闭视图或删除连接不会停止 B 上的应用。<br>Saving verifies the application. Closing or deleting this connection keeps the application running on B.</p>
+            </div>
             <div id="background-config">
                 <div class="form-line command-line">
                     <label class="form-label info-label">

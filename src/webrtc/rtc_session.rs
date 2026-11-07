@@ -463,7 +463,17 @@ async fn drain_outputs(
                 Ok(Output::Transmit(t)) => {
                     had_transmit = true;
                     let framed = frame_packet(&t.contents);
-                    if let Err(e) = tcp_stream.write_all(&framed).await {
+                    if let Err(e) =
+                        tokio::time::timeout(Duration::from_secs(10), tcp_stream.write_all(&framed))
+                            .await
+                            .map_err(|_| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "slow media client",
+                                )
+                            })
+                            .and_then(|v| v)
+                    {
                         return Err(WebRTCError::ConnectionFailed(format!("TCP write: {}", e)));
                     }
                 }
@@ -585,6 +595,9 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
 /// Handle incoming DataChannel data — reuses the existing input parsing logic.
 fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &EventContext) {
     if data.binary {
+        if !ctx.shared_state.can_control(&session.id) {
+            return;
+        }
         // Binary data → file upload handler
         ctx.upload_handler
             .lock()
@@ -606,6 +619,12 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         return;
     }
 
+    if !ctx.shared_state.can_control(&session.id)
+        && !text.starts_with("_client_")
+        && !text.starts_with("_stats_")
+    {
+        return;
+    }
     // Try specialized handlers first
     if ctx
         .upload_handler

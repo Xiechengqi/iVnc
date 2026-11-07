@@ -15,6 +15,7 @@ mod gstreamer;
 mod input;
 mod paths;
 mod proxy_panel;
+mod remote;
 mod runtime_settings;
 mod system_clipboard;
 mod terminal;
@@ -176,8 +177,6 @@ fn ensure_pulseaudio() {
 }
 
 fn main() {
-    check_runtime_deps();
-
     let cli = Cli::parse();
 
     // Handle `ivnc env` subcommand early (no compositor needed)
@@ -192,6 +191,21 @@ fn main() {
         _ => cli.run_args,
     };
 
+    if let Some(path) = &args.app_supervisor {
+        let runtime = tokio::runtime::Runtime::new().expect("supervisor runtime");
+        if let Err(error) = runtime.block_on(remote::worker::supervise(path)) {
+            eprintln!("Application isolation failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    let worker_config = args.app_worker.as_ref().map(|path| {
+        remote::worker::prepare(path).unwrap_or_else(|e| {
+            eprintln!("Application isolation failed: {e}");
+            std::process::exit(1)
+        })
+    });
+    check_runtime_deps();
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::new()
         .parse_filters(&format!(
@@ -202,7 +216,11 @@ fn main() {
 
     info!("ivnc v{} starting", env!("CARGO_PKG_VERSION"));
 
-    let mut config = match args.load_config() {
+    let mut config = match worker_config
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| args.load_config())
+    {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to load config: {}", e);
@@ -211,7 +229,10 @@ fn main() {
         }
     };
 
-    apply_cli_overrides(&mut config, &args);
+    if worker_config.is_none() {
+        apply_cli_overrides(&mut config, &args);
+    }
+    remote::worker::set_parent_config(config.clone());
 
     if let Err(e) = config.validate() {
         eprintln!("Invalid configuration: {}", e);
@@ -438,9 +459,11 @@ fn run(
 
     // Ensure PulseAudio is running (needed for audio capture)
     #[cfg(feature = "pulseaudio")]
-    if config.audio.enabled {
+    if config.audio.enabled && !remote::worker::is_worker() {
         ensure_pulseaudio();
     }
+
+    remote::worker::start_application()?;
 
     // Audio capture thread
     if config.audio.enabled {
@@ -1045,26 +1068,36 @@ fn drain_input_events(
                 inject_key(state, &ev, serial, time);
             }
             InputEvent::KeyboardReset => {
-                // Release all modifier keys to clear stuck state
+                // Release every pressed key and pointer button when a view loses control.
                 let keyboard = state.seat.get_keyboard().unwrap();
-                let modifier_keycodes: &[u32] = &[
-                    50, 62, // Shift L/R
-                    37, 105, // Control L/R
-                    64, 108, // Alt L/R
-                    133, 134, // Super L/R
-                ];
-                for &kc in modifier_keycodes {
+                let pressed = keyboard.pressed_keys();
+                for kc in pressed {
                     let s = smithay::utils::SERIAL_COUNTER.next_serial();
                     keyboard.input::<(), _>(
                         state,
-                        smithay::input::keyboard::Keycode::from(kc),
+                        kc,
                         smithay::backend::input::KeyState::Released,
                         s,
                         time,
                         |_, _, _| smithay::input::keyboard::FilterResult::Forward,
                     );
                 }
-                info!("Keyboard reset: released all modifier keys");
+                for bit in 0..5u8 {
+                    if *prev_button_mask & (1 << bit) != 0 {
+                        inject_button(
+                            state,
+                            &InputEventData {
+                                event_type: InputEvent::MouseButton,
+                                mouse_button: bit,
+                                button_pressed: false,
+                                ..Default::default()
+                            },
+                            SERIAL_COUNTER.next_serial(),
+                            time,
+                        );
+                    }
+                }
+                *prev_button_mask = 0;
             }
             InputEvent::Ping => {
                 shared.send_text("pong".to_string());
@@ -1734,36 +1767,40 @@ async fn run_async_services(
     };
 
     // Apps manager
-    let apps_state = match crate::apps::api::AppsState::new(shared.proxy_panel.clone()) {
-        Ok(ps) => {
-            info!("Apps manager initialized");
-            let ps_arc = std::sync::Arc::new(ps);
+    let apps_state = if remote::worker::is_worker() {
+        None
+    } else {
+        match crate::apps::api::AppsState::new(shared.proxy_panel.clone()) {
+            Ok(ps) => {
+                info!("Apps manager initialized");
+                let ps_arc = std::sync::Arc::new(ps);
 
-            // Restore previously running apps after update
-            let ps_clone = ps_arc.clone();
-            tokio::spawn(async move {
-                if let Err(error) = ps_clone.start_builtin_apps().await {
-                    log::warn!("Miao autostart failed: {}", error);
-                }
-                // Wait a bit for the system to stabilize
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                if let Err(e) = ps_clone.restore_running_state().await {
-                    log::warn!("Failed to restore running apps: {}", e);
-                } else {
-                    log::info!("Running apps restoration completed");
-                }
-                if let Err(e) = ps_clone.start_autostart_apps().await {
-                    log::warn!("Failed to start autostart apps: {}", e);
-                } else {
-                    log::info!("Autostart apps initialization completed");
-                }
-            });
+                // Restore previously running apps after update
+                let ps_clone = ps_arc.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = ps_clone.start_builtin_apps().await {
+                        log::warn!("Miao autostart failed: {}", error);
+                    }
+                    // Wait a bit for the system to stabilize
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    if let Err(e) = ps_clone.restore_running_state().await {
+                        log::warn!("Failed to restore running apps: {}", e);
+                    } else {
+                        log::info!("Running apps restoration completed");
+                    }
+                    if let Err(e) = ps_clone.start_autostart_apps().await {
+                        log::warn!("Failed to start autostart apps: {}", e);
+                    } else {
+                        log::info!("Autostart apps initialization completed");
+                    }
+                });
 
-            Some(ps_arc)
-        }
-        Err(e) => {
-            warn!("Failed to init Apps manager: {}", e);
-            None
+                Some(ps_arc)
+            }
+            Err(e) => {
+                warn!("Failed to init Apps manager: {}", e);
+                None
+            }
         }
     };
 

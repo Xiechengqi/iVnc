@@ -7,6 +7,7 @@ pub enum AppType {
     BackgroundApp,
     DesktopApp,
     CliApp,
+    RemoteApp,
 }
 
 impl AppType {
@@ -15,6 +16,7 @@ impl AppType {
             AppType::BackgroundApp => "background",
             AppType::DesktopApp => "desktop",
             AppType::CliApp => "cli",
+            AppType::RemoteApp => "remote",
         }
     }
 
@@ -23,6 +25,7 @@ impl AppType {
             "background" => Some(AppType::BackgroundApp),
             "desktop" => Some(AppType::DesktopApp),
             "cli" => Some(AppType::CliApp),
+            "remote" => Some(AppType::RemoteApp),
             _ => None,
         }
     }

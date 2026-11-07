@@ -27,6 +27,10 @@ pub enum Command {
 
 #[derive(Parser, Debug, Clone)]
 pub struct RunArgs {
+    #[arg(long, hide = true)]
+    pub app_supervisor: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    pub app_worker: Option<PathBuf>,
     /// Configuration file path
     #[arg(short, long, default_value = "/etc/ivnc.toml")]
     pub config: PathBuf,

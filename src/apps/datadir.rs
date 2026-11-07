@@ -39,7 +39,7 @@ fn should_recreate_after_clear(dir: &Path) -> bool {
 }
 
 pub fn dir_size(path: &PathBuf) -> u64 {
-    if !path.exists() {
+    if !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
         return 0;
     }
     std::fs::read_dir(path)
@@ -48,10 +48,10 @@ pub fn dir_size(path: &PathBuf) -> u64 {
                 .filter_map(|e| e.ok())
                 .map(|e| {
                     let p = e.path();
-                    if p.is_file() {
-                        e.metadata().map(|m| m.len()).unwrap_or(0)
-                    } else {
-                        dir_size(&p)
+                    match e.file_type() {
+                        Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+                        Ok(t) if t.is_dir() => dir_size(&p),
+                        _ => 0,
                     }
                 })
                 .sum()

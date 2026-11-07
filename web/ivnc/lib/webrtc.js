@@ -421,7 +421,7 @@ export class WebRTCDemo {
 	 */
 	unmuteAudio() {
 		if (this._audioElement) {
-			this._audioElement.muted = false;
+			this._audioElement.muted = !!window.__ivncRootViewSuspended || (window.__IVNC_APP_VIEW__ && !window.__ivncViewActive);
 			this._audioElement.play().catch((e) => {
 				this._setDebug("Audio play failed: " + e.message);
 			});
