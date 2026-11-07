@@ -594,6 +594,20 @@ async function loadSection(section = activeSection) {
     if (section === 'settings') await loadSettings();
 }
 
+// The view state on A, refined by the last known state of the application on B.
+function remoteStatusText(a) {
+    if (a.status === 'connected') return remoteText('已连接', 'Connected');
+    if (a.status === 'connecting') return remoteText('连接中', 'Connecting');
+    const state = {
+        stopped: remoteText('B 上未运行', 'Not running on B'),
+        not_ready: remoteText('B 上需重启应用', 'Restart required on B'),
+        auth_required: remoteText('需重新输入密码', 'Password required'),
+        unreachable: remoteText('B 无法访问', 'B unreachable'),
+        incompatible: remoteText('B 已变更', 'B changed'),
+    }[a.remote_state];
+    return state ? remoteText('未连接 · ', 'Disconnected · ') + state : remoteText('未连接', 'Disconnected');
+}
+
 async function load() {
     try {
         const [appsResp, capResp] = await Promise.all([
@@ -628,7 +642,7 @@ async function load() {
                     : [a.url ? `${t('visit')}: ${a.url}` : '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
             const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
             const statusKey = a.app_type === 'cli' ? (a.install_status || 'missing') : a.status;
-            const statusText = a.app_type === 'remote' ? (a.status === 'connected' ? remoteText('已连接', 'Connected') : a.status === 'connecting' ? remoteText('连接中', 'Connecting') : remoteText('未连接', 'Disconnected')) : a.enabled === false ? t('disabledByAdmin') : (t(statusKey) || statusKey);
+            const statusText = a.app_type === 'remote' ? remoteStatusText(a) : a.enabled === false ? t('disabledByAdmin') : (t(statusKey) || statusKey);
             const statusClass = a.app_type === 'cli'
                 ? (a.installed ? 'running' : 'stopped')
                 : a.status;
@@ -641,7 +655,7 @@ async function load() {
                 <td>
                     <div class="status-wrapper">
                         <span class="status status-${statusClass}"></span>
-                        <span title="${esc(a.error || a.install_error || '')}">${esc(statusText)}</span>
+                        <span title="${esc(a.error || a.install_error || a.remote_detail || '')}">${esc(statusText)}</span>
                     </div>
                 </td>
                 <td class="data-size">${esc(dataText)}</td>

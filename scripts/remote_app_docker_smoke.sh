@@ -8,7 +8,7 @@ IMAGE="${IVNC_TEST_IMAGE:-ivnc:remote-review}"
 docker info >/dev/null
 docker image inspect "$IMAGE" >/dev/null
 exec docker run --rm --init \
-  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --security-opt "seccomp=$ROOT/docker/seccomp-desktop.json" --security-opt apparmor=unconfined \
   --shm-size=1g --entrypoint bash \
   -v "$ROOT:/smoke:ro" -w /smoke \
   -e IVNC_BIN=/usr/local/bin/ivnc "$IMAGE" -ceu '
@@ -17,5 +17,6 @@ exec docker run --rm --init \
       gtk-3-examples python3 nodejs node-ws jq >/dev/null
     bash scripts/remote_app_smoke.sh
     REMOTE_SMOKE_TLS=1 bash scripts/remote_app_smoke.sh
+    bash scripts/remote_hardening_smoke.sh
     python3 scripts/remote_isolation_smoke.py
   '

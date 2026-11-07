@@ -298,6 +298,7 @@ iVnc 持久化数据默认位于 `$HOME/.ivnc`（可用 `IVNC_HOME` 覆盖）：
 $IVNC_HOME/
   apps.db / console.json / app_running_state.json
   remote.db / remote.key / apps.before-isolation.db
+  remote-audit.log / public-ipv4
   capability_calls.jsonl / ivnc.pid / Desktop/
   applications/   # .desktop 入口
   miao/           # 内置 miao 二进制与 miao.log
@@ -318,7 +319,7 @@ Miao 以内置后台应用显示在控制台应用列表，首次默认随 iVnc 
 
 在 B 的桌面应用“远程访问”中设置应用密码并复制连接地址，在 A 添加“远程应用”后打开即可连接原有进程。浏览器只连接 A；关闭或删除 A 中的连接不会停止 B 的应用。B 关闭共享或修改密码会断开远程会话，B 所有者可以接管控制权。
 
-桌面应用使用 bubblewrap、slirp4netns、nftables 的独立环境，需要相应依赖和命名空间权限。允许访问的本机后台服务由 B 逐应用授权。使用步骤、证书、Docker 权限、升级和验证范围见 [远程桌面应用](docs/REMOTE_APPS.md)。
+桌面应用默认在 bubblewrap、slirp4netns、nftables 的严格隔离环境运行，可逐应用放行主机路径、内网网段和本机后台服务；不共享的应用也可改用主机模式。使用步骤、证书、Docker 权限、升级和验证范围见 [远程桌面应用](docs/REMOTE_APPS.md)。
 
 ## API 参考
 

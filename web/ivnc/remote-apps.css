@@ -9,6 +9,27 @@
     box-sizing: border-box;
     margin: 12px 0;
 }
+.remote-sharing > select,
+.remote-sharing textarea {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin: 8px 0;
+}
+.remote-sharing h3 {
+    margin: 16px 0 4px;
+    font-size: 15px;
+}
+.remote-sharing .password-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 12px 0;
+}
+.remote-sharing .password-row input {
+    flex: 1;
+    min-width: 0;
+}
 .remote-sharing .checkbox-row {
     display: flex;
     align-items: center;

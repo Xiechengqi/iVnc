@@ -1,0 +1,21 @@
+name: Remote application runtime smoke
+
+# Builds the runtime image and runs the two-instance relay and isolation suites
+# inside it. Manual: it needs user namespaces and takes a full image build.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Allow user namespaces for bubblewrap
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Build runtime image
+        run: docker build -t ivnc:remote-review .
+      - name: Run remote application suites
+        run: IVNC_TEST_IMAGE=ivnc:remote-review bash scripts/remote_app_docker_smoke.sh

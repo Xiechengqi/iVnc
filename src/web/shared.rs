@@ -55,6 +55,43 @@ struct ClientActivityReport {
     event: Option<String>,
 }
 
+/// How long a session may stay unable to accept media before it is disconnected.
+const CONGESTION_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A per-session queue. Brief congestion drops items; sustained congestion ends
+/// the session instead of buffering without bound.
+pub struct Subscriber<T> {
+    tx: mpsc::Sender<T>,
+    congested_since: Option<std::time::Instant>,
+}
+impl<T> Subscriber<T> {
+    fn new(tx: mpsc::Sender<T>) -> Self {
+        Self {
+            tx,
+            congested_since: None,
+        }
+    }
+}
+
+/// Delivers an item to every subscriber; returns whether any recovered from congestion.
+fn deliver<T: Clone>(subs: &mut Vec<Subscriber<T>>, item: &T) -> bool {
+    let mut recovered = false;
+    subs.retain_mut(|sub| match sub.tx.try_send(item.clone()) {
+        Ok(()) => {
+            recovered |= sub.congested_since.take().is_some();
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            sub.congested_since
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed()
+                < CONGESTION_LIMIT
+        }
+    });
+    recovered
+}
+
 /// Shared state for the application
 #[derive(Clone)]
 pub struct SharedState {
@@ -119,11 +156,11 @@ pub struct SharedState {
     pub keyframe_cache: Arc<Mutex<Vec<Vec<u8>>>>,
 
     /// Per-session mpsc senders for RTP (reliable cross-thread wakeup)
-    pub rtp_subscribers: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>,
+    pub rtp_subscribers: Arc<Mutex<Vec<Subscriber<Vec<u8>>>>>,
     /// Per-session mpsc senders for audio
-    pub audio_subscribers: Arc<Mutex<Vec<mpsc::Sender<AudioPacket>>>>,
+    pub audio_subscribers: Arc<Mutex<Vec<Subscriber<AudioPacket>>>>,
     /// Per-session mpsc senders for text
-    pub text_subscribers: Arc<Mutex<Vec<mpsc::Sender<String>>>>,
+    pub text_subscribers: Arc<Mutex<Vec<Subscriber<String>>>>,
 
     /// Password override (set via /api/change-password, takes precedence over config)
     pub password_override: Arc<RwLock<Option<String>>>,
@@ -462,8 +499,11 @@ impl SharedState {
 
     /// Broadcast an RTP packet to all WebRTC sessions
     pub fn broadcast_rtp(&self, packet: Vec<u8>) {
-        let mut subs = self.rtp_subscribers.lock().unwrap();
-        subs.retain(|tx| tx.try_send(packet.clone()).is_ok());
+        let recovered = deliver(&mut self.rtp_subscribers.lock().unwrap(), &packet);
+        // Video dropped during congestion is unusable until the next keyframe.
+        if recovered {
+            self.request_keyframe();
+        }
     }
 
     /// Get current RTP subscriber count
@@ -474,34 +514,41 @@ impl SharedState {
     /// Subscribe to RTP packets via mpsc (reliable cross-thread wakeup)
     pub fn subscribe_rtp_mpsc(&self) -> mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel(2048);
-        self.rtp_subscribers.lock().unwrap().push(tx);
+        self.rtp_subscribers
+            .lock()
+            .unwrap()
+            .push(Subscriber::new(tx));
         rx
     }
 
     /// Subscribe to audio packets via mpsc
     pub fn subscribe_audio_mpsc(&self) -> mpsc::Receiver<AudioPacket> {
-        let (tx, rx) = mpsc::channel(128);
-        self.audio_subscribers.lock().unwrap().push(tx);
+        let (tx, rx) = mpsc::channel(512);
+        self.audio_subscribers
+            .lock()
+            .unwrap()
+            .push(Subscriber::new(tx));
         rx
     }
 
     /// Subscribe to text messages via mpsc
     pub fn subscribe_text_mpsc(&self) -> mpsc::Receiver<String> {
         let (tx, rx) = mpsc::channel(256);
-        self.text_subscribers.lock().unwrap().push(tx);
+        self.text_subscribers
+            .lock()
+            .unwrap()
+            .push(Subscriber::new(tx));
         rx
     }
 
     /// Broadcast audio to all subscribers
     pub fn broadcast_audio(&self, packet: AudioPacket) {
-        let mut subs = self.audio_subscribers.lock().unwrap();
-        subs.retain(|tx| tx.try_send(packet.clone()).is_ok());
+        deliver(&mut self.audio_subscribers.lock().unwrap(), &packet);
     }
 
     /// Broadcast text to all subscribers
     pub fn broadcast_text(&self, msg: String) {
-        let mut subs = self.text_subscribers.lock().unwrap();
-        subs.retain(|tx| tx.try_send(msg.clone()).is_ok());
+        deliver(&mut self.text_subscribers.lock().unwrap(), &msg);
     }
 
     /// Update the keyframe cache with a new set of RTP packets
@@ -841,5 +888,31 @@ impl Default for RuntimeStats {
             proto_tls: 0,
             proto_unknown: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    #[test]
+    fn brief_congestion_drops_items_and_sustained_congestion_disconnects() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut subs = vec![Subscriber::new(tx)];
+        assert!(!deliver(&mut subs, &1));
+        assert!(!deliver(&mut subs, &2)); // full: dropped, still subscribed
+        assert_eq!(subs.len(), 1);
+        assert_eq!(rx.try_recv().unwrap(), 1);
+        assert!(deliver(&mut subs, &3)); // recovered
+        assert!(!deliver(&mut subs, &4));
+        subs[0].congested_since =
+            Some(std::time::Instant::now() - CONGESTION_LIMIT - std::time::Duration::from_secs(1));
+        deliver(&mut subs, &5);
+        assert!(subs.is_empty());
+        let (closed, receiver) = mpsc::channel::<i32>(1);
+        drop(receiver);
+        let mut subs = vec![Subscriber::new(closed)];
+        deliver(&mut subs, &1);
+        assert!(subs.is_empty());
     }
 }

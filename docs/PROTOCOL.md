@@ -526,17 +526,18 @@ debug!("Session {} DC parse error: {}", session.id, e);
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET/PUT /api/apps/{id}/sharing` | 本地桌面应用的共享策略、密码重设、X11/后台服务设置和远程连接列表 |
+| `GET/PUT /api/apps/{id}/sharing` | 本地桌面应用的共享策略、密码重设、隔离设置（`isolation`、`mounts`、`networks`、`x11`、`services`）、已保存连接与当前会话；只有开关和密码变更会撤销凭据 |
 | `POST /api/apps/{id}/view` | 为本地或远程应用创建有时限的应用视图 |
-| `DELETE /api/apps/{id}/sessions/{session}` | B 所有者断开指定远程连接 |
+| `DELETE /api/apps/{id}/sessions/{session}` | B 所有者断开指定远程会话 |
+| `DELETE /api/apps/{id}/grants/{grant}` | B 所有者撤销一个已保存连接并结束使用它的会话 |
 | `POST /api/remote/test` | 用应用地址和密码验证连接，返回目标信息并撤销临时凭据 |
-| `POST /remote/v1/apps/{id}/authenticate` | 用应用密码换取仅绑定此应用的凭据 |
-| `GET /remote/v1/apps/{id}/info` | 持应用 Bearer 凭据读取名称、状态、节点身份和协议版本 |
+| `POST /remote/v1/apps/{id}/authenticate` | 用应用密码换取仅绑定此应用的凭据；可选 `client: {node_id, name}` 标识连接实例；按来源地址限流 |
+| `GET /remote/v1/apps/{id}/info` | 持应用 Bearer 凭据读取名称、状态、`ready`/`detail`（是否需重启应用）、节点身份和协议版本 |
 | `GET /remote/v1/apps/{id}/socket` | 持应用 Bearer 凭据建立中继信令 WebSocket |
 | `GET /remote/v1/apps/{id}/data/{path}` | 仅转发 UI 配置、渲染状态和应用 Downloads；不代理管理 API |
 | `DELETE /remote/v1/apps/{id}/credential` | 撤销当前 Bearer 凭据 |
 | `POST /app-view/{token}/close` | 关闭 A 的应用视图及关联媒体和下载 |
 
-应用视图信令沿用 SDP 协议并扩展：客户端发送 `{"ivnc_control":"claim"}`、`"release"` 或仅所有者可用的 `"takeover"`；服务端返回 `{"ivnc_control":{"controller":true,"owner":false}}`。撤销消息 `{"ivnc_revoked":true}` 要求停止自动重连，用户需重新打开视图或更新连接凭据。
+应用视图信令沿用 SDP 协议并扩展：客户端发送 `{"ivnc_control":"claim"}`、`"release"` 或仅所有者可用的 `"takeover"`；服务端返回 `{"ivnc_control":{"controller":true,"owner":false}}`。结束消息 `{"ivnc_revoked":true,"reason":"revoked|disconnected|stopped"}` 要求停止自动重连：`revoked` 需更新连接凭据，`disconnected` 为 B 所有者断开，`stopped` 为应用停止。
 
 ICE-TCP 通过已授权 SDP 中的 ICE ufrag 路由，仍需完成工作进程的 ICE/DTLS 握手。信令、媒体与文件均绑定同一应用和运行代次，应用重启不复用旧媒体会话。

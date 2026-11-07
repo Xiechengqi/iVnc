@@ -282,6 +282,7 @@ export class WebRTCDemoSignaling {
         if (msg.ivnc_revoked) {
             window.__FORCE_DISCONNECTED__ = true;
             window.__ivncCanControl = false;
+            window.dispatchEvent(new CustomEvent("ivnc-view-ended", {detail: msg.reason || "revoked"}));
         } else if (msg.ivnc_control != null) {
             window.dispatchEvent(new CustomEvent("ivnc-control", {detail:msg.ivnc_control}));
         } else if (msg.sdp != null) {

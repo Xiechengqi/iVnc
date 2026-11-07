@@ -1,0 +1,52 @@
+{
+  "comment": "iVnc desktop runtime profile. Namespaces, mounts and pivot_root stay available for per-application bubblewrap sandboxes; kernel-wide and commonly exploited interfaces are denied. Use instead of seccomp=unconfined.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": [
+        "_sysctl",
+        "acct",
+        "add_key",
+        "bpf",
+        "clock_adjtime",
+        "clock_adjtime64",
+        "clock_settime",
+        "clock_settime64",
+        "create_module",
+        "delete_module",
+        "finit_module",
+        "get_kernel_syms",
+        "init_module",
+        "io_uring_enter",
+        "io_uring_register",
+        "io_uring_setup",
+        "ioperm",
+        "iopl",
+        "kexec_file_load",
+        "kexec_load",
+        "keyctl",
+        "lookup_dcookie",
+        "nfsservctl",
+        "open_by_handle_at",
+        "perf_event_open",
+        "query_module",
+        "quotactl",
+        "quotactl_fd",
+        "reboot",
+        "request_key",
+        "settimeofday",
+        "stime",
+        "swapoff",
+        "swapon",
+        "sysfs",
+        "uselib",
+        "userfaultfd",
+        "ustat",
+        "vm86",
+        "vm86old"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}

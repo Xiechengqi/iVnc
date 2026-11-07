@@ -307,7 +307,7 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```bash
 docker run -d --name ivnc --restart unless-stopped \
   -p 8008:8008 --cap-add NET_ADMIN --device /dev/net/tun \
-  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --security-opt seccomp="$PWD/docker/seccomp-desktop.json" --security-opt apparmor=unconfined \
   -v "$PWD/ivnc-data:/root/.ivnc" -v "$PWD/miao-data:/root/.miao" \
   -v /path/to/ivnc-ssh:/root/.ssh \
   ghcr.io/xiechengqi/ivnc:latest --proxy-ip 203.0.113.10
@@ -321,7 +321,7 @@ docker run -d --name ivnc --restart unless-stopped \
 代理模式会创建 TUN，因此宿主机必须提供 `/dev/net/tun`，容器也需要脚本中授予的
 `NET_ADMIN`。代理池端口如需从容器外连接，需要按实际端口范围扩展脚本的发布参数。
 
-两个 `security-opt` 允许桌面应用建立嵌套命名空间；缺少权限时应用会启动失败。
+两个 `security-opt` 允许桌面应用建立嵌套命名空间：seccomp 配置保留命名空间与挂载调用，拒绝内核模块、bpf、io_uring 等接口（比 unconfined 窄）；缺少权限时应用会启动失败。Ubuntu 23.10 及以上宿主机还需允许 user namespace，见 [远程应用部署](REMOTE_APPS.md#部署与证书)。
 应用内部仍强制配置防火墙并丢弃 capabilities。HTTP(S)、信令和原始 ICE-TCP
 共用发布端口，因此纯 HTTP 反向代理不能替代透明 TCP 入口。
 证书与私有 CA 配置见 [远程应用部署](REMOTE_APPS.md#部署与证书)。

@@ -41,6 +41,10 @@ impl Default for SignalingConfig {
     }
 }
 
+/// Replies wait this long for queue space. A writer that cannot send for this
+/// long closes the queue, which ends the connection.
+const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Handle a WebRTC signaling WebSocket connection
 pub async fn handle_signaling_connection(
     socket: WebSocket,
@@ -80,15 +84,22 @@ pub async fn handle_signaling_connection(
 
     // Process incoming messages
     let mut control_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    // Control state is sent when it changes, plus a slow heartbeat.
+    let mut last_control: Option<(bool, std::time::Instant)> = None;
     loop {
-        if tx.is_closed() || tx.capacity() == 0 {
+        // A stalled writer closes the queue after its send timeout.
+        if tx.is_closed() {
             break;
         }
         let result = tokio::select! {
             msg = ws_receiver.next() => match msg { Some(result) => result, None => break },
             _ = control_tick.tick(), if crate::remote::worker::is_worker() => {
                 if let Some(sid) = &session_id {
-                    let _ = tx.try_send(json!({"ivnc_control":{"controller":state.can_control(sid),"owner":owner}}).to_string());
+                    let controller = state.can_control(sid);
+                    if last_control.is_none_or(|(sent, at)| sent != controller || at.elapsed() >= std::time::Duration::from_secs(10)) {
+                        last_control = Some((controller, std::time::Instant::now()));
+                        let _ = tx.try_send(json!({"ivnc_control":{"controller":controller,"owner":owner}}).to_string());
+                    }
                 }
                 continue;
             }
@@ -111,14 +122,20 @@ pub async fn handle_signaling_connection(
                                     "release" => state.release_control(sid),
                                     _ => {}
                                 }
-                                let _ = tx.try_send(json!({"ivnc_control":{"controller":state.can_control(sid),"owner":owner}}).to_string());
+                                let controller = state.can_control(sid);
+                                last_control = Some((controller, std::time::Instant::now()));
+                                let _ = tx.send_timeout(
+                                    json!({"ivnc_control":{"controller":controller,"owner":owner}})
+                                        .to_string(),
+                                    REPLY_TIMEOUT,
+                                ).await;
                             }
                             continue;
                         }
                     }
                 }
                 if let Some(reply) = handle_gstreamer_control_message(text_str, &mut wire_format) {
-                    let _ = tx.try_send(reply);
+                    let _ = tx.send_timeout(reply, REPLY_TIMEOUT).await;
                     continue;
                 }
 
@@ -135,7 +152,7 @@ pub async fn handle_signaling_connection(
                     )
                     .await
                     {
-                        let _ = tx.try_send(response);
+                        let _ = tx.send_timeout(response, REPLY_TIMEOUT).await;
                     }
                     continue;
                 }
@@ -153,7 +170,7 @@ pub async fn handle_signaling_connection(
                         )
                         .await
                         {
-                            let _ = tx.try_send(response);
+                            let _ = tx.send_timeout(response, REPLY_TIMEOUT).await;
                         }
                     }
                     Err(e) => {
@@ -164,7 +181,7 @@ pub async fn handle_signaling_connection(
                             session_id.clone(),
                         );
                         if let Some(msg) = format_signaling_message(&error, wire_format) {
-                            let _ = tx.try_send(msg);
+                            let _ = tx.send_timeout(msg, REPLY_TIMEOUT).await;
                         }
                     }
                 }
@@ -251,7 +268,7 @@ async fn handle_signaling_message(
                             "input",
                         );
                         if let Some(payload) = format_signaling_message(&ready, wire_format) {
-                            let _ = tx.try_send(payload);
+                            let _ = tx.send_timeout(payload, REPLY_TIMEOUT).await;
                         }
                     }
 
@@ -261,7 +278,7 @@ async fn handle_signaling_message(
                             session_id: sid.clone(),
                         };
                         if let Some(payload) = format_signaling_message(&complete, wire_format) {
-                            let _ = tx.try_send(payload);
+                            let _ = tx.send_timeout(payload, REPLY_TIMEOUT).await;
                         }
                     }
 

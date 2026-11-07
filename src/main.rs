@@ -177,6 +177,10 @@ fn ensure_pulseaudio() {
 }
 
 fn main() {
+    // Application process-tree owner inside a desktop runtime; see `worker::reap`.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--app-reaper")) {
+        std::process::exit(remote::worker::reap(std::env::args_os().skip(2).collect()));
+    }
     let cli = Cli::parse();
 
     // Handle `ivnc env` subcommand early (no compositor needed)
@@ -903,7 +907,9 @@ fn run(
         if last_stats.elapsed() >= Duration::from_secs(1) {
             let secs = last_stats.elapsed().as_secs_f64();
             let windows = comp.space.elements().count();
-            info!(
+            // Application workers log to a per-application file; keep it to events.
+            log::log!(
+                if remote::worker::is_worker() { log::Level::Debug } else { log::Level::Info },
                 "Loop stats: idle={}, viewers={}, rtp_receivers={}, windows={}, rendered={}, pushed={}, rtp_pkts={}, secs={:.1}",
                 render_state.as_str(),
                 shared_state.webrtc_sessions(),

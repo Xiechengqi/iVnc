@@ -24,6 +24,7 @@ use std::sync::Arc;
 pub struct AppsState {
     pub shared: std::sync::OnceLock<std::sync::Weak<crate::web::SharedState>>,
     pub remote: Arc<crate::remote::store::RemoteStore>,
+    pub remote_health: Arc<crate::remote::gateway::RemoteHealthCache>,
     pub proxy_panel: Arc<ProxyPanelManager>,
     pub store: Arc<AppStore>,
     pub process: ProcessManager,
@@ -45,6 +46,7 @@ impl AppsState {
         Ok(Self {
             shared: std::sync::OnceLock::new(),
             remote: Arc::new(crate::remote::store::RemoteStore::new()?),
+            remote_health: Default::default(),
             proxy_panel,
             store,
             process,
@@ -52,10 +54,10 @@ impl AppsState {
         })
     }
 
-    pub fn revoke_views(&self, id: &str) {
+    pub fn revoke_views(&self, id: &str, reason: crate::remote::media::StopReason) {
         if let Some(shared) = self.shared.get().and_then(std::sync::Weak::upgrade) {
-            shared.app_views.revoke(id, false);
-            shared.media_router.revoke(id, false);
+            shared.app_views.revoke(id, false, reason);
+            shared.media_router.revoke(id, false, reason);
         }
     }
 
@@ -197,8 +199,12 @@ impl AppsState {
         }
         match app.app_type {
             AppType::DesktopApp => {
-                let pid = self.process.start(app)?;
-                for _ in 0..200 {
+                // Building a runtime inspects the host network and opens databases.
+                let (process, launch) = (self.process.clone(), app.clone());
+                let pid = tokio::task::spawn_blocking(move || process.start(&launch))
+                    .await
+                    .map_err(|e| e.to_string())??;
+                for _ in 0..900 {
                     if crate::remote::worker::endpoint(&app.id).is_ok() {
                         return Ok(Some(pid));
                     }
@@ -223,12 +229,17 @@ impl AppsState {
     }
 
     async fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
-        self.revoke_views(&app.id);
+        self.revoke_views(&app.id, crate::remote::media::StopReason::Stopped);
         if app.id == BUILTIN_MIAO_ID {
             return self.proxy_panel.stop().await;
         }
         match app.app_type {
-            AppType::DesktopApp => self.process.stop(&app.id),
+            AppType::DesktopApp => {
+                let (process, id) = (self.process.clone(), app.id.clone());
+                tokio::task::spawn_blocking(move || process.stop(&id))
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
             AppType::BackgroundApp => self.service.stop(&app.id),
             AppType::CliApp | AppType::RemoteApp => Ok(()),
         }
@@ -506,7 +517,7 @@ elif [ "${{IVNC_PROXY_PANEL_ENABLED:-1}}" != '0' ] && [ -s {proxy_file} ]; then
   IFS= read -r proxy_server < {proxy_file};
   set -- "--proxy-server=$proxy_server";
 fi;
-exec google-chrome "$@" --user-data-dir="$profile_dir" --crash-dumps-dir="$crash_dir" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
+exec google-chrome "$@" --user-data-dir="$profile_dir" --crash-dumps-dir="$crash_dir" --remote-debugging-host="${{IVNC_CHROME_DEBUG_HOST:-0.0.0.0}}" --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
 "#
     ).replace('\n', " "))
 }
@@ -709,6 +720,10 @@ fn app_json(
                 .and_then(std::sync::Weak::upgrade)
                 .map(|s| s.app_views.connection_status(&app.id))
                 .unwrap_or("disconnected"));
+            if let Some(health) = state.remote_health.get(&app.id) {
+                obj["remote_state"] = json!(health.state);
+                obj["remote_detail"] = json!(health.detail);
+            }
             obj["can_clear_data"] = json!(false);
         }
         AppType::BackgroundApp => {
@@ -738,6 +753,13 @@ fn app_json(
 async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
     match state.store.list() {
         Ok(apps) => {
+            crate::remote::gateway::refresh_remote_health(
+                state.clone(),
+                apps.iter()
+                    .filter(|a| a.app_type == AppType::RemoteApp)
+                    .map(|a| a.id.clone())
+                    .collect(),
+            );
             let items: Vec<_> = apps
                 .iter()
                 .map(|app| {
@@ -772,7 +794,7 @@ async fn add_app(
         None => return err_response(StatusCode::BAD_REQUEST, "Invalid application type"),
     };
     let remote_target = if app_type == AppType::RemoteApp {
-        match crate::remote::gateway::connect_target(&body).await {
+        match crate::remote::gateway::connect_target(&body, &state.remote.node_id).await {
             Ok(target) => Some(target),
             Err(e) => return err_response(StatusCode::BAD_REQUEST, &e),
         }
@@ -990,14 +1012,15 @@ async fn update_app(
     match app.app_type {
         AppType::RemoteApp => {
             if body["password"].as_str().is_some_and(|s| !s.is_empty()) {
-                match crate::remote::gateway::connect_target(&body).await {
+                match crate::remote::gateway::connect_target(&body, &state.remote.node_id).await {
                     Ok(target) => {
                         let previous = state.remote.target(&app.id).ok();
                         if let Err(e) = state.remote.save_target(&app.id, &target) {
                             crate::remote::gateway::forget_target(&target).await;
                             return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
                         }
-                        state.revoke_views(&app.id);
+                        state.revoke_views(&app.id, crate::remote::media::StopReason::Closed);
+                        state.remote_health.forget(&app.id);
                         if let Some(previous) = previous {
                             crate::remote::gateway::forget_target(&previous).await;
                         }
@@ -1095,7 +1118,8 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
         let _ = state.stop_app_processes(&app).await;
         let _ = std::fs::remove_dir_all(datadir::app_root(&app));
     }
-    state.revoke_views(&id);
+    state.revoke_views(&id, crate::remote::media::StopReason::Stopped);
+    state.remote_health.forget(&id);
     if let Ok(target) = state.remote.target(&id) {
         crate::remote::gateway::forget_target(&target).await;
     }
@@ -1306,6 +1330,7 @@ mod tests {
         Arc::new(AppsState {
             shared: std::sync::OnceLock::new(),
             remote: Arc::new(crate::remote::store::RemoteStore::in_memory()),
+            remote_health: Default::default(),
             store,
             proxy_panel: Arc::new(ProxyPanelManager::isolated(
                 false,

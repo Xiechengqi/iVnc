@@ -41,7 +41,7 @@ use crate::apps::api::AppsState;
 use crate::webrtc::SessionManager;
 
 #[derive(Clone, Copy, Debug)]
-struct HttpPeerAddr(SocketAddr);
+pub(crate) struct HttpPeerAddr(pub SocketAddr);
 
 /// Classify a TCP connection by its first bytes.
 fn classify_first_bytes(buf: &[u8]) -> ConnectionType {
@@ -266,6 +266,9 @@ pub async fn run_http_server_with_webrtc(
         loop {
             match fetch_ipv4().await {
                 Ok(ip) if ip != last_ip => {
+                    if !crate::remote::worker::is_worker() {
+                        crate::remote::worker::record_public_ipv4(&ip);
+                    }
                     *ipv4_state.ipv4_address.write().await = ip.clone();
                     ipv4_state.send_text(format!("ipv4,{}", ip));
                     info!("IPv4 address updated: {}", ip);
@@ -466,23 +469,106 @@ async fn worker_boundary(req: Request<Body>, next: middleware::Next) -> Response
     next.run(req).await
 }
 
+/// Serves the configured certificate and reloads it when the files change, so a
+/// renewed certificate takes effect without restarting running applications.
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct ReloadingCertificate {
+    cert: std::path::PathBuf,
+    key: std::path::PathBuf,
+    state: std::sync::Mutex<(
+        Arc<rustls::sign::CertifiedKey>,
+        Option<std::time::SystemTime>,
+        std::time::Instant,
+    )>,
+}
+
+#[cfg(feature = "tls")]
+impl ReloadingCertificate {
+    fn new(cert: std::path::PathBuf, key: std::path::PathBuf) -> Result<Self, String> {
+        let loaded = Self::load(&cert, &key)?;
+        let modified = Self::modified(&cert, &key);
+        Ok(Self {
+            cert,
+            key,
+            state: std::sync::Mutex::new((loaded, modified, std::time::Instant::now())),
+        })
+    }
+
+    fn load(cert: &StdPath, key: &StdPath) -> Result<Arc<rustls::sign::CertifiedKey>, String> {
+        use rustls::pki_types::pem::PemObject;
+        let chain = rustls::pki_types::CertificateDer::pem_file_iter(cert)
+            .map_err(|e| format!("Cannot read certificate {}: {e}", cert.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Invalid certificate {}: {e}", cert.display()))?;
+        if chain.is_empty() {
+            return Err(format!("No certificate in {}", cert.display()));
+        }
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_file(key)
+            .map_err(|e| format!("Cannot read private key {}: {e}", key.display()))?;
+        let signing = rustls::crypto::ring::sign::any_supported_type(&key)
+            .map_err(|e| format!("Unsupported private key: {e}"))?;
+        let certified = rustls::sign::CertifiedKey::new(chain, signing);
+        certified
+            .keys_match()
+            .map_err(|e| format!("Certificate and private key do not match: {e}"))?;
+        Ok(Arc::new(certified))
+    }
+
+    fn modified(cert: &StdPath, key: &StdPath) -> Option<std::time::SystemTime> {
+        let time = |p: &StdPath| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        time(cert).max(time(key))
+    }
+}
+
+#[cfg(feature = "tls")]
+impl rustls::server::ResolvesServerCert for ReloadingCertificate {
+    fn resolve(
+        &self,
+        _hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let mut state = self.state.lock().unwrap();
+        if state.2.elapsed() >= Duration::from_secs(60) {
+            state.2 = std::time::Instant::now();
+            let modified = Self::modified(&self.cert, &self.key);
+            if modified != state.1 {
+                match Self::load(&self.cert, &self.key) {
+                    Ok(loaded) => {
+                        info!("Reloaded TLS certificate {}", self.cert.display());
+                        *state = (loaded, modified, state.2);
+                    }
+                    // A half-written renewal keeps the previous certificate in service.
+                    Err(e) => warn!("Keeping the current TLS certificate: {}", e),
+                }
+            }
+        }
+        Some(state.0.clone())
+    }
+}
+
 #[cfg(feature = "tls")]
 fn create_tls_acceptor() -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
     use rustls::ServerConfig;
     use std::sync::Arc as StdArc;
 
-    use rustls::pki_types::pem::PemObject;
     let root = crate::paths::ivnc_home().join("tls");
     std::fs::create_dir_all(&root)?;
-    let cert_path = std::env::var_os("IVNC_TLS_CERT_FILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("cert.pem"));
-    let key_path = std::env::var_os("IVNC_TLS_KEY_FILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("key.pem"));
-    let custom = std::env::var_os("IVNC_TLS_CERT_FILE").is_some()
-        || std::env::var_os("IVNC_TLS_KEY_FILE").is_some();
-    if !custom && !cert_path.exists() && !key_path.exists() {
+    let custom_cert = std::env::var_os("IVNC_TLS_CERT_FILE").map(std::path::PathBuf::from);
+    let custom_key = std::env::var_os("IVNC_TLS_KEY_FILE").map(std::path::PathBuf::from);
+    let (cert_path, key_path) = match (custom_cert, custom_key) {
+        (Some(cert), Some(key)) => (cert, key),
+        (None, None) => (root.join("cert.pem"), root.join("key.pem")),
+        _ => return Err("Set both IVNC_TLS_CERT_FILE and IVNC_TLS_KEY_FILE, or neither".into()),
+    };
+    let custom = std::env::var_os("IVNC_TLS_CERT_FILE").is_some();
+    if !custom && (cert_path.exists() != key_path.exists()) {
+        return Err(format!(
+            "Incomplete TLS identity in {}; remove the remaining file to generate a new one",
+            root.display()
+        )
+        .into());
+    }
+    if !custom && !cert_path.exists() {
         let mut names = vec![
             "localhost".to_string(),
             "ivnc.local".to_string(),
@@ -502,15 +588,13 @@ fn create_tls_acceptor() -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error
         crate::remote::store::private_write(&key_path, cert.key_pair.serialize_pem().as_bytes())?;
         crate::remote::store::private_write(&cert_path, cert.cert.pem().as_bytes())?;
     }
-    let cert_der = rustls::pki_types::CertificateDer::pem_file_iter(cert_path)?
-        .collect::<Result<Vec<_>, _>>()?;
-    let key_der = rustls::pki_types::PrivateKeyDer::from_pem_file(key_path)?;
+    let resolver = ReloadingCertificate::new(cert_path, key_path)?;
 
     let config =
         ServerConfig::builder_with_provider(StdArc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
-            .with_single_cert(cert_der, key_der)?;
+            .with_cert_resolver(StdArc::new(resolver));
 
     info!("TLS enabled with configured certificate");
     Ok(tokio_rustls::TlsAcceptor::from(StdArc::new(config)))

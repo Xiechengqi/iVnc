@@ -1,11 +1,11 @@
 use super::{
-    media::Lease,
-    store::{DesktopSettings, Target},
+    media::{Kind, Lease, Origin, StopReason},
+    store::{Client, DesktopSettings, Target},
     worker, PROTOCOL,
 };
 use crate::{
     apps::{api::AppsState, app::AppType},
-    web::SharedState,
+    web::{http_server::HttpPeerAddr, SharedState},
 };
 use axum::{
     body::Body,
@@ -16,24 +16,40 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use futures::{SinkExt, StreamExt};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as UpMessage};
+
+/// Views without an active connection expire after this idle period.
+const VIEW_IDLE: Duration = Duration::from_secs(8 * 3600);
 
 #[derive(Clone)]
 pub struct View {
     pub app: String,
     target: Source,
-    created: Instant,
+    touched: Arc<Mutex<Instant>>,
     lifetime: Arc<Lease>,
     lease: Option<Arc<Lease>>,
+}
+impl View {
+    fn expired(&self) -> bool {
+        !self.lease.as_ref().is_some_and(|l| l.active())
+            && self.touched.lock().unwrap().elapsed() >= VIEW_IDLE
+    }
+    fn stop(&self, reason: StopReason) {
+        self.lifetime.stop_with(reason);
+        if let Some(l) = &self.lease {
+            l.stop_with(reason);
+        }
+    }
 }
 #[derive(Clone)]
 enum Source {
@@ -61,24 +77,171 @@ impl Views {
             "disconnected"
         }
     }
-    pub fn revoke(&self, app: &str, remote_only: bool) {
+    pub fn revoke(&self, app: &str, remote_only: bool, reason: StopReason) {
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|_, v| {
             let revoke = v.app == app && (!remote_only || matches!(v.target, Source::Remote(_)));
             if revoke {
-                v.lifetime.stop();
-                if let Some(l) = &v.lease {
-                    l.stop();
-                }
+                v.stop(reason);
             }
             !revoke
         });
     }
 }
+
+/// Last known state of each remote application, as seen from A.
+#[derive(Clone, Debug, Serialize)]
+pub struct RemoteHealth {
+    pub state: &'static str,
+    pub detail: String,
+    #[serde(skip)]
+    at: Instant,
+}
+#[derive(Default)]
+pub struct RemoteHealthCache {
+    entries: Mutex<HashMap<String, RemoteHealth>>,
+    refreshing: Mutex<HashSet<String>>,
+}
+impl RemoteHealthCache {
+    pub fn get(&self, app: &str) -> Option<RemoteHealth> {
+        self.entries.lock().unwrap().get(app).cloned()
+    }
+    pub fn forget(&self, app: &str) {
+        self.entries.lock().unwrap().remove(app);
+    }
+    fn record(&self, app: &str, state: &'static str, detail: String) {
+        self.entries.lock().unwrap().insert(
+            app.to_owned(),
+            RemoteHealth {
+                state,
+                detail,
+                at: Instant::now(),
+            },
+        );
+    }
+}
+
+/// Refreshes stale remote states in the background; listing never waits on B.
+pub fn refresh_remote_health(apps: Arc<AppsState>, ids: Vec<String>) {
+    for id in ids {
+        let stale = apps
+            .remote_health
+            .get(&id)
+            .is_none_or(|h| h.at.elapsed() > Duration::from_secs(30));
+        if !stale
+            || !apps
+                .remote_health
+                .refreshing
+                .lock()
+                .unwrap()
+                .insert(id.clone())
+        {
+            continue;
+        }
+        let apps = apps.clone();
+        tokio::spawn(async move {
+            if let Ok(target) = apps.remote.target(&id) {
+                let _ = probe(&apps, &id, &target).await;
+            }
+            apps.remote_health.refreshing.lock().unwrap().remove(&id);
+        });
+    }
+}
+
+/// Failed-authentication windows per source and per source/application. IPv6
+/// sources are counted per /64, since one host usually controls the whole prefix.
+/// Attempts count as failures until they succeed, so concurrent guesses from one
+/// source are bounded too. One source never locks out another.
+#[derive(Default)]
+struct Limiter {
+    entries: Mutex<HashMap<String, (Instant, u32)>>,
+}
+impl Limiter {
+    const WINDOW: Duration = Duration::from_secs(15 * 60);
+    const CAPACITY: usize = 8192;
+    fn source(ip: &str) -> String {
+        match ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V6(v6)) => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+            _ => ip.to_owned(),
+        }
+    }
+    fn keys(ip: &str, app: &str) -> [(String, u32); 2] {
+        let source = Self::source(ip);
+        [
+            (format!("ip {source}"), 30),
+            (format!("app {source} {app}"), 8),
+        ]
+    }
+    /// Records an attempt; returns false when the source must wait.
+    fn begin(&self, ip: &str, app: &str) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        let keys = Self::keys(ip, app);
+        let blocked = keys.iter().any(|(key, limit)| {
+            entries
+                .get(key)
+                .is_some_and(|(start, count)| start.elapsed() < Self::WINDOW && count >= limit)
+        });
+        if blocked {
+            return false;
+        }
+        if entries.len() >= Self::CAPACITY {
+            entries.retain(|_, (start, _)| start.elapsed() < Self::WINDOW);
+            while entries.len() >= Self::CAPACITY {
+                let oldest = entries
+                    .iter()
+                    .min_by_key(|(_, (start, _))| *start)
+                    .map(|(k, _)| k.clone());
+                match oldest {
+                    Some(key) => entries.remove(&key),
+                    None => break,
+                };
+            }
+        }
+        for (key, _) in keys {
+            let entry = entries.entry(key).or_insert((Instant::now(), 0));
+            if entry.0.elapsed() >= Self::WINDOW {
+                *entry = (Instant::now(), 0);
+            }
+            entry.1 += 1;
+        }
+        true
+    }
+    /// A successful attempt is not a failure and clears the source/application count.
+    fn succeed(&self, ip: &str, app: &str) {
+        let [(source_key, _), (app_key, _)] = Self::keys(ip, app);
+        let mut entries = self.entries.lock().unwrap();
+        entries.remove(&app_key);
+        if let Some(entry) = entries.get_mut(&source_key) {
+            entry.1 = entry.1.saturating_sub(1);
+        }
+    }
+}
+
+/// Serializes password checks per application and spaces out failures, bounding
+/// guesses against one application from any number of sources to about one per second.
+struct Pacing([tokio::sync::Mutex<()>; 64]);
+impl Default for Pacing {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| tokio::sync::Mutex::new(())))
+    }
+}
+impl Pacing {
+    fn slot(&self, app: &str) -> &tokio::sync::Mutex<()> {
+        let index = app
+            .bytes()
+            .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
+        &self.0[index % self.0.len()]
+    }
+}
+
 struct Gateway {
     apps: Arc<AppsState>,
     shared: Arc<SharedState>,
-    attempts: Mutex<HashMap<String, (Instant, u32)>>,
+    limiter: Limiter,
+    pacing: Pacing,
     password_jobs: Arc<tokio::sync::Semaphore>,
 }
 pub fn router(apps: Arc<AppsState>, shared: Arc<SharedState>) -> Router {
@@ -86,7 +249,8 @@ pub fn router(apps: Arc<AppsState>, shared: Arc<SharedState>) -> Router {
     let state = Arc::new(Gateway {
         apps,
         shared,
-        attempts: Mutex::new(HashMap::new()),
+        limiter: Limiter::default(),
+        pacing: Pacing::default(),
         password_jobs: Arc::new(tokio::sync::Semaphore::new(4)),
     });
     Router::new()
@@ -97,6 +261,10 @@ pub fn router(apps: Arc<AppsState>, shared: Arc<SharedState>) -> Router {
         .route(
             "/api/apps/{id}/sessions/{session}",
             axum::routing::delete(disconnect_session),
+        )
+        .route(
+            "/api/apps/{id}/grants/{grant}",
+            axum::routing::delete(revoke_grant),
         )
         .route(
             "/remote/v1/apps/{id}/credential",
@@ -122,6 +290,49 @@ fn bearer(headers: &HeaderMap) -> &str {
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("")
 }
+fn peer(addr: &Option<Extension<HttpPeerAddr>>) -> String {
+    addr.as_ref()
+        .map(|a| a.0 .0.ip().to_canonical().to_string())
+        .unwrap_or_default()
+}
+
+/// Security-relevant remote access events, kept separately from the service log.
+/// A dedicated thread writes them so request handlers never wait on the disk.
+fn audit(event: &str, app: &str, detail: Value) {
+    static WRITER: OnceLock<std::sync::mpsc::Sender<Value>> = OnceLock::new();
+    log::info!("remote access {event}: app={app} {detail}");
+    let line = json!({
+        "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        "event": event,
+        "app": app,
+        "detail": detail,
+    });
+    let writer = WRITER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        let path = crate::paths::ivnc_home().join("remote-audit.log");
+        std::thread::spawn(move || {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            for line in rx {
+                if std::fs::metadata(&path).is_ok_and(|m| m.len() > 4 * 1024 * 1024) {
+                    let _ = std::fs::rename(&path, path.with_extension("log.1"));
+                }
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&path)
+                {
+                    let _ = writeln!(file, "{line}");
+                }
+            }
+        });
+        tx
+    });
+    let _ = writer.send(line);
+}
+
 fn desktop(g: &Gateway, id: &str) -> Result<crate::apps::app::ManagedApp, Response> {
     let app = g
         .apps
@@ -136,39 +347,78 @@ fn desktop(g: &Gateway, id: &str) -> Result<crate::apps::app::ManagedApp, Respon
     }
     Ok(app)
 }
-fn authorize(g: &Gateway, id: &str, headers: &HeaderMap) -> Result<(), Response> {
+/// Verifies an application credential and returns who is using it.
+fn authorize(g: &Gateway, id: &str, headers: &HeaderMap, ip: &str) -> Result<Origin, Response> {
     desktop(g, id)?;
-    if !g.apps.remote.verify(id, bearer(headers)) {
+    let credential = bearer(headers);
+    let Some((grant, label)) = g.apps.remote.grant(id, credential) else {
         return Err(error(
             StatusCode::UNAUTHORIZED,
             "Application credentials expired or remote access is disabled",
         ));
-    }
-    Ok(())
+    };
+    g.apps.remote.touch(id, credential, ip);
+    Ok(Origin {
+        grant,
+        label,
+        peer: ip.to_owned(),
+    })
 }
-fn runtime(g: &Gateway, id: &str) -> Result<worker::Endpoint, Response> {
+fn runtime_check(g: &Gateway, id: &str) -> Result<worker::Endpoint, (StatusCode, String)> {
     if g.apps.process.status(id) != crate::apps::app::AppStatus::Running {
-        return Err(error(StatusCode::CONFLICT, "Application is not running"));
+        return Err((StatusCode::CONFLICT, "Application is not running".into()));
     }
-    let endpoint = worker::endpoint(id).map_err(|e| error(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let endpoint = worker::endpoint(id).map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
     let policy = g
         .apps
         .remote
         .policy(id)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if endpoint.desktop != policy.desktop {
-        return Err(error(
+        return Err((
             StatusCode::CONFLICT,
-            "Restart this application on B to apply its desktop/network settings",
+            "Restart this application on B to apply its isolation settings".into(),
         ));
     }
     Ok(endpoint)
+}
+fn runtime(g: &Gateway, id: &str) -> Result<worker::Endpoint, Response> {
+    runtime_check(g, id).map_err(|(status, message)| error(status, message))
 }
 async fn get_policy(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Response {
     if let Err(e) = desktop(&g, &id) {
         return e;
     }
-    match g.apps.remote.policy(&id){Ok(p)=>Json(json!({"policy":p,"share_path":format!("/remote/v1/apps/{id}"),"node_id":g.apps.remote.node_id,"sessions":g.shared.media_router.sessions(&id)})).into_response(),Err(e)=>error(StatusCode::INTERNAL_SERVER_ERROR,e)}
+    let policy = match g.apps.remote.policy(&id) {
+        Ok(p) => p,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let sessions = g.shared.media_router.sessions(&id);
+    let grants: Vec<Value> = match g.apps.remote.grants(&id) {
+        Ok(grants) => grants
+            .into_iter()
+            .map(|grant| {
+                let active = sessions
+                    .iter()
+                    .filter(|s| s["grant"] == grant.id.as_str())
+                    .count();
+                let mut value = json!(grant);
+                value["active_sessions"] = json!(active);
+                value
+            })
+            .collect(),
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let restart_required = worker::endpoint(&id).is_ok_and(|e| e.desktop != policy.desktop);
+    Json(json!({
+        "policy": policy,
+        "share_path": format!("/remote/v1/apps/{id}"),
+        "node_id": g.apps.remote.node_id,
+        "sessions": sessions,
+        "grants": grants,
+        "restart_required": restart_required,
+    }))
+    .into_response()
 }
 async fn set_policy(
     State(g): State<Arc<Gateway>>,
@@ -204,8 +454,14 @@ async fn set_policy(
             Ok(settings) => settings,
             Err(e) => return error(StatusCode::BAD_REQUEST, e),
         },
-        None => previous.desktop,
+        None => previous.desktop.clone(),
     };
+    if let Err(e) = settings.validate() {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = worker::resolve_mounts(&settings.mounts, &worker::protected_paths()) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
     for service in &settings.services {
         if !g.apps.store.get(service).is_ok_and(|a| {
             a.app_type == AppType::BackgroundApp && worker::service_url(&a).is_some()
@@ -217,17 +473,24 @@ async fn set_policy(
     let store = g.apps.remote.clone();
     let app = id.clone();
     let password = body["password"].as_str().map(str::to_owned);
+    let password_changed = password.as_deref().is_some_and(|p| !p.is_empty());
     let result = tokio::task::spawn_blocking(move || {
         store.set_policy(&app, enabled, password.as_deref(), settings)
     })
     .await;
     match result {
         Ok(Ok(policy)) => {
-            if policy.revision != old_revision {
-                g.shared.media_router.revoke(&id, true);
+            let revoked = policy.revision != old_revision;
+            if revoked {
+                g.shared.media_router.revoke(&id, true, StopReason::Revoked);
+                audit(
+                    "policy_changed",
+                    &id,
+                    json!({"enabled": enabled, "password_changed": password_changed}),
+                );
             }
             let restart_required = worker::endpoint(&id).is_ok_and(|e| e.desktop != policy.desktop);
-            Json(json!({"ok":true,"policy":policy,"restart_required":restart_required}))
+            Json(json!({"ok":true,"policy":policy,"restart_required":restart_required,"revoked":revoked}))
                 .into_response()
         }
         Ok(Err(e)) => error(StatusCode::BAD_REQUEST, e),
@@ -243,84 +506,137 @@ async fn services(State(g): State<Arc<Gateway>>) -> Response {
 async fn authenticate(
     State(g): State<Arc<Gateway>>,
     Path(id): Path<String>,
+    addr: Option<Extension<HttpPeerAddr>>,
     Json(body): Json<Value>,
 ) -> Response {
-    // An application cannot be used as an unlimited Argon2 work queue.
-    {
-        let mut attempts = g.attempts.lock().unwrap();
-        attempts.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(60));
-        if attempts.len() >= 1024 {
-            return error(StatusCode::TOO_MANY_REQUESTS, "Try again later");
-        }
-        let entry = attempts.entry(id.clone()).or_insert((Instant::now(), 0));
-        if entry.1 >= 10 {
-            return error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Too many authentication attempts; retry in one minute",
-            );
-        }
-        entry.1 += 1;
-    }
-    if desktop(&g, &id).is_err() {
+    let ip = peer(&addr);
+    if !super::valid_id(&id) {
         return error(StatusCode::UNAUTHORIZED, "Invalid application credentials");
     }
-    let Some(password) = body["password"].as_str().filter(|s| s.len() <= 256) else {
-        return error(StatusCode::UNAUTHORIZED, "Invalid application credentials");
+    if !g.limiter.begin(&ip, &id) {
+        audit("auth_limited", &id, json!({"ip": ip}));
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many failed attempts from this address; retry later",
+        );
+    }
+    let password = body["password"].as_str().unwrap_or("").to_string();
+    let client = Client {
+        node: body["client"]["node_id"].as_str().unwrap_or("").into(),
+        label: body["client"]["name"].as_str().unwrap_or("").into(),
+        ip: ip.clone(),
     };
-    let permit = match g.password_jobs.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => {
-            return error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Authentication is busy; retry shortly",
-            )
-        }
+    let busy = || {
+        error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Authentication is busy; retry shortly",
+        )
     };
-    let password = password.to_string();
-    let store = g.apps.remote.clone();
-    let app = id.clone();
-    match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        store.authenticate(&app, &password)
-    })
+    let Ok(_paced) = tokio::time::timeout(Duration::from_secs(10), g.pacing.slot(&id).lock()).await
+    else {
+        return busy();
+    };
+    // Argon2 work is bounded; requests wait briefly instead of failing at once.
+    let permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        g.password_jobs.clone().acquire_owned(),
+    )
     .await
     {
-        Ok(Ok(credential)) => {
-            let app = match desktop(&g, &id) {
-                Ok(a) => a,
-                Err(e) => return e,
-            };
+        Ok(Ok(p)) => p,
+        _ => return busy(),
+    };
+    let store = g.apps.remote.clone();
+    let app = id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        store.authenticate(&app, &password, &client)
+    })
+    .await;
+    match (result, desktop(&g, &id)) {
+        (Ok(Ok(credential)), Ok(app)) => {
+            g.limiter.succeed(&ip, &id);
+            audit(
+                "auth_success",
+                &id,
+                json!({"ip": ip, "client": body["client"]["name"], "node": body["client"]["node_id"]}),
+            );
             Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"credential":credential})).into_response()
         }
-        _ => error(StatusCode::UNAUTHORIZED, "Invalid application credentials"),
+        (Ok(Ok(credential)), Err(_)) => {
+            let _ = g.apps.remote.revoke_grant(&id, &credential);
+            error(StatusCode::UNAUTHORIZED, "Invalid application credentials")
+        }
+        (Ok(Err(e)), _) => {
+            if e.starts_with("Invalid") {
+                audit("auth_failure", &id, json!({"ip": ip}));
+                // Keep this application's slot busy so failures stay spaced out.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                error(StatusCode::UNAUTHORIZED, "Invalid application credentials")
+            } else {
+                error(StatusCode::CONFLICT, e)
+            }
+        }
+        (Err(_), _) => error(StatusCode::INTERNAL_SERVER_ERROR, "Authentication failed"),
     }
 }
 async fn remote_info(
     State(g): State<Arc<Gateway>>,
     Path(id): Path<String>,
+    addr: Option<Extension<HttpPeerAddr>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(e) = authorize(&g, &id, &headers) {
+    if let Err(e) = authorize(&g, &id, &headers, &peer(&addr)) {
         return e;
     }
     let app = match desktop(&g, &id) {
         Ok(a) => a,
         Err(e) => return e,
     };
-    Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"status":format!("{:?}",g.apps.app_status(&app)).to_lowercase()})).into_response()
+    let status = format!("{:?}", g.apps.app_status(&app)).to_lowercase();
+    let (ready, detail) = match runtime_check(&g, &id) {
+        Ok(_) => (true, String::new()),
+        Err((_, message)) => (false, message),
+    };
+    Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"status":status,"ready":ready,"detail":detail})).into_response()
 }
-pub fn http_client() -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
+
+/// One shared TLS client configuration: system roots plus `IVNC_REMOTE_CA_FILE`,
+/// used by both HTTPS and WSS so they always trust the same certificates. It is
+/// rebuilt when the CA file changes; failures are returned, never cached.
+fn tls_client() -> Result<(Arc<rustls::ClientConfig>, reqwest::Client), String> {
+    type Cached = (
+        Option<std::time::SystemTime>,
+        Arc<rustls::ClientConfig>,
+        reqwest::Client,
+    );
+    static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
+    let version = std::env::var_os("IVNC_REMOTE_CA_FILE")
+        .and_then(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((cached, config, client)) = cache.as_ref() {
+        if *cached == version {
+            return Ok((config.clone(), client.clone()));
+        }
+    }
+    let config = build_tls_config(trusted_certificates()?)?;
+    let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30));
-    for cert in trusted_certificates()? {
-        builder = builder.add_root_certificate(
-            reqwest::Certificate::from_der(&cert).map_err(|e| e.to_string())?,
-        );
-    }
-    builder.build().map_err(|e| e.to_string())
+        .timeout(Duration::from_secs(30))
+        .use_preconfigured_tls(config.clone())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let config = Arc::new(config);
+    *cache = Some((version, config.clone(), client.clone()));
+    Ok((config, client))
+}
+fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
+    tls_client().map(|(config, _)| config)
+}
+pub fn http_client() -> Result<reqwest::Client, String> {
+    tls_client().map(|(_, client)| client)
 }
 pub fn parse_share_url(value: &str) -> Result<(String, String), String> {
     let url =
@@ -356,7 +672,14 @@ pub fn parse_share_url(value: &str) -> Result<(String, String), String> {
         .to_owned();
     Ok((url.origin().ascii_serialization(), id))
 }
-pub async fn connect_target(body: &Value) -> Result<Target, String> {
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default()
+}
+/// Authenticates against B. `own_node` prevents mapping an instance onto itself,
+/// which would register the same media session twice in one router.
+pub async fn connect_target(body: &Value, own_node: &str) -> Result<Target, String> {
     let (base_url, app_id) =
         parse_share_url(body["url"].as_str().ok_or("Missing application URL")?)?;
     let password = body["password"]
@@ -365,14 +688,19 @@ pub async fn connect_target(body: &Value) -> Result<Target, String> {
         .ok_or("Enter the application password")?;
     let response = http_client()?
         .post(format!("{base_url}/remote/v1/apps/{app_id}/authenticate"))
-        .json(&json!({"password":password}))
+        .json(&json!({"password":password,"client":{"node_id":own_node,"name":hostname()}}))
         .send()
         .await
         .map_err(|e| format!("Cannot connect to B: {e}"))?;
     if !response.status().is_success() {
+        let status = response.status();
+        let detail = bounded_json(response)
+            .await
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_owned))
+            .unwrap_or_default();
         return Err(format!(
-            "B rejected application authentication ({})",
-            response.status()
+            "B rejected application authentication ({status}): {detail}"
         ));
     }
     let value = bounded_json(response).await?;
@@ -381,7 +709,7 @@ pub async fn connect_target(body: &Value) -> Result<Target, String> {
     {
         return Err("B does not support this application sharing protocol".into());
     }
-    Ok(Target {
+    let target = Target {
         base_url,
         app_id,
         node_id: value["node_id"]
@@ -397,10 +725,29 @@ pub async fn connect_target(body: &Value) -> Result<Target, String> {
             .filter(|s| s.len() == 64)
             .ok_or("Invalid application credential")?
             .into(),
-    })
+    };
+    if target.node_id == own_node {
+        forget_target(&target).await;
+        return Err(
+            "This address is the current instance; open the local application directly".into(),
+        );
+    }
+    Ok(target)
 }
-async fn check_target(target: &Target) -> Result<Value, String> {
-    let r = http_client()?
+
+/// Why B could not serve a remote application, in a form A can show and cache.
+#[derive(Debug)]
+pub struct Probe {
+    pub state: &'static str,
+    pub message: String,
+}
+async fn check_target(target: &Target) -> Result<Value, Probe> {
+    let unreachable = |message: String| Probe {
+        state: "unreachable",
+        message,
+    };
+    let client = http_client().map_err(unreachable)?;
+    let r = client
         .get(format!(
             "{}/remote/v1/apps/{}/info",
             target.base_url, target.app_id
@@ -408,18 +755,48 @@ async fn check_target(target: &Target) -> Result<Value, String> {
         .bearer_auth(&target.credential)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
-    if !r.status().is_success() {
-        return Err("B is unavailable or this connection has been revoked; enter the application password again".into());
+        .map_err(|e| unreachable(format!("B is unavailable: {e}")))?;
+    if r.status() == StatusCode::UNAUTHORIZED || r.status() == StatusCode::NOT_FOUND {
+        return Err(Probe {
+            state: "auth_required",
+            message: "B revoked this connection or disabled sharing; edit it and enter the application password again".into(),
+        });
     }
-    let value = bounded_json(r).await?;
+    if !r.status().is_success() {
+        return Err(unreachable(format!("B returned {}", r.status())));
+    }
+    let value = bounded_json(r).await.map_err(unreachable)?;
     if value["protocol"].as_u64() != Some(PROTOCOL as u64)
         || value["node_id"].as_str() != Some(&target.node_id)
         || value["app_id"].as_str() != Some(&target.app_id)
     {
-        return Err("Remote instance identity or application protocol changed".into());
+        return Err(Probe {
+            state: "incompatible",
+            message: "Remote instance identity or application protocol changed".into(),
+        });
     }
     Ok(value)
+}
+/// Checks B and records the result for the application list.
+async fn probe(apps: &AppsState, id: &str, target: &Target) -> Result<Value, Probe> {
+    let result = check_target(target).await;
+    match &result {
+        Ok(value) if value["status"] != "running" => {
+            apps.remote_health
+                .record(id, "stopped", "The application is not running on B".into())
+        }
+        // B versions without readiness information are treated as ready.
+        Ok(value) if value["ready"] == false => apps.remote_health.record(
+            id,
+            "not_ready",
+            value["detail"].as_str().unwrap_or("").to_owned(),
+        ),
+        Ok(_) => apps.remote_health.record(id, "running", String::new()),
+        Err(probe) => apps
+            .remote_health
+            .record(id, probe.state, probe.message.clone()),
+    }
+    result
 }
 async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Response {
     let app = match g.apps.store.get(&id) {
@@ -436,10 +813,21 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
                 Ok(t) => t,
                 Err(e) => return error(StatusCode::BAD_REQUEST, e),
             };
-            match check_target(&target).await {
-                Ok(v) if v["status"] == "running" => {}
-                Ok(_) => return error(StatusCode::CONFLICT, "Application is not running on B"),
-                Err(e) => return error(StatusCode::BAD_GATEWAY, e),
+            match probe(&g.apps, &id, &target).await {
+                Ok(v) if v["status"] != "running" => {
+                    return error(StatusCode::CONFLICT, "Application is not running on B")
+                }
+                Ok(v) if v["ready"] == false => {
+                    return error(
+                        StatusCode::CONFLICT,
+                        format!(
+                            "B: {}",
+                            v["detail"].as_str().unwrap_or("application is not ready")
+                        ),
+                    )
+                }
+                Ok(_) => {}
+                Err(e) => return error(StatusCode::BAD_GATEWAY, e.message),
             }
             Source::Remote(target)
         }
@@ -453,14 +841,11 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
     let view = super::token();
     let mut entries = g.shared.app_views.entries.lock().unwrap();
     entries.retain(|_, v| {
-        let keep = v.created.elapsed() < Duration::from_secs(8 * 3600);
-        if !keep {
-            v.lifetime.stop();
-            if let Some(l) = &v.lease {
-                l.stop();
-            }
+        let expired = v.expired();
+        if expired {
+            v.stop(StopReason::Closed);
         }
-        keep
+        !expired
     });
     if entries.len() >= 128 {
         return error(StatusCode::TOO_MANY_REQUESTS, "Too many application views");
@@ -471,7 +856,7 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
             lifetime: Lease::new(id.clone(), false, false, String::new()),
             app: id,
             target: source,
-            created: Instant::now(),
+            touched: Arc::new(Mutex::new(Instant::now())),
             lease: None,
         },
     );
@@ -484,7 +869,8 @@ fn view(g: &Gateway, id: &str) -> Result<View, Response> {
         .lock()
         .unwrap()
         .get(id)
-        .filter(|v| v.created.elapsed() < Duration::from_secs(8 * 3600))
+        .filter(|v| !v.expired() && v.lifetime.active())
+        .inspect(|v| *v.touched.lock().unwrap() = Instant::now())
         .cloned()
         .ok_or_else(|| {
             error(
@@ -500,11 +886,9 @@ async fn view_index(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Re
     crate::web::embedded_assets::get_embedded_file("index.html")
 }
 async fn close_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Response {
-    if let Some(v) = g.shared.app_views.entries.lock().unwrap().remove(&id) {
-        v.lifetime.stop();
-        if let Some(l) = v.lease {
-            l.stop();
-        }
+    let removed = g.shared.app_views.entries.lock().unwrap().remove(&id);
+    if let Some(v) = removed {
+        v.stop(StopReason::Closed);
     }
     Json(json!({"ok":true})).into_response()
 }
@@ -539,9 +923,10 @@ async fn fetch_data(source: &Source, path: &str, guard: AccessLease) -> Response
             ))
             .bearer_auth(&t.credential),
     };
+    // Large downloads are bounded by inactivity rather than total duration.
     let response = tokio::select! {
         _ = guard.cancelled() => return error(StatusCode::GONE, "Application access ended"),
-        result = request.timeout(Duration::from_secs(1800)).send() => result,
+        result = request.timeout(Duration::from_secs(24 * 3600)).send() => result,
     };
     match response {
         Ok(response) => {
@@ -563,7 +948,10 @@ async fn fetch_data(source: &Source, path: &str, guard: AccessLease) -> Response
                 |(mut stream, guard)| async move {
                     let next = tokio::select! {
                         _ = guard.cancelled() => None,
-                        next = stream.next() => next,
+                        next = tokio::time::timeout(Duration::from_secs(120), stream.next()) => match next {
+                            Ok(item) => item.map(|r| r.map_err(std::io::Error::other)),
+                            Err(_) => Some(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "download stalled"))),
+                        },
                     };
                     next.map(|data| (data, (stream, guard)))
                 },
@@ -610,11 +998,13 @@ async fn view_data(
 async fn remote_data(
     State(g): State<Arc<Gateway>>,
     Path((id, path)): Path<(String, String)>,
+    addr: Option<Extension<HttpPeerAddr>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(e) = authorize(&g, &id, &headers) {
-        return e;
-    }
+    let origin = match authorize(&g, &id, &headers, &peer(&addr)) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
     if !data_path(&path) {
         return error(StatusCode::NOT_FOUND, "Not found");
     }
@@ -622,7 +1012,7 @@ async fn remote_data(
         Ok(e) => e,
         Err(e) => return e,
     };
-    let lease = Lease::new(id.clone(), true, false, endpoint.generation.clone());
+    let lease = Lease::remote(id.clone(), Kind::Data, endpoint.generation.clone(), origin);
     if let Err(e) = g.shared.media_router.track(&lease) {
         return error(StatusCode::TOO_MANY_REQUESTS, e);
     }
@@ -667,42 +1057,65 @@ async fn view_socket(
         Source::Remote(t) => t.node_id.clone(),
     };
     let lease = Lease::new(v.app.clone(), !owner, owner, generation);
+    if let Err(e) = g.shared.media_router.track(&lease) {
+        lease.stop();
+        return error(StatusCode::TOO_MANY_REQUESTS, e);
+    }
     {
         let mut entries = g.shared.app_views.entries.lock().unwrap();
         let Some(entry) = entries.get_mut(&id) else {
+            lease.stop();
             return error(StatusCode::GONE, "View expired");
         };
         if let Some(old) = entry.lease.replace(lease.clone()) {
             old.stop();
         }
     }
-    if let Err(e) = g.shared.media_router.track(&lease) {
-        return error(StatusCode::TOO_MANY_REQUESTS, e);
-    }
+    // If the upgrade never completes, the callback is dropped and so is the guard.
+    let pending = StopOnDrop(lease.clone());
     ws.max_message_size(256 * 1024)
-        .on_upgrade(move |socket| bridge(g, socket, v.target, lease, None))
+        .on_upgrade(move |socket| async move {
+            let _pending = pending;
+            bridge(g, socket, v.target, lease, None).await
+        })
         .into_response()
 }
 async fn remote_socket(
     State(g): State<Arc<Gateway>>,
     Path(id): Path<String>,
+    addr: Option<Extension<HttpPeerAddr>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if let Err(e) = authorize(&g, &id, &headers) {
-        return e;
-    }
+    let origin = match authorize(&g, &id, &headers, &peer(&addr)) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
     let endpoint = match runtime(&g, &id) {
         Ok(e) => e,
         Err(e) => return e,
     };
-    let lease = Lease::new(id.clone(), true, false, endpoint.generation.clone());
+    audit(
+        "connect",
+        &id,
+        json!({"ip": origin.peer, "grant": origin.grant, "client": origin.label}),
+    );
+    let lease = Lease::remote(
+        id.clone(),
+        Kind::Signal,
+        endpoint.generation.clone(),
+        origin,
+    );
     let credential = bearer(&headers).to_string();
     if let Err(e) = g.shared.media_router.track(&lease) {
+        lease.stop();
         return error(StatusCode::TOO_MANY_REQUESTS, e);
     }
+    // If the upgrade never completes, the callback is dropped and so is the guard.
+    let pending = StopOnDrop(lease.clone());
     ws.max_message_size(256 * 1024)
-        .on_upgrade(move |socket| {
+        .on_upgrade(move |socket| async move {
+            let _pending = pending;
             bridge(
                 g,
                 socket,
@@ -710,6 +1123,7 @@ async fn remote_socket(
                 lease,
                 Some((id, credential)),
             )
+            .await
         })
         .into_response()
 }
@@ -747,13 +1161,16 @@ async fn bridge(
         result = bridge_inner(&g, &mut client, &source, &lease) => result,
         _ = guard.cancelled() => Ok(()),
     };
-    let revoked = !lease.active();
+    let reason = lease.stop_reason();
     lease.stop();
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
-        if revoked {
+        // Clients reconnect automatically only after an ordinary close.
+        if let Some(reason) = reason.filter(|r| *r != StopReason::Closed) {
             let _ = client
                 .send(Message::Text(
-                    json!({"ivnc_revoked":true}).to_string().into(),
+                    json!({"ivnc_revoked":true,"reason":reason.as_str()})
+                        .to_string()
+                        .into(),
                 ))
                 .await;
         }
@@ -777,6 +1194,32 @@ where
         .map_err(|_| "Application signaling timed out")?
         .map_err(|e| e.to_string())
 }
+
+/// Explains a refused upstream WebSocket handshake using B's status and message.
+fn handshake_error(error: tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::Error;
+    match error {
+        Error::Http(response) => {
+            let detail = response
+                .body()
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+                .and_then(|v| v["error"].as_str().map(str::to_owned));
+            let fallback = match response.status() {
+                StatusCode::UNAUTHORIZED => "B revoked this connection or disabled sharing",
+                StatusCode::CONFLICT => "the application is not running or must be restarted on B",
+                StatusCode::TOO_MANY_REQUESTS => "B has reached its session limit",
+                _ => "B refused the application connection",
+            };
+            format!(
+                "{} ({})",
+                detail.as_deref().unwrap_or(fallback),
+                response.status()
+            )
+        }
+        other => format!("Application connection failed: {other}"),
+    }
+}
 async fn bridge_inner(
     g: &Gateway,
     client: &mut WebSocket,
@@ -797,7 +1240,16 @@ async fn bridge_inner(
             )
         }
         Source::Remote(t) => {
-            check_target(t).await?;
+            match probe(&g.apps, &lease.app, t).await {
+                Ok(v) if v["ready"] == false => {
+                    return Err(format!(
+                        "B: {}",
+                        v["detail"].as_str().unwrap_or("not ready")
+                    ))
+                }
+                Ok(_) => {}
+                Err(e) => return Err(e.message),
+            }
             let mut url = reqwest::Url::parse(&format!(
                 "{}/remote/v1/apps/{}/socket",
                 t.base_url, t.app_id
@@ -838,12 +1290,12 @@ async fn bridge_inner(
                 ..Default::default()
             }),
             true,
-            Some(websocket_connector(trusted_certificates()?)?),
+            Some(tokio_tungstenite::Connector::Rustls(tls_config()?)),
         ),
     )
     .await
     .map_err(|_| "Application connection timed out")?
-    .map_err(|_| "Application connection failed or access was revoked")?;
+    .map_err(handshake_error)?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
@@ -907,7 +1359,8 @@ mod tests {
             } else {
                 Vec::new()
             };
-            let connector = websocket_connector(extra).unwrap();
+            let connector =
+                tokio_tungstenite::Connector::Rustls(Arc::new(build_tls_config(extra).unwrap()));
             let server = async {
                 let (stream, _) = listener.accept().await.unwrap();
                 let stream = acceptor.accept(stream).await;
@@ -1006,7 +1459,9 @@ mod tests {
                 DesktopSettings::default(),
             )
             .unwrap();
-        let credential = store.authenticate("app", "password-one").unwrap();
+        let credential = store
+            .authenticate("app", "password-one", &Default::default())
+            .unwrap();
         let lease = Lease::new("app".into(), true, false, "one".into());
         let guard = AccessLease {
             lease: lease.clone(),
@@ -1042,6 +1497,26 @@ mod tests {
     }
 
     #[test]
+    fn failures_are_limited_per_source_and_prefix() {
+        let limiter = Limiter::default();
+        for _ in 0..8 {
+            assert!(limiter.begin("2001:db8:1:2::5", "app"));
+        }
+        // Rotating addresses inside the same /64 does not reset the count.
+        assert!(!limiter.begin("2001:db8:1:2::9", "app"));
+        // Other sources and applications are unaffected.
+        assert!(limiter.begin("2001:db8:1:3::1", "app"));
+        assert!(limiter.begin("2001:db8:1:2::5", "other"));
+        // Success clears the source/application count.
+        let limiter = Limiter::default();
+        for _ in 0..20 {
+            assert!(limiter.begin("192.0.2.1", "app"));
+            limiter.succeed("192.0.2.1", "app");
+        }
+        assert_eq!(Limiter::source("192.0.2.1"), "192.0.2.1");
+    }
+
+    #[test]
     fn share_addresses_cannot_be_arbitrary_proxy_targets() {
         assert_eq!(
             parse_share_url("https://b.example/remote/v1/apps/builtin-chrome").unwrap(),
@@ -1071,32 +1546,56 @@ async fn disconnect_session(
         return e;
     }
     if g.shared.media_router.disconnect(&app, &session) {
+        audit("disconnect", &app, json!({"session": session}));
         Json(json!({"ok":true})).into_response()
     } else {
         error(StatusCode::NOT_FOUND, "Session not found")
     }
 }
-async fn revoke_credential(
+/// Revokes one saved connection on B and ends every session that used it.
+async fn revoke_grant(
     State(g): State<Arc<Gateway>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
+    Path((app, grant)): Path<(String, String)>,
 ) -> Response {
-    if let Err(e) = authorize(&g, &id, &headers) {
+    if let Err(e) = desktop(&g, &app) {
         return e;
     }
-    match g.apps.remote.revoke_grant(&id, bearer(&headers)) {
-        Ok(()) => Json(json!({"ok":true})).into_response(),
+    match g.apps.remote.revoke_grant_id(&app, &grant) {
+        Ok(true) => {
+            g.shared.media_router.revoke_grant(&app, &grant);
+            audit("revoke_grant", &app, json!({"grant": grant}));
+            Json(json!({"ok":true})).into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, "Connection not found"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
-async fn test_connection(Json(body): Json<Value>) -> Response {
-    match connect_target(&body).await {
+async fn revoke_credential(
+    State(g): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    addr: Option<Extension<HttpPeerAddr>>,
+    headers: HeaderMap,
+) -> Response {
+    let origin = match authorize(&g, &id, &headers, &peer(&addr)) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+    match g.apps.remote.revoke_grant(&id, bearer(&headers)) {
+        Ok(()) => {
+            g.shared.media_router.revoke_grant(&id, &origin.grant);
+            Json(json!({"ok":true})).into_response()
+        }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+async fn test_connection(State(g): State<Arc<Gateway>>, Json(body): Json<Value>) -> Response {
+    match connect_target(&body, &g.apps.remote.node_id).await {
         Ok(target) => {
             let result = check_target(&target).await;
             forget_target(&target).await;
             match result {
                 Ok(info) => Json(info).into_response(),
-                Err(e) => error(StatusCode::BAD_GATEWAY, e),
+                Err(e) => error(StatusCode::BAD_GATEWAY, e.message),
             }
         }
         Err(e) => error(StatusCode::BAD_REQUEST, e),
@@ -1132,27 +1631,35 @@ fn trusted_certificates() -> Result<Vec<rustls::pki_types::CertificateDer<'stati
     }
     Ok(certs)
 }
-fn websocket_connector(
+fn build_tls_config(
     extra: Vec<rustls::pki_types::CertificateDer<'static>>,
-) -> Result<tokio_tungstenite::Connector, String> {
+) -> Result<rustls::ClientConfig, String> {
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs()
-        .certs
-        .into_iter()
-        .chain(extra)
-    {
+    let (_, ignored) =
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if ignored > 0 {
+        log::debug!("Ignored {ignored} unusable system certificates");
+    }
+    for cert in extra {
         roots.add(cert).map_err(|e| e.to_string())?;
     }
     // TLS builds may enable both ring and aws-lc through dependencies. Always
     // choose a provider, including when only the system CA store is used.
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|e| e.to_string())?
     .with_root_certificates(roots)
-    .with_no_client_auth();
-    Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+    .with_no_client_auth())
+}
+
+/// Ends a lease when dropped, e.g. with a WebSocket callback that never ran.
+struct StopOnDrop(Arc<Lease>);
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
 }
 
 struct AccessLease {
@@ -1161,16 +1668,23 @@ struct AccessLease {
     authorization: Option<(Arc<super::store::RemoteStore>, String, String)>,
 }
 impl AccessLease {
+    /// Completes when access ends, including when its credential is revoked.
+    /// Credential changes are signalled by the store; the slow timer only
+    /// catches expiry.
     async fn cancelled(&self) {
+        let Some((store, app, credential)) = &self.authorization else {
+            return self.lease.cancelled().await;
+        };
+        let mut changes = store.subscribe();
         loop {
-            if let Some((store, app, credential)) = &self.authorization {
-                if !store.verify(app, credential) {
-                    self.lease.stop();
-                }
+            if !store.verify(app, credential) {
+                self.lease.stop_with(StopReason::Revoked);
+                return;
             }
             tokio::select! {
                 _ = self.lease.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(1)), if self.authorization.is_some() => {},
+                _ = changes.changed() => {},
+                _ = tokio::time::sleep(Duration::from_secs(300)) => {},
             }
         }
     }

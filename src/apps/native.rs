@@ -24,10 +24,9 @@ pub fn build_command(app: &ManagedApp) -> Result<Command, String> {
 fn configure_process_group(cmd: &mut Command) {
     unsafe {
         cmd.pre_exec(|| {
+            // The supervisor watches its parent process itself: PR_SET_PDEATHSIG
+            // follows the spawning thread, and spawns may run on pooled threads.
             if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
