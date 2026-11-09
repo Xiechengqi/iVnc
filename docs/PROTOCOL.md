@@ -589,7 +589,7 @@ debug!("Session {} DC parse error: {}", session.id, e);
 
 `password` 只在 `password_viewable` 为 `true` 时返回明文，否则为 `null`；从旧版本升级的密码只有校验值，此时 `password_set` 为 `true`、`password_viewable` 为 `false`。
 
-`PUT /api/apps/{id}/sharing` 请求体 `{"enabled": bool, "password"?: string}`，省略或留空 `password` 时保留原密码。成功返回 `{"ok": true, "revoked": bool, "restart_required": bool}`：`revoked` 表示因关闭共享或修改密码而断开了远程会话。没有设置过密码时开启共享、密码长度不在 8–256 字节、实例仍使用默认管理密码等错误返回 4xx 和 `{"error": "..."}`。
+`PUT /api/apps/{id}/sharing` 请求体 `{"enabled": bool, "password"?: string}`，省略或留空 `password` 时保留原密码。成功返回 `{"ok": true, "revoked": bool, "restart_required": bool}`：`revoked` 表示因关闭共享或修改密码而断开了远程会话。没有设置过密码时开启共享、密码长度不在 8–256 字节等错误返回 4xx 和 `{"error": "..."}`。
 
 ### B 的远程接口
 

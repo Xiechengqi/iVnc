@@ -448,19 +448,6 @@ async fn set_policy(
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "enabled must be a boolean"),
     };
-    if enabled {
-        let override_password = g.shared.password_override.read().await;
-        let password = override_password
-            .as_deref()
-            .unwrap_or(&g.shared.config.http.basic_auth_password);
-        if !g.shared.config.http.basic_auth_enabled || password == "mypasswd" || password.is_empty()
-        {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "Set a private instance management password before sharing applications",
-            );
-        }
-    }
     let previous = match g.apps.remote.policy(&id) {
         Ok(policy) => policy,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -630,20 +617,6 @@ pub fn parse_share_url(value: &str) -> Result<(String, String), String> {
         || url.fragment().is_some()
     {
         return Err("Use an HTTP(S) application URL without credentials, query or fragment".into());
-    }
-    // Plain HTTP is restricted to a local/private transport, never public hosts.
-    if url.scheme() == "http" {
-        let host = url.host_str().unwrap_or("").trim_matches(['[', ']']);
-        let trusted = host == "localhost"
-            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
-                std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
-                std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
-            });
-        if !trusted {
-            return Err(
-                "Remote public hosts require HTTPS; configure a trusted certificate".into(),
-            );
-        }
     }
     let id = url
         .path()
@@ -1843,7 +1816,6 @@ mod tests {
         );
         for url in [
             "file:///etc/passwd",
-            "http://b.example/remote/v1/apps/app",
             "https://user:secret@b.example/remote/v1/apps/app",
             "https://b.example/api/apps",
             "https://b.example/remote/v1/apps/app?password=x",
@@ -1852,6 +1824,7 @@ mod tests {
             assert!(parse_share_url(url).is_err(), "{url}");
         }
         assert!(parse_share_url("http://127.0.0.1:8008/remote/v1/apps/app").is_ok());
+        assert!(parse_share_url("http://b.example:8008/remote/v1/apps/app").is_ok());
         assert!(data_path("ui-config"));
         assert!(!data_path("api/apps"));
         assert!(!data_path("app/files"));
