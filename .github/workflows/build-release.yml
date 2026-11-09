@@ -53,8 +53,11 @@ jobs:
           #!/bin/bash
           set -euo pipefail
 
-          apt-get update
-          apt-get install -y --no-install-recommends \
+          # The runner's Azure mirror is faster and more reliable than archive.ubuntu.com.
+          sed -i 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          # Fail on any missing index instead of installing from a partial one.
+          apt-get -o Acquire::Retries=5 update --error-on=any
+          apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             build-essential \
             pkg-config \
             curl \
@@ -78,7 +81,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-          apt-get install -y --no-install-recommends nodejs
+          apt-get -o Acquire::Retries=5 install -y --no-install-recommends nodejs
 
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
           source "$HOME/.cargo/env"
