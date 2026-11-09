@@ -1,6 +1,7 @@
 use super::app::{AppStatus, AppType, ManagedApp};
 use super::datadir;
 use super::desktop_entry;
+use super::error::ApiError;
 use super::native;
 use super::process::ProcessManager;
 use super::service_process::{self, ServiceProcessManager};
@@ -159,13 +160,13 @@ impl AppsState {
     }
 
     /// The connection state of a remote application and why it is not connected.
-    pub fn remote_state(&self, id: &str) -> (&'static str, String) {
+    pub fn remote_state(&self, id: &str) -> (&'static str, Option<ApiError>) {
         if !self.remote_started(id) {
-            return ("disconnected", String::new());
+            return ("disconnected", None);
         }
         self.remote_health
             .get(id)
-            .map_or(("connecting", String::new()), |h| (h.state, h.detail))
+            .map_or(("connecting", None), |h| (h.state, h.detail))
     }
 
     /// Whether the application runs differently than its sharing setting asks for.
@@ -312,7 +313,7 @@ impl AppsState {
 
             match result {
                 Ok(()) => log::info!("Autostart app started: {} ({})", app.name, app.id),
-                Err(e) if e == "App is already running" => {
+                Err(e) if e.code == "app_already_running" => {
                     log::debug!("Autostart app already running: {} ({})", app.name, app.id)
                 }
                 Err(e) => log::warn!("Failed to autostart app {} ({}): {}", app.name, app.id, e),
@@ -321,15 +322,15 @@ impl AppsState {
         Ok(())
     }
 
-    async fn start_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
+    async fn start_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, ApiError> {
         let result = self.launch_app(app).await;
         self.refresh_stream_apps();
         result
     }
 
-    async fn launch_app(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
+    async fn launch_app(&self, app: &ManagedApp) -> Result<Option<u32>, ApiError> {
         if app.id == BUILTIN_MIAO_ID {
-            return self.proxy_panel.start().await;
+            return Ok(self.proxy_panel.start().await?);
         }
         if app.id == "builtin-chrome" {
             self.proxy_panel.prepare_chrome_proxy().await;
@@ -351,42 +352,55 @@ impl AppsState {
                         AppStatus::Running => return Ok(Some(pid)),
                         AppStatus::Starting => {}
                         _ => {
-                            return Err(crate::remote::worker::failure(&app.id)
-                                .map(|f| f.message)
-                                .unwrap_or_else(|| {
-                                    "Application runtime failed to start; see the application log"
-                                        .into()
-                                }))
+                            return Err(match crate::remote::worker::failure(&app.id) {
+                                Some(failure) => failure.message.into(),
+                                None => ApiError::new(
+                                    "app_runtime_failed",
+                                    "Application runtime failed to start; see the application log",
+                                ),
+                            })
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                Err("Application runtime did not become ready; check its log".into())
+                Err(ApiError::new(
+                    "app_runtime_timeout",
+                    "Application runtime did not become ready; check its log",
+                ))
             }
             AppType::BackgroundApp => {
                 if !service_process::has_launch_command(app) {
-                    return Err("background app requires launch_command".to_string());
+                    return Err(ApiError::new(
+                        "launch_command_required",
+                        "background app requires launch_command",
+                    ));
                 }
-                self.service.start_and_wait(app).await
+                Ok(self.service.start_and_wait(app).await?)
             }
             AppType::RemoteApp => {
                 // The process runs on B; starting connects to it.
                 self.remote.target(&app.id)?;
                 if !self.started.lock().unwrap().insert(app.id.clone()) {
-                    return Err("App is already running".into());
+                    return Err(ApiError::new(
+                        "app_already_running",
+                        "App is already running",
+                    ));
                 }
                 self.remote_health.forget(&app.id);
                 self.wake.notify_one();
                 Ok(None)
             }
-            AppType::CliApp => Err("CLI apps are one-shot tools and cannot be started".to_string()),
+            AppType::CliApp => Err(ApiError::new(
+                "cli_not_startable",
+                "CLI apps are one-shot tools and cannot be started",
+            )),
         }
     }
 
-    async fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), String> {
+    async fn stop_app_processes(&self, app: &ManagedApp) -> Result<(), ApiError> {
         self.revoke_views(&app.id, crate::remote::media::StopReason::Stopped);
         if app.id == BUILTIN_MIAO_ID {
-            return self.proxy_panel.stop().await;
+            return Ok(self.proxy_panel.stop().await?);
         }
         let result = match app.app_type {
             AppType::DesktopApp => {
@@ -395,7 +409,7 @@ impl AppsState {
                     .await
                     .map_err(|e| e.to_string())?
             }
-            AppType::BackgroundApp => self.service.stop(&app.id),
+            AppType::BackgroundApp => self.service.stop(&app.id).map_err(ApiError::from),
             AppType::RemoteApp => {
                 self.started.lock().unwrap().remove(&app.id);
                 self.remote_health.forget(&app.id);
@@ -407,9 +421,9 @@ impl AppsState {
         result
     }
 
-    async fn restart_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
+    async fn restart_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, ApiError> {
         if app.id == BUILTIN_MIAO_ID {
-            return self.proxy_panel.restart().await;
+            return Ok(self.proxy_panel.restart().await?);
         }
         let _ = self.stop_app_processes(app).await;
         self.start_app_processes(app).await
@@ -587,8 +601,8 @@ fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), S
             };
             match store.add(&app) {
                 Ok(()) => log::info!("Added built-in Chrome desktop app"),
-                Err(err) if err.contains("already exists") => {}
-                Err(err) => return Err(err),
+                Err(err) if err.code == "app_name_exists" => {}
+                Err(err) => return Err(err.into()),
             }
         }
     }
@@ -652,8 +666,8 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
             };
             match store.add(&app) {
                 Ok(()) => log::info!("Added built-in agent-browser CLI app"),
-                Err(err) if err.contains("already exists") => {}
-                Err(err) => return Err(err),
+                Err(err) if err.code == "app_name_exists" => {}
+                Err(err) => return Err(err.into()),
             }
         }
     }
@@ -750,8 +764,8 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
         .unwrap()
 }
 
-fn err_response(status: StatusCode, msg: &str) -> Response {
-    json_response(status, json!({"error": msg}))
+fn err_response(status: StatusCode, error: impl Into<ApiError>) -> Response {
+    json_response(status, error.into().body())
 }
 
 fn parse_env_vars(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
@@ -908,7 +922,12 @@ fn app_json(
             let (remote_state, remote_detail) = state.remote_state(&app.id);
             obj["started"] = json!(state.remote_started(&app.id));
             obj["remote_state"] = json!(remote_state);
-            obj["remote_detail"] = json!(remote_detail);
+            obj["remote_detail"] = json!(remote_detail.as_ref().map_or("", |e| &e.message));
+            obj["remote_detail_code"] = json!(remote_detail.as_ref().map(|e| e.code));
+            obj["remote_detail_params"] = json!(remote_detail
+                .as_ref()
+                .map(|e| &e.params)
+                .filter(|p| !p.is_empty()));
             // Plain HTTP is only accepted on private networks; the list marks it.
             obj["remote_plaintext"] = json!(obj["url"]
                 .as_str()
@@ -962,7 +981,7 @@ async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
                 .collect();
             json_response(StatusCode::OK, json!({"apps": items}))
         }
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -973,7 +992,12 @@ async fn add_app(
     let mut name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ if body["app_type"] == "remote" => String::new(),
-        _ => return err_response(StatusCode::BAD_REQUEST, "missing name"),
+        _ => {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                ApiError::new("app_name_required", "missing name"),
+            )
+        }
     };
 
     let app_type_str = body
@@ -982,12 +1006,17 @@ async fn add_app(
         .unwrap_or("background");
     let app_type = match AppType::from_str(app_type_str) {
         Some(t) => t,
-        None => return err_response(StatusCode::BAD_REQUEST, "Invalid application type"),
+        None => {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                ApiError::new("app_type_invalid", "Invalid application type"),
+            )
+        }
     };
     let remote_target = if app_type == AppType::RemoteApp {
         match crate::remote::gateway::connect_target(&body, &state.remote.node_id).await {
             Ok(target) => Some(target),
-            Err(e) => return err_response(StatusCode::BAD_REQUEST, &e),
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
         }
     } else {
         None
@@ -999,7 +1028,10 @@ async fn add_app(
         }
     }
     if name.len() > 256 {
-        return err_response(StatusCode::BAD_REQUEST, "Application name is too long");
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            ApiError::new("app_name_too_long", "Application name is too long"),
+        );
     }
 
     let (
@@ -1026,7 +1058,10 @@ async fn add_app(
                 None => {
                     return err_response(
                         StatusCode::BAD_REQUEST,
-                        "missing launch_command for background",
+                        ApiError::new(
+                            "launch_command_required",
+                            "missing launch_command for background",
+                        ),
                     )
                 }
             };
@@ -1058,7 +1093,10 @@ async fn add_app(
                 _ => {
                     return err_response(
                         StatusCode::BAD_REQUEST,
-                        "missing exec_command for desktop app",
+                        ApiError::new(
+                            "exec_command_required",
+                            "missing exec_command for desktop app",
+                        ),
                     )
                 }
             };
@@ -1078,7 +1116,12 @@ async fn add_app(
         AppType::CliApp => {
             let cli_binary_path = match body.get("cli_binary_path").and_then(|v| v.as_str()) {
                 Some(path) if !path.trim().is_empty() => Some(path.trim().to_string()),
-                _ => return err_response(StatusCode::BAD_REQUEST, "missing cli_binary_path"),
+                _ => {
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        ApiError::new("cli_binary_path_required", "missing cli_binary_path"),
+                    )
+                }
             };
             let cli_env_vars = parse_env_vars(body.get("cli_env_vars"));
             (
@@ -1118,13 +1161,13 @@ async fn add_app(
     };
 
     if let Err(e) = state.store.add(&app) {
-        return err_response(StatusCode::CONFLICT, &e);
+        return err_response(StatusCode::CONFLICT, e);
     }
 
     if let Some((target, token)) = remote_target {
         if let Err(e) = state.remote.save_target(&app.id, &target) {
             let _ = state.store.delete(&app.id);
-            return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
         state.remote_health.remember_token(&app.id, token);
     }
@@ -1143,7 +1186,7 @@ async fn add_app(
                     delete_err
                 );
             }
-            return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
     }
 
@@ -1167,7 +1210,7 @@ async fn get_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) ->
                 app_json(&state, &app, &format!("{:?}", st).to_lowercase(), pid, size),
             )
         }
-        Err(e) => err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
     }
 }
 
@@ -1178,13 +1221,16 @@ async fn update_app(
 ) -> Response {
     let mut app = match state.store.get(&id) {
         Ok(a) => a,
-        Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => return err_response(StatusCode::NOT_FOUND, e),
     };
 
     if id == BUILTIN_MIAO_ID {
         return err_response(
             StatusCode::FORBIDDEN,
-            "Miao application settings are read-only; configure startup through the iVnc CLI",
+            ApiError::new(
+                "miao_read_only",
+                "Miao application settings are read-only; configure startup through the iVnc CLI",
+            ),
         );
     }
 
@@ -1203,21 +1249,24 @@ async fn update_app(
                 match crate::remote::gateway::connect_target(&body, &state.remote.node_id).await {
                     Ok((target, token)) => {
                         if let Err(e) = state.remote.save_target(&app.id, &target) {
-                            return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+                            return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
                         }
                         state.revoke_views(&app.id, crate::remote::media::StopReason::Closed);
                         state.remote_health.forget(&app.id);
                         state.remote_health.remember_token(&app.id, token);
                         state.wake.notify_one();
                     }
-                    Err(e) => return err_response(StatusCode::BAD_REQUEST, &e),
+                    Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
                 }
             } else if let Some(url) = body["url"].as_str() {
                 let old = state.remote.target(&app.id).ok();
                 if old.as_ref().map(|t| t.share_url()).as_deref() != Some(url.trim()) {
                     return err_response(
                         StatusCode::BAD_REQUEST,
-                        "Enter the password when changing the remote address",
+                        ApiError::new(
+                            "remote_password_for_url",
+                            "Enter the password when changing the remote address",
+                        ),
                     );
                 }
             }
@@ -1247,7 +1296,10 @@ async fn update_app(
             if !service_process::has_launch_command(&app) {
                 return err_response(
                     StatusCode::BAD_REQUEST,
-                    "missing launch_command for background",
+                    ApiError::new(
+                        "launch_command_required",
+                        "missing launch_command for background",
+                    ),
                 );
             }
         }
@@ -1257,7 +1309,10 @@ async fn update_app(
                 if exec.is_empty() {
                     return err_response(
                         StatusCode::BAD_REQUEST,
-                        "missing exec_command for desktop app",
+                        ApiError::new(
+                            "exec_command_required",
+                            "missing exec_command for desktop app",
+                        ),
                     );
                 }
                 app.exec_command = Some(exec.to_string());
@@ -1268,7 +1323,10 @@ async fn update_app(
             if let Some(path) = body.get("cli_binary_path").and_then(|v| v.as_str()) {
                 let path = path.trim();
                 if path.is_empty() {
-                    return err_response(StatusCode::BAD_REQUEST, "missing cli_binary_path");
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        ApiError::new("cli_binary_path_required", "missing cli_binary_path"),
+                    );
                 }
                 app.cli_binary_path = Some(path.to_string());
             }
@@ -1281,7 +1339,7 @@ async fn update_app(
     }
 
     if let Err(e) = state.store.update(&app) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
     // Tabs show the name.
     state.refresh_stream_apps();
@@ -1292,7 +1350,10 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
     if id == BUILTIN_MIAO_ID {
         return err_response(
             StatusCode::FORBIDDEN,
-            "Built-in Miao cannot be deleted; disable autostart instead",
+            ApiError::new(
+                "miao_not_deletable",
+                "Built-in Miao cannot be deleted; disable autostart instead",
+            ),
         );
     }
     // Clean up data directory before removing from store
@@ -1310,29 +1371,32 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
     state.refresh_stream_apps();
     match result {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
-        Err(e) => err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
     }
 }
 
 async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     if id == BUILTIN_MIAO_ID && !state.proxy_panel.status().enabled {
-        return err_response(StatusCode::FORBIDDEN, "Proxy disabled by administrator");
+        return err_response(
+            StatusCode::FORBIDDEN,
+            ApiError::new("proxy_disabled", "Proxy disabled by administrator"),
+        );
     }
     let app = match state.store.get(&id) {
         Ok(a) => a,
-        Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => return err_response(StatusCode::NOT_FOUND, e),
     };
 
     match state.start_app_processes(&app).await {
         Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
-        Err(e) if e == "App is already running" => {
+        Err(e) if e.code == "app_already_running" => {
             json_response(StatusCode::OK, json!({"ok":true,"pid":state.app_pid(&app)}))
         }
         Err(e) => {
             if id != BUILTIN_MIAO_ID && app.app_type != AppType::RemoteApp {
                 let _ = state.stop_app_processes(&app).await;
             }
-            err_response(StatusCode::INTERNAL_SERVER_ERROR, &e)
+            err_response(StatusCode::INTERNAL_SERVER_ERROR, e.or("app_start_failed"))
         }
     }
 }
@@ -1340,34 +1404,37 @@ async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
 async fn stop_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     let app = match state.store.get(&id) {
         Ok(a) => a,
-        Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => return err_response(StatusCode::NOT_FOUND, e),
     };
 
     match state.stop_app_processes(&app).await {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
-        Err(e) => err_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, e.or("app_stop_failed")),
     }
 }
 
 async fn restart_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     if id == BUILTIN_MIAO_ID && !state.proxy_panel.status().enabled {
-        return err_response(StatusCode::FORBIDDEN, "Proxy disabled by administrator");
+        return err_response(
+            StatusCode::FORBIDDEN,
+            ApiError::new("proxy_disabled", "Proxy disabled by administrator"),
+        );
     }
     let app = match state.store.get(&id) {
         Ok(a) => a,
-        Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => return err_response(StatusCode::NOT_FOUND, e),
     };
 
     match state.restart_app_processes(&app).await {
         Ok(pid) => json_response(StatusCode::OK, json!({"ok": true, "pid": pid})),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e.or("app_start_failed")),
     }
 }
 
 async fn data_size(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     let app = match state.store.get(&id) {
         Ok(a) => a,
-        Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => return err_response(StatusCode::NOT_FOUND, e),
     };
     let dir = datadir::app_root(&app);
     let bytes = datadir::durable_size(&app);
@@ -1385,31 +1452,37 @@ async fn clear_data(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
     if id == BUILTIN_MIAO_ID {
         return err_response(
             StatusCode::FORBIDDEN,
-            "Miao data is shared persistent proxy configuration and cannot be cleared here",
+            ApiError::new(
+                "miao_data_not_clearable",
+                "Miao data is shared persistent proxy configuration and cannot be cleared here",
+            ),
         );
     }
     let app = match state.store.get(&id) {
         Ok(a) => a,
-        Err(e) => return err_response(StatusCode::NOT_FOUND, &e),
+        Err(e) => return err_response(StatusCode::NOT_FOUND, e),
     };
     if app.app_type == AppType::RemoteApp {
         return err_response(
             StatusCode::BAD_REQUEST,
-            "Remote application data is managed on its source instance",
+            ApiError::new(
+                "remote_data_not_clearable",
+                "Remote application data is managed on its source instance",
+            ),
         );
     }
     // Stop app before clearing data
     let _ = state.stop_app_processes(&app).await;
     match datadir::clear(&app) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
 async fn get_logs(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
     // Verify app exists
     if let Err(e) = state.store.get(&id) {
-        return err_response(StatusCode::NOT_FOUND, &e);
+        return err_response(StatusCode::NOT_FOUND, e);
     }
     if id == BUILTIN_MIAO_ID {
         let path = state.proxy_panel.log_path();
@@ -1769,6 +1842,57 @@ mod tests {
         assert!(state.store.get(&app.id).unwrap().autostart);
         state.start_autostart_apps().await.unwrap();
         assert!(state.remote_started(&app.id));
+    }
+
+    #[tokio::test]
+    async fn errors_keep_their_english_text_and_carry_codes() {
+        let state = state(None, None);
+        let body = |response: Response| async move {
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        };
+        let add = |body| add_app(State(state.clone()), axum::Json(body));
+        let cli = json!({"name": "Tool", "app_type": "cli", "cli_binary_path": "/bin/true"});
+        assert_eq!(add(cli.clone()).await.status(), StatusCode::CREATED);
+        let (status, error) = body(add(cli).await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            error,
+            json!({
+                "error": "App name 'Tool' already exists",
+                "code": "app_name_exists",
+                "params": {"name": "Tool"},
+            })
+        );
+        let (status, error) = body(add(json!({"app_type": "cli"})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error,
+            json!({"error": "missing name", "code": "app_name_required"})
+        );
+        let (_, error) = body(add(json!({"name": "x".repeat(257)})).await).await;
+        assert_eq!(error["code"], "app_name_too_long");
+
+        let tool = state
+            .store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name == "Tool");
+        let (status, error) =
+            body(start_app(State(state.clone()), Path(tool.unwrap().id)).await).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error["code"], "cli_not_startable");
+        let (status, error) =
+            body(stop_app(State(state.clone()), Path("missing".into())).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["code"], "app_not_found");
     }
 
     #[test]

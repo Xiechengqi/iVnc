@@ -563,7 +563,9 @@ debug!("Session {} DC parse error: {}", session.id, e);
 | `started` | 远程应用 | 是否已启动（连接）；与本机应用的运行状态一起保存，短时间内重启（5 分钟内）后恢复 |
 | `autostart` | 后台、桌面和远程应用 | 原有的随 iVnc 启动偏好，远程应用同样支持：每次 iVnc 启动时自动启动（连接）；通过创建和更新应用接口设置 |
 | `remote_state` | 远程应用 | `disconnected`（未启动）、`connecting`、`connected`、`starting`（B 的应用已开启共享，运行环境仍在启动；不是错误，就绪后自动连接）、`stopped`（B 的应用未运行）、`not_ready`（B 需重启应用）、`auth_required`（密码错误或旧连接）、`incompatible`（协议版本不一致）、`unreachable` |
-| `remote_detail` | 远程应用 | 状态说明文本 |
+| `remote_detail` | 远程应用 | 状态说明的英文文本 |
+| `remote_detail_code` | 远程应用 | 状态说明的错误码，取值同错误响应的 `code`（如 `remote_refused`、`remote_auth_failed`、`remote_app_stopped`）；没有说明时为 `null` |
+| `remote_detail_params` | 远程应用 | 错误码的参数，同错误响应的 `params`；没有参数时为 `null` |
 
 | 接口 | 说明 |
 | --- | --- |
@@ -571,8 +573,10 @@ debug!("Session {} DC parse error: {}", session.id, e);
 | `GET /api/apps/{id}/sharing` | 桌面应用的远程访问设置，见下文 |
 | `PUT /api/apps/{id}/sharing` | 修改远程访问设置，见下文 |
 | `POST /api/apps/{id}/view` | 为共享应用或已启动的远程应用创建视图，返回 `{"url": "/app-view/{token}/", "name": "..."}`；每个页面为每个应用申请自己的令牌，一个令牌只允许一个连接 |
-| `POST /api/remote/test` | 请求体 `{"url", "password"}`，用连接地址和访问密码验证连接，返回 B 的 `info`（名称、`status` 为 `running`/`starting`/`stopped` 等、`ready`），或 `{"error"}` |
+| `POST /api/remote/test` | 请求体 `{"url", "password"}`，用连接地址和访问密码验证连接，返回 B 的 `info`（名称、`status` 为 `running`/`starting`/`stopped` 等、`ready`），或错误响应 |
 | `POST /app-view/{token}/close` | 关闭视图及其信令和媒体 |
+
+`/api/apps`、`/api/remote/`、`/remote/v1/` 和应用视图接口的 JSON 错误响应为 `{"error": "...", "code": "...", "params"?: {...}}`。`error` 是原有的英文说明，iVnc CLI 和脚本读取它；`code` 是稳定的 snake_case 错误码，如 `app_name_exists`、`share_password_length`、`remote_url_not_share`、`remote_not_started`，无法归类的内部错误（数据库、文件读写等）为 `internal`；`params` 是说明中的动态部分，如 `name`、`status`，其中 `detail` 是无法翻译的底层说明，如网络错误的完整原因。控制台按 `code` 以界面语言显示，把 `detail` 附在后面；不认识的错误码显示通用文本并附上英文原文。
 
 `GET /api/apps/{id}/sharing` 返回：
 
@@ -589,7 +593,7 @@ debug!("Session {} DC parse error: {}", session.id, e);
 
 `password` 只在 `password_viewable` 为 `true` 时返回明文，否则为 `null`；从旧版本升级的密码只有校验值，此时 `password_set` 为 `true`、`password_viewable` 为 `false`。
 
-`PUT /api/apps/{id}/sharing` 请求体 `{"enabled": bool, "password"?: string}`，省略或留空 `password` 时保留原密码。成功返回 `{"ok": true, "revoked": bool, "restart_required": bool}`：`revoked` 表示因关闭共享或修改密码而断开了远程会话。没有设置过密码时开启共享、密码长度不在 8–256 字节等错误返回 4xx 和 `{"error": "..."}`。
+`PUT /api/apps/{id}/sharing` 请求体 `{"enabled": bool, "password"?: string}`，省略或留空 `password` 时保留原密码。成功返回 `{"ok": true, "revoked": bool, "restart_required": bool}`：`revoked` 表示因关闭共享或修改密码而断开了远程会话。没有设置过密码时开启共享（`share_password_required`）、密码长度不在 8–256 字节（`share_password_length`）等错误返回 4xx 和错误响应。
 
 ### B 的远程接口
 

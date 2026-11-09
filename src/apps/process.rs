@@ -1,4 +1,5 @@
 use super::app::{AppStatus, ManagedApp};
+use super::error::ApiError;
 use super::native;
 use crate::remote::store::RemoteStore;
 use log::{info, warn};
@@ -184,6 +185,7 @@ impl ProcessManager {
         for app_id in due {
             match store
                 .get(&app_id)
+                .map_err(String::from)
                 .and_then(|app| self.spawn(&app).map(|r| (app, r)))
             {
                 Ok((app, running)) => {
@@ -219,10 +221,13 @@ impl ProcessManager {
         })
     }
 
-    pub fn start(&self, app: &ManagedApp) -> Result<u32, String> {
+    pub fn start(&self, app: &ManagedApp) -> Result<u32, ApiError> {
         let _operation = self.operations.lock().unwrap();
         if self.is_running(&app.id) {
-            return Err("App is already running".into());
+            return Err(ApiError::new(
+                "app_already_running",
+                "App is already running",
+            ));
         }
 
         // Remove from user-stopped set so watchdog will restart if it crashes
@@ -240,7 +245,7 @@ impl ProcessManager {
         Ok(pid)
     }
 
-    pub fn stop(&self, app_id: &str) -> Result<(), String> {
+    pub fn stop(&self, app_id: &str) -> Result<(), ApiError> {
         let _operation = self.operations.lock().unwrap();
         // Mark as user-stopped so watchdog won't restart it
         self.stopped_by_user
@@ -260,7 +265,7 @@ impl ProcessManager {
         } else if pending {
             Ok(())
         } else {
-            Err("App is not running".into())
+            Err(ApiError::new("app_not_running", "App is not running"))
         }
     }
 

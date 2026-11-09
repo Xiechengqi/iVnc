@@ -6,6 +6,7 @@ pub mod api;
 pub mod app;
 pub mod datadir;
 pub mod desktop_entry;
+pub mod error;
 pub mod native;
 pub mod process;
 pub mod service_process;

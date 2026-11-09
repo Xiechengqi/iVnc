@@ -1,4 +1,4 @@
-import { getLang, setLang, onLangChange, APP_STRINGS, remoteStateText } from './lib/i18n.js?v=1';
+import { getLang, setLang, onLangChange, APP_STRINGS, remoteStateText, serverErrorText } from './lib/i18n.js?v=1';
 import { notifyAppStarted } from './app-streams.js';
 
 const API = '/api/apps';
@@ -403,7 +403,7 @@ function getHash(data) {
         name: a.name,
         sharing: a.sharing,
         started: a.started,
-        remote: [a.remote_state, a.remote_detail, a.remote_plaintext]
+        remote: [a.remote_state, a.remote_detail, a.remote_detail_code, a.remote_detail_params, a.remote_plaintext]
     })).concat((data.capabilities?.apps || []).map(a => ({
         capId: a.id,
         tools: a.tool_count,
@@ -643,7 +643,8 @@ function isActive(a) {
 function appStatus(a) {
     if (a.app_type === 'remote') {
         const state = a.remote_state || (a.started ? 'connecting' : 'disconnected');
-        return { text: remoteStateText(state), cls: REMOTE_STATUS_CLASS[state] || 'error', detail: a.remote_detail || '' };
+        const detail = serverErrorText({ error: a.remote_detail, code: a.remote_detail_code, params: a.remote_detail_params });
+        return { text: remoteStateText(state), cls: REMOTE_STATUS_CLASS[state] || 'error', detail };
     }
     if (a.app_type === 'cli') {
         const key = a.install_status || 'missing';
@@ -969,7 +970,7 @@ function truncate(s, n) {
 async function fetchJson(url, options = {}) {
     const r = await fetch(url, { cache: 'no-store', ...options });
     const d = await parseJsonResponse(r);
-    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    if (!r.ok || d.error) throw new Error(serverErrorText(d) || r.statusText);
     return d;
 }
 
@@ -980,7 +981,7 @@ async function putJson(url, body) {
         body: JSON.stringify(body)
     });
     const d = await parseJsonResponse(r);
-    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    if (!r.ok || d.error) throw new Error(serverErrorText(d) || r.statusText);
     return d;
 }
 
@@ -991,7 +992,7 @@ async function postJson(url, body) {
         body: JSON.stringify(body)
     });
     const d = await parseJsonResponse(r);
-    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    if (!r.ok || d.error) throw new Error(serverErrorText(d) || r.statusText);
     return d;
 }
 
@@ -1524,7 +1525,7 @@ async function saveApp() {
         });
         const d = await parseJsonResponse(r);
         if (!r.ok || d.error) {
-            showModalError(d.error || r.statusText);
+            showModalError(serverErrorText(d) || r.statusText);
             return;
         }
         const wasEditing = !!editId;
@@ -1573,7 +1574,7 @@ async function act(id, action) {
         const r = await fetch(`${API}/${id}/${action}`, { method: 'POST' });
         const d = await r.json();
         if (d.error) {
-            toast(d.error, 'err');
+            toast(serverErrorText(d), 'err');
             return;
         }
         toast(action === 'start' ? t('started') : action === 'stop' ? t('stoppedToast') : t('restarted'), 'ok');
@@ -1590,7 +1591,7 @@ async function del(id, name) {
         const r = await fetch(API + '/' + id, { method: 'DELETE' });
         const d = await r.json();
         if (d.error) {
-            toast(d.error, 'err');
+            toast(serverErrorText(d), 'err');
             return;
         }
         toast(t('deleted'), 'ok');
@@ -1606,7 +1607,7 @@ async function clearData(id, name) {
         const r = await fetch(`${API}/${id}/clear-data`, { method: 'POST' });
         const d = await r.json();
         if (d.error) {
-            toast(d.error, 'err');
+            toast(serverErrorText(d), 'err');
             return;
         }
         toast(t('cleared'), 'ok');

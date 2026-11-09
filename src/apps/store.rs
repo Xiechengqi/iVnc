@@ -1,4 +1,5 @@
 use super::app::{AppType, ManagedApp};
+use super::error::ApiError;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -73,7 +74,7 @@ impl AppStore {
         Ok(())
     }
 
-    pub fn add(&self, app: &ManagedApp) -> Result<(), String> {
+    pub fn add(&self, app: &ManagedApp) -> Result<(), ApiError> {
         let conn = self.conn.lock().unwrap();
 
         let url = app.url.as_deref().unwrap_or("");
@@ -106,15 +107,19 @@ impl AppStore {
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
-                format!("App name '{}' already exists", app.name)
+                ApiError::new(
+                    "app_name_exists",
+                    format!("App name '{}' already exists", app.name),
+                )
+                .param("name", app.name.as_str())
             } else {
-                format!("Failed to add app: {}", e)
+                format!("Failed to add app: {}", e).into()
             }
         })?;
         Ok(())
     }
 
-    pub fn update(&self, app: &ManagedApp) -> Result<(), String> {
+    pub fn update(&self, app: &ManagedApp) -> Result<(), ApiError> {
         let conn = self.conn.lock().unwrap();
 
         let url = app.url.as_deref().unwrap_or("");
@@ -138,27 +143,40 @@ impl AppStore {
         let changed = conn.execute(
             "UPDATE apps SET name=?13, app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11 WHERE id=?12",
             params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, app.name],
-        ).map_err(|e| format!("Failed to update app: {}", e))?;
+        ).map_err(|e| {
+            let message = format!("Failed to update app: {}", e);
+            if e.to_string().contains("UNIQUE") {
+                ApiError::new("app_name_exists", message).param("name", app.name.as_str())
+            } else {
+                message.into()
+            }
+        })?;
         if changed == 0 {
-            return Err(format!("App '{}' not found", app.id));
+            return Err(ApiError::new(
+                "app_not_found",
+                format!("App '{}' not found", app.id),
+            ));
         }
         Ok(())
     }
 
-    pub fn delete(&self, id: &str) -> Result<(), String> {
+    pub fn delete(&self, id: &str) -> Result<(), ApiError> {
         let conn = self.conn.lock().unwrap();
         let changed = conn
             .execute("DELETE FROM apps WHERE id=?1", params![id])
             .map_err(|e| format!("Failed to delete app: {}", e))?;
         if changed == 0 {
-            return Err(format!("App '{}' not found", id));
+            return Err(ApiError::new(
+                "app_not_found",
+                format!("App '{}' not found", id),
+            ));
         }
         Ok(())
     }
 
-    pub fn get(&self, id: &str) -> Result<ManagedApp, String> {
+    pub fn get(&self, id: &str) -> Result<ManagedApp, ApiError> {
         self.get_optional(id)?
-            .ok_or_else(|| format!("App not found: {}", id))
+            .ok_or_else(|| ApiError::new("app_not_found", format!("App not found: {}", id)))
     }
 
     pub fn get_optional(&self, id: &str) -> Result<Option<ManagedApp>, String> {

@@ -1,3 +1,4 @@
+use crate::apps::error::ApiError;
 use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
 use rand_core::{OsRng, RngCore};
@@ -231,13 +232,19 @@ impl RemoteStore {
         app: &str,
         enabled: bool,
         password: Option<&str>,
-    ) -> Result<Policy, String> {
+    ) -> Result<Policy, ApiError> {
         if !super::valid_id(app) {
-            return Err("Invalid application identifier".into());
+            return Err(ApiError::new(
+                "app_id_invalid",
+                "Invalid application identifier",
+            ));
         }
         let password = password.filter(|p| !p.is_empty());
         if password.is_some_and(|p| p.len() < 8 || p.len() > 256) {
-            return Err("Application password must be 8–256 bytes".into());
+            return Err(ApiError::new(
+                "share_password_length",
+                "Application password must be 8–256 bytes",
+            ));
         }
         let secret = password
             .map(|p| {
@@ -268,7 +275,10 @@ impl RemoteStore {
             None => old.map_or((None, None), |(_, hash, sealed)| (hash, sealed)),
         };
         if enabled && hash.is_none() {
-            return Err("Set a password before enabling remote access".into());
+            return Err(ApiError::new(
+                "share_password_required",
+                "Set a password before enabling remote access",
+            ));
         }
         if access_changed {
             tx.execute("INSERT INTO policies(app,enabled,password,password_secret,revision) VALUES(?1,?2,?3,?4,1) ON CONFLICT(app) DO UPDATE SET enabled=excluded.enabled,password=excluded.password,password_secret=excluded.password_secret,revision=policies.revision+1",params![app,enabled,hash,sealed]).map_err(|e|e.to_string())?;
@@ -278,14 +288,13 @@ impl RemoteStore {
         if access_changed {
             self.changed(app);
         }
-        self.policy(app)
+        Ok(self.policy(app)?)
     }
 
     /// Exchanges an application password for a session token of that application.
     /// Applications that are not shared are refused without password work, so
     /// unauthenticated requests cannot occupy Argon2 capacity with random IDs.
-    pub fn authenticate(&self, app: &str, password: &str) -> Result<String, String> {
-        const INVALID: &str = "Invalid application credentials";
+    pub fn authenticate(&self, app: &str, password: &str) -> Result<String, ApiError> {
         let record: Option<(String, u64)> = if password.len() > 256 {
             None
         } else {
@@ -301,13 +310,16 @@ impl RemoteStore {
                 .map_err(|e| e.to_string())?
         };
         let Some((hash, revision)) = record else {
-            return Err(INVALID.into());
+            return Err(invalid_credentials());
         };
         if !verify_password(&hash, password) {
-            return Err(INVALID.into());
+            return Err(invalid_credentials());
         }
         if self.revision(app)? != Some(revision) {
-            return Err("Application access changed; retry authentication".into());
+            return Err(ApiError::new(
+                "auth_access_changed",
+                "Application access changed; retry authentication",
+            ));
         }
         Ok(self.open_session(app, revision))
     }
@@ -392,7 +404,7 @@ impl RemoteStore {
     /// The saved connection. Earlier versions kept a credential of B in the same
     /// column, sealed for the row alone; it never opens as a password, so their
     /// connections, including any they save after a downgrade, have none.
-    pub fn target(&self, app: &str) -> Result<Target, String> {
+    pub fn target(&self, app: &str) -> Result<Target, ApiError> {
         let (text, secret): (String, Vec<u8>) = self
             .db
             .lock()
@@ -402,7 +414,12 @@ impl RemoteStore {
                 [app],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .map_err(|_| "Remote connection is not configured")?;
+            .map_err(|_| {
+                ApiError::new(
+                    "remote_not_configured",
+                    "Remote connection is not configured",
+                )
+            })?;
         let mut target: Target = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         target.password = self
             .unseal(target_aad(app).as_bytes(), &secret)
@@ -455,6 +472,11 @@ fn policy_aad(app: &str, hash: &str) -> String {
 /// credentials with the bare application ID.
 fn target_aad(app: &str) -> String {
     format!("target-password:{app}")
+}
+
+/// The one answer to wrong passwords and unknown or unshared applications.
+pub fn invalid_credentials() -> ApiError {
+    ApiError::new("auth_invalid", "Invalid application credentials")
 }
 
 fn verify_password(hash: &str, password: &str) -> bool {
@@ -526,6 +548,26 @@ mod tests {
             .unwrap()
             .used = Instant::now() - SESSION_IDLE;
         assert!(!s.verify("one", &idle));
+    }
+
+    #[test]
+    fn errors_carry_codes() {
+        let s = store();
+        let code = |r: Result<Policy, ApiError>| r.unwrap_err().code;
+        assert_eq!(
+            code(s.set_policy("one", true, None)),
+            "share_password_required"
+        );
+        assert_eq!(
+            code(s.set_policy("one", true, Some("short"))),
+            "share_password_length"
+        );
+        assert_eq!(code(s.set_policy("bad id", false, None)), "app_id_invalid");
+        assert_eq!(
+            s.authenticate("one", "password-one").unwrap_err().code,
+            "auth_invalid"
+        );
+        assert_eq!(s.target("one").unwrap_err().code, "remote_not_configured");
     }
 
     #[test]

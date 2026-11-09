@@ -10,7 +10,7 @@
 // (/app-view/{token}/?embed=1) laid over the main video. Hidden views stay
 // connected so their audio keeps playing. Only the top-level desktop page
 // owns stream tabs; embedded views never create them.
-import { appText, remoteStateText } from "./lib/i18n.js?v=1";
+import { appText, remoteStateText, serverErrorText } from "./lib/i18n.js?v=1";
 
 // Taskbar `status` at which a view can be opened.
 const READY = { shared: 'running', remote: 'connected' };
@@ -64,7 +64,8 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 		wrap.appendChild(status);
 		layer.appendChild(wrap);
 		// state: null (never opened) | 'connecting' | 'connected' | 'ended'
-		return { id: app.id, app, wrap, status, frame: null, url: null, state: null, detail: '', withdrawn: false, minting: false, timer: null, delay: 0, unlocked: false, ime: false };
+		// error: the server's answer when a view could not be opened.
+		return { id: app.id, app, wrap, status, frame: null, url: null, state: null, error: null, withdrawn: false, minting: false, timer: null, delay: 0, unlocked: false, ime: false };
 	}
 
 	// Mints a view token for this page and (re)loads the iframe with it.
@@ -74,12 +75,12 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 		if (s.minting || !ready(s)) return;
 		s.minting = true;
 		s.state = 'connecting';
-		s.detail = '';
+		s.error = null;
 		refresh();
 		try {
 			const response = await fetch(`/api/apps/${encodeURIComponent(s.id)}/view`, { method: 'POST' });
 			const body = await response.json().catch(() => ({}));
-			if (!response.ok || !body.url) throw new Error(body.error || response.statusText);
+			if (!response.ok || !body.url) throw Object.assign(new Error(body.error || response.statusText), { body });
 			if (streams.get(s.id) !== s) {
 				closeView(body.url);
 				return;
@@ -99,7 +100,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 			}
 		} catch (error) {
 			s.minting = false;
-			end(s, 'error', error.message);
+			end(s, 'error', error.body?.error ? error.body : { error: error.message });
 		} finally {
 			s.minting = false;
 		}
@@ -127,9 +128,9 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 		if (s.id === activeId) s.frame.contentWindow.focus();
 	}
 
-	function end(s, reason, detail = '') {
+	function end(s, reason, error = null) {
 		s.state = 'ended';
-		s.detail = detail;
+		s.error = error;
 		// Withdrawn access is not retried until the user clicks the tab or the app recovers.
 		if (reason === 'revoked') s.withdrawn = true;
 		if (!s.withdrawn && !s.timer && !s.minting && ready(s)) {
@@ -153,7 +154,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 		if (s.state === 'connected') return { dot: 'connected', text: remoteStateText('connected') };
 		if (s.state === 'ended' && s.withdrawn) return { dot: 'ended', text: appText('streamRevoked') };
 		if (!ready(s)) return { dot: status === 'starting' || status === 'connecting' ? 'connecting' : 'ended', text: statusText };
-		if (s.state === 'ended') return { dot: 'ended', text: s.detail || appText('streamReconnecting') };
+		if (s.state === 'ended') return { dot: 'ended', text: serverErrorText(s.error) || appText('streamReconnecting') };
 		if (s.state === 'connecting') return { dot: 'connecting', text: remoteStateText('connecting') };
 		return { dot: 'connected', text: statusText };
 	}

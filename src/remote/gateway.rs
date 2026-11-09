@@ -1,12 +1,13 @@
 use super::{
     media::{Lease, StopReason},
-    store::Target,
+    store::{invalid_credentials, Target},
     worker, PROTOCOL,
 };
 use crate::{
     apps::{
         api::AppsState,
         app::{AppStatus, AppType},
+        error::ApiError,
     },
     web::{http_server::HttpPeerAddr, SharedState},
 };
@@ -81,7 +82,8 @@ impl Views {
 #[derive(Clone, Debug)]
 pub struct RemoteHealth {
     pub state: &'static str,
-    pub detail: String,
+    /// Why the application is not connected.
+    pub detail: Option<ApiError>,
     at: Instant,
 }
 /// What A knows about a remote application while one saved connection lasts.
@@ -92,7 +94,7 @@ struct Link {
     token: Option<String>,
     /// Why B refused the saved password. Until the connection is saved again,
     /// only the rare health check authenticates again.
-    refused: Option<String>,
+    refused: Option<ApiError>,
     /// Serializes authentication, so that concurrent requests share one new token.
     login: Arc<tokio::sync::Mutex<()>>,
 }
@@ -147,11 +149,11 @@ impl RemoteHealthCache {
     fn token(&self, app: &str, epoch: u64) -> Option<String> {
         self.current(app, epoch, |l| l.token.clone()).flatten()
     }
-    fn refused(&self, app: &str, epoch: u64) -> Option<String> {
+    fn refused(&self, app: &str, epoch: u64) -> Option<ApiError> {
         self.current(app, epoch, |l| l.refused.clone()).flatten()
     }
     /// Returns whether the state changed.
-    fn record(&self, app: &str, epoch: u64, state: &'static str, detail: String) -> bool {
+    fn record(&self, app: &str, epoch: u64, state: &'static str, detail: Option<ApiError>) -> bool {
         self.current(app, epoch, |l| {
             let previous = l.health.replace(RemoteHealth {
                 state,
@@ -166,7 +168,7 @@ impl RemoteHealthCache {
 
 /// The saved connection of a remote application, with the epoch it belongs to.
 /// The epoch is taken first: a connection saved meanwhile begins a later one.
-fn connection(apps: &AppsState, id: &str) -> (u64, Result<Target, String>) {
+fn connection(apps: &AppsState, id: &str) -> (u64, Result<Target, ApiError>) {
     let epoch = apps.remote_health.epoch(id);
     (epoch, apps.remote.target(id))
 }
@@ -201,7 +203,7 @@ pub fn refresh_remote_health(apps: Arc<AppsState>, ids: Vec<String>) {
                 Ok(target) => {
                     let _ = probe(&apps, &id, epoch, &target, true).await;
                 }
-                Err(e) => record(&apps, &id, epoch, "auth_required", e),
+                Err(e) => record(&apps, &id, epoch, "auth_required", Some(e)),
             }
             apps.remote_health.refreshing.lock().unwrap().remove(&id);
         });
@@ -209,7 +211,7 @@ pub fn refresh_remote_health(apps: Arc<AppsState>, ids: Vec<String>) {
 }
 
 /// Records a remote state; the taskbar follows state changes.
-fn record(apps: &AppsState, id: &str, epoch: u64, state: &'static str, detail: String) {
+fn record(apps: &AppsState, id: &str, epoch: u64, state: &'static str, detail: Option<ApiError>) {
     if apps.remote_health.record(id, epoch, state, detail) {
         apps.refresh_stream_apps();
     }
@@ -335,8 +337,8 @@ pub fn router(apps: Arc<AppsState>, shared: Arc<SharedState>) -> Router {
         .route("/app-view/{id}/{*path}", get(view_data))
         .with_state(state)
 }
-fn error(status: StatusCode, message: impl ToString) -> Response {
-    (status, Json(json!({"error":message.to_string()}))).into_response()
+fn error(status: StatusCode, error: impl Into<ApiError>) -> Response {
+    (status, Json(error.into().body())).into_response()
 }
 fn bearer(headers: &HeaderMap) -> &str {
     headers
@@ -352,15 +354,19 @@ fn peer(addr: &Option<Extension<HttpPeerAddr>>) -> String {
 }
 
 fn desktop(g: &Gateway, id: &str) -> Result<crate::apps::app::ManagedApp, Response> {
-    let app = g
-        .apps
-        .store
-        .get(id)
-        .map_err(|_| error(StatusCode::NOT_FOUND, "Application not found"))?;
+    let app = g.apps.store.get(id).map_err(|_| {
+        error(
+            StatusCode::NOT_FOUND,
+            ApiError::new("app_not_found", "Application not found"),
+        )
+    })?;
     if app.app_type != AppType::DesktopApp {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "Only local desktop applications support remote access",
+            ApiError::new(
+                "sharing_desktop_only",
+                "Only local desktop applications support remote access",
+            ),
         ));
     }
     Ok(app)
@@ -371,7 +377,10 @@ fn authorize(g: &Gateway, id: &str, headers: &HeaderMap) -> Result<(), Response>
     if !g.apps.remote.verify(id, bearer(headers)) {
         return Err(error(
             StatusCode::UNAUTHORIZED,
-            "Application session expired or remote access is disabled",
+            ApiError::new(
+                "session_invalid",
+                "Application session expired or remote access is disabled",
+            ),
         ));
     }
     Ok(())
@@ -382,31 +391,48 @@ fn runtime_check(
     g: &Gateway,
     id: &str,
     remote: bool,
-) -> Result<worker::Endpoint, (StatusCode, String)> {
+) -> Result<worker::Endpoint, (StatusCode, ApiError)> {
     match g.apps.process.status(id) {
         AppStatus::Running => {}
         AppStatus::Starting => {
-            return Err((StatusCode::CONFLICT, "Application is starting".into()))
+            return Err((
+                StatusCode::CONFLICT,
+                ApiError::new("app_starting", "Application is starting"),
+            ))
         }
-        _ => return Err((StatusCode::CONFLICT, "Application is not running".into())),
+        _ => {
+            return Err((
+                StatusCode::CONFLICT,
+                ApiError::new("app_not_running", "Application is not running"),
+            ))
+        }
     }
     let enabled = !remote
         || g.apps
             .remote
             .policy(id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.into()))?
             .enabled;
     match g.apps.process.in_worker(id) {
-        Some(true) if enabled => {
-            worker::endpoint(id).map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))
-        }
+        Some(true) if enabled => worker::endpoint(id).map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ApiError::new("app_runtime_unavailable", e),
+            )
+        }),
         Some(false) if remote => Err((
             StatusCode::CONFLICT,
-            "Restart this application on B to apply its remote access setting".into(),
+            ApiError::new(
+                "app_restart_required",
+                "Restart this application on B to apply its remote access setting",
+            ),
         )),
         _ => Err((
             StatusCode::CONFLICT,
-            "Remote access is not enabled for this application".into(),
+            ApiError::new(
+                "sharing_disabled",
+                "Remote access is not enabled for this application",
+            ),
         )),
     }
 }
@@ -446,7 +472,12 @@ async fn set_policy(
     }
     let enabled = match body["enabled"].as_bool() {
         Some(v) => v,
-        None => return error(StatusCode::BAD_REQUEST, "enabled must be a boolean"),
+        None => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                ApiError::new("sharing_enabled_invalid", "enabled must be a boolean"),
+            )
+        }
     };
     let previous = match g.apps.remote.policy(&id) {
         Ok(policy) => policy,
@@ -485,20 +516,23 @@ async fn authenticate(
 ) -> Response {
     let ip = peer(&addr);
     if !super::valid_id(&id) {
-        return error(StatusCode::UNAUTHORIZED, "Invalid application credentials");
+        return error(StatusCode::UNAUTHORIZED, invalid_credentials());
     }
     if !g.limiter.begin(&ip, &id) {
         log::warn!("Remote authentication for {id} from {ip} is rate limited");
         return error(
             StatusCode::TOO_MANY_REQUESTS,
-            "Too many failed attempts from this address; retry later",
+            ApiError::new(
+                "auth_rate_limited",
+                "Too many failed attempts from this address; retry later",
+            ),
         );
     }
     let password = body["password"].as_str().unwrap_or("").to_string();
     let busy = || {
         error(
             StatusCode::TOO_MANY_REQUESTS,
-            "Authentication is busy; retry shortly",
+            ApiError::new("auth_busy", "Authentication is busy; retry shortly"),
         )
     };
     let Ok(_paced) = tokio::time::timeout(Duration::from_secs(10), g.pacing.slot(&id).lock()).await
@@ -527,13 +561,13 @@ async fn authenticate(
             g.limiter.succeed(&ip, &id);
             Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"token":token})).into_response()
         }
-        (Ok(Ok(_)), Err(_)) => error(StatusCode::UNAUTHORIZED, "Invalid application credentials"),
+        (Ok(Ok(_)), Err(_)) => error(StatusCode::UNAUTHORIZED, invalid_credentials()),
         (Ok(Err(e)), _) => {
-            if e.starts_with("Invalid") {
+            if e.code == "auth_invalid" {
                 log::info!("Remote authentication for {id} from {ip} failed");
                 // Keep this application's slot busy so failures stay spaced out.
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                error(StatusCode::UNAUTHORIZED, "Invalid application credentials")
+                error(StatusCode::UNAUTHORIZED, e)
             } else {
                 error(StatusCode::CONFLICT, e)
             }
@@ -565,7 +599,7 @@ async fn remote_info(
     let status = format!("{:?}", g.apps.app_status(&app)).to_lowercase();
     let (ready, detail) = match runtime_check(&g, &id, true) {
         Ok(_) => (true, String::new()),
-        Err((_, message)) => (false, message),
+        Err((_, e)) => (false, e.message),
     };
     Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"status":status,"ready":ready,"detail":detail})).into_response()
 }
@@ -604,26 +638,36 @@ fn tls_client() -> Result<(Arc<rustls::ClientConfig>, reqwest::Client), String> 
 fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
     tls_client().map(|(config, _)| config)
 }
-pub fn http_client() -> Result<reqwest::Client, String> {
-    tls_client().map(|(_, client)| client)
+pub fn http_client() -> Result<reqwest::Client, ApiError> {
+    tls_client()
+        .map(|(_, client)| client)
+        .map_err(|e| ApiError::from(e).or("remote_tls_config"))
 }
-pub fn parse_share_url(value: &str) -> Result<(String, String), String> {
-    let url =
-        reqwest::Url::parse(value.trim()).map_err(|_| "Invalid application connection URL")?;
+pub fn parse_share_url(value: &str) -> Result<(String, String), ApiError> {
+    let url = reqwest::Url::parse(value.trim())
+        .map_err(|_| ApiError::new("remote_url_invalid", "Invalid application connection URL"))?;
     if !matches!(url.scheme(), "https" | "http")
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("Use an HTTP(S) application URL without credentials, query or fragment".into());
+        return Err(ApiError::new(
+            "remote_url_unsupported",
+            "Use an HTTP(S) application URL without credentials, query or fragment",
+        ));
     }
     let id = url
         .path()
         .trim_end_matches('/')
         .strip_prefix("/remote/v1/apps/")
         .filter(|s| super::valid_id(s))
-        .ok_or("Use the application sharing URL copied from B")?
+        .ok_or_else(|| {
+            ApiError::new(
+                "remote_url_not_share",
+                "Use the application sharing URL copied from B",
+            )
+        })?
         .to_owned();
     Ok((url.origin().ascii_serialization(), id))
 }
@@ -635,13 +679,61 @@ fn remote_url(target: &Target, path: &str) -> String {
 #[derive(Debug)]
 pub struct Probe {
     pub state: &'static str,
-    pub message: String,
+    pub error: ApiError,
 }
-fn unavailable(message: String) -> Probe {
+fn unavailable(error: ApiError) -> Probe {
     Probe {
         state: "unreachable",
-        message,
+        error,
     }
+}
+type Cause<'a> = &'a (dyn std::error::Error + 'static);
+/// A request to B that failed before B answered. reqwest's own text names only
+/// the URL, so the message and the `detail` give every cause; the code tells
+/// common causes apart.
+fn request_failed(context: &str, e: reqwest::Error) -> Probe {
+    let causes = causes(&e);
+    let mut detail = String::new();
+    for cause in &causes {
+        // Some errors repeat the text of their cause.
+        let text = cause.to_string();
+        if !detail.contains(&text) {
+            if !detail.is_empty() {
+                detail.push_str(": ");
+            }
+            detail.push_str(&text);
+        }
+    }
+    let any = |f: fn(Cause) -> bool| causes.iter().any(|c| f(*c));
+    let code = if any(|c| matches!(c.downcast_ref(), Some(rustls::Error::InvalidCertificate(_)))) {
+        "remote_certificate"
+    } else if e.is_timeout() {
+        "remote_timeout"
+    } else if any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    }) {
+        "remote_refused"
+    } else if any(|c| c.to_string().starts_with("dns error")) {
+        "remote_dns"
+    } else {
+        "remote_unreachable"
+    };
+    unavailable(ApiError::new(code, format!("{context}: {detail}")).param("detail", detail))
+}
+/// An error and its causes, outermost first. I/O errors are opened with
+/// `get_ref`: their `source` skips the error they wrap, e.g. a rustls error.
+fn causes(e: Cause) -> Vec<Cause> {
+    let mut causes = vec![e];
+    let mut current = e;
+    while let Some(next) = match current.downcast_ref::<std::io::Error>() {
+        Some(io) => io.get_ref().map(|e| e as _),
+        None => current.source(),
+    } {
+        causes.push(next);
+        current = next;
+    }
+    causes
 }
 
 /// A session on B, as issued by its authentication endpoint.
@@ -660,7 +752,7 @@ async fn open_session(base_url: &str, app_id: &str, password: &str) -> Result<Se
         .json(&json!({ "password": password }))
         .send()
         .await
-        .map_err(|e| unavailable(format!("Cannot connect to B: {e}")))?;
+        .map_err(|e| request_failed("Cannot connect to B", e))?;
     let status = response.status();
     if !status.is_success() {
         let detail = bounded_json(response)
@@ -668,13 +760,24 @@ async fn open_session(base_url: &str, app_id: &str, password: &str) -> Result<Se
             .ok()
             .and_then(|v| v["error"].as_str().map(str::to_owned))
             .unwrap_or_default();
+        let message = format!("B rejected application authentication ({status}): {detail}");
+        let refused = status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN;
+        let error = if refused {
+            ApiError::new("remote_auth_failed", message)
+        } else if status == StatusCode::TOO_MANY_REQUESTS {
+            ApiError::new("remote_rate_limited", message)
+        } else {
+            ApiError::new("remote_rejected", message)
+                .param("status", status.as_u16())
+                .param("detail", detail)
+        };
         return Err(Probe {
-            state: if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            state: if refused {
                 "auth_required"
             } else {
                 "unreachable"
             },
-            message: format!("B rejected application authentication ({status}): {detail}"),
+            error,
         });
     }
     let value = bounded_json(response).await.map_err(unavailable)?;
@@ -698,27 +801,33 @@ async fn open_session(base_url: &str, app_id: &str, password: &str) -> Result<Se
         }),
         _ => Err(Probe {
             state: "incompatible",
-            message: "B does not support this application sharing protocol; run the same iVnc version on both instances".into(),
+            error: ApiError::new("remote_incompatible", "B does not support this application sharing protocol; run the same iVnc version on both instances"),
         }),
     }
 }
 /// Authenticates against B for a new or edited connection. `own_node` prevents
 /// mapping an instance onto itself, which would register the same media session
 /// twice in one router. Returns the connection and its first session token.
-pub async fn connect_target(body: &Value, own_node: &str) -> Result<(Target, String), String> {
-    let (base_url, app_id) =
-        parse_share_url(body["url"].as_str().ok_or("Missing application URL")?)?;
+pub async fn connect_target(body: &Value, own_node: &str) -> Result<(Target, String), ApiError> {
+    let (base_url, app_id) = parse_share_url(
+        body["url"]
+            .as_str()
+            .ok_or_else(|| ApiError::new("remote_url_required", "Missing application URL"))?,
+    )?;
     let password = body["password"]
         .as_str()
         .filter(|p| !p.is_empty() && p.len() <= 256)
-        .ok_or("Enter the application password")?;
+        .ok_or_else(|| {
+            ApiError::new("remote_password_required", "Enter the application password")
+        })?;
     let session = open_session(&base_url, &app_id, password)
         .await
-        .map_err(|e| e.message)?;
+        .map_err(|e| e.error)?;
     if session.node_id == own_node {
-        return Err(
-            "This address is the current instance; open the local application directly".into(),
-        );
+        return Err(ApiError::new(
+            "remote_self",
+            "This address is the current instance; open the local application directly",
+        ));
     }
     let target = Target {
         base_url,
@@ -757,15 +866,15 @@ async fn session_token(
     if let Some(token) = cached() {
         return Ok((token, true));
     }
-    let refused = |message: String| Probe {
+    let refused = |error: ApiError| Probe {
         state: "auth_required",
-        message,
+        error,
     };
     if target.password.is_empty() {
-        return Err(refused("This connection was saved by an earlier version; edit it and enter the application password again".into()));
+        return Err(refused(ApiError::new("remote_legacy_password", "This connection was saved by an earlier version; edit it and enter the application password again")));
     }
-    if let Some(message) = cache.refused(id, epoch).filter(|_| !retry) {
-        return Err(refused(message));
+    if let Some(error) = cache.refused(id, epoch).filter(|_| !retry) {
+        return Err(refused(error));
     }
     let session = match open_session(&target.base_url, &target.app_id, &target.password).await {
         Ok(session) => session,
@@ -773,10 +882,10 @@ async fn session_token(
             if e.state == "auth_required" {
                 cache.current(id, epoch, |l| {
                     l.token = None;
-                    l.refused = Some(e.message.clone());
+                    l.refused = Some(e.error.clone());
                 });
                 // The health check now waits before it tries the password again.
-                record(apps, id, epoch, e.state, e.message.clone());
+                record(apps, id, epoch, e.state, Some(e.error.clone()));
             }
             return Err(e);
         }
@@ -784,8 +893,10 @@ async fn session_token(
     if session.node_id != target.node_id {
         return Err(Probe {
             state: "incompatible",
-            message: "Remote instance identity changed; edit the connection to trust it again"
-                .into(),
+            error: ApiError::new(
+                "remote_identity_changed",
+                "Remote instance identity changed; edit the connection to trust it again",
+            ),
         });
     }
     cache.current(id, epoch, |l| {
@@ -810,7 +921,7 @@ async fn send_remote(
         let response = request(&client, &token)
             .send()
             .await
-            .map_err(|e| unavailable(format!("B is unavailable: {e}")))?;
+            .map_err(|e| request_failed("B is unavailable", e))?;
         if response.status() != StatusCode::UNAUTHORIZED || fresh {
             return Ok(response);
         }
@@ -822,11 +933,17 @@ async fn read_info(response: reqwest::Response, target: &Target) -> Result<Value
     if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::NOT_FOUND {
         return Err(Probe {
             state: "auth_required",
-            message: "B disabled sharing or changed the application password; edit the connection and enter the password again".into(),
+            error: ApiError::new("remote_access_revoked", "B disabled sharing or changed the application password; edit the connection and enter the password again"),
         });
     }
     if !response.status().is_success() {
-        return Err(unavailable(format!("B returned {}", response.status())));
+        return Err(unavailable(
+            ApiError::new(
+                "remote_http_error",
+                format!("B returned {}", response.status()),
+            )
+            .param("status", response.status().as_u16()),
+        ));
     }
     let value = bounded_json(response).await.map_err(unavailable)?;
     if value["protocol"].as_u64() != Some(PROTOCOL as u64)
@@ -835,7 +952,10 @@ async fn read_info(response: reqwest::Response, target: &Target) -> Result<Value
     {
         return Err(Probe {
             state: "incompatible",
-            message: "Remote instance identity or application protocol changed".into(),
+            error: ApiError::new(
+                "remote_identity_changed",
+                "Remote instance identity or application protocol changed",
+            ),
         });
     }
     Ok(value)
@@ -851,13 +971,13 @@ async fn probe(
 ) -> Result<(), Probe> {
     // A refusal already recorded stays recorded as it was, so that the health
     // check keeps its interval.
-    if let Some(message) = apps.remote_health.refused(id, epoch).filter(|_| !retry) {
+    if let Some(error) = apps.remote_health.refused(id, epoch).filter(|_| !retry) {
         return Err(Probe {
             state: "auth_required",
-            message,
+            error,
         });
     }
-    let failed = |state, message: String| Err(Probe { state, message });
+    let failed = |state, error: ApiError| Err(Probe { state, error });
     let result = match send_remote(apps, id, epoch, target, retry, |client, token| {
         client.get(remote_url(target, "info")).bearer_auth(token)
     })
@@ -868,18 +988,29 @@ async fn probe(
     }
     .and_then(|v| {
         if v["status"] == "starting" {
-            failed("starting", "The application is starting on B".into())
+            failed(
+                "starting",
+                ApiError::new("remote_app_starting", "The application is starting on B"),
+            )
         } else if v["status"] != "running" {
-            failed("stopped", "The application is not running on B".into())
+            failed(
+                "stopped",
+                ApiError::new("remote_app_stopped", "The application is not running on B"),
+            )
         } else if v["ready"] != true {
-            failed("not_ready", v["detail"].as_str().unwrap_or("").to_owned())
+            // B explains in English why its application is not ready.
+            let detail = v["detail"].as_str().unwrap_or("");
+            failed(
+                "not_ready",
+                ApiError::new("remote_app_not_ready", detail).param("detail", detail),
+            )
         } else {
             Ok(())
         }
     });
     match &result {
-        Ok(()) => record(apps, id, epoch, "connected", String::new()),
-        Err(e) => record(apps, id, epoch, e.state, e.message.clone()),
+        Ok(()) => record(apps, id, epoch, "connected", None),
+        Err(e) => record(apps, id, epoch, e.state, Some(e.error.clone())),
     }
     result
 }
@@ -900,7 +1031,10 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
         },
         AppType::RemoteApp => {
             if !g.apps.remote_started(&id) {
-                return error(StatusCode::CONFLICT, "Start this remote application first");
+                return error(
+                    StatusCode::CONFLICT,
+                    ApiError::new("remote_not_started", "Start this remote application first"),
+                );
             }
             let (epoch, target) = connection(&g.apps, &id);
             let target = match target {
@@ -912,14 +1046,17 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
                     "stopped" | "starting" | "not_ready" => StatusCode::CONFLICT,
                     _ => StatusCode::BAD_GATEWAY,
                 };
-                return error(status, e.message);
+                return error(status, e.error);
             }
             Source::Remote(epoch, target)
         }
         _ => {
             return error(
                 StatusCode::BAD_REQUEST,
-                "Only desktop applications have remote views",
+                ApiError::new(
+                    "view_desktop_only",
+                    "Only desktop applications have remote views",
+                ),
             )
         }
     };
@@ -933,7 +1070,10 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
         !expired
     });
     if entries.len() >= 128 {
-        return error(StatusCode::TOO_MANY_REQUESTS, "Too many application views");
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("too_many_views", "Too many application views"),
+        );
     }
     entries.insert(
         view.clone(),
@@ -960,7 +1100,10 @@ fn view(g: &Gateway, id: &str) -> Result<View, Response> {
         .ok_or_else(|| {
             error(
                 StatusCode::GONE,
-                "Application view expired; open it again from the application list",
+                ApiError::new(
+                    "view_expired",
+                    "Application view expired; open it again from the application list",
+                ),
             )
         })
 }
@@ -988,7 +1131,12 @@ async fn fetch_data(
     request: impl Future<Output = Result<reqwest::Response, String>>,
 ) -> Response {
     let result = tokio::select! {
-        _ = guard.cancelled() => return error(StatusCode::GONE, "Application access ended"),
+        _ = guard.cancelled() => {
+            return error(
+                StatusCode::GONE,
+                ApiError::new("access_ended", "Application access ended"),
+            )
+        }
         result = tokio::time::timeout(Duration::from_secs(30), async {
             let response = request.await?;
             let status = response.status();
@@ -1008,11 +1156,17 @@ async fn fetch_data(
         }
         Ok(Err(_)) => error(
             StatusCode::BAD_GATEWAY,
-            "Application runtime is unavailable",
+            ApiError::new(
+                "app_runtime_unavailable",
+                "Application runtime is unavailable",
+            ),
         ),
         Err(_) => error(
             StatusCode::GATEWAY_TIMEOUT,
-            "Application runtime did not respond",
+            ApiError::new(
+                "app_runtime_no_response",
+                "Application runtime did not respond",
+            ),
         ),
     }
 }
@@ -1060,9 +1214,9 @@ async fn view_data(
                         }
                         Err(e) if e.state == "auth_required" => {
                             end_refused_views(&g, &v.app);
-                            Err(e.message)
+                            Err(e.error.message)
                         }
-                        result => result.map_err(|e| e.message),
+                        result => result.map_err(|e| e.error.message),
                     }
                 };
                 fetch_data(guard, request).await
@@ -1076,7 +1230,10 @@ async fn view_data(
         || path == "console.html"
         || path == "console.js"
     {
-        return error(StatusCode::NOT_FOUND, "Not found");
+        return error(
+            StatusCode::NOT_FOUND,
+            ApiError::new("not_found", "Not found"),
+        );
     }
     crate::web::embedded_assets::get_embedded_file(&path)
 }
@@ -1089,7 +1246,10 @@ async fn remote_data(
         return e;
     }
     if !data_path(&path) {
-        return error(StatusCode::NOT_FOUND, "Not found");
+        return error(
+            StatusCode::NOT_FOUND,
+            ApiError::new("not_found", "Not found"),
+        );
     }
     let endpoint = match runtime(&g, &id, true) {
         Ok(e) => e,
@@ -1097,7 +1257,10 @@ async fn remote_data(
     };
     let lease = Lease::new(id.clone(), true);
     if let Err(e) = g.shared.media_router.track(&lease) {
-        return error(StatusCode::TOO_MANY_REQUESTS, e);
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("too_many_sessions", e),
+        );
     }
     fetch_data(
         AccessLease {
@@ -1116,7 +1279,10 @@ async fn view_socket(
     ws: WebSocketUpgrade,
 ) -> Response {
     if !same_origin(&headers) {
-        return error(StatusCode::FORBIDDEN, "Invalid WebSocket origin");
+        return error(
+            StatusCode::FORBIDDEN,
+            ApiError::new("origin_invalid", "Invalid WebSocket origin"),
+        );
     }
     let v = match view(&g, &id) {
         Ok(v) => v,
@@ -1128,7 +1294,7 @@ async fn view_socket(
             _ => {
                 return error(
                     StatusCode::CONFLICT,
-                    "Application restarted; open a new view",
+                    ApiError::new("view_restarted", "Application restarted; open a new view"),
                 )
             }
         }
@@ -1136,13 +1302,19 @@ async fn view_socket(
     let lease = Lease::new(v.app.clone(), matches!(v.target, Source::Remote(..)));
     if let Err(e) = g.shared.media_router.track(&lease) {
         lease.stop();
-        return error(StatusCode::TOO_MANY_REQUESTS, e);
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("too_many_sessions", e),
+        );
     }
     {
         let mut entries = g.shared.app_views.entries.lock().unwrap();
         let Some(entry) = entries.get_mut(&id) else {
             lease.stop();
-            return error(StatusCode::GONE, "View expired");
+            return error(
+                StatusCode::GONE,
+                ApiError::new("view_expired", "View expired"),
+            );
         };
         if let Some(old) = entry.lease.replace(lease.clone()) {
             old.stop();
@@ -1174,7 +1346,10 @@ async fn remote_socket(
     let token = bearer(&headers).to_string();
     if let Err(e) = g.shared.media_router.track(&lease) {
         lease.stop();
-        return error(StatusCode::TOO_MANY_REQUESTS, e);
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("too_many_sessions", e),
+        );
     }
     // If the upgrade never completes, the callback is dropped and so is the guard.
     let pending = StopOnDrop(lease.clone());
@@ -1309,7 +1484,7 @@ async fn bridge_inner(
                     // The client is told the view was revoked and stops reconnecting.
                     end_refused_views(g, &lease.app);
                 }
-                e.message
+                e.error.message
             })?;
             let mut url =
                 reqwest::Url::parse(&remote_url(t, "socket")).map_err(|e| e.to_string())?;
@@ -1390,7 +1565,7 @@ async fn test_connection(State(g): State<Arc<Gateway>>, Json(body): Json<Value>)
         .await
     {
         Ok(response) => read_info(response, &target).await,
-        Err(e) => Err(unavailable(format!("B is unavailable: {e}"))),
+        Err(e) => Err(request_failed("B is unavailable", e)),
     };
     // The session was only for this test; B need not keep it.
     let _ = client
@@ -1401,7 +1576,7 @@ async fn test_connection(State(g): State<Arc<Gateway>>, Json(body): Json<Value>)
         .await;
     match result {
         Ok(info) => Json(info).into_response(),
-        Err(e) => error(StatusCode::BAD_GATEWAY, e.message),
+        Err(e) => error(StatusCode::BAD_GATEWAY, e.error),
     }
 }
 
@@ -1484,30 +1659,41 @@ impl Drop for AccessLease {
         }
     }
 }
-async fn bounded_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+async fn bounded_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ApiError> {
     let mut stream = response.bytes_stream();
     let mut data = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
+        let chunk = chunk.map_err(|e| ApiError::from(e.to_string()).or("remote_unreachable"))?;
         if data.len() + chunk.len() > limit {
-            return Err("Remote application response is too large".into());
+            return Err(ApiError::new(
+                "remote_response_too_large",
+                "Remote application response is too large",
+            ));
         }
         data.extend_from_slice(&chunk);
     }
     Ok(data)
 }
-async fn bounded_json(response: reqwest::Response) -> Result<Value, String> {
+async fn bounded_json(response: reqwest::Response) -> Result<Value, ApiError> {
     let data = bounded_body(response, 65536).await?;
-    serde_json::from_slice(&data).map_err(|_| "Invalid remote application metadata".into())
+    serde_json::from_slice(&data).map_err(|_| {
+        ApiError::new(
+            "remote_invalid_response",
+            "Invalid remote application metadata",
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A TLS server identity for 127.0.0.1 that no system root trusts.
     #[cfg(feature = "tls")]
-    #[tokio::test]
-    async fn wss_uses_explicit_crypto_provider_and_validates_trust() {
+    fn self_signed() -> (
+        tokio_rustls::TlsAcceptor,
+        rustls::pki_types::CertificateDer<'static>,
+    ) {
         let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
         let cert = certificate.cert.der().clone();
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -1522,7 +1708,13 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        (tokio_rustls::TlsAcceptor::from(Arc::new(config)), cert)
+    }
+
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn wss_uses_explicit_crypto_provider_and_validates_trust() {
+        let (acceptor, cert) = self_signed();
 
         // No private CA must produce a certificate error, even when both ring
         // and aws-lc are enabled. Adding the CA must permit a real WSS exchange.
@@ -1586,6 +1778,42 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn untrusted_certificates_are_told_apart_from_unreachable_hosts() {
+        let (acceptor, _) = self_signed();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = acceptor.accept(stream).await;
+        });
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(build_tls_config(Vec::new()).unwrap())
+            .build()
+            .unwrap();
+        let e = request_failed(
+            "Cannot connect to B",
+            client.get(url).send().await.unwrap_err(),
+        );
+        assert_eq!(e.error.code, "remote_certificate");
+        assert!(e.error.message.starts_with("Cannot connect to B: "));
+    }
+
+    #[tokio::test]
+    async fn failed_requests_name_their_cause() {
+        // A port nobody listens on.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        drop(listener);
+        let e = http_client().unwrap().get(url).send().await.unwrap_err();
+        let e = request_failed("Cannot connect to B", e).error;
+        assert_eq!(e.code, "remote_refused");
+        let detail = e.params["detail"].as_str().unwrap();
+        assert!(detail.contains("Connection refused"), "{detail}");
+        assert_eq!(e.message, format!("Cannot connect to B: {detail}"));
     }
 
     #[tokio::test]
@@ -1670,13 +1898,13 @@ mod tests {
         let cache = RemoteHealthCache::default();
         let old = cache.epoch("app");
         assert_eq!(cache.epoch("app"), old);
-        assert!(cache.record("app", old, "connected", String::new()));
+        assert!(cache.record("app", old, "connected", None));
         // The connection is saved again while a check of the old one runs.
         cache.forget("app");
         cache.remember_token("app", "new-token".into());
         let new = cache.epoch("app");
         assert_ne!(new, old);
-        assert!(!cache.record("app", old, "auth_required", "stale".into()));
+        assert!(!cache.record("app", old, "auth_required", Some("stale".into())));
         assert!(cache.get("app").is_none());
         assert!(cache
             .current("app", old, |l| l.token = Some("stale".into()))
@@ -1824,9 +2052,105 @@ mod tests {
             assert!(parse_share_url(url).is_err(), "{url}");
         }
         assert!(parse_share_url("http://127.0.0.1:8008/remote/v1/apps/app").is_ok());
+        for (url, code) in [
+            ("not a url", "remote_url_invalid"),
+            ("file:///etc/passwd", "remote_url_unsupported"),
+            (
+                "https://b.example/remote/v1/apps/app?password=x",
+                "remote_url_unsupported",
+            ),
+            ("https://b.example/api/apps", "remote_url_not_share"),
+        ] {
+            assert_eq!(parse_share_url(url).unwrap_err().code, code, "{url}");
+        }
         assert!(parse_share_url("http://b.example:8008/remote/v1/apps/app").is_ok());
         assert!(data_path("ui-config"));
         assert!(!data_path("api/apps"));
         assert!(!data_path("app/files"));
+    }
+
+    fn gateway(apps: Arc<AppsState>) -> Arc<Gateway> {
+        let config = crate::config::Config::default();
+        let shared = SharedState::new(
+            config.clone(),
+            crate::config::ui::UiConfig::from_env(&config),
+            tokio::sync::mpsc::unbounded_channel().0,
+            Arc::new(crate::runtime_settings::RuntimeSettings::new(&config)),
+            None,
+            None,
+        );
+        Arc::new(Gateway {
+            apps,
+            shared: Arc::new(shared),
+            limiter: Limiter::default(),
+            pacing: Pacing::default(),
+            password_jobs: Arc::new(tokio::sync::Semaphore::new(4)),
+        })
+    }
+
+    /// The status and the `code` of an error response.
+    async fn code(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"].as_str().is_some_and(|e| !e.is_empty()));
+        (status, body["code"].as_str().unwrap_or_default().to_owned())
+    }
+
+    #[tokio::test]
+    async fn console_errors_carry_codes() {
+        let apps = AppsState::for_test(None, None);
+        for (id, app_type) in [
+            ("desktop", AppType::DesktopApp),
+            ("remote", AppType::RemoteApp),
+        ] {
+            let app = crate::apps::app::ManagedApp {
+                name: id.into(),
+                ..crate::apps::app::ManagedApp::for_test(id, app_type)
+            };
+            apps.store.add(&app).unwrap();
+        }
+        let g = gateway(apps);
+        let view = |id: &str| create_view(State(g.clone()), Path(id.into()));
+        assert_eq!(
+            code(view("remote").await).await,
+            (StatusCode::CONFLICT, "remote_not_started".into())
+        );
+        assert_eq!(
+            code(view("desktop").await).await,
+            (StatusCode::CONFLICT, "app_not_running".into())
+        );
+        assert_eq!(
+            code(view("missing").await).await,
+            (StatusCode::NOT_FOUND, "app_not_found".into())
+        );
+        let sharing = |body| set_policy(State(g.clone()), Path("desktop".into()), Json(body));
+        for (body, expected) in [
+            (json!({"enabled": "yes"}), "sharing_enabled_invalid"),
+            (json!({"enabled": true}), "share_password_required"),
+            (
+                json!({"enabled": true, "password": "short"}),
+                "share_password_length",
+            ),
+        ] {
+            assert_eq!(
+                code(sharing(body).await).await,
+                (StatusCode::BAD_REQUEST, expected.into())
+            );
+        }
+        for (body, expected) in [
+            (json!({}), "remote_url_required"),
+            (
+                json!({"url": "https://b.example/remote/v1/apps/app"}),
+                "remote_password_required",
+            ),
+        ] {
+            assert_eq!(
+                connect_target(&body, "node").await.unwrap_err().code,
+                expected
+            );
+        }
     }
 }
