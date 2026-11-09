@@ -177,7 +177,7 @@ fn ensure_pulseaudio() {
 }
 
 fn main() {
-    // Application process-tree owner inside a desktop runtime; see `worker::reap`.
+    // Owner of a desktop application's process tree; see `worker::reap`.
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--app-reaper")) {
         std::process::exit(remote::worker::reap(std::env::args_os().skip(2).collect()));
     }
@@ -198,25 +198,17 @@ fn main() {
     if let Some(path) = &args.app_supervisor {
         let runtime = tokio::runtime::Runtime::new().expect("supervisor runtime");
         if let Err(error) = runtime.block_on(remote::worker::supervise(path)) {
-            eprintln!("Application isolation failed: {error}");
+            eprintln!("Application runtime failed: {error}");
             std::process::exit(1);
         }
         return;
     }
     let worker_config = args.app_worker.as_ref().map(|path| {
         remote::worker::prepare(path).unwrap_or_else(|e| {
-            eprintln!("Application isolation failed: {e}");
+            eprintln!("Application runtime failed: {e}");
             std::process::exit(1)
         })
     });
-    // The iVnc image lifts Docker's seccomp profile so that application sandboxes
-    // can be built, and restores it here for iVnc and everything it starts.
-    if worker_config.is_none() && std::env::var_os("IVNC_SECCOMP").is_some_and(|v| v == "container")
-    {
-        if let Err(error) = remote::seccomp::restrict_container() {
-            eprintln!("warning: {error}; iVnc runs without a system call filter");
-        }
-    }
     check_runtime_deps();
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::new()
@@ -534,6 +526,7 @@ fn run(
     let mut prev_cursor_name: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
     let mut prev_dc_open_count: u64 = 0;
+    let mut prev_apps_generation: u64 = 0;
     let mut render_state = RenderState::Active;
     let mut last_visual_activity_at = Instant::now();
     // Non-blocking clipboard pipe read state
@@ -720,6 +713,14 @@ fn run(
         }
         prev_dc_open_count = cur_dc_open;
 
+        // Resend the taskbar when its application tabs change
+        let cur_apps_generation = shared_state.apps_generation.load(Ordering::Relaxed);
+        if cur_apps_generation != prev_apps_generation {
+            prev_apps_generation = cur_apps_generation;
+            comp.taskbar_dirty = true;
+            last_visual_activity_at = Instant::now();
+        }
+
         // Broadcast taskbar window list to frontend when dirty
         if comp.taskbar_dirty {
             comp.taskbar_dirty = false;
@@ -763,7 +764,8 @@ fn run(
                     "focused": is_focused,
                 }));
             }
-            let json = serde_json::json!({ "windows": windows_json }).to_string();
+            // Runtimes have no apps manager, so their list of tabs stays empty.
+            let json = web::shared::taskbar_json(windows_json, &shared_state.stream_apps());
             if json != prev_taskbar_json {
                 prev_taskbar_json = json.clone();
                 let msg = format!("taskbar,{}", json);
@@ -1082,7 +1084,7 @@ fn drain_input_events(
                 inject_key(state, &ev, serial, time);
             }
             InputEvent::KeyboardReset => {
-                // Release every pressed key and pointer button when a view loses control.
+                // Release every pressed key and pointer button to clear stuck state.
                 let keyboard = state.seat.get_keyboard().unwrap();
                 let pressed = keyboard.pressed_keys();
                 for kc in pressed {
@@ -1788,6 +1790,7 @@ async fn run_async_services(
             Ok(ps) => {
                 info!("Apps manager initialized");
                 let ps_arc = std::sync::Arc::new(ps);
+                ps_arc.start_monitor();
 
                 // Restore previously running apps after update
                 let ps_clone = ps_arc.clone();

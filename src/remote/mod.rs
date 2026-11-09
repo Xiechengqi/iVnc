@@ -1,12 +1,16 @@
 //! Application-scoped desktop sharing. Web and CLI applications are never exported.
 pub mod gateway;
 pub mod media;
-pub mod proxy;
-pub mod seccomp;
 pub mod store;
 pub mod worker;
 
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
+
+/// Where an instance serves a shared application; with the instance's origin
+/// in front, this is the address users copy from B to A.
+pub fn share_path(app_id: &str) -> String {
+    format!("/remote/v1/apps/{app_id}")
+}
 
 pub fn token() -> String {
     use rand_core::RngCore;

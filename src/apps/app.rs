@@ -35,6 +35,8 @@ impl AppType {
 #[serde(rename_all = "lowercase")]
 pub enum AppStatus {
     Running,
+    /// Alive but its runtime is not ready yet.
+    Starting,
     Stopped,
     Crashed,
 }
@@ -69,4 +71,27 @@ pub struct ManagedApp {
     pub cli_env_vars: Option<HashMap<String, String>>,
 
     pub created_at: String,
+}
+
+#[cfg(test)]
+impl ManagedApp {
+    /// An application with only its identity set, for tests.
+    pub fn for_test(id: &str, app_type: AppType) -> Self {
+        Self {
+            id: id.into(),
+            name: "App".into(),
+            app_type,
+            autostart: false,
+            url: None,
+            launch_command: None,
+            launch_env_vars: None,
+            launch_cwd: None,
+            launch_wait_timeout_secs: None,
+            exec_command: (app_type == AppType::DesktopApp).then(|| "true".into()),
+            env_vars: None,
+            cli_binary_path: None,
+            cli_env_vars: None,
+            created_at: String::new(),
+        }
+    }
 }

@@ -138,7 +138,7 @@ clipboard,SGVsbG8gV29ybGQh
 
 ### 5.3 任务栏消息 `taskbar`
 
-传输窗口列表信息。
+传输窗口列表，以及以应用标签显示在工具栏中的应用。
 
 **格式:**
 ```
@@ -163,9 +163,34 @@ taskbar,{json_data}
             "display_name": "Files",
             "focused": false
         }
+    ],
+    "apps": [
+        {
+            "id": "a1b2c3",
+            "name": "Chrome",
+            "kind": "shared",
+            "status": "running"
+        },
+        {
+            "id": "d4e5f6",
+            "name": "remote-demo",
+            "kind": "remote",
+            "status": "connected"
+        }
     ]
 }
 ```
+
+`windows` 是主桌面合成器中的窗口。`apps` 是不在主合成器中绘制、需要通过应用视图打开的应用：
+
+| 字段 | 说明 |
+|------|------|
+| `id` | 应用 ID，与 `/api/apps` 相同 |
+| `name` | 显示名称 |
+| `kind` | `shared`：本实例开启远程访问、在独立运行环境中运行的桌面应用；`remote`：本实例已启动的远程应用 |
+| `status` | `shared` 为 `starting` 或 `running`；`remote` 为 `/api/apps` 的 `remote_state`（`connecting`、`connected`、`starting`、`stopped`、`not_ready`、`auth_required`、`incompatible`、`unreachable`） |
+
+`apps` 变化时以及每个新 DataChannel 打开时重发整条消息；应用运行环境（worker）内的 `apps` 始终为空数组。客户端在 `status` 为 `running`（`shared`）或 `connected`（`remote`）时才打开视图。
 
 ### 5.4 统计消息 `stats`
 
@@ -407,7 +432,10 @@ _l,{latency_ms}             # 客户端延迟
 _arg_fps,{fps}              # 请求目标帧率
 _stats_video,{json}         # WebRTC 视频统计
 _stats_audio,{json}         # WebRTC 音频统计
+_client_activity,{json}     # 页面可见性、焦点与输入活动
 ```
+
+`_client_activity` 报告页面是否可见；所有连接都不可见（或长时间无焦点、无输入）时服务端让合成器进入空闲。页面被隐藏、内嵌视图的标签未被选中，以及桌面页面中应用标签覆盖主桌面（见[内嵌视图](#内嵌视图postmessage)）时都报告 `false`；它只影响空闲判断，不暂停输入和声音。
 
 ## 7. 消息序列图
 
@@ -520,24 +548,92 @@ debug!("Session {} DC parse error: {}", session.id, e);
 *文档版本: 2.0*
 *最后更新: 2026-02-16*
 
-## 应用级远程共享（v1）
+## 应用级远程共享
 
-桌面共享的具体授权与部署边界见 [远程桌面应用](REMOTE_APPS.md)。管理接口仍使用所在实例的管理认证。
+使用方式与部署边界见 [远程桌面应用](REMOTE_APPS.md)。`/api/` 管理接口使用所在实例的管理认证，`/remote/v1/` 接口使用访问密码或 B 签发的会话令牌。
 
-| 接口 | 用途 |
+### 管理接口
+
+`GET /api/apps` 的每一项在原有字段之外包含：
+
+| 字段 | 适用 | 说明 |
+| --- | --- | --- |
+| `status` | 全部 | `running`、`starting`（共享应用的运行环境尚未就绪）、`stopped`、`crashed`；CLI 应用另有 `missing`、`installed`、`not_file`、`not_executable`、`invalid_path` |
+| `sharing` | 桌面应用 | `{"enabled": bool, "restart_required": bool}`；`restart_required` 表示应用当前的运行方式（是否在独立运行环境中）与 `enabled` 不一致，只在运行中有意义，停止时为 `false` |
+| `started` | 远程应用 | 是否已启动（连接）；与本机应用的运行状态一起保存，短时间内重启（5 分钟内）后恢复 |
+| `autostart` | 后台、桌面和远程应用 | 原有的随 iVnc 启动偏好，远程应用同样支持：每次 iVnc 启动时自动启动（连接）；通过创建和更新应用接口设置 |
+| `remote_state` | 远程应用 | `disconnected`（未启动）、`connecting`、`connected`、`starting`（B 的应用已开启共享，运行环境仍在启动；不是错误，就绪后自动连接）、`stopped`（B 的应用未运行）、`not_ready`（B 需重启应用）、`auth_required`（密码错误或旧连接）、`incompatible`（协议版本不一致）、`unreachable` |
+| `remote_detail` | 远程应用 | 状态说明文本 |
+
+| 接口 | 说明 |
 | --- | --- |
-| `GET/PUT /api/apps/{id}/sharing` | 本地桌面应用的共享策略、密码重设、隔离设置（`isolation`、`mounts`、`networks`、`x11`、`services`）、已保存连接与当前会话；只有开关和密码变更会撤销凭据 |
-| `POST /api/apps/{id}/view` | 为本地或远程应用创建有时限的应用视图 |
-| `DELETE /api/apps/{id}/sessions/{session}` | B 所有者断开指定远程会话 |
-| `DELETE /api/apps/{id}/grants/{grant}` | B 所有者撤销一个已保存连接并结束使用它的会话 |
-| `POST /api/remote/test` | 用应用地址和密码验证连接，返回目标信息并撤销临时凭据 |
-| `POST /remote/v1/apps/{id}/authenticate` | 用应用密码换取仅绑定此应用的凭据；可选 `client: {node_id, name}` 标识连接实例；按来源地址限流 |
-| `GET /remote/v1/apps/{id}/info` | 持应用 Bearer 凭据读取名称、状态、`ready`/`detail`（是否需重启应用）、节点身份和协议版本 |
-| `GET /remote/v1/apps/{id}/socket` | 持应用 Bearer 凭据建立中继信令 WebSocket |
-| `GET /remote/v1/apps/{id}/data/{path}` | 仅转发 UI 配置、渲染状态和应用 Downloads；不代理管理 API |
-| `DELETE /remote/v1/apps/{id}/credential` | 撤销当前 Bearer 凭据 |
-| `POST /app-view/{token}/close` | 关闭 A 的应用视图及关联媒体和下载 |
+| `POST /api/apps/{id}/start` \| `stop` \| `restart` | 远程应用：`start` 标记为已启动并连接，`stop` 取消启动并关闭本实例中该应用的全部视图；不影响 B 的进程 |
+| `GET /api/apps/{id}/sharing` | 桌面应用的远程访问设置，见下文 |
+| `PUT /api/apps/{id}/sharing` | 修改远程访问设置，见下文 |
+| `POST /api/apps/{id}/view` | 为共享应用或已启动的远程应用创建视图，返回 `{"url": "/app-view/{token}/", "name": "..."}`；每个页面为每个应用申请自己的令牌，一个令牌只允许一个连接 |
+| `POST /api/remote/test` | 请求体 `{"url", "password"}`，用连接地址和访问密码验证连接，返回 B 的 `info`（名称、`status` 为 `running`/`starting`/`stopped` 等、`ready`），或 `{"error"}` |
+| `POST /app-view/{token}/close` | 关闭视图及其信令和媒体 |
 
-应用视图信令沿用 SDP 协议并扩展：客户端发送 `{"ivnc_control":"claim"}`、`"release"` 或仅所有者可用的 `"takeover"`；服务端返回 `{"ivnc_control":{"controller":true,"owner":false}}`。结束消息 `{"ivnc_revoked":true,"reason":"revoked|disconnected|stopped"}` 要求停止自动重连：`revoked` 需更新连接凭据，`disconnected` 为 B 所有者断开，`stopped` 为应用停止。
+`GET /api/apps/{id}/sharing` 返回：
 
-ICE-TCP 通过已授权 SDP 中的 ICE ufrag 路由，仍需完成工作进程的 ICE/DTLS 握手。信令、媒体与文件均绑定同一应用和运行代次，应用重启不复用旧媒体会话。
+```json
+{
+    "enabled": true,
+    "password_set": true,
+    "password": "解密后的访问密码",
+    "password_viewable": true,
+    "share_path": "/remote/v1/apps/{id}",
+    "restart_required": false
+}
+```
+
+`password` 只在 `password_viewable` 为 `true` 时返回明文，否则为 `null`；从旧版本升级的密码只有校验值，此时 `password_set` 为 `true`、`password_viewable` 为 `false`。
+
+`PUT /api/apps/{id}/sharing` 请求体 `{"enabled": bool, "password"?: string}`，省略或留空 `password` 时保留原密码。成功返回 `{"ok": true, "revoked": bool, "restart_required": bool}`：`revoked` 表示因关闭共享或修改密码而断开了远程会话。没有设置过密码时开启共享、密码长度不在 8–256 字节、实例仍使用默认管理密码等错误返回 4xx 和 `{"error": "..."}`。
+
+### B 的远程接口
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /remote/v1/apps/{id}/authenticate` | 请求体 `{"password"}`，换取仅绑定此应用和当前策略版本的短期会话令牌；按来源地址限流 |
+| `GET /remote/v1/apps/{id}/info` | 持 Bearer 令牌读取名称、状态、`ready`/`detail`（是否需重启应用）、节点身份和协议版本 |
+| `GET /remote/v1/apps/{id}/socket` | 持 Bearer 令牌建立中继信令 WebSocket |
+| `GET /remote/v1/apps/{id}/data/{path}` | 仅转发 UI 配置和渲染状态；不代理管理 API，也不提供文件下载 |
+| `DELETE /remote/v1/apps/{id}/session` | 持 Bearer 令牌结束该会话令牌；A 的“测试连接”用完即调用，不占用每个应用的会话名额 |
+
+响应为 `{"protocol", "node_id", "app_id", "name", "token"}`。令牌只保存在 B 的内存中，空闲 12 小时后失效；每个应用的令牌数有上限，超出时只淘汰该应用最旧的令牌。B 关闭共享或修改密码时策略版本递增，已签发的令牌立即失效，使用它们的信令和媒体同时结束；A 收到 401 后用保存的密码重新认证。协议版本不一致时 A 显示 `incompatible`。
+
+以下旧接口已删除：`/api/desktop/services`、`DELETE /api/apps/{id}/sessions/{session}`、`DELETE /api/apps/{id}/grants/{grant}`、`DELETE /remote/v1/apps/{id}/credential`，以及运行环境的 `/app/files*`。
+
+### 应用视图信令
+
+应用视图沿用 SDP 信令协议，所有连接都可以发送输入、剪贴板、上传和分辨率调整，没有控制权消息。结束消息 `{"ivnc_revoked":true,"reason":"revoked|stopped|closed"}` 要求客户端停止自动重连：`revoked` 为共享关闭或密码修改，`stopped` 为应用停止（包括 A 停止远程应用），`closed` 为视图被关闭或连接配置被替换。
+
+ICE-TCP 通过已授权 SDP 中的 ICE ufrag 路由，仍需完成运行环境的 ICE/DTLS 握手。信令与媒体均绑定同一应用和运行代次，应用重启不复用旧媒体会话。
+
+### 内嵌视图（postMessage）
+
+桌面页面把应用标签以同源 iframe 打开：`/app-view/{token}/?embed=1`。内嵌视图不显示自己的工具栏、底边触发区、连接指示、状态栏和“无窗口”提示，由父页面负责。双方只处理 `event.origin === location.origin` 且 `event.source` 为对方窗口的消息，发送时也指定同源。
+
+父页面 → iframe：
+
+| 消息 | 说明 |
+| --- | --- |
+| `{type: "ivnc-view-active", active: bool}` | 标签被选中或切走；切走时释放按住的键，选中时获得焦点 |
+| `{type: "ivnc-unmute"}` | 页面已获得用户手势，可以播放声音 |
+| `{type: "ivnc-upload", files: File[]}` | 把文件上传到该应用 |
+| `{type: "ivnc-ime"}` | 切换输入法模式 |
+
+iframe → 父页面（每条消息另带 `view: <iframe 的 pathname>`，父页面据此忽略已被替换的视图）：
+
+| 消息 | 说明 |
+| --- | --- |
+| `{type: "ivnc-view-ready"}` | iframe 已安装消息监听；父页面随即重发当前的 `ivnc-view-active`，用户已选中过该标签时再发 `ivnc-unmute`。iframe `load` 时发出的同类消息可能早于监听而丢失 |
+| `{type: "ivnc-view-state", state: "connecting" \| "connected" \| "ended", reason?: string}` | 连接状态；`ended` 的 `reason` 来自 `ivnc_revoked` |
+| `{type: "ivnc-ime-state", active: bool}` | 输入法模式变化 |
+| `{type: "ivnc-edge-hover"}` | 指针到达底边，用于显示未固定的工具栏 |
+| `{type: "ivnc-reopen"}` | 运行代次变化，请父页面申请新令牌并重新打开 |
+
+应用标签被选中期间，桌面页面在自身的 `_client_activity` 中报告 `visible: false`，主桌面合成器因此可以空闲；切回窗口标签或该标签消失后恢复 `visible: true`。主桌面的输入和声音不受影响。
+
+控制台页面（桌面页面中的 iframe）在用户启动应用后向父页面发送 `{type: "ivnc-app-started", id}`，桌面页面在该应用的标签出现时切换过去。

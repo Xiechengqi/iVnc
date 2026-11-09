@@ -388,6 +388,18 @@ Axum HTTP 服务器，同端口复用 HTTP/WebSocket/ICE-TCP。
 4. 通过 `text_sender` 广播 `taskbar,{json}` 消息
 5. 新 DataChannel 打开时（`datachannel_open_count` 变化），清空缓存强制重发
 
+#### 应用标签
+
+开启远程访问的桌面应用在独立运行环境中运行，已启动的远程应用运行在另一台实例上，二者都不在主合成器中绘制，因此以应用标签出现在同一工具栏：
+
+1. `AppsState` 在应用启动、停止、删除、运行环境就绪以及远程连接状态变化时更新 `SharedState` 中的应用快照，并递增 `apps_generation`（`AtomicU64`）
+2. 主循环像比较 `datachannel_open_count` 一样比较 `apps_generation`，变化时重发 `taskbar` 消息，`apps` 字段为快照内容（`id`、`name`、`kind`、`status`，见 [PROTOCOL.md](PROTOCOL.md) §5.3）；主循环不访问 SQLite
+3. 应用运行环境（worker）内的 `apps` 始终为空
+4. 前端 `app-streams.js` 把 `apps` 与窗口合并为工具栏标签；首次选中时为该应用申请视图令牌，创建同源 iframe（`/app-view/{token}/?embed=1`）覆盖在主画面上（固定工具栏时不覆盖工具栏），之后保持连接，切走只隐藏
+5. 父页面与 iframe 通过 postMessage 传递激活、取消静音、上传、输入法和连接状态（见 PROTOCOL.md “内嵌视图”），双方都校验 `event.origin` 与 `event.source`；iframe 安装监听后发送 `ivnc-view-ready`，父页面据此重发当前激活状态，避免 `load` 时的消息丢失
+6. 视图断开时按指数退避重连，令牌过期或运行代次变化时重新申请；页面关闭时只关闭自己申请的视图
+7. 应用标签被选中期间，桌面页面在 `_client_activity` 中报告主桌面不可见，主合成器可以空闲；主桌面的输入和声音不受影响
+
 ### 4.3 RTP 广播与 Keyframe 缓存
 
 1. GStreamer appsink 产出 RTP 包

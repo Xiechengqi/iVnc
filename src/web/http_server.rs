@@ -124,8 +124,6 @@ pub async fn run_http_server_with_webrtc(
         .route("/index.html", get(index_handler))
         .route("/connect", get(index_handler))
         .route("/health", get(health_handler))
-        .route("/app/files", get(crate::remote::worker::files))
-        .route("/app/files/{*path}", get(crate::remote::worker::download))
         .route("/version", get(public_version_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
@@ -176,13 +174,10 @@ pub async fn run_http_server_with_webrtc(
                 .get(axum::http::header::HOST)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
-            let owner = headers.get("x-ivnc-owner").is_some_and(|h| h == "true");
             async move {
                 ws.on_upgrade(move |socket| async move {
-                    crate::transport::handle_signaling_connection(
-                        socket, state, manager, host_str, owner,
-                    )
-                    .await;
+                    crate::transport::handle_signaling_connection(socket, state, manager, host_str)
+                        .await;
                 })
             }
         };
@@ -266,9 +261,6 @@ pub async fn run_http_server_with_webrtc(
         loop {
             match fetch_ipv4().await {
                 Ok(ip) if ip != last_ip => {
-                    if !crate::remote::worker::is_worker() {
-                        crate::remote::worker::record_public_ipv4(&ip);
-                    }
                     *ipv4_state.ipv4_address.write().await = ip.clone();
                     ipv4_state.send_text(format!("ipv4,{}", ip));
                     info!("IPv4 address updated: {}", ip);
@@ -447,14 +439,8 @@ async fn worker_boundary(req: Request<Body>, next: middleware::Next) -> Response
     if crate::remote::worker::is_worker()
         && !matches!(
             path,
-            "/health"
-                | "/webrtc"
-                | "/ui-config"
-                | "/ws-config"
-                | "/api/render-status"
-                | "/app/files"
+            "/health" | "/webrtc" | "/ui-config" | "/ws-config" | "/api/render-status"
         )
-        && !path.starts_with("/app/files/")
     {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
@@ -783,7 +769,6 @@ fn is_console_management_path(path: &str) -> bool {
         || path == "/api/apps"
         || path.starts_with("/api/apps/")
         || path.starts_with("/api/remote/")
-        || path.starts_with("/api/desktop/")
         || path == "/api/capabilities"
         || path.starts_with("/api/capabilities/")
 }

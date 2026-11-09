@@ -595,9 +595,6 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
 /// Handle incoming DataChannel data — reuses the existing input parsing logic.
 fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &EventContext) {
     if data.binary {
-        if !ctx.shared_state.can_control(&session.id) {
-            return;
-        }
         // Binary data → file upload handler
         ctx.upload_handler
             .lock()
@@ -619,12 +616,6 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         return;
     }
 
-    if !ctx.shared_state.can_control(&session.id)
-        && !text.starts_with("_client_")
-        && !text.starts_with("_stats_")
-    {
-        return;
-    }
     // Try specialized handlers first
     if ctx
         .upload_handler

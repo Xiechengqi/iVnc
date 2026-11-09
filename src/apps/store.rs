@@ -17,16 +17,6 @@ impl AppStore {
         let conn =
             Connection::open(&db_path).map_err(|e| format!("Failed to open apps.db: {}", e))?;
 
-        // SQLite produces a consistent, one-time configuration snapshot before
-        // managed desktops are launched in their independent runtimes.
-        let backup = db_path.with_file_name("apps.before-isolation.db");
-        if !backup.exists() {
-            conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
-                .map_err(|e| format!("Cannot back up application configuration: {e}"))?;
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-        }
         Self::from_connection(conn)
     }
 

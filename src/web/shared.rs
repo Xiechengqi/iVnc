@@ -10,7 +10,7 @@ use crate::proxy_panel::ProxyPanelManager;
 use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
 use log::{info, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
@@ -92,12 +92,32 @@ fn deliver<T: Clone>(subs: &mut Vec<Subscriber<T>>, item: &T) -> bool {
     recovered
 }
 
+/// An application streamed in its own taskbar tab rather than as a desktop window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StreamApp {
+    pub id: String,
+    pub name: String,
+    /// "shared": a local application in its own runtime; "remote": an application of another instance.
+    pub kind: &'static str,
+    pub status: &'static str,
+}
+
+/// The taskbar message body: desktop windows and application tabs.
+pub fn taskbar_json(windows: Vec<Value>, apps: &[StreamApp]) -> String {
+    json!({ "windows": windows, "apps": apps }).to_string()
+}
+
 /// Shared state for the application
 #[derive(Clone)]
 pub struct SharedState {
     pub media_router: Arc<crate::remote::media::MediaRouter>,
     pub app_views: Arc<crate::remote::gateway::Views>,
-    pub app_controller: Arc<Mutex<Option<String>>>,
+
+    /// Applications shown as their own taskbar tabs, kept current by the apps
+    /// manager so that the compositor never queries it.
+    stream_apps: Arc<Mutex<Vec<StreamApp>>>,
+    /// Bumped whenever `stream_apps` changes (used to trigger taskbar resend)
+    pub apps_generation: Arc<AtomicU64>,
     /// Configuration
     pub config: Arc<Config>,
 
@@ -216,7 +236,8 @@ impl SharedState {
         Self {
             media_router: Arc::new(crate::remote::media::MediaRouter::default()),
             app_views: Arc::new(crate::remote::gateway::Views::default()),
-            app_controller: Arc::new(Mutex::new(None)),
+            stream_apps: Arc::new(Mutex::new(Vec::new())),
+            apps_generation: Arc::new(AtomicU64::new(0)),
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
             input_sender,
@@ -250,33 +271,17 @@ impl SharedState {
         }
     }
 
-    pub fn can_control(&self, session: &str) -> bool {
-        !crate::remote::worker::is_worker()
-            || self.app_controller.lock().unwrap().as_deref() == Some(session)
-    }
-
-    pub fn claim_control(&self, session: &str, force: bool) -> bool {
-        let mut controller = self.app_controller.lock().unwrap();
-        if (force || controller.is_none()) && controller.as_deref() != Some(session) {
-            self.reset_app_input();
-            *controller = Some(session.to_owned());
-        }
-        controller.as_deref() == Some(session)
-    }
-
-    pub fn release_control(&self, session: &str) {
-        let mut controller = self.app_controller.lock().unwrap();
-        if controller.as_deref() == Some(session) {
-            self.reset_app_input();
-            *controller = None;
+    /// Replaces the application tabs; the taskbar is resent only when they changed.
+    pub fn set_stream_apps(&self, apps: Vec<StreamApp>) {
+        let mut current = self.stream_apps.lock().unwrap();
+        if *current != apps {
+            *current = apps;
+            self.apps_generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    fn reset_app_input(&self) {
-        let _ = self.input_sender.send(crate::input::InputEventData {
-            event_type: crate::input::InputEvent::KeyboardReset,
-            ..Default::default()
-        });
+    pub fn stream_apps(&self) -> Vec<StreamApp> {
+        self.stream_apps.lock().unwrap().clone()
     }
 
     /// Attach the apps manager once it has been constructed during startup.
@@ -763,21 +768,29 @@ impl SharedState {
 
     /// Remove a connection
     pub fn remove_connection(&self, id: &str) {
-        self.connections.lock().unwrap().remove(id);
-        self.release_control(id);
+        if self.connections.lock().unwrap().remove(id).is_some() {
+            self.reset_input();
+        }
     }
 
     pub fn disconnect_connection(&self, id: &str) {
-        if let Some(tx) = self
-            .connections
-            .lock()
-            .unwrap()
-            .remove(id)
-            .and_then(|c| c.shutdown_tx)
-        {
+        let Some(connection) = self.connections.lock().unwrap().remove(id) else {
+            return;
+        };
+        if let Some(tx) = connection.shutdown_tx {
             let _ = tx.send(());
         }
-        self.release_control(id);
+        self.reset_input();
+    }
+
+    /// Releases every pressed key and pointer button. Every connection may
+    /// control the desktop, and keys a connection pressed before it dropped can
+    /// only be released here.
+    fn reset_input(&self) {
+        let _ = self.input_sender.send(InputEventData {
+            event_type: crate::input::InputEvent::KeyboardReset,
+            ..Default::default()
+        });
     }
 
     /// Get all connections as JSON
@@ -914,5 +927,113 @@ mod delivery_tests {
         let mut subs = vec![Subscriber::new(closed)];
         deliver(&mut subs, &1);
         assert!(subs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taskbar_lists_windows_and_application_tabs() {
+        let empty: serde_json::Value = serde_json::from_str(&taskbar_json(vec![], &[])).unwrap();
+        assert_eq!(empty, json!({"windows": [], "apps": []}));
+        let apps = [
+            StreamApp {
+                id: "local".into(),
+                name: "Chrome".into(),
+                kind: "shared",
+                status: "starting",
+            },
+            StreamApp {
+                id: "mapping".into(),
+                name: "Remote".into(),
+                kind: "remote",
+                status: "auth_required",
+            },
+        ];
+        let value: serde_json::Value = serde_json::from_str(&taskbar_json(
+            vec![json!({"id": 0, "title": "Files"})],
+            &apps,
+        ))
+        .unwrap();
+        assert_eq!(value["windows"][0]["title"], "Files");
+        assert_eq!(
+            value["apps"],
+            json!([
+                {"id": "local", "name": "Chrome", "kind": "shared", "status": "starting"},
+                {"id": "mapping", "name": "Remote", "kind": "remote", "status": "auth_required"},
+            ])
+        );
+    }
+
+    #[test]
+    fn only_changed_application_tabs_resend_the_taskbar() {
+        let (input, _) = mpsc::unbounded_channel();
+        let config = Config::default();
+        let state = SharedState::new(
+            config.clone(),
+            UiConfig::from_env(&config),
+            input,
+            Arc::new(RuntimeSettings::new(&config)),
+            None,
+            None,
+        );
+        let app = StreamApp {
+            id: "app".into(),
+            name: "App".into(),
+            kind: "remote",
+            status: "connecting",
+        };
+        state.set_stream_apps(vec![app.clone()]);
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 1);
+        state.set_stream_apps(vec![app.clone()]);
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 1);
+        state.set_stream_apps(vec![StreamApp {
+            status: "connected",
+            ..app
+        }]);
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 2);
+        assert_eq!(state.stream_apps()[0].status, "connected");
+    }
+
+    #[test]
+    fn dropped_connections_release_pressed_input() {
+        let (input, mut events) = mpsc::unbounded_channel();
+        let config = Config::default();
+        let state = SharedState::new(
+            config.clone(),
+            UiConfig::from_env(&config),
+            input,
+            Arc::new(RuntimeSettings::new(&config)),
+            None,
+            None,
+        );
+        let reset = |events: &mut mpsc::UnboundedReceiver<InputEventData>| {
+            let mut count = 0;
+            while let Ok(event) = events.try_recv() {
+                assert!(matches!(
+                    event.event_type,
+                    crate::input::InputEvent::KeyboardReset
+                ));
+                count += 1;
+            }
+            count
+        };
+        for disconnect in [false, true] {
+            state.add_connection(
+                "one".into(),
+                "192.0.2.1".into(),
+                tokio::sync::oneshot::channel().0,
+            );
+            if disconnect {
+                state.disconnect_connection("one");
+            }
+            // Its session ends afterwards and removes it once more.
+            state.remove_connection("one");
+            assert_eq!(reset(&mut events), 1);
+        }
+        state.remove_connection("missing");
+        assert_eq!(reset(&mut events), 0);
     }
 }

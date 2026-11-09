@@ -212,7 +212,10 @@ export class WebRTCDemoSignaling {
         this.retry_count++;
         if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
             setTimeout(() => {
-                if (this.retry_count > 3) {
+                if (this.retry_count > 3 && window.__IVNC_EMBED__) {
+                    // The view token is gone; the parent page mints a new one.
+                    window.parent.postMessage({ type: "ivnc-reopen", view: window.location.pathname }, window.location.origin);
+                } else if (this.retry_count > 3) {
                     window.location.reload();
                 } else {
                     this.connect();
@@ -256,7 +259,7 @@ export class WebRTCDemoSignaling {
         }
 
         if (event.data.startsWith("ERROR")) {
-            this._setError(event.data.slice(6));
+            if (window.__IVNC_APP_VIEW__) this._setError(event.data.slice(6));
             if (event.data === "ERROR peer '0' not found") {
                 this._setDebug("Peer not found. Retrying...");
                 setTimeout(() => {
@@ -281,10 +284,8 @@ export class WebRTCDemoSignaling {
 
         if (msg.ivnc_revoked) {
             window.__FORCE_DISCONNECTED__ = true;
-            window.__ivncCanControl = false;
-            window.dispatchEvent(new CustomEvent("ivnc-view-ended", {detail: msg.reason || "revoked"}));
-        } else if (msg.ivnc_control != null) {
-            window.dispatchEvent(new CustomEvent("ivnc-control", {detail:msg.ivnc_control}));
+            window.__ivncViewEnded = msg.reason || "revoked";
+            window.dispatchEvent(new CustomEvent("ivnc-view-ended", {detail: window.__ivncViewEnded}));
         } else if (msg.sdp != null) {
             this._setSDP(new RTCSessionDescription(msg.sdp));
         } else if (msg.ice != null) {

@@ -1,10 +1,13 @@
 use super::{
-    media::{Kind, Lease, Origin, StopReason},
-    store::{Client, DesktopSettings, Target},
+    media::{Lease, StopReason},
+    store::Target,
     worker, PROTOCOL,
 };
 use crate::{
-    apps::{api::AppsState, app::AppType},
+    apps::{
+        api::AppsState,
+        app::{AppStatus, AppType},
+    },
     web::{http_server::HttpPeerAddr, SharedState},
 };
 use axum::{
@@ -15,15 +18,15 @@ use axum::{
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Json, Router,
 };
 use futures::{SinkExt, StreamExt};
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock},
+    future::Future,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as UpMessage};
@@ -54,33 +57,18 @@ impl View {
 #[derive(Clone)]
 enum Source {
     Local(worker::Endpoint),
-    Remote(Target),
+    /// A saved connection and its epoch; see `RemoteHealthCache`.
+    Remote(u64, Target),
 }
 #[derive(Default)]
 pub struct Views {
     entries: Mutex<HashMap<String, View>>,
 }
 impl Views {
-    pub fn connection_status(&self, app: &str) -> &'static str {
-        let entries = self.entries.lock().unwrap();
-        let leases: Vec<_> = entries
-            .values()
-            .filter(|v| v.app == app)
-            .filter_map(|v| v.lease.as_ref())
-            .filter(|l| l.active())
-            .collect();
-        if leases.iter().any(|l| l.connected()) {
-            "connected"
-        } else if !leases.is_empty() {
-            "connecting"
-        } else {
-            "disconnected"
-        }
-    }
     pub fn revoke(&self, app: &str, remote_only: bool, reason: StopReason) {
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|_, v| {
-            let revoke = v.app == app && (!remote_only || matches!(v.target, Source::Remote(_)));
+            let revoke = v.app == app && (!remote_only || matches!(v.target, Source::Remote(..)));
             if revoke {
                 v.stop(reason);
             }
@@ -89,45 +77,113 @@ impl Views {
     }
 }
 
-/// Last known state of each remote application, as seen from A.
-#[derive(Clone, Debug, Serialize)]
+/// Last known state of a remote application, as seen from A.
+#[derive(Clone, Debug)]
 pub struct RemoteHealth {
     pub state: &'static str,
     pub detail: String,
-    #[serde(skip)]
     at: Instant,
 }
+/// What A knows about a remote application while one saved connection lasts.
+struct Link {
+    epoch: u64,
+    health: Option<RemoteHealth>,
+    /// The session token B issued, so that checks do not cost B a password hash each time.
+    token: Option<String>,
+    /// Why B refused the saved password. Until the connection is saved again,
+    /// only the rare health check authenticates again.
+    refused: Option<String>,
+    /// Serializes authentication, so that concurrent requests share one new token.
+    login: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Remote applications as seen from A. Saving a connection, starting or stopping
+/// the application begins a new epoch; work begun in an earlier epoch can no
+/// longer record a state or a token.
 #[derive(Default)]
 pub struct RemoteHealthCache {
-    entries: Mutex<HashMap<String, RemoteHealth>>,
+    links: Mutex<HashMap<String, Link>>,
+    epochs: std::sync::atomic::AtomicU64,
     refreshing: Mutex<HashSet<String>>,
 }
 impl RemoteHealthCache {
     pub fn get(&self, app: &str) -> Option<RemoteHealth> {
-        self.entries.lock().unwrap().get(app).cloned()
+        self.links.lock().unwrap().get(app)?.health.clone()
     }
+    /// Runs `f` on the current link, beginning an epoch if there is none.
+    fn link<R>(&self, app: &str, f: impl FnOnce(&mut Link) -> R) -> R {
+        let mut links = self.links.lock().unwrap();
+        let link = links.entry(app.to_owned()).or_insert_with(|| Link {
+            epoch: self
+                .epochs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            health: None,
+            token: None,
+            refused: None,
+            login: Default::default(),
+        });
+        f(link)
+    }
+    /// Runs `f` on the link only while it is still in `epoch`.
+    fn current<R>(&self, app: &str, epoch: u64, f: impl FnOnce(&mut Link) -> R) -> Option<R> {
+        self.links
+            .lock()
+            .unwrap()
+            .get_mut(app)
+            .filter(|l| l.epoch == epoch)
+            .map(f)
+    }
+    fn epoch(&self, app: &str) -> u64 {
+        self.link(app, |l| l.epoch)
+    }
+    /// Ends the epoch, e.g. when the connection changes.
     pub fn forget(&self, app: &str) {
-        self.entries.lock().unwrap().remove(app);
+        self.links.lock().unwrap().remove(app);
     }
-    fn record(&self, app: &str, state: &'static str, detail: String) {
-        self.entries.lock().unwrap().insert(
-            app.to_owned(),
-            RemoteHealth {
+    /// Keeps the token of a connection just saved.
+    pub fn remember_token(&self, app: &str, token: String) {
+        self.link(app, |l| l.token = Some(token));
+    }
+    fn token(&self, app: &str, epoch: u64) -> Option<String> {
+        self.current(app, epoch, |l| l.token.clone()).flatten()
+    }
+    fn refused(&self, app: &str, epoch: u64) -> Option<String> {
+        self.current(app, epoch, |l| l.refused.clone()).flatten()
+    }
+    /// Returns whether the state changed.
+    fn record(&self, app: &str, epoch: u64, state: &'static str, detail: String) -> bool {
+        self.current(app, epoch, |l| {
+            let previous = l.health.replace(RemoteHealth {
                 state,
                 detail,
                 at: Instant::now(),
-            },
-        );
+            });
+            previous.is_none_or(|h| h.state != state)
+        })
+        .unwrap_or(false)
     }
 }
 
-/// Refreshes stale remote states in the background; listing never waits on B.
+/// The saved connection of a remote application, with the epoch it belongs to.
+/// The epoch is taken first: a connection saved meanwhile begins a later one.
+fn connection(apps: &AppsState, id: &str) -> (u64, Result<Target, String>) {
+    let epoch = apps.remote_health.epoch(id);
+    (epoch, apps.remote.target(id))
+}
+
+/// Refreshes stale remote states in the background; nothing waits on B. States
+/// that need the user to act are checked rarely, so that a wrong saved password
+/// does not exhaust B's limit on failed attempts. Only this check authenticates
+/// again after B refused the saved password.
 pub fn refresh_remote_health(apps: Arc<AppsState>, ids: Vec<String>) {
     for id in ids {
-        let stale = apps
-            .remote_health
-            .get(&id)
-            .is_none_or(|h| h.at.elapsed() > Duration::from_secs(30));
+        let stale = apps.remote_health.get(&id).is_none_or(|h| {
+            let interval = match h.state {
+                "auth_required" | "incompatible" => Duration::from_secs(300),
+                _ => Duration::from_secs(30),
+            };
+            h.at.elapsed() > interval
+        });
         if !stale
             || !apps
                 .remote_health
@@ -140,11 +196,22 @@ pub fn refresh_remote_health(apps: Arc<AppsState>, ids: Vec<String>) {
         }
         let apps = apps.clone();
         tokio::spawn(async move {
-            if let Ok(target) = apps.remote.target(&id) {
-                let _ = probe(&apps, &id, &target).await;
+            let (epoch, target) = connection(&apps, &id);
+            match target {
+                Ok(target) => {
+                    let _ = probe(&apps, &id, epoch, &target, true).await;
+                }
+                Err(e) => record(&apps, &id, epoch, "auth_required", e),
             }
             apps.remote_health.refreshing.lock().unwrap().remove(&id);
         });
+    }
+}
+
+/// Records a remote state; the taskbar follows state changes.
+fn record(apps: &AppsState, id: &str, epoch: u64, state: &'static str, detail: String) {
+    if apps.remote_health.record(id, epoch, state, detail) {
+        apps.refresh_stream_apps();
     }
 }
 
@@ -256,21 +323,9 @@ pub fn router(apps: Arc<AppsState>, shared: Arc<SharedState>) -> Router {
     Router::new()
         .route("/api/apps/{id}/sharing", get(get_policy).put(set_policy))
         .route("/api/apps/{id}/view", post(create_view))
-        .route("/api/desktop/services", get(services))
         .route("/api/remote/test", post(test_connection))
-        .route(
-            "/api/apps/{id}/sessions/{session}",
-            axum::routing::delete(disconnect_session),
-        )
-        .route(
-            "/api/apps/{id}/grants/{grant}",
-            axum::routing::delete(revoke_grant),
-        )
-        .route(
-            "/remote/v1/apps/{id}/credential",
-            axum::routing::delete(revoke_credential),
-        )
         .route("/remote/v1/apps/{id}/authenticate", post(authenticate))
+        .route("/remote/v1/apps/{id}/session", delete(close_session))
         .route("/remote/v1/apps/{id}/info", get(remote_info))
         .route("/remote/v1/apps/{id}/socket", get(remote_socket))
         .route("/remote/v1/apps/{id}/data/{*path}", get(remote_data))
@@ -296,43 +351,6 @@ fn peer(addr: &Option<Extension<HttpPeerAddr>>) -> String {
         .unwrap_or_default()
 }
 
-/// Security-relevant remote access events, kept separately from the service log.
-/// A dedicated thread writes them so request handlers never wait on the disk.
-fn audit(event: &str, app: &str, detail: Value) {
-    static WRITER: OnceLock<std::sync::mpsc::Sender<Value>> = OnceLock::new();
-    log::info!("remote access {event}: app={app} {detail}");
-    let line = json!({
-        "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        "event": event,
-        "app": app,
-        "detail": detail,
-    });
-    let writer = WRITER.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<Value>();
-        let path = crate::paths::ivnc_home().join("remote-audit.log");
-        std::thread::spawn(move || {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            for line in rx {
-                if std::fs::metadata(&path).is_ok_and(|m| m.len() > 4 * 1024 * 1024) {
-                    let _ = std::fs::rename(&path, path.with_extension("log.1"));
-                }
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path)
-                {
-                    let _ = writeln!(file, "{line}");
-                }
-            }
-        });
-        tx
-    });
-    let _ = writer.send(line);
-}
-
 fn desktop(g: &Gateway, id: &str) -> Result<crate::apps::app::ManagedApp, Response> {
     let app = g
         .apps
@@ -347,76 +365,74 @@ fn desktop(g: &Gateway, id: &str) -> Result<crate::apps::app::ManagedApp, Respon
     }
     Ok(app)
 }
-/// Verifies an application credential and returns who is using it.
-fn authorize(g: &Gateway, id: &str, headers: &HeaderMap, ip: &str) -> Result<Origin, Response> {
+/// Verifies a session token of the application.
+fn authorize(g: &Gateway, id: &str, headers: &HeaderMap) -> Result<(), Response> {
     desktop(g, id)?;
-    let credential = bearer(headers);
-    let Some((grant, label)) = g.apps.remote.grant(id, credential) else {
+    if !g.apps.remote.verify(id, bearer(headers)) {
         return Err(error(
             StatusCode::UNAUTHORIZED,
-            "Application credentials expired or remote access is disabled",
+            "Application session expired or remote access is disabled",
         ));
-    };
-    g.apps.remote.touch(id, credential, ip);
-    Ok(Origin {
-        grant,
-        label,
-        peer: ip.to_owned(),
-    })
-}
-fn runtime_check(g: &Gateway, id: &str) -> Result<worker::Endpoint, (StatusCode, String)> {
-    if g.apps.process.status(id) != crate::apps::app::AppStatus::Running {
-        return Err((StatusCode::CONFLICT, "Application is not running".into()));
     }
-    let endpoint = worker::endpoint(id).map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
-    let policy = g
-        .apps
-        .remote
-        .policy(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if endpoint.desktop != policy.desktop {
-        return Err((
+    Ok(())
+}
+/// The runtime of an application that runs on its own. Access from another
+/// instance also needs sharing to be enabled.
+fn runtime_check(
+    g: &Gateway,
+    id: &str,
+    remote: bool,
+) -> Result<worker::Endpoint, (StatusCode, String)> {
+    match g.apps.process.status(id) {
+        AppStatus::Running => {}
+        AppStatus::Starting => {
+            return Err((StatusCode::CONFLICT, "Application is starting".into()))
+        }
+        _ => return Err((StatusCode::CONFLICT, "Application is not running".into())),
+    }
+    let enabled = !remote
+        || g.apps
+            .remote
+            .policy(id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .enabled;
+    match g.apps.process.in_worker(id) {
+        Some(true) if enabled => {
+            worker::endpoint(id).map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))
+        }
+        Some(false) if remote => Err((
             StatusCode::CONFLICT,
-            "Restart this application on B to apply its isolation settings".into(),
-        ));
+            "Restart this application on B to apply its remote access setting".into(),
+        )),
+        _ => Err((
+            StatusCode::CONFLICT,
+            "Remote access is not enabled for this application".into(),
+        )),
     }
-    Ok(endpoint)
 }
-fn runtime(g: &Gateway, id: &str) -> Result<worker::Endpoint, Response> {
-    runtime_check(g, id).map_err(|(status, message)| error(status, message))
+fn runtime(g: &Gateway, id: &str, remote: bool) -> Result<worker::Endpoint, Response> {
+    runtime_check(g, id, remote).map_err(|(status, message)| error(status, message))
 }
 async fn get_policy(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Response {
     if let Err(e) = desktop(&g, &id) {
         return e;
     }
-    let policy = match g.apps.remote.policy(&id) {
-        Ok(p) => p,
+    let (policy, password) = match g
+        .apps
+        .remote
+        .policy(&id)
+        .and_then(|p| Ok((p, g.apps.remote.policy_password(&id)?)))
+    {
+        Ok(v) => v,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let sessions = g.shared.media_router.sessions(&id);
-    let grants: Vec<Value> = match g.apps.remote.grants(&id) {
-        Ok(grants) => grants
-            .into_iter()
-            .map(|grant| {
-                let active = sessions
-                    .iter()
-                    .filter(|s| s["grant"] == grant.id.as_str())
-                    .count();
-                let mut value = json!(grant);
-                value["active_sessions"] = json!(active);
-                value
-            })
-            .collect(),
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    };
-    let restart_required = worker::endpoint(&id).is_ok_and(|e| e.desktop != policy.desktop);
     Json(json!({
-        "policy": policy,
-        "share_path": format!("/remote/v1/apps/{id}"),
-        "node_id": g.apps.remote.node_id,
-        "sessions": sessions,
-        "grants": grants,
-        "restart_required": restart_required,
+        "enabled": policy.enabled,
+        "password_set": policy.password_set,
+        "password_viewable": password.is_some(),
+        "password": password,
+        "share_path": super::share_path(&id),
+        "restart_required": g.apps.restart_required(&id, policy.enabled),
     }))
     .into_response()
 }
@@ -449,48 +465,22 @@ async fn set_policy(
         Ok(policy) => policy,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let settings = match body.get("desktop") {
-        Some(value) => match serde_json::from_value::<DesktopSettings>(value.clone()) {
-            Ok(settings) => settings,
-            Err(e) => return error(StatusCode::BAD_REQUEST, e),
-        },
-        None => previous.desktop.clone(),
-    };
-    if let Err(e) = settings.validate() {
-        return error(StatusCode::BAD_REQUEST, e);
-    }
-    if let Err(e) = worker::resolve_mounts(&settings.mounts, &worker::protected_paths()) {
-        return error(StatusCode::BAD_REQUEST, e);
-    }
-    for service in &settings.services {
-        if !g.apps.store.get(service).is_ok_and(|a| {
-            a.app_type == AppType::BackgroundApp && worker::service_url(&a).is_some()
-        }) {
-            return error(StatusCode::BAD_REQUEST, "Unknown background service");
-        }
-    }
-    let old_revision = previous.revision;
     let store = g.apps.remote.clone();
     let app = id.clone();
     let password = body["password"].as_str().map(str::to_owned);
-    let password_changed = password.as_deref().is_some_and(|p| !p.is_empty());
-    let result = tokio::task::spawn_blocking(move || {
-        store.set_policy(&app, enabled, password.as_deref(), settings)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || store.set_policy(&app, enabled, password.as_deref()))
+            .await;
     match result {
         Ok(Ok(policy)) => {
-            let revoked = policy.revision != old_revision;
-            if revoked {
+            // A new revision has already ended every session token; end their media too.
+            let changed = policy.revision != previous.revision;
+            if changed {
                 g.shared.media_router.revoke(&id, true, StopReason::Revoked);
-                audit(
-                    "policy_changed",
-                    &id,
-                    json!({"enabled": enabled, "password_changed": password_changed}),
-                );
+                log::info!("Remote access to {id} changed: enabled={}", policy.enabled);
             }
-            let restart_required = worker::endpoint(&id).is_ok_and(|e| e.desktop != policy.desktop);
-            Json(json!({"ok":true,"policy":policy,"restart_required":restart_required,"revoked":revoked}))
+            let restart_required = g.apps.restart_required(&id, policy.enabled);
+            Json(json!({"ok":true,"revoked":changed && previous.enabled,"restart_required":restart_required}))
                 .into_response()
         }
         Ok(Err(e)) => error(StatusCode::BAD_REQUEST, e),
@@ -499,9 +489,6 @@ async fn set_policy(
             "Password processing failed",
         ),
     }
-}
-async fn services(State(g): State<Arc<Gateway>>) -> Response {
-    match g.apps.store.list(){Ok(apps)=>Json(json!({"services":apps.into_iter().filter(|a|a.app_type==AppType::BackgroundApp && worker::service_url(a).is_some()).map(|a|json!({"id":a.id,"name":a.name,"url":worker::service_url(&a)})).collect::<Vec<_>>()})).into_response(),Err(e)=>error(StatusCode::INTERNAL_SERVER_ERROR,e)}
 }
 async fn authenticate(
     State(g): State<Arc<Gateway>>,
@@ -514,18 +501,13 @@ async fn authenticate(
         return error(StatusCode::UNAUTHORIZED, "Invalid application credentials");
     }
     if !g.limiter.begin(&ip, &id) {
-        audit("auth_limited", &id, json!({"ip": ip}));
+        log::warn!("Remote authentication for {id} from {ip} is rate limited");
         return error(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many failed attempts from this address; retry later",
         );
     }
     let password = body["password"].as_str().unwrap_or("").to_string();
-    let client = Client {
-        node: body["client"]["node_id"].as_str().unwrap_or("").into(),
-        label: body["client"]["name"].as_str().unwrap_or("").into(),
-        ip: ip.clone(),
-    };
     let busy = || {
         error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -550,26 +532,18 @@ async fn authenticate(
     let app = id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        store.authenticate(&app, &password, &client)
+        store.authenticate(&app, &password)
     })
     .await;
     match (result, desktop(&g, &id)) {
-        (Ok(Ok(credential)), Ok(app)) => {
+        (Ok(Ok(token)), Ok(app)) => {
             g.limiter.succeed(&ip, &id);
-            audit(
-                "auth_success",
-                &id,
-                json!({"ip": ip, "client": body["client"]["name"], "node": body["client"]["node_id"]}),
-            );
-            Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"credential":credential})).into_response()
+            Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"token":token})).into_response()
         }
-        (Ok(Ok(credential)), Err(_)) => {
-            let _ = g.apps.remote.revoke_grant(&id, &credential);
-            error(StatusCode::UNAUTHORIZED, "Invalid application credentials")
-        }
+        (Ok(Ok(_)), Err(_)) => error(StatusCode::UNAUTHORIZED, "Invalid application credentials"),
         (Ok(Err(e)), _) => {
             if e.starts_with("Invalid") {
-                audit("auth_failure", &id, json!({"ip": ip}));
+                log::info!("Remote authentication for {id} from {ip} failed");
                 // Keep this application's slot busy so failures stay spaced out.
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 error(StatusCode::UNAUTHORIZED, "Invalid application credentials")
@@ -580,13 +554,21 @@ async fn authenticate(
         (Err(_), _) => error(StatusCode::INTERNAL_SERVER_ERROR, "Authentication failed"),
     }
 }
+/// Ends the caller's own session, e.g. one opened only to test a connection.
+async fn close_session(
+    State(g): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    g.apps.remote.close_session(&id, bearer(&headers));
+    Json(json!({"ok":true})).into_response()
+}
 async fn remote_info(
     State(g): State<Arc<Gateway>>,
     Path(id): Path<String>,
-    addr: Option<Extension<HttpPeerAddr>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(e) = authorize(&g, &id, &headers, &peer(&addr)) {
+    if let Err(e) = authorize(&g, &id, &headers) {
         return e;
     }
     let app = match desktop(&g, &id) {
@@ -594,7 +576,7 @@ async fn remote_info(
         Err(e) => return e,
     };
     let status = format!("{:?}", g.apps.app_status(&app)).to_lowercase();
-    let (ready, detail) = match runtime_check(&g, &id) {
+    let (ready, detail) = match runtime_check(&g, &id, true) {
         Ok(_) => (true, String::new()),
         Err((_, message)) => (false, message),
     };
@@ -672,67 +654,8 @@ pub fn parse_share_url(value: &str) -> Result<(String, String), String> {
         .to_owned();
     Ok((url.origin().ascii_serialization(), id))
 }
-fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default()
-}
-/// Authenticates against B. `own_node` prevents mapping an instance onto itself,
-/// which would register the same media session twice in one router.
-pub async fn connect_target(body: &Value, own_node: &str) -> Result<Target, String> {
-    let (base_url, app_id) =
-        parse_share_url(body["url"].as_str().ok_or("Missing application URL")?)?;
-    let password = body["password"]
-        .as_str()
-        .filter(|p| !p.is_empty() && p.len() <= 256)
-        .ok_or("Enter the application password")?;
-    let response = http_client()?
-        .post(format!("{base_url}/remote/v1/apps/{app_id}/authenticate"))
-        .json(&json!({"password":password,"client":{"node_id":own_node,"name":hostname()}}))
-        .send()
-        .await
-        .map_err(|e| format!("Cannot connect to B: {e}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let detail = bounded_json(response)
-            .await
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_owned))
-            .unwrap_or_default();
-        return Err(format!(
-            "B rejected application authentication ({status}): {detail}"
-        ));
-    }
-    let value = bounded_json(response).await?;
-    if value["protocol"].as_u64() != Some(PROTOCOL as u64)
-        || value["app_id"].as_str() != Some(&app_id)
-    {
-        return Err("B does not support this application sharing protocol".into());
-    }
-    let target = Target {
-        base_url,
-        app_id,
-        node_id: value["node_id"]
-            .as_str()
-            .ok_or("Missing B identity")?
-            .into(),
-        name: value["name"]
-            .as_str()
-            .ok_or("Missing application name")?
-            .into(),
-        credential: value["credential"]
-            .as_str()
-            .filter(|s| s.len() == 64)
-            .ok_or("Invalid application credential")?
-            .into(),
-    };
-    if target.node_id == own_node {
-        forget_target(&target).await;
-        return Err(
-            "This address is the current instance; open the local application directly".into(),
-        );
-    }
-    Ok(target)
+fn remote_url(target: &Target, path: &str) -> String {
+    format!("{}/{path}", target.share_url())
 }
 
 /// Why B could not serve a remote application, in a form A can show and cache.
@@ -741,31 +664,198 @@ pub struct Probe {
     pub state: &'static str,
     pub message: String,
 }
-async fn check_target(target: &Target) -> Result<Value, Probe> {
-    let unreachable = |message: String| Probe {
+fn unavailable(message: String) -> Probe {
+    Probe {
         state: "unreachable",
         message,
-    };
-    let client = http_client().map_err(unreachable)?;
-    let r = client
-        .get(format!(
-            "{}/remote/v1/apps/{}/info",
-            target.base_url, target.app_id
+    }
+}
+
+/// A session on B, as issued by its authentication endpoint.
+struct Session {
+    token: String,
+    node_id: String,
+    name: String,
+}
+async fn open_session(base_url: &str, app_id: &str, password: &str) -> Result<Session, Probe> {
+    let response = http_client()
+        .map_err(unavailable)?
+        .post(format!(
+            "{base_url}{}/authenticate",
+            super::share_path(app_id)
         ))
-        .bearer_auth(&target.credential)
+        .json(&json!({ "password": password }))
         .send()
         .await
-        .map_err(|e| unreachable(format!("B is unavailable: {e}")))?;
-    if r.status() == StatusCode::UNAUTHORIZED || r.status() == StatusCode::NOT_FOUND {
+        .map_err(|e| unavailable(format!("Cannot connect to B: {e}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = bounded_json(response)
+            .await
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_owned))
+            .unwrap_or_default();
         return Err(Probe {
-            state: "auth_required",
-            message: "B revoked this connection or disabled sharing; edit it and enter the application password again".into(),
+            state: if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                "auth_required"
+            } else {
+                "unreachable"
+            },
+            message: format!("B rejected application authentication ({status}): {detail}"),
         });
     }
-    if !r.status().is_success() {
-        return Err(unreachable(format!("B returned {}", r.status())));
+    let value = bounded_json(response).await.map_err(unavailable)?;
+    let field = |name: &str| {
+        value[name]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    match (
+        value["protocol"].as_u64() == Some(PROTOCOL as u64)
+            && value["app_id"].as_str() == Some(app_id),
+        field("token").filter(|t| t.len() == 64),
+        field("node_id"),
+        field("name"),
+    ) {
+        (true, Some(token), Some(node_id), Some(name)) => Ok(Session {
+            token,
+            node_id,
+            name,
+        }),
+        _ => Err(Probe {
+            state: "incompatible",
+            message: "B does not support this application sharing protocol; run the same iVnc version on both instances".into(),
+        }),
     }
-    let value = bounded_json(r).await.map_err(unreachable)?;
+}
+/// Authenticates against B for a new or edited connection. `own_node` prevents
+/// mapping an instance onto itself, which would register the same media session
+/// twice in one router. Returns the connection and its first session token.
+pub async fn connect_target(body: &Value, own_node: &str) -> Result<(Target, String), String> {
+    let (base_url, app_id) =
+        parse_share_url(body["url"].as_str().ok_or("Missing application URL")?)?;
+    let password = body["password"]
+        .as_str()
+        .filter(|p| !p.is_empty() && p.len() <= 256)
+        .ok_or("Enter the application password")?;
+    let session = open_session(&base_url, &app_id, password)
+        .await
+        .map_err(|e| e.message)?;
+    if session.node_id == own_node {
+        return Err(
+            "This address is the current instance; open the local application directly".into(),
+        );
+    }
+    let target = Target {
+        base_url,
+        app_id,
+        node_id: session.node_id,
+        name: session.name,
+        password: password.to_owned(),
+    };
+    Ok((target, session.token))
+}
+/// A session token for B: the cached one, or a new one when there is none or
+/// B no longer accepts `rejected`. Concurrent callers share one authentication.
+/// After B refused the saved password, only `retry` authenticates again; other
+/// requests fail at once instead of spending B's limit on failed attempts.
+/// Returns whether the token is new.
+async fn session_token(
+    apps: &AppsState,
+    id: &str,
+    epoch: u64,
+    target: &Target,
+    rejected: Option<&str>,
+    retry: bool,
+) -> Result<(String, bool), Probe> {
+    let cache = &apps.remote_health;
+    let cached = || {
+        cache
+            .token(id, epoch)
+            .filter(|t| Some(t.as_str()) != rejected)
+    };
+    if let Some(token) = cached() {
+        return Ok((token, false));
+    }
+    let login = cache.link(id, |l| l.login.clone());
+    let _login = login.lock().await;
+    // Another request may have authenticated meanwhile.
+    if let Some(token) = cached() {
+        return Ok((token, true));
+    }
+    let refused = |message: String| Probe {
+        state: "auth_required",
+        message,
+    };
+    if target.password.is_empty() {
+        return Err(refused("This connection was saved by an earlier version; edit it and enter the application password again".into()));
+    }
+    if let Some(message) = cache.refused(id, epoch).filter(|_| !retry) {
+        return Err(refused(message));
+    }
+    let session = match open_session(&target.base_url, &target.app_id, &target.password).await {
+        Ok(session) => session,
+        Err(e) => {
+            if e.state == "auth_required" {
+                cache.current(id, epoch, |l| {
+                    l.token = None;
+                    l.refused = Some(e.message.clone());
+                });
+                // The health check now waits before it tries the password again.
+                record(apps, id, epoch, e.state, e.message.clone());
+            }
+            return Err(e);
+        }
+    };
+    if session.node_id != target.node_id {
+        return Err(Probe {
+            state: "incompatible",
+            message: "Remote instance identity changed; edit the connection to trust it again"
+                .into(),
+        });
+    }
+    cache.current(id, epoch, |l| {
+        l.token = Some(session.token.clone());
+        l.refused = None;
+    });
+    Ok((session.token, true))
+}
+/// Sends a request to B with a session token, authenticating again once when B
+/// no longer accepts the cached one.
+async fn send_remote(
+    apps: &AppsState,
+    id: &str,
+    epoch: u64,
+    target: &Target,
+    retry: bool,
+    request: impl Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, Probe> {
+    let client = http_client().map_err(unavailable)?;
+    let (mut token, mut fresh) = session_token(apps, id, epoch, target, None, retry).await?;
+    loop {
+        let response = request(&client, &token)
+            .send()
+            .await
+            .map_err(|e| unavailable(format!("B is unavailable: {e}")))?;
+        if response.status() != StatusCode::UNAUTHORIZED || fresh {
+            return Ok(response);
+        }
+        (token, fresh) = session_token(apps, id, epoch, target, Some(&token), retry).await?;
+    }
+}
+/// Interprets B's answer to an application information request.
+async fn read_info(response: reqwest::Response, target: &Target) -> Result<Value, Probe> {
+    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::NOT_FOUND {
+        return Err(Probe {
+            state: "auth_required",
+            message: "B disabled sharing or changed the application password; edit the connection and enter the password again".into(),
+        });
+    }
+    if !response.status().is_success() {
+        return Err(unavailable(format!("B returned {}", response.status())));
+    }
+    let value = bounded_json(response).await.map_err(unavailable)?;
     if value["protocol"].as_u64() != Some(PROTOCOL as u64)
         || value["node_id"].as_str() != Some(&target.node_id)
         || value["app_id"].as_str() != Some(&target.app_id)
@@ -777,26 +867,53 @@ async fn check_target(target: &Target) -> Result<Value, Probe> {
     }
     Ok(value)
 }
-/// Checks B and records the result for the application list.
-async fn probe(apps: &AppsState, id: &str, target: &Target) -> Result<Value, Probe> {
-    let result = check_target(target).await;
-    match &result {
-        Ok(value) if value["status"] != "running" => {
-            apps.remote_health
-                .record(id, "stopped", "The application is not running on B".into())
+/// Checks B and records the result for the application list and the taskbar.
+/// Anything but a ready application is an error. See `session_token` for `retry`.
+async fn probe(
+    apps: &AppsState,
+    id: &str,
+    epoch: u64,
+    target: &Target,
+    retry: bool,
+) -> Result<(), Probe> {
+    // A refusal already recorded stays recorded as it was, so that the health
+    // check keeps its interval.
+    if let Some(message) = apps.remote_health.refused(id, epoch).filter(|_| !retry) {
+        return Err(Probe {
+            state: "auth_required",
+            message,
+        });
+    }
+    let failed = |state, message: String| Err(Probe { state, message });
+    let result = match send_remote(apps, id, epoch, target, retry, |client, token| {
+        client.get(remote_url(target, "info")).bearer_auth(token)
+    })
+    .await
+    {
+        Ok(response) => read_info(response, target).await,
+        Err(e) => Err(e),
+    }
+    .and_then(|v| {
+        if v["status"] == "starting" {
+            failed("starting", "The application is starting on B".into())
+        } else if v["status"] != "running" {
+            failed("stopped", "The application is not running on B".into())
+        } else if v["ready"] != true {
+            failed("not_ready", v["detail"].as_str().unwrap_or("").to_owned())
+        } else {
+            Ok(())
         }
-        // B versions without readiness information are treated as ready.
-        Ok(value) if value["ready"] == false => apps.remote_health.record(
-            id,
-            "not_ready",
-            value["detail"].as_str().unwrap_or("").to_owned(),
-        ),
-        Ok(_) => apps.remote_health.record(id, "running", String::new()),
-        Err(probe) => apps
-            .remote_health
-            .record(id, probe.state, probe.message.clone()),
+    });
+    match &result {
+        Ok(()) => record(apps, id, epoch, "connected", String::new()),
+        Err(e) => record(apps, id, epoch, e.state, e.message.clone()),
     }
     result
+}
+/// Ends A's views of a remote application whose saved password B refuses, so
+/// that they stop reconnecting and polling until the connection is saved again.
+fn end_refused_views(g: &Gateway, app: &str) {
+    g.shared.app_views.revoke(app, true, StopReason::Revoked);
 }
 async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Response {
     let app = match g.apps.store.get(&id) {
@@ -804,32 +921,27 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
         Err(e) => return error(StatusCode::NOT_FOUND, e),
     };
     let source = match app.app_type {
-        AppType::DesktopApp => match runtime(&g, &id) {
+        AppType::DesktopApp => match runtime(&g, &id, false) {
             Ok(e) => Source::Local(e),
             Err(e) => return e,
         },
         AppType::RemoteApp => {
-            let target = match g.apps.remote.target(&id) {
+            if !g.apps.remote_started(&id) {
+                return error(StatusCode::CONFLICT, "Start this remote application first");
+            }
+            let (epoch, target) = connection(&g.apps, &id);
+            let target = match target {
                 Ok(t) => t,
                 Err(e) => return error(StatusCode::BAD_REQUEST, e),
             };
-            match probe(&g.apps, &id, &target).await {
-                Ok(v) if v["status"] != "running" => {
-                    return error(StatusCode::CONFLICT, "Application is not running on B")
-                }
-                Ok(v) if v["ready"] == false => {
-                    return error(
-                        StatusCode::CONFLICT,
-                        format!(
-                            "B: {}",
-                            v["detail"].as_str().unwrap_or("application is not ready")
-                        ),
-                    )
-                }
-                Ok(_) => {}
-                Err(e) => return error(StatusCode::BAD_GATEWAY, e.message),
+            if let Err(e) = probe(&g.apps, &id, epoch, &target, false).await {
+                let status = match e.state {
+                    "stopped" | "starting" | "not_ready" => StatusCode::CONFLICT,
+                    _ => StatusCode::BAD_GATEWAY,
+                };
+                return error(status, e.message);
             }
-            Source::Remote(target)
+            Source::Remote(epoch, target)
         }
         _ => {
             return error(
@@ -853,7 +965,7 @@ async fn create_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> R
     entries.insert(
         view.clone(),
         View {
-            lifetime: Lease::new(id.clone(), false, false, String::new()),
+            lifetime: Lease::new(id.clone(), false),
             app: id,
             target: source,
             touched: Arc::new(Mutex::new(Instant::now())),
@@ -892,77 +1004,55 @@ async fn close_view(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Re
     }
     Json(json!({"ok":true})).into_response()
 }
+/// Runtime documents a view loads from the application's own server.
 fn data_path(path: &str) -> bool {
-    matches!(
-        path,
-        "ui-config" | "ws-config" | "api/render-status" | "app/files"
-    ) || (path.starts_with("app/files/") && !path.contains("..") && !path.contains('\\'))
+    matches!(path, "ui-config" | "ws-config" | "api/render-status")
 }
-async fn fetch_data(source: &Source, path: &str, guard: AccessLease) -> Response {
-    let client = match http_client() {
-        Ok(c) => c,
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    };
-    let escaped = path
-        .split('/')
-        .map(|part| {
-            let mut url = reqwest::Url::parse("http://local/").unwrap();
-            url.path_segments_mut().unwrap().push(part);
-            url.path()[1..].to_owned()
-        })
-        .collect::<Vec<_>>()
-        .join("/");
-    let request = match source {
-        Source::Local(e) => client
-            .get(format!("http://127.0.0.1:{}/{escaped}", e.port))
-            .basic_auth("worker", Some(&e.password)),
-        Source::Remote(t) => client
-            .get(format!(
-                "{}/remote/v1/apps/{}/data/{escaped}",
-                t.base_url, t.app_id
-            ))
-            .bearer_auth(&t.credential),
-    };
-    // Large downloads are bounded by inactivity rather than total duration.
-    let response = tokio::select! {
+/// Relays one small runtime document. The request is bounded and ends early
+/// when access ends.
+async fn fetch_data(
+    guard: AccessLease,
+    request: impl Future<Output = Result<reqwest::Response, String>>,
+) -> Response {
+    let result = tokio::select! {
         _ = guard.cancelled() => return error(StatusCode::GONE, "Application access ended"),
-        result = request.timeout(Duration::from_secs(24 * 3600)).send() => result,
-    };
-    match response {
-        Ok(response) => {
+        result = tokio::time::timeout(Duration::from_secs(30), async {
+            let response = request.await?;
             let status = response.status();
+            let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+            Ok::<_, String>((status, content_type, bounded_body(response, 1 << 20).await?))
+        }) => result,
+    };
+    match result {
+        Ok(Ok((status, content_type, body))) => {
             let mut builder = Response::builder()
                 .status(status)
                 .header(header::CACHE_CONTROL, "no-store");
-            for name in [
-                header::CONTENT_TYPE,
-                header::CONTENT_DISPOSITION,
-                header::CONTENT_LENGTH,
-            ] {
-                if let Some(value) = response.headers().get(&name) {
-                    builder = builder.header(name, value);
-                }
+            if let Some(value) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, value);
             }
-            let stream = futures::stream::unfold(
-                (response.bytes_stream().boxed(), guard),
-                |(mut stream, guard)| async move {
-                    let next = tokio::select! {
-                        _ = guard.cancelled() => None,
-                        next = tokio::time::timeout(Duration::from_secs(120), stream.next()) => match next {
-                            Ok(item) => item.map(|r| r.map_err(std::io::Error::other)),
-                            Err(_) => Some(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "download stalled"))),
-                        },
-                    };
-                    next.map(|data| (data, (stream, guard)))
-                },
-            );
-            builder.body(Body::from_stream(stream)).unwrap()
+            builder.body(Body::from(body)).unwrap()
         }
-        Err(_) => error(
+        Ok(Err(_)) => error(
             StatusCode::BAD_GATEWAY,
             "Application runtime is unavailable",
         ),
+        Err(_) => error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Application runtime did not respond",
+        ),
     }
+}
+fn local_data(
+    endpoint: &worker::Endpoint,
+    path: &str,
+) -> impl Future<Output = Result<reqwest::Response, String>> {
+    let request = http_client().map(|client| {
+        client
+            .get(format!("http://127.0.0.1:{}/{path}", endpoint.port))
+            .basic_auth("worker", Some(&endpoint.password))
+    });
+    async move { request?.send().await.map_err(|e| e.to_string()) }
 }
 async fn view_data(
     State(g): State<Arc<Gateway>>,
@@ -973,16 +1063,38 @@ async fn view_data(
         Err(e) => return e,
     };
     if data_path(&path) {
-        return fetch_data(
-            &v.target,
-            &path,
-            AccessLease {
-                lease: v.lifetime.clone(),
-                owned: false,
-                authorization: None,
-            },
-        )
-        .await;
+        let guard = AccessLease {
+            lease: v.lifetime.clone(),
+            owned: false,
+            authorization: None,
+        };
+        return match &v.target {
+            Source::Local(endpoint) => fetch_data(guard, local_data(endpoint, &path)).await,
+            Source::Remote(epoch, target) => {
+                let url = remote_url(target, &format!("data/{path}"));
+                let request = async {
+                    let result =
+                        send_remote(&g.apps, &v.app, *epoch, target, false, |client, token| {
+                            client.get(&url).bearer_auth(token)
+                        })
+                        .await;
+                    // Ending the view also ends this request with 410, which
+                    // stops the page from polling.
+                    match result {
+                        Ok(r) if r.status() == StatusCode::UNAUTHORIZED => {
+                            end_refused_views(&g, &v.app);
+                            Ok(r)
+                        }
+                        Err(e) if e.state == "auth_required" => {
+                            end_refused_views(&g, &v.app);
+                            Err(e.message)
+                        }
+                        result => result.map_err(|e| e.message),
+                    }
+                };
+                fetch_data(guard, request).await
+            }
+        };
     }
     // Only trusted A assets are embedded. No HTML or JavaScript is loaded from B.
     if path.contains("..")
@@ -998,32 +1110,29 @@ async fn view_data(
 async fn remote_data(
     State(g): State<Arc<Gateway>>,
     Path((id, path)): Path<(String, String)>,
-    addr: Option<Extension<HttpPeerAddr>>,
     headers: HeaderMap,
 ) -> Response {
-    let origin = match authorize(&g, &id, &headers, &peer(&addr)) {
-        Ok(o) => o,
-        Err(e) => return e,
-    };
+    if let Err(e) = authorize(&g, &id, &headers) {
+        return e;
+    }
     if !data_path(&path) {
         return error(StatusCode::NOT_FOUND, "Not found");
     }
-    let endpoint = match runtime(&g, &id) {
+    let endpoint = match runtime(&g, &id, true) {
         Ok(e) => e,
         Err(e) => return e,
     };
-    let lease = Lease::remote(id.clone(), Kind::Data, endpoint.generation.clone(), origin);
+    let lease = Lease::new(id.clone(), true);
     if let Err(e) = g.shared.media_router.track(&lease) {
         return error(StatusCode::TOO_MANY_REQUESTS, e);
     }
     fetch_data(
-        &Source::Local(endpoint),
-        &path,
         AccessLease {
             lease,
             owned: true,
             authorization: Some((g.apps.remote.clone(), id, bearer(&headers).to_owned())),
         },
+        local_data(&endpoint, &path),
     )
     .await
 }
@@ -1041,7 +1150,7 @@ async fn view_socket(
         Err(e) => return e,
     };
     if let Source::Local(e) = &v.target {
-        match runtime(&g, &v.app) {
+        match runtime(&g, &v.app, false) {
             Ok(now) if now.generation == e.generation => {}
             _ => {
                 return error(
@@ -1051,12 +1160,7 @@ async fn view_socket(
             }
         }
     }
-    let owner = matches!(v.target, Source::Local(_));
-    let generation = match &v.target {
-        Source::Local(e) => e.generation.clone(),
-        Source::Remote(t) => t.node_id.clone(),
-    };
-    let lease = Lease::new(v.app.clone(), !owner, owner, generation);
+    let lease = Lease::new(v.app.clone(), matches!(v.target, Source::Remote(..)));
     if let Err(e) = g.shared.media_router.track(&lease) {
         lease.stop();
         return error(StatusCode::TOO_MANY_REQUESTS, e);
@@ -1083,30 +1187,18 @@ async fn view_socket(
 async fn remote_socket(
     State(g): State<Arc<Gateway>>,
     Path(id): Path<String>,
-    addr: Option<Extension<HttpPeerAddr>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let origin = match authorize(&g, &id, &headers, &peer(&addr)) {
-        Ok(o) => o,
-        Err(e) => return e,
-    };
-    let endpoint = match runtime(&g, &id) {
+    if let Err(e) = authorize(&g, &id, &headers) {
+        return e;
+    }
+    let endpoint = match runtime(&g, &id, true) {
         Ok(e) => e,
         Err(e) => return e,
     };
-    audit(
-        "connect",
-        &id,
-        json!({"ip": origin.peer, "grant": origin.grant, "client": origin.label}),
-    );
-    let lease = Lease::remote(
-        id.clone(),
-        Kind::Signal,
-        endpoint.generation.clone(),
-        origin,
-    );
-    let credential = bearer(&headers).to_string();
+    let lease = Lease::new(id.clone(), true);
+    let token = bearer(&headers).to_string();
     if let Err(e) = g.shared.media_router.track(&lease) {
         lease.stop();
         return error(StatusCode::TOO_MANY_REQUESTS, e);
@@ -1116,14 +1208,7 @@ async fn remote_socket(
     ws.max_message_size(256 * 1024)
         .on_upgrade(move |socket| async move {
             let _pending = pending;
-            bridge(
-                g,
-                socket,
-                Source::Local(endpoint),
-                lease,
-                Some((id, credential)),
-            )
-            .await
+            bridge(g, socket, Source::Local(endpoint), lease, Some((id, token))).await
         })
         .into_response()
 }
@@ -1154,8 +1239,7 @@ async fn bridge(
     let guard = AccessLease {
         lease: lease.clone(),
         owned: true,
-        authorization: authorization
-            .map(|(app, credential)| (g.apps.remote.clone(), app, credential)),
+        authorization: authorization.map(|(app, token)| (g.apps.remote.clone(), app, token)),
     };
     let result = tokio::select! {
         result = bridge_inner(&g, &mut client, &source, &lease) => result,
@@ -1206,7 +1290,7 @@ fn handshake_error(error: tokio_tungstenite::tungstenite::Error) -> String {
                 .and_then(|b| serde_json::from_slice::<Value>(b).ok())
                 .and_then(|v| v["error"].as_str().map(str::to_owned));
             let fallback = match response.status() {
-                StatusCode::UNAUTHORIZED => "B revoked this connection or disabled sharing",
+                StatusCode::UNAUTHORIZED => "B ended this session or disabled sharing",
                 StatusCode::CONFLICT => "the application is not running or must be restarted on B",
                 StatusCode::TOO_MANY_REQUESTS => "B has reached its session limit",
                 _ => "B refused the application connection",
@@ -1239,22 +1323,23 @@ async fn bridge_inner(
                 format!("127.0.0.1:{}", e.port),
             )
         }
-        Source::Remote(t) => {
-            match probe(&g.apps, &lease.app, t).await {
-                Ok(v) if v["ready"] == false => {
-                    return Err(format!(
-                        "B: {}",
-                        v["detail"].as_str().unwrap_or("not ready")
-                    ))
+        Source::Remote(epoch, t) => {
+            // The check also renews the session token when B no longer accepts it.
+            let checked = match probe(&g.apps, &lease.app, *epoch, t, false).await {
+                Ok(()) => session_token(&g.apps, &lease.app, *epoch, t, None, false)
+                    .await
+                    .map(|(token, _)| token),
+                Err(e) => Err(e),
+            };
+            let token = checked.map_err(|e| {
+                if e.state == "auth_required" {
+                    // The client is told the view was revoked and stops reconnecting.
+                    end_refused_views(g, &lease.app);
                 }
-                Ok(_) => {}
-                Err(e) => return Err(e.message),
-            }
-            let mut url = reqwest::Url::parse(&format!(
-                "{}/remote/v1/apps/{}/socket",
-                t.base_url, t.app_id
-            ))
-            .map_err(|e| e.to_string())?;
+                e.message
+            })?;
+            let mut url =
+                reqwest::Url::parse(&remote_url(t, "socket")).map_err(|e| e.to_string())?;
             let destination = format!(
                 "{}:{}",
                 url.host_str().ok_or("Missing remote host")?,
@@ -1262,11 +1347,7 @@ async fn bridge_inner(
             );
             url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
                 .map_err(|_| "Invalid scheme")?;
-            (
-                url.to_string(),
-                format!("Bearer {}", t.credential),
-                destination,
-            )
+            (url.to_string(), format!("Bearer {token}"), destination)
         }
     };
     let mut request = url.into_client_request().map_err(|e| e.to_string())?;
@@ -1274,12 +1355,6 @@ async fn bridge_inner(
         header::AUTHORIZATION,
         auth.parse().map_err(|_| "Invalid upstream credentials")?,
     );
-    if matches!(source, Source::Local(_)) {
-        request.headers_mut().insert(
-            "x-ivnc-owner",
-            if lease.owner { "true" } else { "false" }.parse().unwrap(),
-        );
-    }
     let (mut upstream, _) = tokio::time::timeout(
         Duration::from_secs(10),
         tokio_tungstenite::connect_async_tls_with_config(
@@ -1324,6 +1399,133 @@ async fn bridge_inner(
         }
     }
     Ok(())
+}
+
+async fn test_connection(State(g): State<Arc<Gateway>>, Json(body): Json<Value>) -> Response {
+    let (target, token) = match connect_target(&body, &g.apps.remote.node_id).await {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    let client = match http_client() {
+        Ok(c) => c,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let result = match client
+        .get(remote_url(&target, "info"))
+        .bearer_auth(&token)
+        .send()
+        .await
+    {
+        Ok(response) => read_info(response, &target).await,
+        Err(e) => Err(unavailable(format!("B is unavailable: {e}"))),
+    };
+    // The session was only for this test; B need not keep it.
+    let _ = client
+        .delete(remote_url(&target, "session"))
+        .bearer_auth(&token)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    match result {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, e.message),
+    }
+}
+
+fn trusted_certificates() -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let Some(path) = std::env::var_os("IVNC_REMOTE_CA_FILE") else {
+        return Ok(Vec::new());
+    };
+    let certs = rustls::pki_types::CertificateDer::pem_file_iter(path)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if certs.is_empty() {
+        return Err("IVNC_REMOTE_CA_FILE contains no certificates".into());
+    }
+    Ok(certs)
+}
+fn build_tls_config(
+    extra: Vec<rustls::pki_types::CertificateDer<'static>>,
+) -> Result<rustls::ClientConfig, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    let (_, ignored) =
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if ignored > 0 {
+        log::debug!("Ignored {ignored} unusable system certificates");
+    }
+    for cert in extra {
+        roots.add(cert).map_err(|e| e.to_string())?;
+    }
+    // TLS builds may enable both ring and aws-lc through dependencies. Always
+    // choose a provider, including when only the system CA store is used.
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| e.to_string())?
+    .with_root_certificates(roots)
+    .with_no_client_auth())
+}
+
+/// Ends a lease when dropped, e.g. with a WebSocket callback that never ran.
+struct StopOnDrop(Arc<Lease>);
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
+
+struct AccessLease {
+    lease: Arc<Lease>,
+    owned: bool,
+    authorization: Option<(Arc<super::store::RemoteStore>, String, String)>,
+}
+impl AccessLease {
+    /// Completes when access ends, including when its session token is no
+    /// longer valid. Access changes are signalled by the store; the slow timer
+    /// only catches expiry.
+    async fn cancelled(&self) {
+        let Some((store, app, token)) = &self.authorization else {
+            return self.lease.cancelled().await;
+        };
+        let mut changes = store.subscribe();
+        loop {
+            if !store.verify(app, token) {
+                self.lease.stop_with(StopReason::Revoked);
+                return;
+            }
+            tokio::select! {
+                _ = self.lease.cancelled() => return,
+                _ = changes.changed() => {},
+                _ = tokio::time::sleep(Duration::from_secs(300)) => {},
+            }
+        }
+    }
+}
+impl Drop for AccessLease {
+    fn drop(&mut self) {
+        if self.owned {
+            self.lease.stop();
+        }
+    }
+}
+async fn bounded_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+    let mut stream = response.bytes_stream();
+    let mut data = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if data.len() + chunk.len() > limit {
+            return Err("Remote application response is too large".into());
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(data)
+}
+async fn bounded_json(response: reqwest::Response) -> Result<Value, String> {
+    let data = bounded_body(response, 65536).await?;
+    serde_json::from_slice(&data).map_err(|_| "Invalid remote application metadata".into())
 }
 
 #[cfg(test)]
@@ -1421,10 +1623,9 @@ mod tests {
             port: listener.local_addr().unwrap().port(),
             password: "test".into(),
             generation: "one".into(),
-            desktop: DesktopSettings::default(),
             supervisor: std::process::id(),
         };
-        let lease = Lease::new("app".into(), false, true, "one".into());
+        let lease = Lease::new("app".into(), false);
         let guard = AccessLease {
             lease: lease.clone(),
             owned: true,
@@ -1432,7 +1633,7 @@ mod tests {
         };
         let request =
             tokio::spawn(
-                async move { fetch_data(&Source::Local(endpoint), "app/files", guard).await },
+                async move { fetch_data(guard, local_data(&endpoint, "ui-config")).await },
             );
         let (mut upstream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
@@ -1449,36 +1650,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_revocation_cancels_downloads_without_a_websocket() {
+    async fn access_changes_end_sessions_without_a_websocket() {
         let store = Arc::new(super::super::store::RemoteStore::in_memory());
-        store
-            .set_policy(
-                "app",
-                true,
-                Some("password-one"),
-                DesktopSettings::default(),
-            )
-            .unwrap();
-        let credential = store
-            .authenticate("app", "password-one", &Default::default())
-            .unwrap();
-        let lease = Lease::new("app".into(), true, false, "one".into());
+        store.set_policy("app", true, Some("password-one")).unwrap();
+        let token = store.authenticate("app", "password-one").unwrap();
+        let lease = Lease::new("app".into(), true);
         let guard = AccessLease {
             lease: lease.clone(),
             owned: true,
-            authorization: Some((store.clone(), "app".into(), credential.clone())),
+            authorization: Some((store.clone(), "app".into(), token.clone())),
         };
         assert!(lease.active());
-        store.revoke_grant("app", &credential).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), guard.cancelled())
+        let waiting = tokio::spawn(async move { guard.cancelled().await });
+        tokio::task::yield_now().await;
+        assert!(lease.active());
+        store.set_policy("app", true, Some("password-two")).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), waiting)
             .await
+            .unwrap()
             .unwrap();
-        assert!(!lease.active());
+        assert_eq!(lease.stop_reason(), Some(StopReason::Revoked));
+        assert!(!store.verify("app", &token));
     }
 
     #[tokio::test]
     async fn failed_data_requests_release_session_capacity() {
-        let lease = Lease::new("app".into(), true, false, "one".into());
+        let lease = Lease::new("app".into(), true);
         let guard = AccessLease {
             lease: lease.clone(),
             owned: true,
@@ -1488,12 +1685,134 @@ mod tests {
             port: 0,
             password: "test".into(),
             generation: "one".into(),
-            desktop: DesktopSettings::default(),
             supervisor: std::process::id(),
         };
-        let response = fetch_data(&Source::Local(endpoint), "app/files", guard).await;
+        let response = fetch_data(guard, local_data(&endpoint, "ui-config")).await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert!(!lease.active());
+    }
+
+    #[test]
+    fn work_of_an_earlier_connection_records_nothing() {
+        let cache = RemoteHealthCache::default();
+        let old = cache.epoch("app");
+        assert_eq!(cache.epoch("app"), old);
+        assert!(cache.record("app", old, "connected", String::new()));
+        // The connection is saved again while a check of the old one runs.
+        cache.forget("app");
+        cache.remember_token("app", "new-token".into());
+        let new = cache.epoch("app");
+        assert_ne!(new, old);
+        assert!(!cache.record("app", old, "auth_required", "stale".into()));
+        assert!(cache.get("app").is_none());
+        assert!(cache
+            .current("app", old, |l| l.token = Some("stale".into()))
+            .is_none());
+        assert_eq!(cache.token("app", new).as_deref(), Some("new-token"));
+        assert_eq!(cache.token("app", old), None);
+    }
+
+    /// A stand-in for B that counts authentications, answers them after a
+    /// delay, and accepts `password-one` only.
+    async fn fake_b() -> (Target, Arc<std::sync::atomic::AtomicUsize>) {
+        let logins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = logins.clone();
+        let app = Router::new().route(
+            "/remote/v1/apps/app/authenticate",
+            post(move |Json(body): Json<Value>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if body["password"] != "password-one" {
+                        return error(StatusCode::UNAUTHORIZED, "Invalid application credentials");
+                    }
+                    Json(json!({"protocol":PROTOCOL,"node_id":"node","app_id":"app","name":"App","token":super::super::token()})).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            app_id: "app".into(),
+            node_id: "node".into(),
+            name: "App".into(),
+            password: "password-one".into(),
+        };
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (target, logins)
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_one_authentication() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let apps = AppsState::for_test(None, None);
+        let (target, logins) = fake_b().await;
+        let epoch = apps.remote_health.epoch("app");
+        let tokens = futures::future::join_all(
+            (0..8).map(|_| session_token(&apps, "app", epoch, &target, None, false)),
+        )
+        .await;
+        let tokens: Vec<String> = tokens.into_iter().map(|t| t.unwrap().0).collect();
+        assert_eq!(logins.load(SeqCst), 1);
+        assert!(tokens.iter().all(|t| *t == tokens[0]));
+        // B no longer accepts it: requests that saw it rejected renew it once.
+        let renewed = futures::future::join_all(
+            (0..4).map(|_| session_token(&apps, "app", epoch, &target, Some(&tokens[0]), false)),
+        )
+        .await;
+        assert_eq!(logins.load(SeqCst), 2);
+        let renewed = renewed[0].as_ref().unwrap();
+        assert!(renewed.1 && renewed.0 != tokens[0]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_password_is_tried_again_only_by_the_health_check() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let apps = AppsState::for_test(None, None);
+        let (target, logins) = fake_b().await;
+        let target = Target {
+            password: "password-old".into(),
+            ..target
+        };
+        let epoch = apps.remote_health.epoch("app");
+        let refused = session_token(&apps, "app", epoch, &target, None, false)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.state, "auth_required");
+        assert_eq!(logins.load(SeqCst), 1);
+        assert_eq!(
+            apps.remote_health.get("app").unwrap().state,
+            "auth_required"
+        );
+        // Views and their data requests fail at once.
+        for _ in 0..3 {
+            let e = session_token(&apps, "app", epoch, &target, None, false)
+                .await
+                .unwrap_err();
+            assert_eq!(e.state, "auth_required");
+            let e = probe(&apps, "app", epoch, &target, false)
+                .await
+                .unwrap_err();
+            assert_eq!(e.state, "auth_required");
+        }
+        assert_eq!(logins.load(SeqCst), 1);
+        // The health check tries again.
+        assert!(session_token(&apps, "app", epoch, &target, None, true)
+            .await
+            .is_err());
+        assert_eq!(logins.load(SeqCst), 2);
+        // So does a connection saved again.
+        apps.remote_health.forget("app");
+        let epoch = apps.remote_health.epoch("app");
+        let target = Target {
+            password: "password-one".into(),
+            ..target
+        };
+        assert!(session_token(&apps, "app", epoch, &target, None, false)
+            .await
+            .is_ok());
+        assert_eq!(logins.load(SeqCst), 3);
     }
 
     #[test]
@@ -1533,178 +1852,8 @@ mod tests {
             assert!(parse_share_url(url).is_err(), "{url}");
         }
         assert!(parse_share_url("http://127.0.0.1:8008/remote/v1/apps/app").is_ok());
+        assert!(data_path("ui-config"));
         assert!(!data_path("api/apps"));
-        assert!(!data_path("app/files/../../etc/passwd"));
+        assert!(!data_path("app/files"));
     }
-}
-
-async fn disconnect_session(
-    State(g): State<Arc<Gateway>>,
-    Path((app, session)): Path<(String, String)>,
-) -> Response {
-    if let Err(e) = desktop(&g, &app) {
-        return e;
-    }
-    if g.shared.media_router.disconnect(&app, &session) {
-        audit("disconnect", &app, json!({"session": session}));
-        Json(json!({"ok":true})).into_response()
-    } else {
-        error(StatusCode::NOT_FOUND, "Session not found")
-    }
-}
-/// Revokes one saved connection on B and ends every session that used it.
-async fn revoke_grant(
-    State(g): State<Arc<Gateway>>,
-    Path((app, grant)): Path<(String, String)>,
-) -> Response {
-    if let Err(e) = desktop(&g, &app) {
-        return e;
-    }
-    match g.apps.remote.revoke_grant_id(&app, &grant) {
-        Ok(true) => {
-            g.shared.media_router.revoke_grant(&app, &grant);
-            audit("revoke_grant", &app, json!({"grant": grant}));
-            Json(json!({"ok":true})).into_response()
-        }
-        Ok(false) => error(StatusCode::NOT_FOUND, "Connection not found"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-async fn revoke_credential(
-    State(g): State<Arc<Gateway>>,
-    Path(id): Path<String>,
-    addr: Option<Extension<HttpPeerAddr>>,
-    headers: HeaderMap,
-) -> Response {
-    let origin = match authorize(&g, &id, &headers, &peer(&addr)) {
-        Ok(o) => o,
-        Err(e) => return e,
-    };
-    match g.apps.remote.revoke_grant(&id, bearer(&headers)) {
-        Ok(()) => {
-            g.shared.media_router.revoke_grant(&id, &origin.grant);
-            Json(json!({"ok":true})).into_response()
-        }
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-async fn test_connection(State(g): State<Arc<Gateway>>, Json(body): Json<Value>) -> Response {
-    match connect_target(&body, &g.apps.remote.node_id).await {
-        Ok(target) => {
-            let result = check_target(&target).await;
-            forget_target(&target).await;
-            match result {
-                Ok(info) => Json(info).into_response(),
-                Err(e) => error(StatusCode::BAD_GATEWAY, e.message),
-            }
-        }
-        Err(e) => error(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-/// Best effort: removing a mapping must still work when B is unavailable.
-pub async fn forget_target(target: &Target) {
-    if let Ok(client) = http_client() {
-        let _ = client
-            .delete(format!(
-                "{}/remote/v1/apps/{}/credential",
-                target.base_url, target.app_id
-            ))
-            .bearer_auth(&target.credential)
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await;
-    }
-}
-
-fn trusted_certificates() -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
-    use rustls::pki_types::pem::PemObject;
-    let Some(path) = std::env::var_os("IVNC_REMOTE_CA_FILE") else {
-        return Ok(Vec::new());
-    };
-    let certs = rustls::pki_types::CertificateDer::pem_file_iter(path)
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    if certs.is_empty() {
-        return Err("IVNC_REMOTE_CA_FILE contains no certificates".into());
-    }
-    Ok(certs)
-}
-fn build_tls_config(
-    extra: Vec<rustls::pki_types::CertificateDer<'static>>,
-) -> Result<rustls::ClientConfig, String> {
-    let mut roots = rustls::RootCertStore::empty();
-    let (_, ignored) =
-        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-    if ignored > 0 {
-        log::debug!("Ignored {ignored} unusable system certificates");
-    }
-    for cert in extra {
-        roots.add(cert).map_err(|e| e.to_string())?;
-    }
-    // TLS builds may enable both ring and aws-lc through dependencies. Always
-    // choose a provider, including when only the system CA store is used.
-    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| e.to_string())?
-    .with_root_certificates(roots)
-    .with_no_client_auth())
-}
-
-/// Ends a lease when dropped, e.g. with a WebSocket callback that never ran.
-struct StopOnDrop(Arc<Lease>);
-impl Drop for StopOnDrop {
-    fn drop(&mut self) {
-        self.0.stop();
-    }
-}
-
-struct AccessLease {
-    lease: Arc<Lease>,
-    owned: bool,
-    authorization: Option<(Arc<super::store::RemoteStore>, String, String)>,
-}
-impl AccessLease {
-    /// Completes when access ends, including when its credential is revoked.
-    /// Credential changes are signalled by the store; the slow timer only
-    /// catches expiry.
-    async fn cancelled(&self) {
-        let Some((store, app, credential)) = &self.authorization else {
-            return self.lease.cancelled().await;
-        };
-        let mut changes = store.subscribe();
-        loop {
-            if !store.verify(app, credential) {
-                self.lease.stop_with(StopReason::Revoked);
-                return;
-            }
-            tokio::select! {
-                _ = self.lease.cancelled() => return,
-                _ = changes.changed() => {},
-                _ = tokio::time::sleep(Duration::from_secs(300)) => {},
-            }
-        }
-    }
-}
-impl Drop for AccessLease {
-    fn drop(&mut self) {
-        if self.owned {
-            self.lease.stop();
-        }
-    }
-}
-async fn bounded_json(response: reqwest::Response) -> Result<Value, String> {
-    let mut stream = response.bytes_stream();
-    let mut data = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        if data.len() + chunk.len() > 65536 {
-            return Err("Remote application metadata is too large".into());
-        }
-        data.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&data).map_err(|_| "Invalid remote application metadata".into())
 }

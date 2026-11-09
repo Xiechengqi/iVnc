@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 #
 # remote_app_smoke.sh — end-to-end regression suite for application-scoped
-# remote desktop sharing. Boots two fully isolated iVnc instances (A and B),
-# runs a real GTK desktop app inside B's per-application sandbox, shares it
-# with an application password, connects from A as a "remote app", and drives
-# a real headless Chrome through A's relay. Verifies:
+# remote desktop sharing. Boots two temporary iVnc instances (A and B), turns
+# on remote access for a real GTK desktop app on B (which then runs in its own
+# runtime), connects from A as a "remote app", and drives a real headless
+# Chrome through A's relay. Verifies:
 #
-#   1. Sharing requires an application password and authenticates per app.
-#   2. Wrong application passwords are rejected.
-#   3. A remote app can be added on A only with a valid URL + password.
-#   4. A browser connected only to A receives real video and can send input
-#      that reaches the application running on B.
-#   5. Disabling sharing on B force-disconnects the live remote view.
+#   1. Sharing requires an access password, which B can show again, and
+#      authenticates per app.
+#   2. Wrong access passwords are rejected; tokens are scoped to one app.
+#   3. A remote app can be added on A only with a valid URL + password, and
+#      connects when it is started.
+#   4. A browser connected only to A receives real video and can upload and
+#      send input that reaches the application running on B.
+#   5. Further connections (a second A page as an embedded stream tab, and B
+#      itself) view the same process in parallel, and every one may control.
+#   6. Disabling sharing on B force-disconnects the live remote view; stopping
+#      and deleting the remote app on A leave B's application running.
 #
 # Env knobs (all optional):
 #   IVNC_BIN=path     binary to test   (default: target/release/ivnc)
-#   KEEP_TMP=1        keep the sandbox dir on exit (default: remove)
+#   KEEP_TMP=1        keep the temporary dir on exit (default: remove)
 #   REMOTE_SMOKE_TLS=1 test B's HTTPS/WSS certificate validation as well
 #
-# Requires: bubblewrap, slirp4netns, nftables, iproute2, gtk-3-examples,
-# google-chrome, node, jq, curl.
+# Requires: gtk-3-examples, google-chrome, node (with web/ivnc's `ws`), jq,
+# curl, python3.
 
 set -u -o pipefail
 
@@ -50,11 +55,26 @@ check_status() {
   check_eq "$name" "$expected" "$code"
 }
 
+# Waits up to $1 seconds for the remaining command to succeed.
+eventually() {
+  local deadline=$((SECONDS + $1)); shift
+  until "$@" >/dev/null 2>&1; do
+    [ "$SECONDS" -ge "$deadline" ] && return 1
+    sleep 0.5
+  done
+}
+
+# Prints a field of A's remote app.
+remote_field() {
+  curl -sS -m 15 "$BASE_A/api/apps/$REMOTE_ID" | jq -r ".$1"
+}
+remote_state_is() { [ "$(remote_field remote_state)" = "$1" ]; }
+
 free_port() {
   python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
 }
 
-for tool in bwrap slirp4netns nft ip gtk3-demo google-chrome node jq curl python3; do
+for tool in gtk3-demo google-chrome node jq curl python3; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     say "ERROR: required tool not found: $tool"
     exit 1
@@ -133,7 +153,7 @@ cleanup() {
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi
   done
   if [ "${KEEP_TMP:-}" = "1" ]; then
-    say "KEEP_TMP=1 — sandbox left at $TMP"
+    say "KEEP_TMP=1 — temporary dir left at $TMP"
   else
     rm -rf "$TMP"
   fi
@@ -142,7 +162,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 say "binary    : $IVNC_BIN"
-say "sandbox   : $TMP"
+say "temp dir  : $TMP"
 say "A         : $BASE_A"
 say "B         : $BASE_B"
 
@@ -159,35 +179,47 @@ resp="$(curl -sS -m 15 -u "$B_AUTH" -X POST "$BASE_B/api/apps" \
   -d '{"name":"remote-demo","app_type":"desktop","exec_command":"gtk3-demo"}')"
 APP_ID="$(jq -r '.app.id' <<<"$resp")"
 if [ -n "$APP_ID" ] && [ "$APP_ID" != "null" ]; then pass "desktop app created on B"; else fail "desktop app creation: $resp"; exit 1; fi
+check_eq "sharing is off by default" "false" "$(curl -sS -m 15 -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.sharing.enabled')"
 
-resp="$(curl -sS -m 30 -u "$B_AUTH" -X POST "$BASE_B/api/apps/$APP_ID/start")"
-check_eq "app start accepted" "true" "$(jq -r '.ok' <<<"$resp")"
+code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -u "$B_AUTH" -X PUT "$BASE_B/api/apps/$APP_ID/sharing" \
+  -H 'Content-Type: application/json' -d '{"enabled":true}')"
+check_eq "enabling without a password is refused" "400" "$code"
 
+# Enabled before the first start, so the app starts in its own runtime.
 resp="$(curl -sS -m 15 -u "$B_AUTH" -X PUT "$BASE_B/api/apps/$APP_ID/sharing" \
   -H 'Content-Type: application/json' \
-  -d "{\"enabled\":true,\"password\":\"$APP_PASSWORD\",\"desktop\":{\"x11\":false,\"services\":[]}}")"
-check_eq "sharing enabled" "true" "$(jq -r '.policy.enabled' <<<"$resp")"
-check_eq "password stored as hash only" "true" "$(jq -r '.policy.password_set' <<<"$resp")"
+  -d "{\"enabled\":true,\"password\":\"$APP_PASSWORD\"}")"
+check_eq "sharing enabled" "true" "$(jq -r '.ok' <<<"$resp")"
+check_eq "stopped app needs no restart" "false" "$(jq -r '.restart_required' <<<"$resp")"
 
 resp="$(curl -sS -m 15 -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID/sharing")"
-SHARE_URL="$BASE_B$(jq -r '.share_path' <<<"$resp")"
+check_eq "sharing reported enabled" "true" "$(jq -r '.enabled' <<<"$resp")"
+check_eq "password is viewable on B" "$APP_PASSWORD" "$(jq -r 'select(.password_viewable == true) | .password' <<<"$resp")"
 check_eq "share path shape" "/remote/v1/apps/$APP_ID" "$(jq -r '.share_path' <<<"$resp")"
+SHARE_URL="$BASE_B$(jq -r '.share_path' <<<"$resp")"
+
+resp="$(curl -sS -m 60 -u "$B_AUTH" -X POST "$BASE_B/api/apps/$APP_ID/start")"
+check_eq "app start accepted" "true" "$(jq -r '.ok' <<<"$resp")"
+check_eq "shared app runs in its own runtime" "running" "$(curl -sS -m 15 -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.status')"
+check_eq "running shared app needs no restart" "false" "$(curl -sS -m 15 -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.sharing.restart_required')"
+[ -f "$TMP/b/home/runtimes/$APP_ID/endpoint.json" ] && pass "runtime endpoint published" || fail "runtime endpoint published"
 
 hdr "negative authorization checks"
-check_status "remote info without credential rejected" "401" "$SHARE_URL/info"
+check_status "remote info without token rejected" "401" "$SHARE_URL/info"
 code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "$SHARE_URL/authenticate" \
   -H 'Content-Type: application/json' -d '{"password":"wrong-password"}')"
-check_eq "wrong application password rejected" "401" "$code"
+check_eq "wrong access password rejected" "401" "$code"
 resp="$(curl -sS -m 20 -X POST "$BASE_A/api/apps" -H 'Content-Type: application/json' \
   -d "{\"app_type\":\"remote\",\"url\":\"$SHARE_URL\",\"password\":\"wrong-password\"}")"
 check_eq "adding remote app with wrong password fails" "null" "$(jq -r '.ok' <<<"$resp")"
-credential="$(curl -sS -m 15 -X POST "$SHARE_URL/authenticate" -H 'Content-Type: application/json' \
-  -d "{\"password\":\"$APP_PASSWORD\"}" | jq -r '.credential')"
-check_status "app credential cannot list B applications" "401" "$BASE_B/api/apps" -H "Authorization: Bearer $credential"
-check_status "app credential cannot access another desktop" "401" "$BASE_B/remote/v1/apps/builtin-chrome/info" -H "Authorization: Bearer $credential"
-check_status "data proxy rejects management routes" "404" "$SHARE_URL/data/api/apps" -H "Authorization: Bearer $credential"
-check_status "temporary credential revocation" "200" "$SHARE_URL/credential" -X DELETE -H "Authorization: Bearer $credential"
-check_status "revoked credential is rejected" "401" "$SHARE_URL/info" -H "Authorization: Bearer $credential"
+token="$(curl -sS -m 15 -X POST "$SHARE_URL/authenticate" -H 'Content-Type: application/json' \
+  -d "{\"password\":\"$APP_PASSWORD\"}" | jq -r '.token // empty')"
+[ -n "$token" ] && pass "session token issued" || fail "session token issued"
+check_status "token reads the shared app" "200" "$SHARE_URL/info" -H "Authorization: Bearer $token"
+check_status "token cannot list B applications" "401" "$BASE_B/api/apps" -H "Authorization: Bearer $token"
+check_status "token cannot access another desktop" "401" "$BASE_B/remote/v1/apps/builtin-chrome/info" -H "Authorization: Bearer $token"
+check_status "data proxy rejects management routes" "404" "$SHARE_URL/data/api/apps" -H "Authorization: Bearer $token"
+check_status "data proxy offers no file downloads" "404" "$SHARE_URL/data/app/files" -H "Authorization: Bearer $token"
 
 hdr "remote app on A"
 resp="$(curl -sS -m 20 -X POST "$BASE_A/api/remote/test" -H 'Content-Type: application/json' \
@@ -200,6 +232,17 @@ REMOTE_ID="$(jq -r '.app.id' <<<"$resp")"
 REMOTE_NAME="$(jq -r '.app.name' <<<"$resp")"
 if [ -n "$REMOTE_ID" ] && [ "$REMOTE_ID" != "null" ]; then pass "remote app added on A (name: $REMOTE_NAME)"; else fail "remote app creation: $resp"; exit 1; fi
 check_eq "remote app defaults to target name" "remote-demo" "$REMOTE_NAME"
+check_eq "new remote app is not started" "false" "$(remote_field started)"
+check_eq "new remote app is disconnected" "disconnected" "$(remote_field remote_state)"
+expected_plaintext=true
+if [ "${REMOTE_SMOKE_TLS:-}" = 1 ]; then expected_plaintext=false; fi
+check_eq "plaintext connection is marked" "$expected_plaintext" "$(remote_field remote_plaintext)"
+check_eq "A lists no password" "null" "$(curl -sS -m 15 "$BASE_A/api/apps" | jq -r --arg id "$REMOTE_ID" '.apps[]|select(.id==$id)|.password')"
+
+resp="$(curl -sS -m 30 -X POST "$BASE_A/api/apps/$REMOTE_ID/start")"
+check_eq "remote app start accepted" "true" "$(jq -r '.ok' <<<"$resp")"
+check_eq "remote app is started" "true" "$(remote_field started)"
+eventually 45 remote_state_is connected && pass "remote app connected" || fail "remote app connected (state: $(remote_field remote_state))"
 
 resp="$(curl -sS -m 20 -X POST "$BASE_A/api/apps/$REMOTE_ID/view")"
 VIEW_PATH="$(jq -r '.url' <<<"$resp")"
@@ -211,7 +254,7 @@ esac
 hdr "browser end-to-end through A"
 mkdir -p "$TMP/view"
 REMOTE_VIEW_EXPECT_REVOKE=1 node "$SCRIPT_DIR/remote_view_smoke.mjs" \
-  "$BASE_A$VIEW_PATH?app=$REMOTE_ID" "$TMP/view" > "$TMP/view-smoke.log" 2>&1 &
+  "$BASE_A$VIEW_PATH" "$TMP/view" > "$TMP/view-smoke.log" 2>&1 &
 VIEW_PID=$!
 
 input_ok=""
@@ -234,37 +277,49 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 check_eq "mouse click reached application compositor on B" "1" "$click_ok"
+UPLOADED="$TMP/b/home/apps/$APP_ID/home/Downloads/smoke-upload.txt"
+eventually 15 test -s "$UPLOADED"
+check_eq "upload reached the app's Downloads on B" "iVnc upload 中文" "$(cat "$UPLOADED" 2>/dev/null)"
 
-hdr "concurrent viewers and owner control"
-check_eq "A reports the active connection" "connected" "$(curl -sS "$BASE_A/api/apps/$REMOTE_ID" | jq -r '.status')"
+hdr "parallel connections"
+check_eq "A reports the active connection" "connected" "$(remote_field remote_state)"
+clicks() { local n; n="$(grep -c 'ButtonMask changed' "$APP_LOG" 2>/dev/null)"; printf '%s' "${n:-0}"; }
+clicks_increased() { [ "$(clicks)" -gt "$clicks_before" ]; }
+clicks_before="$(clicks)"
 resp="$(curl -sS -m 20 -X POST "$BASE_A/api/apps/$REMOTE_ID/view")"
-VIEWER_PATH="$(jq -r '.url' <<<"$resp")"
-mkdir -p "$TMP/viewer"
-if node "$SCRIPT_DIR/remote_view_smoke.mjs" "$BASE_A$VIEWER_PATH?app=$REMOTE_ID" "$TMP/viewer" --viewer > "$TMP/viewer.log" 2>&1; then
-  pass "second viewer receives video; server rejects takeover, resize and upload"
+SECOND_PATH="$(jq -r '.url' <<<"$resp")"
+[ "$SECOND_PATH" != "$VIEW_PATH" ] && pass "each page gets its own view token" || fail "view token reused"
+mkdir -p "$TMP/second"
+if REMOTE_VIEW_UPLOAD_NAME=second-upload.txt node "$SCRIPT_DIR/remote_view_smoke.mjs" \
+  "$BASE_A$SECOND_PATH" "$TMP/second" --embed > "$TMP/second.log" 2>&1; then
+  pass "embedded second view receives video, hides its own toolbar and reports its state"
 else
-  fail "second viewer control boundary"
-  cat "$TMP/viewer.log"
+  fail "embedded second view"
+  cat "$TMP/second.log"
 fi
-curl -sS -m 5 -X POST "$BASE_A${VIEWER_PATH}close" >/dev/null
+curl -sS -m 5 -X POST "$BASE_A${SECOND_PATH}close" >/dev/null
+eventually 10 clicks_increased && pass "second connection may control as well" || fail "second connection input did not reach B"
+SECOND_UPLOAD="$TMP/b/home/apps/$APP_ID/home/Downloads/second-upload.txt"
+eventually 15 test -s "$SECOND_UPLOAD" && pass "second connection may upload as well" || fail "second connection upload did not reach B"
 resp="$(curl -sS -m 20 -u "$B_AUTH" -X POST "$BASE_B/api/apps/$APP_ID/view")"
-OWNER_PATH="$(jq -r '.url' <<<"$resp")"
-mkdir -p "$TMP/owner"
-OWNER_BASE="${BASE_B/\/\//\/\/$B_AUTH@}"
-if node "$SCRIPT_DIR/remote_view_smoke.mjs" "$OWNER_BASE$OWNER_PATH?app=$APP_ID" "$TMP/owner" --owner > "$TMP/owner.log" 2>&1; then
-  pass "B owner can take control from remote controller"
+LOCAL_PATH="$(jq -r '.url' <<<"$resp")"
+mkdir -p "$TMP/local"
+LOCAL_BASE="${BASE_B/\/\//\/\/$B_AUTH@}"
+if node "$SCRIPT_DIR/remote_view_smoke.mjs" "$LOCAL_BASE$LOCAL_PATH" "$TMP/local" --no-input > "$TMP/local.log" 2>&1; then
+  pass "B views its shared app while A is connected"
 else
-  fail "owner takeover"
-  cat "$TMP/owner.log"
+  fail "local view on B"
+  cat "$TMP/local.log"
 fi
-curl -sS -m 5 -u "$B_AUTH" -X POST "$BASE_B${OWNER_PATH}close" >/dev/null
-check_eq "viewers reuse the same application process" "running" "$(curl -sS -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.status')"
+curl -sS -m 5 -u "$B_AUTH" -X POST "$BASE_B${LOCAL_PATH}close" >/dev/null
+check_eq "connections reuse the same application process" "running" "$(curl -sS -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.status')"
 
 hdr "revocation"
 resp="$(curl -sS -m 15 -u "$B_AUTH" -X PUT "$BASE_B/api/apps/$APP_ID/sharing" \
-  -H 'Content-Type: application/json' \
-  -d '{"enabled":false,"desktop":{"x11":false,"services":[]}}')"
-check_eq "sharing disabled on B" "false" "$(jq -r '.policy.enabled' <<<"$resp")"
+  -H 'Content-Type: application/json' -d '{"enabled":false}')"
+check_eq "sharing disabled on B" "true" "$(jq -r '.ok' <<<"$resp")"
+check_eq "disabling reports disconnected sessions" "true" "$(jq -r '.revoked' <<<"$resp")"
+check_eq "disabling a running shared app needs a restart" "true" "$(jq -r '.restart_required' <<<"$resp")"
 
 revoke_ok=""
 for _ in $(seq 1 60); do
@@ -277,12 +332,16 @@ else
   fail "view was not disconnected after revocation"
   cat "$TMP/view-smoke.log"
 fi
+check_status "old token rejected after disabling" "401" "$SHARE_URL/info" -H "Authorization: Bearer $token"
 
 resp="$(curl -sS -m 20 -X POST "$BASE_A/api/apps/$REMOTE_ID/view")"
 check_eq "view rejected after revocation" "null" "$(jq -r '.url' <<<"$resp")"
 
+check_eq "stopping the remote app on A" "true" "$(curl -sS -m 20 -X POST "$BASE_A/api/apps/$REMOTE_ID/stop" | jq -r '.ok')"
+check_eq "stopped remote app is not started" "false" "$(remote_field started)"
+check_eq "stopped remote app is disconnected" "disconnected" "$(remote_field remote_state)"
 check_status "delete remote mapping" "200" "$BASE_A/api/apps/$REMOTE_ID" -X DELETE
-check_eq "deleting mapping keeps B's application running" "running" "$(curl -sS -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.status')"
+check_eq "stopping and deleting on A keep B's application running" "running" "$(curl -sS -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.status')"
 
 hdr "summary"
 say "passed: $PASS, failed: $FAIL"

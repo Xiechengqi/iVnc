@@ -14,8 +14,10 @@
   <script>
     (function() {
       window.__IVNC_APP_VIEW__ = window.location.pathname.startsWith('/app-view/');
-      window.__ivncViewActive = window.parent === window;
-      window.__ivncCanControl = !window.__IVNC_APP_VIEW__;
+      // Embedded app views are stream tabs of the main desktop page (app-streams.js).
+      window.__IVNC_EMBED__ = window.__IVNC_APP_VIEW__ && window.parent !== window
+        && new URLSearchParams(window.location.search).get('embed') === '1';
+      window.__ivncViewActive = !window.__IVNC_EMBED__;
       const configBase = window.__IVNC_APP_VIEW__ ? window.location.pathname : '/';
       window.__IVNC_WS_HOST__ = window.location.hostname;
       // Server replaces __IVNC_INJECTED_PORT__ with actual port (e.g., "8007")

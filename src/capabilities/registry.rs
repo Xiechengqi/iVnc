@@ -27,6 +27,7 @@ pub async fn build_snapshot(apps: &Arc<AppsState>) -> CapabilitySnapshot {
     for app in configured {
         let status = match apps.app_status(&app) {
             AppStatus::Running => "running",
+            AppStatus::Starting => "starting",
             AppStatus::Stopped => "stopped",
             AppStatus::Crashed => "crashed",
         }

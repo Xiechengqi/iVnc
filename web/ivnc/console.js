@@ -1,11 +1,15 @@
-import {openAppView, showSharing, remoteText} from './remote-apps.js';
-import { getLang, setLang, onLangChange } from './lib/i18n.js?v=1';
+import { getLang, setLang, onLangChange, APP_STRINGS, remoteStateText } from './lib/i18n.js?v=1';
+import { notifyAppStarted } from './app-streams.js';
 
 const API = '/api/apps';
 const CONSOLE_API = '/api/console';
 const CAP_API = '/api/capabilities';
 let editId = null;
 let editBuiltin = false;
+let editApp = null;        // record of the app being edited
+let sharingState = null;   // GET /api/apps/{id}/sharing of the desktop app being edited
+let appSignature = '';     // launch settings as last saved; a change on a running app needs a restart
+let modalSaved = false;    // the open dialog has saved at least once
 let lastDataHash = '';
 let currentLang = getLang();
 let activeSection = 'overview';
@@ -20,7 +24,7 @@ const I18N = {
         navApps: 'Apps',
         navSettings: 'Connection',
         sectionOverviewDesc: 'Current iVnc status and quick checks.',
-        sectionAppsDesc: 'Manage desktop, background, and CLI applications.',
+        sectionAppsDesc: 'Manage desktop, background, CLI and remote applications.',
         sectionSettingsDesc: 'Common runtime controls for stream quality.',
         saveApply: 'Save & Apply',
         requestKeyframe: 'Request Keyframe',
@@ -77,9 +81,6 @@ const I18N = {
         desktop: 'Desktop',
         background: 'Background',
         cli: 'CLI',
-        missing: 'missing',
-        running: 'running',
-        stopped: 'stopped',
         start: 'Start',
         stop: 'Stop',
         restart: 'Restart',
@@ -88,7 +89,6 @@ const I18N = {
         log: 'Logs',
         clear: 'Clear',
         delete: 'Delete',
-        editDisabled: 'Stop the app before editing',
         addModal: 'Add App',
         editModal: 'Edit App',
         addSave: 'Add',
@@ -199,7 +199,7 @@ const I18N = {
         navApps: '应用',
         navSettings: '连接质量',
         sectionOverviewDesc: '当前 iVnc 运行状态和快捷入口。',
-        sectionAppsDesc: '管理桌面、后台和 CLI 应用。',
+        sectionAppsDesc: '管理桌面、后台、CLI 和远程应用。',
         sectionSettingsDesc: '调整常用的实时串流质量参数。',
         saveApply: '保存并应用',
         requestKeyframe: '请求关键帧',
@@ -256,9 +256,6 @@ const I18N = {
         desktop: '桌面',
         background: '后台',
         cli: 'CLI',
-        missing: '缺失',
-        running: '运行中',
-        stopped: '已停止',
         start: '启动',
         stop: '停止',
         restart: '重启',
@@ -267,7 +264,6 @@ const I18N = {
         log: '日志',
         clear: '清理',
         delete: '删除',
-        editDisabled: '请先停止应用再编辑',
         addModal: '添加应用',
         editModal: '编辑应用',
         addSave: '添加',
@@ -373,6 +369,10 @@ const I18N = {
     }
 };
 
+// Status, sharing and remote-app strings live in lib/i18n.js so the desktop
+// toolbar can share them.
+for (const lang of Object.keys(I18N)) Object.assign(I18N[lang], APP_STRINGS[lang]);
+
 function t(key) {
     return I18N[currentLang][key];
 }
@@ -399,7 +399,11 @@ function getHash(data) {
         error: a.error,
         cli: a.cli_binary_path,
         install: a.install_status,
-        skills: a.skill_paths
+        skills: a.skill_paths,
+        name: a.name,
+        sharing: a.sharing,
+        started: a.started,
+        remote: [a.remote_state, a.remote_detail, a.remote_plaintext]
     })).concat((data.capabilities?.apps || []).map(a => ({
         capId: a.id,
         tools: a.tool_count,
@@ -506,9 +510,11 @@ function applyTranslations() {
     const bgOpt = document.querySelector('#f-app-type option[value="background"]');
     const dtOpt = document.querySelector('#f-app-type option[value="desktop"]');
     const cliOpt = document.querySelector('#f-app-type option[value="cli"]');
+    const remoteOpt = document.querySelector('#f-app-type option[value="remote"]');
     if (bgOpt) bgOpt.textContent = t('backgroundOption');
     if (dtOpt) dtOpt.textContent = t('desktopOption');
     if (cliOpt) cliOpt.textContent = t('cliOption');
+    if (remoteOpt) remoteOpt.textContent = t('remoteOption');
     setText('label-autostart', 'autostart');
     setText('label-skill-paths', 'skillPaths');
     setText('label-skill-paths-default', 'skillPathsDefault');
@@ -529,7 +535,29 @@ function applyTranslations() {
     setText('label-cli-binary', 'cliBinary');
     setText('label-cli-env', 'cliEnv');
     setText('label-cli-env-default', 'cliEnvDefault');
-    setText('modal-cancel', editBuiltin ? 'close' : 'cancel');
+    [
+        ['basic-title', 'sectionBasic'],
+        ['sharing-title', 'sectionSharing'],
+        ['label-share-enabled', 'shareEnabled'],
+        ['help-share-enabled', 'shareEnabledHelp'],
+        ['label-share-password', 'sharePassword'],
+        ['help-share-password', 'sharePasswordHelp'],
+        ['label-share-url', 'shareUrl'],
+        ['help-share-url', 'shareUrlHelp'],
+        ['share-password-generate', 'generate'],
+        ['share-url-copy', 'copy'],
+        ['restart-now', 'restartNow'],
+        ['label-remote-url', 'remoteUrl'],
+        ['label-remote-password', 'remotePassword'],
+        ['remote-plaintext-hint', 'remotePlaintextHint'],
+        ['remote-test', 'remoteTest'],
+        ['remote-help', 'remoteHelp'],
+    ].forEach(([id, key]) => setText(id, key));
+    setPlaceholderById('f-remote-url', t('remoteUrlPlaceholder'));
+    ['f-remote-password', 'f-share-password'].forEach(syncPasswordToggle);
+    const notice = document.getElementById('restart-notice');
+    if (notice?.dataset.key) setText('restart-notice-text', notice.dataset.key);
+    setText('modal-cancel', editBuiltin || modalSaved ? 'close' : 'cancel');
     setText('log-close-btn', 'close');
     document.getElementById('modal-close')?.setAttribute('aria-label', t('close'));
     setPlaceholderById('f-name', t('nameInputPlaceholder'));
@@ -543,6 +571,7 @@ function applyTranslations() {
     setPlaceholderById('f-skill-paths', t('skillPathsPlaceholder'));
     setPlaceholderById('f-cli-binary', t('cliBinaryPlaceholder'));
     setPlaceholderById('f-cli-env', t('cliEnvPlaceholder'));
+    updateTypePlaceholders();
 
     if (!editId) {
         setText('modal-title', 'addModal');
@@ -594,18 +623,45 @@ async function loadSection(section = activeSection) {
     if (section === 'settings') await loadSettings();
 }
 
-// The view state on A, refined by the last known state of the application on B.
-function remoteStatusText(a) {
-    if (a.status === 'connected') return remoteText('已连接', 'Connected');
-    if (a.status === 'connecting') return remoteText('连接中', 'Connecting');
-    const state = {
-        stopped: remoteText('B 上未运行', 'Not running on B'),
-        not_ready: remoteText('B 上需重启应用', 'Restart required on B'),
-        auth_required: remoteText('需重新输入密码', 'Password required'),
-        unreachable: remoteText('B 无法访问', 'B unreachable'),
-        incompatible: remoteText('B 已变更', 'B changed'),
-    }[a.remote_state];
-    return state ? remoteText('未连接 · ', 'Disconnected · ') + state : remoteText('未连接', 'Disconnected');
+// Dot colour for each remote_state of a remote app.
+const REMOTE_STATUS_CLASS = {
+    disconnected: 'disconnected',
+    connecting: 'connecting',
+    starting: 'connecting',
+    connected: 'connected',
+    stopped: 'stopped',
+    not_ready: 'warning',
+    auth_required: 'error',
+    incompatible: 'error',
+    unreachable: 'error'
+};
+
+function isActive(a) {
+    return a.app_type === 'remote' ? !!a.started : a.status === 'running' || a.status === 'starting';
+}
+
+function appStatus(a) {
+    if (a.app_type === 'remote') {
+        const state = a.remote_state || (a.started ? 'connecting' : 'disconnected');
+        return { text: remoteStateText(state), cls: REMOTE_STATUS_CLASS[state] || 'error', detail: a.remote_detail || '' };
+    }
+    if (a.app_type === 'cli') {
+        const key = a.install_status || 'missing';
+        return { text: t(key) || key, cls: a.installed ? 'running' : 'stopped', detail: a.install_error || '' };
+    }
+    const text = a.enabled === false ? t('disabledByAdmin') : (t(a.status) || a.status);
+    return { text, cls: a.status, detail: a.error || '' };
+}
+
+// restart_required: the running app is (or is not) in its sharing worker
+// contrary to the saved setting.
+function sharingBadge(a) {
+    const sharing = a.app_type === 'desktop' ? a.sharing : null;
+    if (!sharing) return '';
+    if (sharing.enabled && !sharing.restart_required) return `<span class="badge-ok">${esc(t('badgeShared'))}</span>`;
+    if (sharing.enabled) return `<span class="badge-warn">${esc(t('badgeSharedRestart'))}</span>`;
+    if (sharing.restart_required) return `<span class="badge-warn" title="${esc(t('badgeRestartStopTitle'))}">${esc(t('badgeRestart'))}</span>`;
+    return '';
 }
 
 async function load() {
@@ -633,43 +689,44 @@ async function load() {
         d.apps.forEach(a => {
             const tr = document.createElement('tr');
             const cap = capByApp.get(a.id);
-            const type = a.app_type === 'remote' ? remoteText('远程应用', 'Remote app') : a.app_type === 'desktop' ? t('desktop') : (a.app_type === 'cli' ? t('cli') : t('background'));
+            const isRemote = a.app_type === 'remote';
+            const type = isRemote ? t('remote') : a.app_type === 'desktop' ? t('desktop') : (a.app_type === 'cli' ? t('cli') : t('background'));
             const capLines = cap ? capabilitySummaryLines(cap) : [];
-            const configStr = a.app_type === 'remote' ? (a.url || '') : a.builtin ? t('miaoService') : a.app_type === 'desktop'
+            const configStr = isRemote ? (a.url || '') : a.builtin ? t('miaoService') : a.app_type === 'desktop'
                 ? (a.exec_command || '')
                 : a.app_type === 'cli'
                     ? [a.cli_binary_path || '', ...capLines, ...(a.skill_paths || []).map(p => `skill: ${p}`)].filter(Boolean).join('\n')
                     : [a.url ? `${t('visit')}: ${a.url}` : '', a.launch_command ? `cmd: ${a.launch_command}` : ''].filter(Boolean).join('\n');
             const configShort = configStr.length > 30 ? configStr.slice(0, 30) + '...' : configStr;
-            const statusKey = a.app_type === 'cli' ? (a.install_status || 'missing') : a.status;
-            const statusText = a.app_type === 'remote' ? remoteStatusText(a) : a.enabled === false ? t('disabledByAdmin') : (t(statusKey) || statusKey);
-            const statusClass = a.app_type === 'cli'
-                ? (a.installed ? 'running' : 'stopped')
-                : a.status;
+            const plaintext = isRemote && a.remote_plaintext ? `<span class="badge-warn">${esc(t('badgePlaintext'))}</span>` : '';
+            const status = appStatus(a);
             const dataText = a.app_type === 'cli' ? '-' : a.data_size_human;
 
             tr.innerHTML = `
                 <td><strong>${esc(a.name)}</strong></td>
-                <td><span class="badge">${type}</span></td>
-                <td title="${esc(configStr)}">${esc(configShort)}</td>
+                <td><span class="badge">${esc(type)}</span></td>
+                <td title="${esc(configStr)}">${plaintext ? `<div class="config-cell"><span>${esc(configShort)}</span>${plaintext}</div>` : esc(configShort)}</td>
                 <td>
                     <div class="status-wrapper">
-                        <span class="status status-${statusClass}"></span>
-                        <span title="${esc(a.error || a.install_error || a.remote_detail || '')}">${esc(statusText)}</span>
+                        <span class="status status-${esc(status.cls)}"></span>
+                        <span title="${esc(status.detail)}">${esc(status.text)}</span>
+                        ${sharingBadge(a)}
                     </div>
                 </td>
-                <td class="data-size">${esc(dataText)}</td>
+                <td class="data-size">${esc(isRemote ? '-' : dataText)}</td>
                 <td class="actions"></td>
             `;
 
             const actionsCell = tr.querySelector('.actions');
 
-            if (a.app_type !== 'cli' && a.app_type !== 'remote') {
-                if (a.status === 'running') {
-                    const stopBtn = createBtn(t('stop'), 'btn-stop btn-sm', () => act(a.id, 'stop'));
-                    const restartBtn = createBtn(t('restart'), 'btn-restart btn-sm', () => act(a.id, 'restart'));
-                    restartBtn.disabled = a.enabled === false;
-                    actionsCell.append(stopBtn, restartBtn);
+            if (a.app_type !== 'cli') {
+                if (isActive(a)) {
+                    actionsCell.append(createBtn(t('stop'), 'btn-stop btn-sm', () => act(a.id, 'stop')));
+                    if (!isRemote) {
+                        const restartBtn = createBtn(t('restart'), 'btn-restart btn-sm', () => act(a.id, 'restart'));
+                        restartBtn.disabled = a.enabled === false;
+                        actionsCell.append(restartBtn);
+                    }
                 } else {
                     const startBtn = createBtn(t('start'), 'btn-start btn-sm', () => act(a.id, 'start'));
                     startBtn.disabled = a.enabled === false;
@@ -678,32 +735,19 @@ async function load() {
             }
 
             const editBtn = createBtn(t('edit'), 'btn-edit btn-sm', () => showEdit(a.id));
-            if (!a.builtin && a.app_type !== 'cli' && a.status === 'running') {
-                editBtn.disabled = true;
-                editBtn.title = t('editDisabled');
-            }
-
             const logBtn = createBtn(t('log'), 'btn-log btn-sm', () => showLogs(a.id, a.name));
             const clearBtn = createBtn(t('clear'), 'btn-clear btn-sm', () => clearData(a.id, a.name));
             const delBtn = createBtn(t('delete'), 'btn-delete btn-sm', () => del(a.id, a.name));
 
             actionsCell.append(editBtn);
-            if (a.app_type === 'remote' || a.app_type === 'desktop') {
-                const open = createBtn(remoteText('打开', 'Open'), 'btn-visit btn-sm', () => openAppView(a).catch(e => toast(e.message, 'err')));
-                open.disabled = a.app_type === 'desktop' && a.status !== 'running';
-                actionsCell.append(open);
-            }
-            if (a.app_type === 'desktop') {
-                actionsCell.append(createBtn(remoteText('远程访问', 'Remote access'), 'btn-edit btn-sm', () => showSharing(a.id).catch(e => toast(e.message, 'err'))));
-            }
             if (a.panel_url) {
                 const panelBtn = createBtn(t('configureProxy'), 'btn-visit btn-sm', () => window.open(a.panel_url, '_blank', 'noopener'));
                 panelBtn.disabled = a.enabled === false;
                 actionsCell.append(panelBtn);
-            } else if (a.app_type !== 'desktop' && a.app_type !== 'remote' && a.url) {
+            } else if (a.app_type !== 'desktop' && !isRemote && a.url) {
                 actionsCell.append(createBtn(t('visit'), 'btn-visit btn-sm', () => copyAccessUrl(a.url)));
             }
-            if (a.app_type !== 'cli' && a.app_type !== 'remote') {
+            if (a.app_type !== 'cli' && !isRemote) {
                 actionsCell.append(logBtn);
                 if (a.can_clear_data !== false) actionsCell.append(clearBtn);
             }
@@ -1061,63 +1105,68 @@ async function copyText(text) {
     }
 }
 
-function showAdd() {
+// ---------- App dialog ----------
+
+const APP_FIELDS = ['f-name', 'f-url', 'f-launch-command', 'f-launch-cwd', 'f-launch-timeout', 'f-launch-env',
+    'f-exec', 'f-env', 'f-cli-binary', 'f-cli-env', 'f-skill-paths', 'f-remote-url', 'f-remote-password'];
+
+// Clears per-open state so nothing leaks between apps.
+function resetModal() {
     editId = null;
     editBuiltin = false;
+    editApp = null;
+    sharingState = null;
+    appSignature = '';
+    modalSaved = false;
+    APP_FIELDS.forEach(id => setValue(id, ''));
+    document.getElementById('f-autostart').checked = false;
+    ['f-remote-password', 'f-share-password'].forEach(id => setPasswordVisible(id, false));
+    document.getElementById('remote-plaintext-hint').hidden = true;
+    setTestResult('', '');
+    document.getElementById('sharing-section').hidden = true;
+    document.getElementById('basic-title').hidden = true;
+    document.getElementById('f-share-enabled').checked = false;
+    setValue('f-share-password', '');
+    setValue('f-share-url', '');
+    showRestartNotice(null);
+    clearFormErrors();
+}
+
+function showAdd() {
+    resetModal();
     const modal = document.getElementById('modal');
     modal.querySelector('#modal-title').textContent = t('addModal');
     modal.querySelector('#modal-save').textContent = t('addSave');
-
-    document.getElementById('f-remote-url').value = '';
-    document.getElementById('f-remote-password').value = '';
-    document.getElementById('f-name').value = '';
     document.getElementById('f-app-type').value = 'background';
-    document.getElementById('f-url').value = '';
-    document.getElementById('f-autostart').checked = false;
-    document.getElementById('f-launch-command').value = '';
-    document.getElementById('f-launch-cwd').value = '';
-    document.getElementById('f-launch-timeout').value = '';
-    document.getElementById('f-launch-env').value = '';
-    document.getElementById('f-exec').value = '';
-    document.getElementById('f-env').value = '';
-    document.getElementById('f-cli-binary').value = '';
-    document.getElementById('f-cli-env').value = '';
-    document.getElementById('f-skill-paths').value = '';
-
     updateAppTypeVisibility();
     modal.classList.add('show');
+    document.getElementById('f-name').focus();
 }
 
 async function showEdit(id) {
     try {
-        const r = await fetch(API + '/' + id);
-        const a = await r.json();
+        const a = await fetchJson(API + '/' + id);
+        resetModal();
         editId = id;
+        editApp = a;
         editBuiltin = a.builtin === true && a.managed_by === 'ivnc';
         const modal = document.getElementById('modal');
         modal.querySelector('#modal-title').textContent = t('editModal');
         modal.querySelector('#modal-save').textContent = t('editSave');
 
+        const appType = a.app_type || 'background';
         document.getElementById('f-name').value = a.name;
-        document.getElementById('f-app-type').value = a.app_type || 'background';
+        document.getElementById('f-app-type').value = appType;
         document.getElementById('f-autostart').checked = !!a.autostart;
         document.getElementById('f-skill-paths').value = listToText(a.skill_paths);
-        document.getElementById('f-url').value = '';
-        document.getElementById('f-launch-command').value = '';
-        document.getElementById('f-launch-cwd').value = '';
-        document.getElementById('f-launch-timeout').value = '';
-        document.getElementById('f-launch-env').value = '';
-        document.getElementById('f-exec').value = '';
-        document.getElementById('f-env').value = '';
-        document.getElementById('f-cli-binary').value = '';
-        document.getElementById('f-cli-env').value = '';
 
-        document.getElementById('f-remote-url').value = a.url || '';
-        document.getElementById('f-remote-password').value = '';
-        if (a.app_type === 'desktop') {
+        if (appType === 'remote') {
+            document.getElementById('f-remote-url').value = a.url || '';
+            syncPlaintextHint();
+        } else if (appType === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
             document.getElementById('f-env').value = envToText(a.env_vars);
-        } else if (a.app_type === 'cli') {
+        } else if (appType === 'cli') {
             document.getElementById('f-cli-binary').value = a.cli_binary_path || '';
             document.getElementById('f-cli-env').value = envToText(a.cli_env_vars);
         } else {
@@ -1128,16 +1177,238 @@ async function showEdit(id) {
             document.getElementById('f-launch-env').value = envToText(a.launch_env_vars);
         }
         updateAppTypeVisibility();
+        appSignature = JSON.stringify(readAppBody(appType));
         modal.classList.add('show');
+        if (appType === 'desktop' && !editBuiltin) loadSharing(id);
     } catch (e) {
-        toast(t('fetchFailed') + e, 'err');
+        toast(t('fetchFailed') + e.message, 'err');
     }
 }
 
 function hideModal() {
-    editId = null;
-    editBuiltin = false;
     document.getElementById('modal').classList.remove('show');
+    resetModal();
+}
+
+function clearFormErrors() {
+    document.querySelectorAll('#modal .field-error').forEach(el => { el.textContent = ''; });
+    document.querySelectorAll('#modal .invalid').forEach(el => el.classList.remove('invalid'));
+}
+
+// Shows `message` under the field and focuses it. Returns false for validators.
+function fieldError(id, message) {
+    const input = document.getElementById(id);
+    setTextById('err-' + id, message);
+    if (input) {
+        input.classList.add('invalid');
+        input.focus();
+    }
+    return false;
+}
+
+function showModalError(message) {
+    setTextById('modal-error', message);
+}
+
+function showRestartNotice(key) {
+    const notice = document.getElementById('restart-notice');
+    notice.hidden = !key;
+    if (key) {
+        notice.dataset.key = key;
+        setText('restart-notice-text', key);
+    } else {
+        delete notice.dataset.key;
+    }
+}
+
+function setPasswordVisible(id, visible) {
+    const input = document.getElementById(id);
+    if (input) input.type = visible ? 'text' : 'password';
+    syncPasswordToggle(id);
+}
+
+function syncPasswordToggle(id) {
+    const input = document.getElementById(id);
+    const btn = document.querySelector(`[data-password-toggle="${id}"]`);
+    if (input && btn) btn.textContent = t(input.type === 'password' ? 'show' : 'hide');
+}
+
+// Uniformly random from a 64-symbol alphabet: 24 symbols carry 144 bits.
+function randomPassword() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_+=@#.';
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    return Array.from(bytes, b => alphabet[b & 63]).join('');
+}
+
+function isHttpUrl(url) {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+function syncPlaintextHint() {
+    const url = document.getElementById('f-remote-url').value.trim();
+    document.getElementById('remote-plaintext-hint').hidden = !/^http:\/\//i.test(url);
+}
+
+function setTestResult(text, tone) {
+    const el = document.getElementById('remote-test-result');
+    el.textContent = text;
+    el.classList.toggle('test-ok', tone === 'ok');
+    el.classList.toggle('test-err', tone === 'err');
+}
+
+// ---------- Remote access (desktop apps) ----------
+
+async function loadSharing(id) {
+    document.getElementById('sharing-section').hidden = false;
+    document.getElementById('basic-title').hidden = false;
+    document.getElementById('f-share-enabled').disabled = true;
+    document.getElementById('sharing-fields').hidden = true;
+    try {
+        const data = await fetchJson(`${API}/${id}/sharing`);
+        if (editId === id) renderSharing(data);
+    } catch (e) {
+        if (editId === id) setTextById('err-f-share-enabled', t('sharingLoadFailed') + e.message);
+    }
+}
+
+function renderSharing(data) {
+    sharingState = data;
+    const enabled = document.getElementById('f-share-enabled');
+    enabled.checked = !!data.enabled;
+    enabled.disabled = false;
+    const password = document.getElementById('f-share-password');
+    // Legacy rows keep only a hash: the password exists but cannot be shown.
+    password.value = data.password_viewable && data.password ? data.password : '';
+    password.placeholder = data.password_set && !data.password_viewable ? t('sharePasswordLegacy') : '';
+    setPasswordVisible('f-share-password', false);
+    document.getElementById('f-share-url').value = new URL(data.share_path, location.origin).href;
+    syncSharingFields();
+    if (data.restart_required) showRestartNotice('restartPending');
+}
+
+function syncSharingFields() {
+    document.getElementById('sharing-fields').hidden = !document.getElementById('f-share-enabled').checked;
+}
+
+function onSharingToggle() {
+    const password = document.getElementById('f-share-password');
+    setTextById('err-f-share-enabled', '');
+    // First enable: offer a strong password the owner can copy or replace.
+    if (this.checked && sharingState && !sharingState.password_set && !password.value) {
+        password.value = randomPassword();
+        setPasswordVisible('f-share-password', true);
+    }
+    syncSharingFields();
+}
+
+function byteLength(text) {
+    return new TextEncoder().encode(text).length;
+}
+
+// The PUT /sharing body, null when nothing changed, false when invalid.
+function readSharingChange() {
+    if (!sharingState) return null;
+    const enabled = document.getElementById('f-share-enabled').checked;
+    const value = document.getElementById('f-share-password').value;
+    const original = sharingState.password_viewable ? (sharingState.password || '') : '';
+    const body = { enabled };
+    if (enabled) {
+        if (!value) {
+            if (!sharingState.password_set || sharingState.password_viewable) {
+                return fieldError('f-share-password', t('sharePasswordRequired'));
+            }
+        } else if (value !== original) {
+            const length = byteLength(value);
+            if (length < 8 || length > 256) return fieldError('f-share-password', t('sharePasswordLength'));
+            body.password = value;
+        }
+    }
+    if (enabled === !!sharingState.enabled && !body.password) return null;
+    return body;
+}
+
+async function saveSharing(id, body) {
+    const result = await putJson(`${API}/${id}/sharing`, body);
+    sharingState = {
+        ...sharingState,
+        enabled: body.enabled,
+        password_set: sharingState.password_set || !!body.password,
+        password: body.password ?? sharingState.password,
+        password_viewable: body.password ? true : sharingState.password_viewable,
+        restart_required: !!result.restart_required
+    };
+    return result;
+}
+
+async function copyShareUrl() {
+    const btn = document.getElementById('share-url-copy');
+    try {
+        await copyText(document.getElementById('f-share-url').value);
+        btn.textContent = t('copied');
+        setTimeout(() => setText('share-url-copy', 'copy'), 1500);
+    } catch (e) {
+        console.warn('Failed to copy share URL:', e);
+        toast(t('copyFailed'), 'err');
+    }
+}
+
+async function restartFromModal() {
+    const id = editId;
+    if (!id) return;
+    const btn = document.getElementById('restart-now');
+    btn.disabled = true;
+    btn.textContent = t('restarting');
+    try {
+        await fetchJson(`${API}/${id}/restart`, { method: 'POST' });
+        notifyAppStarted(id);
+        hideModal();
+        toast(t('restarted'), 'ok');
+        load();
+    } catch (e) {
+        showModalError(t('actionFailed') + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = t('restartNow');
+    }
+}
+
+async function testRemote() {
+    const btn = document.getElementById('remote-test');
+    ['f-remote-url', 'f-remote-password'].forEach(id => {
+        setTextById('err-' + id, '');
+        document.getElementById(id).classList.remove('invalid');
+    });
+    const url = document.getElementById('f-remote-url').value.trim();
+    const password = document.getElementById('f-remote-password').value;
+    if (!url) return fieldError('f-remote-url', t('remoteUrlRequired'));
+    if (!isHttpUrl(url)) return fieldError('f-remote-url', t('remoteUrlInvalid'));
+    if (!password) return fieldError('f-remote-password', t('remotePasswordRequired'));
+    btn.disabled = true;
+    setTestResult(t('remoteTesting'), '');
+    try {
+        const data = await postJson('/api/remote/test', { url, password });
+        setTestResult(testResultText(data), 'ok');
+        const name = document.getElementById('f-name');
+        if (!name.value.trim() && data.name) name.value = data.name;
+    } catch (e) {
+        setTestResult(e.message, 'err');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// B's /info answer: status is the app status there, ready is false while
+// its runtime does not match its sharing setting.
+function testResultText(data) {
+    if (data.status === 'starting') return `${data.name} · ${remoteStateText('starting')}`;
+    if (data.status !== 'running') return t('remoteTestStopped')(data.name);
+    if (data.ready === false) return `${data.name} · ${remoteStateText('not_ready')}`;
+    return t('remoteTestRunning')(data.name);
 }
 
 function validateUrl(url) {
@@ -1178,44 +1449,68 @@ function parseEnvText(text) {
     return Object.keys(envVars).length ? envVars : null;
 }
 
-async function saveApp() {
-    if (editBuiltin) return;
-    const btn = document.getElementById('modal-save');
-    const appType = document.getElementById('f-app-type').value;
+function readAppBody(appType) {
     const body = {
         app_type: appType,
-        autostart: !['cli', 'remote'].includes(appType) && document.getElementById('f-autostart').checked,
+        autostart: appType !== 'cli' && document.getElementById('f-autostart').checked,
         skill_paths: parseListText(document.getElementById('f-skill-paths').value)
     };
 
     if (!editId || appType === 'remote') {
         body.name = document.getElementById('f-name').value.trim();
-        if (!body.name && appType !== 'remote') return toast(t('missingName'), 'err');
     }
 
     if (appType === 'remote') {
         body.url = document.getElementById('f-remote-url').value.trim();
         body.password = document.getElementById('f-remote-password').value;
-        if (!body.url || (!editId && !body.password)) return toast(remoteText('请输入连接地址和应用密码', 'Enter the connection URL and application password'), 'err');
     } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
-        if (!body.exec_command) return toast(t('missingExec'), 'err');
-
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
     } else if (appType === 'cli') {
         body.cli_binary_path = document.getElementById('f-cli-binary').value.trim();
-        if (!body.cli_binary_path) return toast(t('missingCliBinary'), 'err');
         body.cli_env_vars = parseEnvText(document.getElementById('f-cli-env').value);
     } else {
         body.launch_command = document.getElementById('f-launch-command').value.trim() || null;
-        if (!body.launch_command) return toast(t('missingLaunchCommand'), 'err');
         body.launch_cwd = document.getElementById('f-launch-cwd').value.trim() || null;
         const launchTimeout = document.getElementById('f-launch-timeout').value;
         body.launch_wait_timeout_secs = launchTimeout ? parseInt(launchTimeout, 10) : null;
         body.url = document.getElementById('f-url').value.trim() || null;
-        if (body.url && !validateUrl(body.url)) return toast(t('invalidUrl'), 'err');
         body.launch_env_vars = parseEnvText(document.getElementById('f-launch-env').value);
     }
+    return body;
+}
+
+function validateAppBody(body) {
+    // A remote app without a name takes the name reported by the remote side.
+    if (!editId && body.app_type !== 'remote' && !body.name) return fieldError('f-name', t('missingName'));
+    if (body.app_type === 'remote') {
+        if (!body.url) return fieldError('f-remote-url', t('remoteUrlRequired'));
+        if (!isHttpUrl(body.url)) return fieldError('f-remote-url', t('remoteUrlInvalid'));
+        if (!editId && !body.password) return fieldError('f-remote-password', t('remotePasswordRequired'));
+        if (editId && !body.password && body.url !== (editApp?.url || '')) {
+            return fieldError('f-remote-password', t('remotePasswordForUrl'));
+        }
+    } else if (body.app_type === 'desktop') {
+        if (!body.exec_command) return fieldError('f-exec', t('missingExec'));
+    } else if (body.app_type === 'cli') {
+        if (!body.cli_binary_path) return fieldError('f-cli-binary', t('missingCliBinary'));
+    } else {
+        if (!body.launch_command) return fieldError('f-launch-command', t('missingLaunchCommand'));
+        if (body.url && !validateUrl(body.url)) return fieldError('f-url', t('invalidUrl'));
+    }
+    return true;
+}
+
+async function saveApp() {
+    if (editBuiltin) return;
+    clearFormErrors();
+    const btn = document.getElementById('modal-save');
+    const appType = document.getElementById('f-app-type').value;
+    const body = readAppBody(appType);
+    if (!validateAppBody(body)) return;
+    const sharing = editId && appType === 'desktop' ? readSharingChange() : null;
+    if (sharing === false) return;
+    if (sharing?.password && sharingState.enabled && sharingState.password_set && !confirm(t('confirmPasswordChange'))) return;
 
     btn.disabled = true;
     const originalText = btn.textContent;
@@ -1227,17 +1522,46 @@ async function saveApp() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
         });
-        const d = await r.json();
-        if (d.error) {
-            toast(d.error, 'err');
+        const d = await parseJsonResponse(r);
+        if (!r.ok || d.error) {
+            showModalError(d.error || r.statusText);
             return;
         }
         const wasEditing = !!editId;
-        hideModal();
-        toast(wasEditing ? t('updated') : t('added'), 'ok');
+        let restart = false;
+        let revoked = false;
+        if (wasEditing && !['cli', 'remote'].includes(appType)) {
+            // Launch settings of a running app apply on its next start.
+            const signature = JSON.stringify(body);
+            restart = signature !== appSignature && isActive(editApp);
+            appSignature = signature;
+        }
+        if (sharing) {
+            try {
+                const result = await saveSharing(editId, sharing);
+                revoked = !!result.revoked;
+                restart = restart || !!result.restart_required;
+            } catch (e) {
+                // The app itself is saved; keep the dialog open on the failed part.
+                modalSaved = true;
+                setText('modal-cancel', 'close');
+                setTextById('err-f-share-enabled', e.message);
+                load();
+                return;
+            }
+        }
         load();
+        if (restart) {
+            modalSaved = true;
+            setText('modal-cancel', 'close');
+            showRestartNotice('restartSaved');
+            toast(revoked ? t('sharingRevoked') : t('updated'), 'ok');
+            return;
+        }
+        hideModal();
+        toast(revoked ? t('sharingRevoked') : wasEditing ? t('updated') : t('added'), 'ok');
     } catch (e) {
-        toast(t('actionFailed') + e, 'err');
+        showModalError(t('actionFailed') + e.message);
     } finally {
         btn.disabled = false;
         btn.textContent = originalText;
@@ -1253,6 +1577,7 @@ async function act(id, action) {
             return;
         }
         toast(action === 'start' ? t('started') : action === 'stop' ? t('stoppedToast') : t('restarted'), 'ok');
+        if (action === 'start' || action === 'restart') notifyAppStarted(id);
         load();
     } catch (e) {
         toast(t('actionFailedShort'), 'err');
@@ -1346,16 +1671,24 @@ function updateAppTypeVisibility() {
         generalSlot.appendChild(autostartControl);
     }
 
-    autostartControl.style.display = ['cli', 'remote'].includes(type) ? 'none' : '';
+    // A remote app with autostart is started (connected) when iVnc starts.
+    autostartControl.style.display = type === 'cli' ? 'none' : '';
     document.getElementById('remote-config').hidden = type !== 'remote';
     document.getElementById('f-skill-paths').closest('.form-line').hidden = type === 'remote';
+    document.getElementById('name-required-mark').hidden = type === 'remote';
+    document.getElementById('remote-password-required-mark').hidden = !!editId;
+    if (type !== 'desktop' || !editId || editBuiltin) {
+        document.getElementById('sharing-section').hidden = true;
+        document.getElementById('basic-title').hidden = true;
+    }
+    updateTypePlaceholders();
 
     if (!autostartControl.parentElement) {
         generalSlot.appendChild(autostartControl);
     }
 
     const modal = document.getElementById('modal');
-    modal.querySelectorAll('input:not([type="checkbox"]), textarea').forEach(field => {
+    modal.querySelectorAll('input:not([type="checkbox"]):not([data-fixed-readonly]), textarea').forEach(field => {
         field.readOnly = editBuiltin;
     });
     document.getElementById('f-name').disabled = !!editId && !editBuiltin && type !== 'remote';
@@ -1363,7 +1696,14 @@ function updateAppTypeVisibility() {
     document.getElementById('f-autostart').disabled = editBuiltin;
     document.getElementById('modal-save').hidden = editBuiltin;
     document.getElementById('modal-save').disabled = editBuiltin;
-    document.getElementById('modal-cancel').textContent = t(editBuiltin ? 'close' : 'cancel');
+    document.getElementById('modal-cancel').textContent = t(editBuiltin || modalSaved ? 'close' : 'cancel');
+}
+
+// Placeholders that depend on the selected type and on add vs. edit.
+function updateTypePlaceholders() {
+    const type = document.getElementById('f-app-type').value;
+    setPlaceholderById('f-name', t(type === 'remote' ? 'remoteNamePlaceholder' : 'nameInputPlaceholder'));
+    setPlaceholderById('f-remote-password', t(editId ? 'remotePasswordKeep' : 'remotePasswordPlaceholder'));
 }
 
 
@@ -1386,15 +1726,45 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         loadSection();
     });
-    document.getElementById('f-app-type').addEventListener('change', updateAppTypeVisibility);
+    document.getElementById('f-app-type').addEventListener('change', () => {
+        clearFormErrors();
+        updateAppTypeVisibility();
+    });
     document.getElementById('modal-close').addEventListener('click', hideModal);
-
-    document.querySelectorAll('.btn-cancel').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            if (e.target.closest('#log-modal')) hideLogModal();
-            else if (e.target.closest('#modal')) hideModal();
+    document.getElementById('modal-cancel').addEventListener('click', hideModal);
+    document.getElementById('log-close-btn').addEventListener('click', hideLogModal);
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (document.getElementById('log-modal').classList.contains('show')) hideLogModal();
+        else if (document.getElementById('modal').classList.contains('show')) hideModal();
+    });
+    // Editing a field clears its inline error.
+    document.getElementById('modal').addEventListener('input', (e) => {
+        if (!e.target.classList?.contains('invalid')) return;
+        e.target.classList.remove('invalid');
+        setTextById('err-' + e.target.id, '');
+    });
+    document.querySelectorAll('[data-password-toggle]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const id = btn.dataset.passwordToggle;
+            setPasswordVisible(id, document.getElementById(id).type === 'password');
         });
     });
+    document.getElementById('f-share-enabled').addEventListener('change', onSharingToggle);
+    document.getElementById('share-password-generate').addEventListener('click', () => {
+        setValue('f-share-password', randomPassword());
+        setPasswordVisible('f-share-password', true);
+        document.getElementById('f-share-password').classList.remove('invalid');
+        setTextById('err-f-share-password', '');
+    });
+    document.getElementById('share-url-copy').addEventListener('click', copyShareUrl);
+    document.getElementById('restart-now').addEventListener('click', restartFromModal);
+    document.getElementById('f-remote-url').addEventListener('input', () => {
+        syncPlaintextHint();
+        setTestResult('', '');
+    });
+    document.getElementById('f-remote-password').addEventListener('input', () => setTestResult('', ''));
+    document.getElementById('remote-test').addEventListener('click', testRemote);
 
     document.getElementById('modal-save').addEventListener('click', saveApp);
     document.getElementById('settings-save').addEventListener('click', () => saveSettings().catch(e => toast(t('actionFailed') + e, 'err')));
@@ -1419,20 +1789,4 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(() => {
         if (activeSection === 'overview') updateOverviewMeta();
     }, 1000);
-});
-
-document.getElementById('remote-test').addEventListener('click', async event => {
-    const result = document.getElementById('remote-test-result');
-    event.target.disabled = true;
-    result.textContent = remoteText('正在验证…', 'Verifying…');
-    try {
-        const response = await fetch('/api/remote/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-            url:document.getElementById('f-remote-url').value.trim(),password:document.getElementById('f-remote-password').value
-        })});
-        const data = await response.json();
-        if (!response.ok) throw Error(data.error || response.statusText);
-        result.textContent = data.name + ' — ' + (data.status === 'running' ? remoteText('运行中', 'Running') : remoteText('应用未运行', 'Application is stopped'));
-        if (!document.getElementById('f-name').value.trim()) document.getElementById('f-name').value=data.name;
-    } catch(error) { result.textContent=error.message; }
-    finally { event.target.disabled=false; }
 });

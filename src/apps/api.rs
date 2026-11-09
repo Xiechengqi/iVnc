@@ -16,10 +16,10 @@ use axum::{
     Router,
 };
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct AppsState {
     pub shared: std::sync::OnceLock<std::sync::Weak<crate::web::SharedState>>,
@@ -29,6 +29,12 @@ pub struct AppsState {
     pub store: Arc<AppStore>,
     pub process: ProcessManager,
     pub service: ServiceProcessManager,
+    /// Remote applications the user started; only these are connected.
+    started: Mutex<HashSet<String>>,
+    /// Wakes the monitor early, e.g. to connect a remote application just started.
+    wake: tokio::sync::Notify,
+    /// Set when the application list may have changed; the monitor reads it again.
+    apps_changed: std::sync::atomic::AtomicBool,
 }
 
 impl AppsState {
@@ -39,19 +45,134 @@ impl AppsState {
         ensure_builtin_apps(&store)?;
         ensure_builtin_miao(&store)?;
         proxy_panel.start_watchdog();
-        let mut process = ProcessManager::new();
+        let remote = Arc::new(crate::remote::store::RemoteStore::new()?);
+        let mut process =
+            ProcessManager::new(remote.clone(), crate::remote::worker::runtimes_dir());
         process.set_store(store.clone());
         let mut service = ServiceProcessManager::new();
         service.set_store(store.clone());
         Ok(Self {
             shared: std::sync::OnceLock::new(),
-            remote: Arc::new(crate::remote::store::RemoteStore::new()?),
+            remote,
             remote_health: Default::default(),
             proxy_panel,
             store,
             process,
             service,
+            started: Mutex::new(HashSet::new()),
+            wake: tokio::sync::Notify::new(),
+            apps_changed: std::sync::atomic::AtomicBool::new(true),
         })
+    }
+
+    /// Keeps the taskbar's application tabs current without any request: runtimes
+    /// become ready, crash or are restarted by the watchdog, and remote
+    /// applications change state on their instance.
+    /// The monitor alone publishes the tabs. The application list is read again
+    /// only after `refresh_stream_apps`; the periodic pass only checks runtimes.
+    pub fn start_monitor(self: &Arc<Self>) {
+        let apps = self.clone();
+        tokio::spawn(async move {
+            let mut listed = Vec::new();
+            loop {
+                let started: Vec<String> = apps.started.lock().unwrap().iter().cloned().collect();
+                crate::remote::gateway::refresh_remote_health(apps.clone(), started);
+                // Listing applications opens databases, and runtimes publish
+                // their state in files.
+                let state = apps.clone();
+                let previous = std::mem::take(&mut listed);
+                listed = tokio::task::spawn_blocking(move || state.publish_stream_apps(previous))
+                    .await
+                    .unwrap_or_default();
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                    _ = apps.wake.notified() => {}
+                }
+            }
+        });
+    }
+
+    /// Asks the monitor to publish the taskbar's application tabs again, e.g.
+    /// after an application was added, renamed, started or stopped. Cheap enough
+    /// for any thread.
+    pub fn refresh_stream_apps(&self) {
+        self.apps_changed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    /// Publishes the applications shown as taskbar tabs: local applications in
+    /// their own runtime, and started remote applications. Returns the list it
+    /// used, which is `listed` unless the applications changed.
+    fn publish_stream_apps(&self, listed: Vec<ManagedApp>) -> Vec<ManagedApp> {
+        let listed = if self
+            .apps_changed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            match self.store.list() {
+                Ok(apps) => apps,
+                Err(e) => {
+                    log::warn!("Cannot list application tabs: {}", e);
+                    // Retried on the next pass.
+                    self.apps_changed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    return listed;
+                }
+            }
+        } else {
+            listed
+        };
+        if let Some(shared) = self.shared.get().and_then(std::sync::Weak::upgrade) {
+            shared.set_stream_apps(self.stream_apps(&listed));
+        }
+        listed
+    }
+
+    fn stream_apps(&self, apps: &[ManagedApp]) -> Vec<crate::web::shared::StreamApp> {
+        apps.iter()
+            .filter_map(|app| {
+                let (kind, status) = match app.app_type {
+                    AppType::DesktopApp if self.process.in_worker(&app.id) == Some(true) => {
+                        match self.process.status(&app.id) {
+                            AppStatus::Starting => ("shared", "starting"),
+                            AppStatus::Running => ("shared", "running"),
+                            _ => return None,
+                        }
+                    }
+                    AppType::RemoteApp if self.remote_started(&app.id) => {
+                        ("remote", self.remote_state(&app.id).0)
+                    }
+                    _ => return None,
+                };
+                Some(crate::web::shared::StreamApp {
+                    id: app.id.clone(),
+                    name: app.name.clone(),
+                    kind,
+                    status,
+                })
+            })
+            .collect()
+    }
+
+    pub fn remote_started(&self, id: &str) -> bool {
+        self.started.lock().unwrap().contains(id)
+    }
+
+    /// The connection state of a remote application and why it is not connected.
+    pub fn remote_state(&self, id: &str) -> (&'static str, String) {
+        if !self.remote_started(id) {
+            return ("disconnected", String::new());
+        }
+        self.remote_health
+            .get(id)
+            .map_or(("connecting", String::new()), |h| (h.state, h.detail))
+    }
+
+    /// Whether the application runs differently than its sharing setting asks for.
+    pub fn restart_required(&self, id: &str, sharing: bool) -> bool {
+        self.process
+            .in_worker(id)
+            .is_some_and(|worker| worker != sharing)
     }
 
     pub fn revoke_views(&self, id: &str, reason: crate::remote::media::StopReason) {
@@ -80,7 +201,12 @@ impl AppsState {
         let running_ids: Vec<String> = apps
             .iter()
             .filter(|app| app.id != BUILTIN_MIAO_ID)
-            .filter(|app| matches!(self.app_status(app), AppStatus::Running))
+            .filter(|app| {
+                matches!(
+                    self.app_status(app),
+                    AppStatus::Running | AppStatus::Starting
+                )
+            })
             .map(|app| app.id.clone())
             .collect();
 
@@ -119,7 +245,12 @@ impl AppsState {
         Ok(apps
             .iter()
             .filter(|app| app.id != BUILTIN_MIAO_ID)
-            .filter(|app| matches!(self.app_status(app), AppStatus::Running))
+            .filter(|app| {
+                matches!(
+                    self.app_status(app),
+                    AppStatus::Running | AppStatus::Starting
+                )
+            })
             .map(|app| app.id.clone())
             .collect())
     }
@@ -191,6 +322,12 @@ impl AppsState {
     }
 
     async fn start_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
+        let result = self.launch_app(app).await;
+        self.refresh_stream_apps();
+        result
+    }
+
+    async fn launch_app(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
         if app.id == BUILTIN_MIAO_ID {
             return self.proxy_panel.start().await;
         }
@@ -199,19 +336,28 @@ impl AppsState {
         }
         match app.app_type {
             AppType::DesktopApp => {
-                // Building a runtime inspects the host network and opens databases.
+                // Building a command opens databases.
                 let (process, launch) = (self.process.clone(), app.clone());
                 let pid = tokio::task::spawn_blocking(move || process.start(&launch))
                     .await
                     .map_err(|e| e.to_string())??;
+                if self.process.in_worker(&app.id) != Some(true) {
+                    return Ok(Some(pid));
+                }
+                // Show the tab while the runtime starts.
+                self.refresh_stream_apps();
                 for _ in 0..900 {
-                    if crate::remote::worker::endpoint(&app.id).is_ok() {
-                        return Ok(Some(pid));
-                    }
-                    if self.process.status(&app.id) != AppStatus::Running {
-                        return Err(crate::remote::worker::failure(&app.id)
-                            .map(|f| f.message)
-                            .unwrap_or_else(|| "Application isolation failed; see the application log for missing dependencies or namespace permissions".into()));
+                    match self.process.status(&app.id) {
+                        AppStatus::Running => return Ok(Some(pid)),
+                        AppStatus::Starting => {}
+                        _ => {
+                            return Err(crate::remote::worker::failure(&app.id)
+                                .map(|f| f.message)
+                                .unwrap_or_else(|| {
+                                    "Application runtime failed to start; see the application log"
+                                        .into()
+                                }))
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
@@ -224,7 +370,14 @@ impl AppsState {
                 self.service.start_and_wait(app).await
             }
             AppType::RemoteApp => {
-                Err("Remote applications can only be connected; manage their process on B".into())
+                // The process runs on B; starting connects to it.
+                self.remote.target(&app.id)?;
+                if !self.started.lock().unwrap().insert(app.id.clone()) {
+                    return Err("App is already running".into());
+                }
+                self.remote_health.forget(&app.id);
+                self.wake.notify_one();
+                Ok(None)
             }
             AppType::CliApp => Err("CLI apps are one-shot tools and cannot be started".to_string()),
         }
@@ -235,7 +388,7 @@ impl AppsState {
         if app.id == BUILTIN_MIAO_ID {
             return self.proxy_panel.stop().await;
         }
-        match app.app_type {
+        let result = match app.app_type {
             AppType::DesktopApp => {
                 let (process, id) = (self.process.clone(), app.id.clone());
                 tokio::task::spawn_blocking(move || process.stop(&id))
@@ -243,8 +396,15 @@ impl AppsState {
                     .map_err(|e| e.to_string())?
             }
             AppType::BackgroundApp => self.service.stop(&app.id),
-            AppType::CliApp | AppType::RemoteApp => Ok(()),
-        }
+            AppType::RemoteApp => {
+                self.started.lock().unwrap().remove(&app.id);
+                self.remote_health.forget(&app.id);
+                Ok(())
+            }
+            AppType::CliApp => Ok(()),
+        };
+        self.refresh_stream_apps();
+        result
     }
 
     async fn restart_app_processes(&self, app: &ManagedApp) -> Result<Option<u32>, String> {
@@ -269,6 +429,7 @@ impl AppsState {
         match app.app_type {
             AppType::DesktopApp => self.process.status(&app.id),
             AppType::BackgroundApp => self.service.status(&app.id),
+            AppType::RemoteApp if self.remote_started(&app.id) => AppStatus::Running,
             AppType::CliApp | AppType::RemoteApp => AppStatus::Stopped,
         }
     }
@@ -292,6 +453,39 @@ impl AppsState {
             self.proxy_panel.cleanup_inactive_instance().await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl AppsState {
+    /// An application manager with in-memory stores and its files in a new
+    /// temporary directory, never in `$IVNC_HOME`.
+    pub(crate) fn for_test(
+        proxy_ip: Option<std::net::IpAddr>,
+        autostart_override: Option<bool>,
+    ) -> Arc<Self> {
+        let store = Arc::new(AppStore::in_memory());
+        ensure_builtin_miao(&store).unwrap();
+        let remote = Arc::new(crate::remote::store::RemoteStore::in_memory());
+        let root =
+            std::env::temp_dir().join(format!("ivnc-apps-{} space'quote", uuid::Uuid::new_v4()));
+        Arc::new(Self {
+            shared: std::sync::OnceLock::new(),
+            remote: remote.clone(),
+            remote_health: Default::default(),
+            store,
+            proxy_panel: Arc::new(ProxyPanelManager::isolated(
+                false,
+                &root,
+                proxy_ip,
+                autostart_override,
+            )),
+            process: ProcessManager::new(remote, root.join("runtimes")),
+            service: ServiceProcessManager::new(),
+            started: Mutex::new(HashSet::new()),
+            wake: tokio::sync::Notify::new(),
+            apps_changed: std::sync::atomic::AtomicBool::new(true),
+        })
     }
 }
 
@@ -513,13 +707,11 @@ fn builtin_chrome_command() -> Result<String, String> {
 crash_dir={crash_dir};
 rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonSocket" "$profile_dir/SingletonCookie";
 set --;
-if [ -n "${{IVNC_CHROME_PROXY:-}}" ]; then
-  set -- "--proxy-server=$IVNC_CHROME_PROXY";
-elif [ "${{IVNC_PROXY_PANEL_ENABLED:-1}}" != '0' ] && [ -s {proxy_file} ]; then
+if [ "${{IVNC_PROXY_PANEL_ENABLED:-1}}" != '0' ] && [ -s {proxy_file} ]; then
   IFS= read -r proxy_server < {proxy_file};
   set -- "--proxy-server=$proxy_server";
 fi;
-exec google-chrome "$@" --user-data-dir="$profile_dir" --crash-dumps-dir="$crash_dir" --remote-debugging-host="${{IVNC_CHROME_DEBUG_HOST:-0.0.0.0}}" --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
+exec google-chrome "$@" --user-data-dir="$profile_dir" --crash-dumps-dir="$crash_dir" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
 "#
     ).replace('\n', " "))
 }
@@ -710,22 +902,17 @@ fn app_json(
     match app.app_type {
         AppType::RemoteApp => {
             if let Ok(target) = state.remote.target(&app.id) {
+                obj["url"] = json!(target.share_url());
                 obj["remote"] = json!(target);
-                obj["url"] = json!(format!(
-                    "{}/remote/v1/apps/{}",
-                    target.base_url, target.app_id
-                ));
             }
-            obj["status"] = json!(state
-                .shared
-                .get()
-                .and_then(std::sync::Weak::upgrade)
-                .map(|s| s.app_views.connection_status(&app.id))
-                .unwrap_or("disconnected"));
-            if let Some(health) = state.remote_health.get(&app.id) {
-                obj["remote_state"] = json!(health.state);
-                obj["remote_detail"] = json!(health.detail);
-            }
+            let (remote_state, remote_detail) = state.remote_state(&app.id);
+            obj["started"] = json!(state.remote_started(&app.id));
+            obj["remote_state"] = json!(remote_state);
+            obj["remote_detail"] = json!(remote_detail);
+            // Plain HTTP is only accepted on private networks; the list marks it.
+            obj["remote_plaintext"] = json!(obj["url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("http://")));
             obj["can_clear_data"] = json!(false);
         }
         AppType::BackgroundApp => {
@@ -738,6 +925,15 @@ fn app_json(
         AppType::DesktopApp => {
             obj["exec_command"] = json!(app.exec_command);
             obj["env_vars"] = json!(app.env_vars);
+            let enabled = state
+                .remote
+                .policy(&app.id)
+                .map(|p| p.enabled)
+                .unwrap_or(false);
+            obj["sharing"] = json!({
+                "enabled": enabled,
+                "restart_required": state.restart_required(&app.id, enabled),
+            });
         }
         AppType::CliApp => {
             let (installed, install_status, install_error) = cli_install_status(app);
@@ -755,13 +951,6 @@ fn app_json(
 async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
     match state.store.list() {
         Ok(apps) => {
-            crate::remote::gateway::refresh_remote_health(
-                state.clone(),
-                apps.iter()
-                    .filter(|a| a.app_type == AppType::RemoteApp)
-                    .map(|a| a.id.clone())
-                    .collect(),
-            );
             let items: Vec<_> = apps
                 .iter()
                 .map(|app| {
@@ -805,7 +994,7 @@ async fn add_app(
     };
 
     if name.is_empty() {
-        if let Some(target) = &remote_target {
+        if let Some((target, _)) = &remote_target {
             name = target.name.clone();
         }
     }
@@ -909,7 +1098,7 @@ async fn add_app(
         .get("autostart")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-        && !matches!(app_type, AppType::CliApp | AppType::RemoteApp);
+        && app_type != AppType::CliApp;
 
     let app = ManagedApp {
         id: uuid::Uuid::new_v4().to_string(),
@@ -929,18 +1118,15 @@ async fn add_app(
     };
 
     if let Err(e) = state.store.add(&app) {
-        if let Some(target) = &remote_target {
-            crate::remote::gateway::forget_target(target).await;
-        }
         return err_response(StatusCode::CONFLICT, &e);
     }
 
-    if let Some(target) = remote_target {
+    if let Some((target, token)) = remote_target {
         if let Err(e) = state.remote.save_target(&app.id, &target) {
             let _ = state.store.delete(&app.id);
-            crate::remote::gateway::forget_target(&target).await;
             return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
         }
+        state.remote_health.remember_token(&app.id, token);
     }
     if app.app_type == AppType::DesktopApp {
         let exec_command = app
@@ -1015,28 +1201,20 @@ async fn update_app(
         AppType::RemoteApp => {
             if body["password"].as_str().is_some_and(|s| !s.is_empty()) {
                 match crate::remote::gateway::connect_target(&body, &state.remote.node_id).await {
-                    Ok(target) => {
-                        let previous = state.remote.target(&app.id).ok();
+                    Ok((target, token)) => {
                         if let Err(e) = state.remote.save_target(&app.id, &target) {
-                            crate::remote::gateway::forget_target(&target).await;
                             return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
                         }
                         state.revoke_views(&app.id, crate::remote::media::StopReason::Closed);
                         state.remote_health.forget(&app.id);
-                        if let Some(previous) = previous {
-                            crate::remote::gateway::forget_target(&previous).await;
-                        }
+                        state.remote_health.remember_token(&app.id, token);
+                        state.wake.notify_one();
                     }
                     Err(e) => return err_response(StatusCode::BAD_REQUEST, &e),
                 }
             } else if let Some(url) = body["url"].as_str() {
                 let old = state.remote.target(&app.id).ok();
-                if old
-                    .as_ref()
-                    .map(|t| format!("{}/remote/v1/apps/{}", t.base_url, t.app_id))
-                    .as_deref()
-                    != Some(url.trim())
-                {
+                if old.as_ref().map(|t| t.share_url()).as_deref() != Some(url.trim()) {
                     return err_response(
                         StatusCode::BAD_REQUEST,
                         "Enter the password when changing the remote address",
@@ -1099,12 +1277,14 @@ async fn update_app(
     }
 
     if let Some(autostart) = body.get("autostart").and_then(|v| v.as_bool()) {
-        app.autostart = !matches!(app.app_type, AppType::CliApp | AppType::RemoteApp) && autostart;
+        app.autostart = app.app_type != AppType::CliApp && autostart;
     }
 
     if let Err(e) = state.store.update(&app) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
+    // Tabs show the name.
+    state.refresh_stream_apps();
     json_response(StatusCode::OK, json!({"ok": true}))
 }
 
@@ -1119,14 +1299,16 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
     if let Ok(app) = state.store.get(&id) {
         let _ = state.stop_app_processes(&app).await;
         let _ = std::fs::remove_dir_all(datadir::app_root(&app));
+        if crate::remote::valid_id(&app.id) {
+            let _ = std::fs::remove_dir_all(state.process.runtime_dir(&app.id));
+        }
     }
     state.revoke_views(&id, crate::remote::media::StopReason::Stopped);
     state.remote_health.forget(&id);
-    if let Ok(target) = state.remote.target(&id) {
-        crate::remote::gateway::forget_target(&target).await;
-    }
     let _ = state.remote.delete(&id);
-    match state.store.delete(&id) {
+    let result = state.store.delete(&id);
+    state.refresh_stream_apps();
+    match result {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(e) => err_response(StatusCode::NOT_FOUND, &e),
     }
@@ -1327,23 +1509,7 @@ mod tests {
         proxy_ip: Option<std::net::IpAddr>,
         autostart_override: Option<bool>,
     ) -> Arc<AppsState> {
-        let store = Arc::new(AppStore::in_memory());
-        ensure_builtin_miao(&store).unwrap();
-        Arc::new(AppsState {
-            shared: std::sync::OnceLock::new(),
-            remote: Arc::new(crate::remote::store::RemoteStore::in_memory()),
-            remote_health: Default::default(),
-            store,
-            proxy_panel: Arc::new(ProxyPanelManager::isolated(
-                false,
-                &std::env::temp_dir()
-                    .join(format!("ivnc-apps-{} space'quote", uuid::Uuid::new_v4())),
-                proxy_ip,
-                autostart_override,
-            )),
-            process: ProcessManager::new(),
-            service: ServiceProcessManager::new(),
-        })
+        AppsState::for_test(proxy_ip, autostart_override)
     }
 
     #[tokio::test]
@@ -1512,5 +1678,112 @@ mod tests {
                 assert_eq!(state.store.get(BUILTIN_MIAO_ID).unwrap().autostart, saved);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_desktop_app_removes_its_runtime() {
+        let state = state(None, None);
+        let app = ManagedApp::for_test(&uuid::Uuid::new_v4().to_string(), AppType::DesktopApp);
+        state.store.add(&app).unwrap();
+        assert_eq!(
+            app_json(&state, &app, "stopped", None, 0)["sharing"],
+            json!({"enabled": false, "restart_required": false})
+        );
+        let runtime = state.process.runtime_dir(&app.id);
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("failure.json"), "{}").unwrap();
+
+        let response = delete_app(State(state.clone()), Path(app.id.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!runtime.exists());
+        assert!(state.store.get_optional(&app.id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_apps_are_started_and_stopped_on_this_instance() {
+        let state = state(None, None);
+        let app = ManagedApp {
+            name: "Remote".into(),
+            ..ManagedApp::for_test(&uuid::Uuid::new_v4().to_string(), AppType::RemoteApp)
+        };
+        state.store.add(&app).unwrap();
+        state
+            .remote
+            .save_target(
+                &app.id,
+                &crate::remote::store::Target {
+                    base_url: "http://192.168.1.2:8008".into(),
+                    app_id: "shared".into(),
+                    node_id: "node".into(),
+                    name: "Remote".into(),
+                    password: "password-one".into(),
+                },
+            )
+            .unwrap();
+        let id = || Path(app.id.clone());
+        let json = || app_json(&state, &app, "stopped", None, 0);
+        assert_eq!(json()["started"], false);
+        assert_eq!(json()["remote_state"], "disconnected");
+        assert_eq!(json()["remote_plaintext"], true);
+
+        for _ in 0..2 {
+            // Starting again is not an error.
+            assert_eq!(
+                start_app(State(state.clone()), id()).await.status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(state.app_status(&app), AppStatus::Running);
+        assert_eq!(json()["started"], true);
+        assert_eq!(json()["remote_state"], "connecting");
+        // Started remote applications are restored with running applications.
+        assert_eq!(state.running_app_ids().unwrap(), vec![app.id.clone()]);
+        let stream_apps = || state.stream_apps(&state.store.list().unwrap());
+        assert_eq!(
+            stream_apps(),
+            [crate::web::shared::StreamApp {
+                id: app.id.clone(),
+                name: "Remote".into(),
+                kind: "remote",
+                status: "connecting",
+            }]
+        );
+
+        assert_eq!(
+            stop_app(State(state.clone()), id()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.app_status(&app), AppStatus::Stopped);
+        assert_eq!(json()["remote_state"], "disconnected");
+        assert!(state.running_app_ids().unwrap().is_empty());
+        assert!(stream_apps().is_empty());
+
+        // Remote applications can start with this instance.
+        let response = update_app(
+            State(state.clone()),
+            id(),
+            axum::Json(json!({"autostart": true})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(state.store.get(&app.id).unwrap().autostart);
+        state.start_autostart_apps().await.unwrap();
+        assert!(state.remote_started(&app.id));
+    }
+
+    #[test]
+    fn tabs_reread_applications_only_after_a_change() {
+        let state = state(None, None);
+        let listed = state.publish_stream_apps(Vec::new());
+        assert_eq!(listed.len(), 1);
+        state
+            .store
+            .add(&ManagedApp::for_test("added", AppType::DesktopApp))
+            .unwrap();
+        // The periodic pass keeps the list it has.
+        let listed = state.publish_stream_apps(listed);
+        assert_eq!(listed.len(), 1);
+        state.refresh_stream_apps();
+        assert_eq!(state.publish_stream_apps(listed).len(), 2);
     }
 }

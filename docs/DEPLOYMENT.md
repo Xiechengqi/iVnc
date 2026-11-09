@@ -10,10 +10,9 @@
 - PulseAudio 或 PipeWire（音频捕获）
 - 硬件编码器驱动（可选）
 
-托管桌面应用还需要 Linux 5.6+、可用的 user/mount/PID/network namespace，以及
-`bubblewrap slirp4netns nftables iproute2 dbus-daemon`。X11 兼容使用
-`xwayland openbox x11-xkb-utils`；独立应用音频使用 `pulseaudio pulseaudio-utils`。
-完整边界与用法见 [远程桌面应用](REMOTE_APPS.md)。
+桌面应用是 Wayland 客户端；开启远程访问的应用在独立运行环境中运行，其私有音频使用
+`pulseaudio pulseaudio-utils`，不需要额外的内核功能或权限。完整边界与用法见
+[远程桌面应用](REMOTE_APPS.md)。
 
 ## 依赖安装
 
@@ -281,7 +280,7 @@ sudo systemctl start ivnc
 ## Docker 部署
 
 正式镜像以 Ubuntu 24.04 LTS 为运行时，内置 Smithay headless 合成器，不需要
-外部 X11/Wayland 服务；X11 应用使用各自的 Xwayland 和 Openbox。在仓库目录中运行：
+外部 X11/Wayland 服务。在仓库目录中运行：
 
 ```bash
 ./docker-run.sh
@@ -307,8 +306,6 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```bash
 docker run -d --name ivnc --restart unless-stopped \
   -p 8008:8008 --cap-add NET_ADMIN --device /dev/net/tun \
-  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-  --security-opt systempaths=unconfined \
   -v "$PWD/ivnc-data:/root/.ivnc" -v "$PWD/miao-data:/root/.miao" \
   -v /path/to/ivnc-ssh:/root/.ssh \
   ghcr.io/xiechengqi/ivnc:latest --proxy-ip 203.0.113.10
@@ -319,12 +316,11 @@ docker run -d --name ivnc --restart unless-stopped \
 镜像名后不带 iVnc 参数时保持默认启动；自定义前台命令仍可使用 `IMAGE sleep infinity`。同时传 iVnc 参数与前台命令时，使用 `IMAGE --proxy-ip <IP> -- COMMAND ...`。
 
 脚本会创建并持久化仓库目录下的 `ivnc-data` 和 `miao-data`。miao 的全局和进程
-代理模式以及桌面应用的隔离网络都使用 TUN，因此宿主机必须提供 `/dev/net/tun`；miao
-还需要脚本中授予的 `NET_ADMIN`。代理池端口如需从容器外连接，需要按实际端口范围扩展脚本的发布参数。
+代理模式会创建 TUN，因此宿主机必须提供 `/dev/net/tun`，容器也需要脚本中授予的
+`NET_ADMIN`。代理池端口如需从容器外连接，需要按实际端口范围扩展脚本的发布参数。
 
-三个 `security-opt` 都是 Docker 内置选项，不需要额外文件：前两个允许桌面应用创建嵌套命名空间并挂载，`systempaths=unconfined` 取消 Docker 对 `/proc` 的遮蔽，否则应用沙箱无法挂载自己的 `/proc`。系统调用过滤由镜像中的 iVnc 为自身及其启动的进程安装，严格隔离的应用内部另有更严的一层。缺少这些参数时应用启动失败，控制台会直接给出需要补充的参数。安全影响及 Ubuntu 23.10 及以上宿主机的额外设置见 [远程应用部署](REMOTE_APPS.md#部署与证书)。
-应用内部仍强制配置防火墙并丢弃 capabilities。HTTP(S)、信令和原始 ICE-TCP
-共用发布端口，因此纯 HTTP 反向代理不能替代透明 TCP 入口。
+桌面应用及其远程访问不需要额外的 `--security-opt`、`SYS_ADMIN` 或 `--privileged`。
+HTTP(S)、信令和原始 ICE-TCP 共用发布端口，因此纯 HTTP 反向代理不能替代透明 TCP 入口。
 证书与私有 CA 配置见 [远程应用部署](REMOTE_APPS.md#部署与证书)。
 
 ### 镜像版本与回滚

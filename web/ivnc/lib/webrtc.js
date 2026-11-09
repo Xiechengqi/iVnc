@@ -408,7 +408,7 @@ export class WebRTCDemo {
 				this._audioElement = document.createElement('audio');
 				this._audioElement.autoplay = true;
 				// Start muted to comply with autoplay policy; unmute after user gesture
-				this._audioElement.muted = true;
+				this._audioElement.muted = !this._audioUnlocked;
 				document.body.appendChild(this._audioElement);
 			}
 			this._audioElement.srcObject = event.streams[0];
@@ -420,8 +420,10 @@ export class WebRTCDemo {
 	 * to comply with browser autoplay policy.
 	 */
 	unmuteAudio() {
+		// Embedded views may be unlocked by the parent before the audio track arrives.
+		this._audioUnlocked = true;
 		if (this._audioElement) {
-			this._audioElement.muted = !!window.__ivncRootViewSuspended || (window.__IVNC_APP_VIEW__ && !window.__ivncViewActive);
+			this._audioElement.muted = false;
 			this._audioElement.play().catch((e) => {
 				this._setDebug("Audio play failed: " + e.message);
 			});

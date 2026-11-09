@@ -4,114 +4,17 @@ use rand_core::{OsRng, RngCore};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::{fs, net::Ipv4Addr, os::unix::fs::OpenOptionsExt, path::Path, sync::Mutex};
-
-/// How much of the host a managed desktop application can reach.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Isolation {
-    /// Private filesystem, network and services. Required for sharing.
-    #[default]
-    Strict,
-    /// Host filesystem, network and environment, as before isolation existed.
-    /// Only the display, audio and session bus remain private to the application.
-    Host,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Mount {
-    pub path: String,
-    #[serde(default)]
-    pub writable: bool,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct DesktopSettings {
-    pub x11: bool,
-    /// IDs of registered background apps, resolved by the owner before launch.
-    pub services: Vec<String>,
-    pub isolation: Isolation,
-    /// Extra host paths visible inside a strict runtime.
-    pub mounts: Vec<Mount>,
-    /// Private IPv4 networks (CIDR) a strict runtime may reach.
-    pub networks: Vec<String>,
-}
-
-impl DesktopSettings {
-    /// Syntax checks that do not depend on the host. Launch re-validates paths.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.services.len() > 32 || self.services.iter().any(|id| !super::valid_id(id)) {
-            return Err("Invalid service identifier".into());
-        }
-        if self.mounts.len() > 16 || self.networks.len() > 16 {
-            return Err("Too many mounts or networks".into());
-        }
-        for mount in &self.mounts {
-            // Rejected textually: `Path::components` silently drops "." segments.
-            if !mount.path.starts_with('/')
-                || mount.path.len() > 1024
-                || mount.path.contains('\0')
-                || mount.path[1..]
-                    .split('/')
-                    .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-            {
-                return Err(format!(
-                    "Mount path must be a normalized absolute path: {}",
-                    mount.path
-                ));
-            }
-        }
-        for network in &self.networks {
-            parse_network(network)?;
-        }
-        if self.isolation == Isolation::Host
-            && (!self.mounts.is_empty() || !self.networks.is_empty())
-        {
-            return Err("Host mode already uses the host filesystem and network".into());
-        }
-        Ok(())
-    }
-}
-
-/// slirp4netns' private network, 10.0.2.0/24, used inside every strict runtime.
-const SLIRP_NETWORK: u32 = 0x0a00_0200;
-
-/// Parses an allowed IPv4 network and returns its normalized address and prefix.
-pub fn parse_network(value: &str) -> Result<(Ipv4Addr, u8), String> {
-    let invalid = || format!("Invalid IPv4 network: {value}");
-    let (ip, prefix) = value.trim().split_once('/').unwrap_or((value.trim(), "32"));
-    let ip: Ipv4Addr = ip.parse().map_err(|_| invalid())?;
-    let prefix: u8 = prefix.parse().map_err(|_| invalid())?;
-    if !(8..=32).contains(&prefix) {
-        return Err(format!("Network prefix must be between 8 and 32: {value}"));
-    }
-    let mask = u32::MAX << (32 - prefix as u32);
-    let network = Ipv4Addr::from(u32::from(ip) & mask);
-    let [a, b, _, _] = network.octets();
-    // Loopback, the runtime's own NAT network and non-unicast space never become reachable.
-    if a == 0 || a == 127 || a >= 224 || (a == 169 && b == 254) {
-        return Err(format!("Network cannot be allowed: {value}"));
-    }
-    // Two networks overlap when the shorter prefix contains the other's address.
-    let shared = u32::MAX << (32 - prefix.min(24) as u32);
-    if u32::from(network) & shared == SLIRP_NETWORK & shared {
-        return Err(format!(
-            "Network overlaps the application runtime network: {value}"
-        ));
-    }
-    Ok((network, prefix))
-}
+use std::time::{Duration, Instant};
+use std::{fs, os::unix::fs::OpenOptionsExt, path::Path, sync::Mutex};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Policy {
     pub enabled: bool,
     pub password_set: bool,
-    /// Authorization revision. Saved credentials are bound to it.
+    /// Authorization revision. Session tokens are bound to it.
     pub revision: u64,
-    pub desktop: DesktopSettings,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,33 +23,35 @@ pub struct Target {
     pub app_id: String,
     pub node_id: String,
     pub name: String,
+    /// The application password on B; empty for connections saved by earlier versions.
     #[serde(skip_serializing, default)]
-    pub credential: String,
+    pub password: String,
+}
+impl Target {
+    /// The address this connection was made with.
+    pub fn share_url(&self) -> String {
+        format!("{}{}", self.base_url, super::share_path(&self.app_id))
+    }
 }
 
-/// Identity reported by the connecting instance; informational only.
-#[derive(Clone, Debug, Default)]
-pub struct Client {
-    pub node: String,
-    pub label: String,
-    pub ip: String,
-}
+/// Session tokens expire after this long without use.
+const SESSION_IDLE: Duration = Duration::from_secs(12 * 3600);
+/// Sessions kept per application. Logins to one application never end the
+/// sessions of another.
+const SESSIONS_PER_APP: usize = 64;
 
-#[derive(Clone, Debug, Serialize)]
-pub struct Grant {
-    pub id: String,
-    pub client: String,
-    pub label: String,
-    pub ip: String,
-    pub created: i64,
-    pub last_used: Option<i64>,
+struct Session {
+    app: String,
+    revision: u64,
+    used: Instant,
 }
-
-const GRANT_LIFETIME: i64 = 90 * 24 * 3600;
 
 pub struct RemoteStore {
     db: Mutex<Connection>,
     cipher: ChaCha20Poly1305,
+    /// Session tokens by digest. They are kept in memory only, so a restart of
+    /// this instance makes connected instances authenticate again.
+    sessions: Mutex<HashMap<String, Session>>,
     changes: tokio::sync::watch::Sender<u64>,
     pub node_id: String,
 }
@@ -193,6 +98,10 @@ impl RemoteStore {
         .map_err(|e| e.to_string())?;
         fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .map_err(|e| e.to_string())?;
+        // Earlier versions kept an access log here.
+        for log in ["remote-audit.log", "remote-audit.log.1"] {
+            let _ = fs::remove_file(root.join(log));
+        }
         Self::open(Connection::open(path).map_err(|e| e.to_string())?, &key)
     }
 
@@ -201,33 +110,17 @@ impl RemoteStore {
         Self::open(Connection::open_in_memory().unwrap(), &[7; 32]).unwrap()
     }
 
-    fn open(db: Connection, key: &[u8; 32]) -> Result<Self, String> {
+    fn open(mut db: Connection, key: &[u8; 32]) -> Result<Self, String> {
         db.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
+        // policies.desktop held runtime settings of earlier versions. It is kept,
+        // unused, so that those versions can still open this database.
         db.execute_batch("PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS identity (id INTEGER PRIMARY KEY CHECK(id=1), node TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS policies (app TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, password TEXT, revision INTEGER NOT NULL DEFAULT 0, desktop TEXT NOT NULL DEFAULT '{}');
-          CREATE TABLE IF NOT EXISTS grants (hash TEXT PRIMARY KEY, app TEXT NOT NULL, revision INTEGER NOT NULL, created INTEGER NOT NULL DEFAULT (unixepoch()));
+          CREATE TABLE IF NOT EXISTS policies (app TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, password TEXT, revision INTEGER NOT NULL DEFAULT 0, desktop TEXT NOT NULL DEFAULT '{}', password_secret BLOB);
           CREATE TABLE IF NOT EXISTS targets (app TEXT PRIMARY KEY, metadata TEXT NOT NULL, secret BLOB NOT NULL);
         ").map_err(|e| e.to_string())?;
-        let columns: Vec<String> = db
-            .prepare("SELECT name FROM pragma_table_info('grants')")
-            .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
-            .map_err(|e| e.to_string())?;
-        for (column, kind) in [
-            ("client", "TEXT NOT NULL DEFAULT ''"),
-            ("label", "TEXT NOT NULL DEFAULT ''"),
-            ("ip", "TEXT NOT NULL DEFAULT ''"),
-            ("last_used", "INTEGER"),
-        ] {
-            if !columns.iter().any(|c| c == column) {
-                db.execute(
-                    &format!("ALTER TABLE grants ADD COLUMN {column} {kind}"),
-                    [],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
+        migrate(&mut db).map_err(|e| e.to_string())?;
         db.execute(
             "INSERT OR IGNORE INTO identity VALUES(1,?1)",
             [uuid::Uuid::new_v4().to_string()],
@@ -239,38 +132,65 @@ impl RemoteStore {
         Ok(Self {
             db: Mutex::new(db),
             cipher: ChaCha20Poly1305::new(key.into()),
+            sessions: Mutex::new(HashMap::new()),
             changes: tokio::sync::watch::channel(0).0,
             node_id,
         })
     }
 
-    /// Wakes holders of remote access whenever a credential may have become invalid.
+    /// Wakes holders of remote access whenever a session may have become invalid.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.subscribe()
     }
 
-    fn changed(&self) {
+    fn changed(&self, app: &str) {
+        self.sessions.lock().unwrap().retain(|_, s| s.app != app);
         self.changes.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    /// Encrypts a secret; `aad` binds it to the row it belongs to.
+    fn seal(&self, aad: &[u8], secret: &[u8]) -> Result<Vec<u8>, String> {
+        let mut nonce = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce);
+        let encrypted = self
+            .cipher
+            .encrypt(
+                &Nonce::from(nonce),
+                chacha20poly1305::aead::Payload { msg: secret, aad },
+            )
+            .map_err(|_| "Cannot protect remote secret")?;
+        let mut sealed = nonce.to_vec();
+        sealed.extend(encrypted);
+        Ok(sealed)
+    }
+
+    fn unseal(&self, aad: &[u8], sealed: &[u8]) -> Option<String> {
+        if sealed.len() < 28 {
+            return None;
+        }
+        let plain = self
+            .cipher
+            .decrypt(
+                &Nonce::from(<[u8; 12]>::try_from(&sealed[..12]).unwrap()),
+                chacha20poly1305::aead::Payload {
+                    msg: &sealed[12..],
+                    aad,
+                },
+            )
+            .ok()?;
+        String::from_utf8(plain).ok()
     }
 
     pub fn policy(&self, app: &str) -> Result<Policy, String> {
         let db = self.db.lock().unwrap();
         db.query_row(
-            "SELECT enabled,password IS NOT NULL,revision,desktop FROM policies WHERE app=?1",
+            "SELECT enabled,password IS NOT NULL,revision FROM policies WHERE app=?1",
             [app],
             |r| {
-                let text: String = r.get(3)?;
                 Ok(Policy {
                     enabled: r.get(0)?,
                     password_set: r.get(1)?,
                     revision: r.get(2)?,
-                    desktop: serde_json::from_str(&text).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?,
                 })
             },
         )
@@ -281,88 +201,90 @@ impl RemoteStore {
                 enabled: false,
                 password_set: false,
                 revision: 0,
-                desktop: DesktopSettings::default(),
             })
         })
     }
 
-    /// Updates sharing and runtime settings. Only access changes (enable/disable or a
-    /// new password) advance the revision and revoke saved credentials; runtime
-    /// settings take effect when the application restarts.
+    /// The application password, for its owner to view. Passwords set by earlier
+    /// versions were kept only as a hash and cannot be shown. The copy is bound to
+    /// the hash it was saved with, so a password an earlier version changed later
+    /// is never shown in place of the current one.
+    pub fn policy_password(&self, app: &str) -> Result<Option<String>, String> {
+        let row: Option<(String, Option<Vec<u8>>)> = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT password,password_secret FROM policies WHERE app=?1 AND password IS NOT NULL",
+                [app],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(row.and_then(|(hash, sealed)| self.unseal(policy_aad(app, &hash).as_bytes(), &sealed?)))
+    }
+
+    /// Updates sharing. Access changes (enable/disable or a new password) advance
+    /// the revision, which ends every session.
     pub fn set_policy(
         &self,
         app: &str,
         enabled: bool,
         password: Option<&str>,
-        desktop: DesktopSettings,
     ) -> Result<Policy, String> {
         if !super::valid_id(app) {
             return Err("Invalid application identifier".into());
-        }
-        desktop.validate()?;
-        if enabled && desktop.isolation == Isolation::Host {
-            return Err("Shared applications must use strict isolation".into());
         }
         let password = password.filter(|p| !p.is_empty());
         if password.is_some_and(|p| p.len() < 8 || p.len() > 256) {
             return Err("Application password must be 8–256 bytes".into());
         }
-        let hash = password
+        let secret = password
             .map(|p| {
-                Argon2::default()
+                let hash = Argon2::default()
                     .hash_password(p.as_bytes(), &SaltString::generate(&mut OsRng))
                     .map(|v| v.to_string())
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                let sealed = self.seal(policy_aad(app, &hash).as_bytes(), p.as_bytes())?;
+                Ok::<_, String>((hash, sealed))
             })
             .transpose()?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction().map_err(|e| e.to_string())?;
-        let old: Option<(bool, Option<String>, String)> = tx
+        let old: Option<(bool, Option<String>, Option<Vec<u8>>)> = tx
             .query_row(
-                "SELECT enabled,password,desktop FROM policies WHERE app=?1",
+                "SELECT enabled,password,password_secret FROM policies WHERE app=?1",
                 [app],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        let desktop_json = serde_json::to_string(&desktop).map_err(|e| e.to_string())?;
-        let access_changed = hash.is_some()
+        let access_changed = secret.is_some()
             || old
                 .as_ref()
                 .is_none_or(|(old_enabled, _, _)| *old_enabled != enabled);
-        let desktop_changed = old.as_ref().is_none_or(|(_, _, d)| *d != desktop_json);
-        let hash = hash.or_else(|| old.and_then(|(_, password, _)| password));
+        let (hash, sealed) = match secret {
+            Some((hash, sealed)) => (Some(hash), Some(sealed)),
+            None => old.map_or((None, None), |(_, hash, sealed)| (hash, sealed)),
+        };
         if enabled && hash.is_none() {
             return Err("Set a password before enabling remote access".into());
         }
         if access_changed {
-            tx.execute("INSERT INTO policies(app,enabled,password,revision,desktop) VALUES(?1,?2,?3,1,?4) ON CONFLICT(app) DO UPDATE SET enabled=excluded.enabled,password=excluded.password,revision=policies.revision+1,desktop=excluded.desktop",params![app,enabled,hash,desktop_json]).map_err(|e|e.to_string())?;
-            tx.execute("DELETE FROM grants WHERE app=?1", [app])
-                .map_err(|e| e.to_string())?;
-        } else if desktop_changed {
-            tx.execute(
-                "UPDATE policies SET desktop=?2 WHERE app=?1",
-                params![app, desktop_json],
-            )
-            .map_err(|e| e.to_string())?;
+            tx.execute("INSERT INTO policies(app,enabled,password,password_secret,revision) VALUES(?1,?2,?3,?4,1) ON CONFLICT(app) DO UPDATE SET enabled=excluded.enabled,password=excluded.password,password_secret=excluded.password_secret,revision=policies.revision+1",params![app,enabled,hash,sealed]).map_err(|e|e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         drop(db);
         if access_changed {
-            self.changed();
+            self.changed(app);
         }
         self.policy(app)
     }
 
-    /// Exchanges an application password for an application-scoped credential.
+    /// Exchanges an application password for a session token of that application.
     /// Applications that are not shared are refused without password work, so
     /// unauthenticated requests cannot occupy Argon2 capacity with random IDs.
-    pub fn authenticate(
-        &self,
-        app: &str,
-        password: &str,
-        client: &Client,
-    ) -> Result<String, String> {
+    pub fn authenticate(&self, app: &str, password: &str) -> Result<String, String> {
         const INVALID: &str = "Invalid application credentials";
         let record: Option<(String, u64)> = if password.len() > 256 {
             None
@@ -384,145 +306,92 @@ impl RemoteStore {
         if !verify_password(&hash, password) {
             return Err(INVALID.into());
         }
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction().map_err(|e| e.to_string())?;
-        let current: Option<u64> = tx
+        if self.revision(app)? != Some(revision) {
+            return Err("Application access changed; retry authentication".into());
+        }
+        Ok(self.open_session(app, revision))
+    }
+
+    /// Issues a session token. Beyond the per-application limit, the session of
+    /// that application used least recently ends.
+    fn open_session(&self, app: &str, revision: u64) -> String {
+        let token = super::token();
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.retain(|_, s| s.used.elapsed() < SESSION_IDLE);
+        while sessions.values().filter(|s| s.app == app).count() >= SESSIONS_PER_APP {
+            let oldest = sessions
+                .iter()
+                .filter(|(_, s)| s.app == app)
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(key) => sessions.remove(&key),
+                None => break,
+            };
+        }
+        sessions.insert(
+            digest(&token),
+            Session {
+                app: app.to_owned(),
+                revision,
+                used: Instant::now(),
+            },
+        );
+        token
+    }
+
+    /// Ends a session of the application, e.g. one opened only to test a connection.
+    pub fn close_session(&self, app: &str, token: &str) {
+        let key = digest(token);
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.get(&key).is_some_and(|s| s.app == app) {
+            sessions.remove(&key);
+        }
+    }
+
+    /// Revision of an application while it is shared.
+    fn revision(&self, app: &str) -> Result<Option<u64>, String> {
+        self.db
+            .lock()
+            .unwrap()
             .query_row(
                 "SELECT revision FROM policies WHERE app=?1 AND enabled=1",
                 [app],
                 |r| r.get(0),
             )
             .optional()
-            .map_err(|e| e.to_string())?;
-        if current != Some(revision) {
-            return Err("Application access changed; retry authentication".into());
-        }
-        // Bound saved credentials per application; old entries expire after 90 days.
-        tx.execute(
-            "DELETE FROM grants WHERE created < unixepoch()-?1",
-            [GRANT_LIFETIME],
-        )
-        .map_err(|e| e.to_string())?;
-        let count: u64 = tx
-            .query_row("SELECT count(*) FROM grants WHERE app=?1", [app], |r| {
-                r.get(0)
-            })
-            .map_err(|e| e.to_string())?;
-        if count >= 128 {
-            return Err(
-                "Too many saved connections; revoke unused connections on B or reset the application password".into(),
-            );
-        }
-        let token = super::token();
-        tx.execute(
-            "INSERT INTO grants(hash,app,revision,client,label,ip,last_used) VALUES(?1,?2,?3,?4,?5,?6,unixepoch())",
-            params![
-                digest(&token),
-                app,
-                revision,
-                truncate(&client.node, 64),
-                truncate(&client.label, 128),
-                truncate(&client.ip, 64)
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(token)
+            .map_err(|e| e.to_string())
     }
 
+    /// Whether a session token is valid for the application. Use keeps it alive.
     pub fn verify(&self, app: &str, token: &str) -> bool {
-        self.grant(app, token).is_some()
-    }
-
-    /// Returns the public grant ID and the reported client label for a valid credential.
-    pub fn grant(&self, app: &str, token: &str) -> Option<(String, String)> {
         if token.len() != 64 {
-            return None;
+            return false;
         }
-        let hash = digest(token);
-        self.db.lock().unwrap().query_row("SELECT g.label FROM grants g JOIN policies p ON p.app=g.app AND p.revision=g.revision WHERE g.hash=?1 AND g.app=?2 AND p.enabled=1 AND g.created>=unixepoch()-?3",params![hash,app,GRANT_LIFETIME], |r|r.get::<_,String>(0)).optional().ok().flatten().map(|label|(grant_id(&hash),label))
-    }
-
-    /// Records use of a credential, at most once a minute per credential.
-    pub fn touch(&self, app: &str, token: &str, ip: &str) {
-        let _ = self.db.lock().unwrap().execute(
-            "UPDATE grants SET last_used=unixepoch(), ip=?3 WHERE hash=?1 AND app=?2 AND (last_used IS NULL OR last_used<unixepoch()-60 OR ip<>?3)",
-            params![digest(token), app, truncate(ip, 64)],
-        );
-    }
-
-    pub fn grants(&self, app: &str) -> Result<Vec<Grant>, String> {
-        let db = self.db.lock().unwrap();
-        let mut statement = db
-            .prepare("SELECT g.hash,g.client,g.label,g.ip,g.created,g.last_used FROM grants g JOIN policies p ON p.app=g.app AND p.revision=g.revision WHERE g.app=?1 AND g.created>=unixepoch()-?2 ORDER BY coalesce(g.last_used,g.created) DESC")
-            .map_err(|e| e.to_string())?;
-        let rows = statement
-            .query_map(params![app, GRANT_LIFETIME], |r| {
-                Ok(Grant {
-                    id: grant_id(&r.get::<_, String>(0)?),
-                    client: r.get(1)?,
-                    label: r.get(2)?,
-                    ip: r.get(3)?,
-                    created: r.get(4)?,
-                    last_used: r.get(5)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
-    }
-
-    pub fn revoke_grant(&self, app: &str, token: &str) -> Result<(), String> {
-        self.db
-            .lock()
-            .unwrap()
-            .execute(
-                "DELETE FROM grants WHERE app=?1 AND hash=?2",
-                params![app, digest(token)],
-            )
-            .map_err(|e| e.to_string())?;
-        self.changed();
-        Ok(())
-    }
-
-    /// Revokes a credential by its public ID; returns whether one was removed.
-    pub fn revoke_grant_id(&self, app: &str, id: &str) -> Result<bool, String> {
-        if id.len() != 16 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Ok(false);
+        let key = digest(token);
+        let revision = match self.sessions.lock().unwrap().get(&key) {
+            Some(s) if s.app == app && s.used.elapsed() < SESSION_IDLE => s.revision,
+            _ => return false,
+        };
+        if self.revision(app).ok().flatten() != Some(revision) {
+            return false;
         }
-        let removed = self
-            .db
-            .lock()
-            .unwrap()
-            .execute(
-                "DELETE FROM grants WHERE app=?1 AND substr(hash,1,16)=?2",
-                params![app, id],
-            )
-            .map_err(|e| e.to_string())?;
-        if removed > 0 {
-            self.changed();
+        if let Some(session) = self.sessions.lock().unwrap().get_mut(&key) {
+            session.used = Instant::now();
+            return true;
         }
-        Ok(removed > 0)
+        false
     }
 
     pub fn save_target(&self, app: &str, target: &Target) -> Result<(), String> {
-        let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
-        let encrypted = self
-            .cipher
-            .encrypt(
-                &Nonce::from(nonce),
-                chacha20poly1305::aead::Payload {
-                    msg: target.credential.as_bytes(),
-                    aad: app.as_bytes(),
-                },
-            )
-            .map_err(|_| "Cannot protect remote credential")?;
-        let mut secret = nonce.to_vec();
-        secret.extend(encrypted);
+        let secret = self.seal(target_aad(app).as_bytes(), target.password.as_bytes())?;
         self.db.lock().unwrap().execute("INSERT INTO targets VALUES(?1,?2,?3) ON CONFLICT(app) DO UPDATE SET metadata=excluded.metadata,secret=excluded.secret",params![app,serde_json::to_string(target).map_err(|e|e.to_string())?,secret]).map_err(|e|e.to_string())?;
         Ok(())
     }
 
+    /// The saved connection. Earlier versions kept a credential of B in the same
+    /// column, sealed for the row alone; it never opens as a password, so their
+    /// connections, including any they save after a downgrade, have none.
     pub fn target(&self, app: &str) -> Result<Target, String> {
         let (text, secret): (String, Vec<u8>) = self
             .db
@@ -534,36 +403,58 @@ impl RemoteStore {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|_| "Remote connection is not configured")?;
-        if secret.len() < 28 {
-            return Err("Invalid saved credential".into());
-        }
-        let plain = self
-            .cipher
-            .decrypt(
-                &Nonce::from(<[u8; 12]>::try_from(&secret[..12]).unwrap()),
-                chacha20poly1305::aead::Payload {
-                    msg: &secret[12..],
-                    aad: app.as_bytes(),
-                },
-            )
-            .map_err(|_| "Cannot decrypt remote credential; configure the connection again")?;
         let mut target: Target = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        target.credential = String::from_utf8(plain).map_err(|e| e.to_string())?;
+        target.password = self
+            .unseal(target_aad(app).as_bytes(), &secret)
+            .unwrap_or_default();
         Ok(target)
     }
 
     pub fn delete(&self, app: &str) -> Result<(), String> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction().map_err(|e| e.to_string())?;
-        for table in ["grants", "policies", "targets"] {
+        for table in ["policies", "targets"] {
             tx.execute(&format!("DELETE FROM {table} WHERE app=?1"), [app])
                 .map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         drop(db);
-        self.changed();
+        self.changed(app);
         Ok(())
     }
+}
+
+/// Upgrades databases of earlier versions. Version 1 replaces saved credentials
+/// with session tokens: grants are dropped. Connections saved on A must be given
+/// their password again; see `RemoteStore::target`.
+fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= 1 {
+        return Ok(());
+    }
+    let tx = db.transaction()?;
+    tx.execute("DROP TABLE IF EXISTS grants", [])?;
+    let has_secret: bool = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('policies') WHERE name='password_secret'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_secret {
+        tx.execute("ALTER TABLE policies ADD COLUMN password_secret BLOB", [])?;
+    }
+    tx.execute_batch("PRAGMA user_version=1")?;
+    tx.commit()
+}
+
+/// Binds a viewable password to its application and to the hash it was saved with.
+fn policy_aad(app: &str, hash: &str) -> String {
+    format!("policy:{app}\n{hash}")
+}
+
+/// Binds a saved password to its connection. Earlier versions sealed their
+/// credentials with the bare application ID.
+fn target_aad(app: &str) -> String {
+    format!("target-password:{app}")
 }
 
 fn verify_password(hash: &str, password: &str) -> bool {
@@ -586,11 +477,6 @@ fn digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
-/// The public grant ID is a prefix of the stored digest, never of the credential.
-pub fn grant_id(hash: &str) -> String {
-    hash.chars().take(16).collect()
-}
-
 pub fn private_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension(format!("{}.tmp", super::token()));
     let mut file = fs::OpenOptions::new()
@@ -611,178 +497,260 @@ mod tests {
     fn store() -> RemoteStore {
         RemoteStore::open(Connection::open_in_memory().unwrap(), &[7; 32]).unwrap()
     }
-    fn client() -> Client {
-        Client {
-            node: "a-node".into(),
-            label: "A".into(),
-            ip: "192.0.2.1".into(),
-        }
-    }
     #[test]
-    fn credentials_are_app_scoped_revocable_and_never_exported() {
+    fn session_tokens_are_app_scoped_and_end_with_access_changes() {
         let s = store();
         assert!(!s.policy("one").unwrap().enabled);
-        assert!(s
-            .set_policy("one", true, None, DesktopSettings::default())
-            .is_err());
-        s.set_policy(
-            "one",
-            true,
-            Some("password-one"),
-            DesktopSettings::default(),
-        )
-        .unwrap();
-        s.set_policy(
-            "two",
-            true,
-            Some("password-two"),
-            DesktopSettings::default(),
-        )
-        .unwrap();
-        let grant = s.authenticate("one", "password-one", &client()).unwrap();
-        assert!(s.verify("one", &grant));
-        assert!(!s.verify("two", &grant));
-        assert!(s.authenticate("two", "password-one", &client()).is_err());
-        assert!(s
-            .authenticate("missing", "password-one", &client())
-            .is_err());
-        s.set_policy(
-            "one",
-            true,
-            Some("password-new"),
-            DesktopSettings::default(),
-        )
-        .unwrap();
-        assert!(!s.verify("one", &grant));
-        assert!(s.authenticate("one", "password-one", &client()).is_err());
-        let new = s.authenticate("one", "password-new", &client()).unwrap();
-        s.set_policy("one", false, None, DesktopSettings::default())
-            .unwrap();
+        assert!(s.set_policy("one", true, None).is_err());
+        s.set_policy("one", true, Some("password-one")).unwrap();
+        s.set_policy("two", true, Some("password-two")).unwrap();
+        let token = s.authenticate("one", "password-one").unwrap();
+        assert!(s.verify("one", &token));
+        assert!(!s.verify("two", &token));
+        assert!(s.authenticate("two", "password-one").is_err());
+        assert!(s.authenticate("missing", "password-one").is_err());
+        s.set_policy("one", true, Some("password-new")).unwrap();
+        assert!(!s.verify("one", &token));
+        assert!(s.authenticate("one", "password-one").is_err());
+        let new = s.authenticate("one", "password-new").unwrap();
+        s.set_policy("one", false, None).unwrap();
         assert!(!s.verify("one", &new));
+        s.set_policy("one", true, None).unwrap();
+        assert!(!s.verify("one", &new));
+        // Tokens expire after a period without use.
+        let idle = s.authenticate("one", "password-new").unwrap();
+        s.sessions
+            .lock()
+            .unwrap()
+            .get_mut(&digest(&idle))
+            .unwrap()
+            .used = Instant::now() - SESSION_IDLE;
+        assert!(!s.verify("one", &idle));
     }
 
     #[test]
-    fn runtime_settings_do_not_revoke_credentials() {
+    fn sessions_are_limited_per_application() {
+        let s = store();
+        let other = s.open_session("two", 1);
+        let first = s.open_session("one", 1);
+        let tokens: Vec<String> = (1..SESSIONS_PER_APP)
+            .map(|_| s.open_session("one", 1))
+            .collect();
+        let count = |app: &str| {
+            s.sessions
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|v| v.app == app)
+                .count()
+        };
+        assert_eq!(count("one"), SESSIONS_PER_APP);
+        let session = |token: &str| s.sessions.lock().unwrap().contains_key(&digest(token));
+        // One more login ends the oldest session of the same application only.
+        s.open_session("one", 1);
+        assert_eq!(count("one"), SESSIONS_PER_APP);
+        assert!(!session(&first));
+        assert!(tokens.iter().all(|t| session(t)));
+        assert!(session(&other));
+        // A token closes only sessions of its own application.
+        s.close_session("one", &other);
+        assert!(session(&other));
+        s.close_session("two", &other);
+        assert!(!session(&other));
+    }
+
+    #[test]
+    fn unchanged_access_does_not_end_sessions() {
         let s = store();
         let mut changes = s.subscribe();
-        s.set_policy(
-            "one",
-            true,
-            Some("password-one"),
-            DesktopSettings::default(),
-        )
-        .unwrap();
+        s.set_policy("one", true, Some("password-one")).unwrap();
         let revision = s.policy("one").unwrap().revision;
-        let grant = s.authenticate("one", "password-one", &client()).unwrap();
+        let token = s.authenticate("one", "password-one").unwrap();
         changes.mark_unchanged();
-        let desktop = DesktopSettings {
-            x11: true,
-            networks: vec!["192.168.10.7/24".into()],
-            ..Default::default()
-        };
-        let policy = s.set_policy("one", true, None, desktop).unwrap();
+        let policy = s.set_policy("one", true, None).unwrap();
         assert_eq!(policy.revision, revision);
-        assert!(policy.desktop.x11);
-        assert!(s.verify("one", &grant));
+        assert!(s.verify("one", &token));
         assert!(!changes.has_changed().unwrap());
-        // Sharing requires strict isolation.
-        let host = DesktopSettings {
-            isolation: Isolation::Host,
-            ..Default::default()
-        };
-        assert!(s.set_policy("one", true, None, host.clone()).is_err());
-        s.set_policy("one", false, None, host).unwrap();
+        s.set_policy("one", false, None).unwrap();
         assert!(changes.has_changed().unwrap());
-    }
-
-    #[test]
-    fn grants_are_listed_touched_and_revoked_by_public_id() {
-        let s = store();
-        s.set_policy(
-            "one",
-            true,
-            Some("password-one"),
-            DesktopSettings::default(),
-        )
-        .unwrap();
-        let token = s.authenticate("one", "password-one", &client()).unwrap();
-        let grants = s.grants("one").unwrap();
-        assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].client, "a-node");
-        assert_eq!(grants[0].label, "A");
-        assert!(!token.starts_with(&grants[0].id));
-        assert_eq!(s.grant("one", &token).unwrap().0, grants[0].id);
-        s.touch("one", &token, "198.51.100.2");
-        assert_eq!(s.grants("one").unwrap()[0].ip, "198.51.100.2");
-        assert!(!s.revoke_grant_id("one", "not-an-id").unwrap());
-        assert!(!s.revoke_grant_id("two", &grants[0].id).unwrap());
-        assert!(s.revoke_grant_id("one", &grants[0].id).unwrap());
         assert!(!s.verify("one", &token));
     }
 
     #[test]
-    fn desktop_settings_validate_paths_and_networks() {
+    fn passwords_can_be_viewed_by_their_owner_only_when_saved_by_this_version() {
+        let s = store();
+        assert_eq!(s.policy_password("one").unwrap(), None);
+        s.set_policy("one", false, Some("password-one")).unwrap();
         assert_eq!(
-            parse_network("192.168.1.9/24").unwrap(),
-            ("192.168.1.0".parse().unwrap(), 24)
+            s.policy_password("one").unwrap().as_deref(),
+            Some("password-one")
         );
-        assert!(parse_network("172.20.0.5").is_ok());
-        for bad in [
-            "127.0.0.0/8",
-            "10.0.0.0/8",
-            "10.0.2.0/24",
-            "10.0.0.0/16",
-            "169.254.0.0/16",
-            "0.0.0.0/0",
-            "224.0.0.0/4",
-            "192.168.1.0/7",
-            "nonsense",
-        ] {
-            assert!(parse_network(bad).is_err(), "{bad}");
-        }
-        let mount = |path: &str| DesktopSettings {
-            mounts: vec![Mount {
-                path: path.into(),
-                writable: false,
-            }],
-            ..Default::default()
-        };
-        assert!(mount("/data/projects").validate().is_ok());
-        for bad in [
-            "relative",
-            "/data/../etc",
-            "/data/./x",
-            "/",
-            "/data/",
-            "/a//b",
-        ] {
-            assert!(mount(bad).validate().is_err(), "{bad}");
-        }
-        let mut host = mount("/data");
-        host.isolation = Isolation::Host;
-        assert!(host.validate().is_err());
-        // Settings saved before these fields existed still load.
-        let old: DesktopSettings = serde_json::from_str(r#"{"x11":true,"services":[]}"#).unwrap();
-        assert_eq!(old.isolation, Isolation::Strict);
+        // Keeping the password keeps its viewable copy.
+        s.set_policy("one", true, None).unwrap();
+        assert_eq!(
+            s.policy_password("one").unwrap().as_deref(),
+            Some("password-one")
+        );
+        // The copy is bound to its application.
+        s.set_policy("two", false, Some("password-two")).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE policies SET password_secret=(SELECT password_secret FROM policies WHERE app='one') WHERE app='two'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(s.policy_password("two").unwrap(), None);
+        // An earlier version that changes the password leaves the copy behind.
+        s.set_policy("three", true, Some("password-three")).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE policies SET password=(SELECT password FROM policies WHERE app='two') WHERE app='three'",
+                [],
+            )
+            .unwrap();
+        assert!(s.policy("three").unwrap().password_set);
+        assert_eq!(s.policy_password("three").unwrap(), None);
+        // Earlier versions stored only the hash.
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE policies SET password_secret=NULL WHERE app='one'",
+                [],
+            )
+            .unwrap();
+        let policy = s.policy("one").unwrap();
+        assert!(policy.enabled && policy.password_set);
+        assert_eq!(s.policy_password("one").unwrap(), None);
+        assert!(s.authenticate("one", "password-one").is_ok());
     }
 
     #[test]
-    fn saved_credentials_are_encrypted_and_bound_to_mapping() {
+    fn policies_with_legacy_runtime_settings_still_load() {
+        let s = store();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO policies(app,enabled,password,revision,desktop) VALUES('one',0,NULL,3,?1)",
+                [r#"{"x11":true,"isolation":"host","mounts":[{"path":"/data","writable":true}],"networks":["192.168.1.0/24"],"services":["svc"]}"#],
+            )
+            .unwrap();
+        let policy = s.policy("one").unwrap();
+        assert!(!policy.enabled && !policy.password_set);
+        assert_eq!(policy.revision, 3);
+        let policy = s.set_policy("one", true, Some("password-one")).unwrap();
+        assert!(policy.enabled && policy.password_set);
+        assert_eq!(policy.revision, 4);
+        // Left for earlier versions, which still read it.
+        let desktop: String =
+            s.db.lock()
+                .unwrap()
+                .query_row("SELECT desktop FROM policies WHERE app='one'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+        assert!(desktop.contains("\"isolation\":\"host\""));
+    }
+
+    #[test]
+    fn databases_of_earlier_versions_are_migrated_once() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("
+          CREATE TABLE policies (app TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, password TEXT, revision INTEGER NOT NULL DEFAULT 0, desktop TEXT NOT NULL DEFAULT '{}');
+          CREATE TABLE grants (hash TEXT PRIMARY KEY, app TEXT NOT NULL, revision INTEGER NOT NULL, created INTEGER NOT NULL DEFAULT (unixepoch()), client TEXT NOT NULL DEFAULT '');
+          CREATE TABLE targets (app TEXT PRIMARY KEY, metadata TEXT NOT NULL, secret BLOB NOT NULL);
+          INSERT INTO policies(app,enabled,password,revision) VALUES('one',1,'$argon2id$legacy',2);
+          INSERT INTO grants(hash,app,revision) VALUES('digest','one',2);
+          INSERT INTO targets VALUES('mapping','{\"base_url\":\"https://b.example\",\"app_id\":\"one\",\"node_id\":\"node\",\"name\":\"App\"}',x'00');
+        ").unwrap();
+        let s = RemoteStore::open(db, &[7; 32]).unwrap();
+        let db = s.db.lock().unwrap();
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let grants: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='grants'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(grants, 0);
+        drop(db);
+        let policy = s.policy("one").unwrap();
+        assert!(policy.enabled && policy.password_set);
+        assert_eq!(policy.revision, 2);
+        assert_eq!(s.policy_password("one").unwrap(), None);
+        // The saved credential is not a password; A must ask for it again.
+        let target = s.target("mapping").unwrap();
+        assert_eq!(target.app_id, "one");
+        assert!(target.password.is_empty());
+        let saved = Target {
+            password: "password-one".into(),
+            ..target
+        };
+        s.save_target("mapping", &saved).unwrap();
+        assert_eq!(s.target("mapping").unwrap().password, "password-one");
+        // Opening again does not repeat the migration.
+        let db = std::mem::replace(
+            &mut *s.db.lock().unwrap(),
+            Connection::open_in_memory().unwrap(),
+        );
+        let s = RemoteStore::open(db, &[7; 32]).unwrap();
+        assert_eq!(s.target("mapping").unwrap().password, "password-one");
+    }
+
+    #[test]
+    fn saved_passwords_are_encrypted_and_bound_to_mapping() {
         let s = store();
         let t = Target {
             base_url: "https://b.example".into(),
             app_id: "one".into(),
             node_id: "node".into(),
             name: "App".into(),
-            credential: super::super::token(),
+            password: "password-one".into(),
         };
         s.save_target("mapping", &t).unwrap();
-        assert_eq!(s.target("mapping").unwrap().credential, t.credential);
-        assert!(!serde_json::to_string(&t).unwrap().contains(&t.credential));
+        assert_eq!(s.target("mapping").unwrap().password, t.password);
+        assert!(!serde_json::to_string(&t).unwrap().contains(&t.password));
+        let stored: Vec<u8> =
+            s.db.lock()
+                .unwrap()
+                .query_row("SELECT secret FROM targets", [], |r| r.get(0))
+                .unwrap();
+        assert!(!String::from_utf8_lossy(&stored).contains(&t.password));
         s.db.lock()
             .unwrap()
             .execute("UPDATE targets SET app='other'", [])
             .unwrap();
-        assert!(s.target("other").is_err());
+        assert!(s.target("other").unwrap().password.is_empty());
+    }
+
+    #[test]
+    fn credentials_of_earlier_versions_are_not_passwords() {
+        let s = store();
+        let t = Target {
+            base_url: "https://b.example".into(),
+            app_id: "one".into(),
+            node_id: "node".into(),
+            name: "App".into(),
+            password: "password-one".into(),
+        };
+        s.save_target("mapping", &t).unwrap();
+        // After a downgrade, an earlier version saves the connection again with
+        // a credential of B, sealed for the row alone and without any marker.
+        let credential = s.seal(b"mapping", b"credential-token").unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE targets SET secret=?1 WHERE app='mapping'",
+                [credential],
+            )
+            .unwrap();
+        let target = s.target("mapping").unwrap();
+        assert_eq!(target.share_url(), "https://b.example/remote/v1/apps/one");
+        assert!(target.password.is_empty());
     }
 }

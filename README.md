@@ -11,14 +11,14 @@
 - **硬件加速** - Intel VA-API, NVIDIA NVENC, Intel Quick Sync Video
 - **输入转发** - 通过 WebRTC DataChannel 支持键盘/鼠标/文本输入（IME）
 - **双向剪贴板** - 浏览器 ↔ 远程应用剪贴板同步，500ms 回声抑制
-- **任务栏** - 窗口列表广播，支持从浏览器切换焦点/关闭窗口
+- **任务栏** - 窗口列表广播，支持从浏览器切换焦点/关闭窗口；共享应用和远程应用以标签显示
 - **光标同步** - 远程光标样式实时同步到浏览器
 - **音频流媒体** - PulseAudio/PipeWire 捕获 + Opus 编码
 - **文件传输** - 支持上传/下载文件
 - **Web UI** - 内置 Web 界面，支持 PWA 安装
 - **HTTP API** - 健康检查和 Prometheus 指标端点
 - **Basic Auth** - 内置 HTTP 基础认证
-- **远程桌面应用** - 应用独立运行与授权，A 中继 B 的画面、输入、声音和文件，多人观看与单人控制
+- **远程桌面应用** - 按应用开启远程访问，A 启动后以工具栏标签显示，A 中继 B 的画面、输入、声音和上传，多个连接可同时操作
 - **TLS** - 支持持久化自签名或指定证书（构建启用 `tls`，运行加 `--tls`）
 
 ## 快速开始
@@ -154,8 +154,7 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```
 
 脚本将仓库下的 `ivnc-data` 和 `miao-data` 分别挂载到 `/root/.ivnc` 和
-`/root/.miao`，并为 miao 全局和进程代理模式提供 `/dev/net/tun` 与 `NET_ADMIN`；
-桌面应用的隔离网络同样使用 `/dev/net/tun`。
+`/root/.miao`，并为 miao 全局和进程代理模式提供 `/dev/net/tun` 与 `NET_ADMIN`。
 容器默认使用 `--restart unless-stopped`。宿主机必须已安装 Docker 且提供 TUN 设备。
 
 也可直接在镜像名后传入 iVnc 参数：
@@ -163,22 +162,17 @@ PORT=9000 NAME=ivnc-noble IMAGE=ghcr.io/xiechengqi/ivnc:noble ./docker-run.sh
 ```bash
 docker run -d --name ivnc --restart unless-stopped \
   -p 8008:8008 --cap-add NET_ADMIN --device /dev/net/tun \
-  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-  --security-opt systempaths=unconfined \
   -v "$PWD/ivnc-data:/root/.ivnc" -v "$PWD/miao-data:/root/.miao" \
   ghcr.io/xiechengqi/ivnc:latest --proxy-ip 203.0.113.10
 ```
-
-三个 `security-opt` 都是 Docker 内置选项，不需要额外文件；缺少它们时桌面应用无法创建隔离环境，
-原因见 [远程应用部署](docs/REMOTE_APPS.md#部署与证书)。
 
 `--proxy-ip` 接受 IPv4/IPv6，使 Miao 以 `--nopasswd --mode global --vps-host <IP>` 启动，默认使用运行账户的 SSH 密钥或 agent。Docker 若需使用密钥，可将专用 SSH 目录挂载到 `/root/.ssh`；需可写以保存 `known_hosts`。详细行为见 [Miao 后台应用](docs/MIAO.md)。
 
 可用镜像标签包括滚动更新的 `latest`、固定 Ubuntu 24.04 运行时的 `noble`，以及
 不可变的 `sha-<提交短哈希>`。需要回滚时，将 `IMAGE` 指向此前的提交标签或镜像摘要。
 
-> 正式 Docker 镜像使用 `--no-default-features` 构建，当前不包含音频捕获；源码构建和
-> 独立发布二进制的默认 feature 仍包含 PulseAudio。
+> 正式 Docker 镜像和独立发布二进制保留默认 PulseAudio feature 并启用 `tls` feature；
+> 音频仍需在配置中启用，HTTPS 运行时使用 `--tls`。
 
 ## 配置
 
@@ -303,14 +297,13 @@ iVnc 持久化数据默认位于 `$HOME/.ivnc`（可用 `IVNC_HOME` 覆盖）：
 ```
 $IVNC_HOME/
   apps.db / console.json / app_running_state.json
-  remote.db / remote.key / apps.before-isolation.db
-  remote-audit.log / public-ipv4
+  remote.db / remote.key
   capability_calls.jsonl / ivnc.pid / Desktop/
   applications/   # .desktop 入口
   miao/           # 内置 miao 二进制与 miao.log
-  apps/<id>/      # 日志、隔离 HOME、data、chrome profile
-  runtimes/<id>/  # 内部运行代次与端点
-  tls/           # 持久化 TLS 证书与私钥
+  apps/<id>/      # 日志、应用 HOME、data、chrome profile、worker-state
+  runtimes/<id>/  # 共享应用运行环境的内部代次与端点
+  tls/            # 持久化 TLS 证书与私钥
 ```
 
 miao 自身的配置、订阅缓存和运行状态遵循 miao 的目录约定，位于 `$HOME/.miao`。Docker 部署应同时持久化 `/root/.ivnc` 与 `/root/.miao`。
@@ -323,9 +316,9 @@ Miao 以内置后台应用显示在控制台应用列表，首次默认随 iVnc 
 
 ### 远程应用
 
-在 B 的桌面应用“远程访问”中设置应用密码并复制连接地址，在 A 添加“远程应用”后打开即可连接原有进程。浏览器只连接 A；关闭或删除 A 中的连接不会停止 B 的应用。B 关闭共享或修改密码会断开远程会话，B 所有者可以接管控制权。
+在 B 上“编辑”桌面应用，在“远程访问”中打开开关、设置访问密码并复制连接地址；在 A 添加“远程应用”并启动，即可连接 B 上已运行的进程，它以标签形式出现在 A 桌面的工具栏中。浏览器只连接 A；停止或删除 A 中的远程应用不会停止 B 的应用。B 关闭共享或修改密码会立即断开所有远程会话。所有连接都可以操作应用。
 
-桌面应用默认在 bubblewrap、slirp4netns、nftables 的严格隔离环境运行，可逐应用放行主机路径、内网网段和本机后台服务；不共享的应用也可改用主机模式。使用步骤、证书、Docker 权限、升级和验证范围见 [远程桌面应用](docs/REMOTE_APPS.md)。
+未开启远程访问的桌面应用是主桌面的 Wayland 窗口；开启远程访问的应用在独立运行环境（自带合成器和私有 PulseAudio）中运行，重启后切换。两种方式下应用的文件、网络和环境与本机运行相同，没有沙箱隔离，只支持 Wayland 应用。使用步骤、证书、升级和验证范围见 [远程桌面应用](docs/REMOTE_APPS.md)。
 
 ## API 参考
 
@@ -383,7 +376,7 @@ ICE-TCP 连接也复用同一端口，通过首字节分类自动区分。
 |------|------|
 | `cursor,{json}` | 光标样式变化 |
 | `clipboard,{base64}` | 剪贴板内容 |
-| `taskbar,{json}` | 窗口列表更新 |
+| `taskbar,{json}` | 窗口列表与应用标签更新 |
 | `stats,{json}` | 性能统计（每秒） |
 | `ping` | 心跳请求 |
 
@@ -450,6 +443,7 @@ iVnc 使用 str0m Sans-I/O WebRTC 库，所有 I/O 由调用方驱动：
 - 浏览器可发送 `focus,{id}` / `close,{id}` 控制窗口
 - `display_name` 从 `.desktop` 文件解析
 - 新 DataChannel 打开时（`datachannel_open_count` 变化）自动重发窗口列表
+- 共享应用和已启动的远程应用通过 `apps` 字段下发，前端以标签显示，选中时用内嵌应用视图覆盖主画面
 
 ### 模块结构
 

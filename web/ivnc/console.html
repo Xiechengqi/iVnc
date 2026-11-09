@@ -164,12 +164,14 @@
                 <h2 id="modal-title">添加应用</h2>
                 <button class="modal-close" id="modal-close" type="button" aria-label="关闭">×</button>
             </div>
+            <div class="advanced-title modal-section-first" id="basic-title" hidden>基本信息</div>
             <div class="form-line">
-                <label class="form-label required-label">
+                <label class="form-label required-label" for="f-name">
                     <span id="label-name">名称</span>
-                    <span class="required-mark">*</span>
+                    <span class="required-mark" id="name-required-mark">*</span>
                 </label>
                 <input type="text" id="f-name" placeholder="应用显示名称">
+                <div class="field-hint field-error" id="err-f-name"></div>
             </div>
             <div class="form-line">
                 <label class="form-label required-label">
@@ -180,7 +182,7 @@
                     <option value="background">后台应用</option>
                     <option value="desktop">桌面应用</option>
                     <option value="cli">CLI 应用</option>
-                    <option value="remote">远程应用 / Remote app</option>
+                    <option value="remote">远程应用</option>
                 </select>
             </div>
 
@@ -202,11 +204,31 @@
             </div>
             
             <div id="remote-config" hidden>
-                <div class="form-line"><label class="form-label" for="f-remote-url">应用连接地址 / Application URL</label><input id="f-remote-url" type="url" placeholder="https://B/remote/v1/apps/…"></div>
-                <div class="form-line"><label class="form-label" for="f-remote-password">应用密码 / Application password</label><input id="f-remote-password" type="password" autocomplete="new-password" placeholder="编辑时留空保留连接 / Leave blank to keep connection"></div>
-                <button type="button" id="remote-test" class="btn btn-sm">测试连接 / Test connection</button>
-                <span id="remote-test-result" role="status"></span>
-                <p>保存时验证目标应用。关闭视图或删除连接不会停止 B 上的应用。<br>Saving verifies the application. Closing or deleting this connection keeps the application running on B.</p>
+                <div class="form-line">
+                    <label class="form-label required-label" for="f-remote-url">
+                        <span id="label-remote-url">连接地址</span>
+                        <span class="required-mark">*</span>
+                    </label>
+                    <input id="f-remote-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://主机/remote/v1/apps/…">
+                    <div class="field-hint field-error" id="err-f-remote-url"></div>
+                    <span class="help-text help-warn" id="remote-plaintext-hint" hidden>未加密连接，仅建议在可信局域网中使用。</span>
+                </div>
+                <div class="form-line">
+                    <label class="form-label required-label" for="f-remote-password">
+                        <span id="label-remote-password">访问密码</span>
+                        <span class="required-mark" id="remote-password-required-mark">*</span>
+                    </label>
+                    <div class="input-actions">
+                        <input id="f-remote-password" type="password" autocomplete="new-password" spellcheck="false" placeholder="共享端设置的访问密码">
+                        <button type="button" class="btn btn-cancel btn-sm" id="remote-password-toggle" data-password-toggle="f-remote-password">显示</button>
+                    </div>
+                    <div class="field-hint field-error" id="err-f-remote-password"></div>
+                </div>
+                <div class="remote-test-row">
+                    <button type="button" id="remote-test" class="btn btn-action btn-sm">测试连接</button>
+                    <span class="field-hint" id="remote-test-result" role="status"></span>
+                </div>
+                <span class="help-text" id="remote-help">在共享端编辑该应用并开启远程访问，然后复制连接地址和密码。</span>
             </div>
             <div id="background-config">
                 <div class="form-line command-line">
@@ -223,6 +245,7 @@
                         </div>
                         <input type="text" id="f-launch-command" placeholder="请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860">
                     </div>
+                    <div class="field-hint field-error" id="err-f-launch-command"></div>
                 </div>
                 <div class="form-line no-label">
                     <div class="split-row">
@@ -257,6 +280,7 @@
                         </span>
                     </label>
                     <input type="text" id="f-url" placeholder="请输入访问地址，例如： http://127.0.0.1:7860">
+                    <div class="field-hint field-error" id="err-f-url"></div>
                 </div>
                 <div class="form-line">
                     <label class="form-label info-label">
@@ -285,6 +309,7 @@
                         </div>
                         <input type="text" id="f-exec" placeholder="请输入启动命令，例如： /usr/bin/code --no-sandbox">
                     </div>
+                    <div class="field-hint field-error" id="err-f-exec"></div>
                 </div>
                 <div class="form-line">
                     <label class="form-label info-label">
@@ -305,6 +330,7 @@
                         <span class="required-mark">*</span>
                     </label>
                     <input type="text" id="f-cli-binary" placeholder="/usr/local/bin/agent-browser">
+                    <div class="field-hint field-error" id="err-f-cli-binary"></div>
                 </div>
                 <div class="form-line">
                     <label class="form-label info-label">
@@ -317,6 +343,44 @@
                     <textarea id="f-cli-env" rows="5" placeholder="NO_COLOR=1&#10;AGENT_BROWSER_SESSION=ivnc-default"></textarea>
                 </div>
             </div>
+
+            <div id="sharing-section" hidden>
+                <div class="advanced-title" id="sharing-title">远程访问</div>
+                <div class="sharing-toggle">
+                    <div class="sharing-toggle-text">
+                        <label class="form-label" for="f-share-enabled" id="label-share-enabled">允许远程访问</label>
+                        <span class="help-text" id="help-share-enabled">其他 iVnc 可凭密码连接，只能看到和操作此应用。</span>
+                    </div>
+                    <label class="checkbox-row settings-checkbox"><input type="checkbox" id="f-share-enabled"></label>
+                </div>
+                <div class="field-hint field-error" id="err-f-share-enabled"></div>
+                <div id="sharing-fields" hidden>
+                    <div class="form-line">
+                        <label class="form-label" for="f-share-password" id="label-share-password">访问密码</label>
+                        <div class="input-actions">
+                            <input id="f-share-password" type="password" autocomplete="new-password" spellcheck="false">
+                            <button type="button" class="btn btn-cancel btn-sm" id="share-password-toggle" data-password-toggle="f-share-password">显示</button>
+                            <button type="button" class="btn btn-cancel btn-sm" id="share-password-generate">生成</button>
+                        </div>
+                        <div class="field-hint field-error" id="err-f-share-password"></div>
+                        <span class="help-text" id="help-share-password">至少 8 位。修改密码会断开所有远程连接。</span>
+                    </div>
+                    <div class="form-line">
+                        <label class="form-label" for="f-share-url" id="label-share-url">连接地址</label>
+                        <div class="input-actions">
+                            <input id="f-share-url" type="text" readonly data-fixed-readonly>
+                            <button type="button" class="btn btn-cancel btn-sm" id="share-url-copy">复制</button>
+                        </div>
+                        <span class="help-text" id="help-share-url">在另一台 iVnc 中添加“远程应用”，填入此地址和密码。</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-notice" id="restart-notice" role="status" hidden>
+                <span id="restart-notice-text"></span>
+                <button type="button" class="btn btn-restart btn-sm" id="restart-now">立即重启</button>
+            </div>
+            <div class="field-hint field-error form-error" id="modal-error" role="alert"></div>
 
             <div class="modal-actions">
                 <button class="btn btn-cancel" id="modal-cancel">取消</button>

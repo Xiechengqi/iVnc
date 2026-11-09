@@ -51,7 +51,6 @@ pub async fn handle_signaling_connection(
     state: Arc<SharedState>,
     session_manager: Arc<SessionManager>,
     client_host: Option<String>,
-    owner: bool,
 ) {
     info!(
         "New signaling WebSocket connection established (host: {:?})",
@@ -83,57 +82,18 @@ pub async fn handle_signaling_connection(
     let mut wire_format = WireFormat::Selkies;
 
     // Process incoming messages
-    let mut control_tick = tokio::time::interval(std::time::Duration::from_secs(1));
-    // Control state is sent when it changes, plus a slow heartbeat.
-    let mut last_control: Option<(bool, std::time::Instant)> = None;
     loop {
         // A stalled writer closes the queue after its send timeout.
         if tx.is_closed() {
             break;
         }
-        let result = tokio::select! {
-            msg = ws_receiver.next() => match msg { Some(result) => result, None => break },
-            _ = control_tick.tick(), if crate::remote::worker::is_worker() => {
-                if let Some(sid) = &session_id {
-                    let controller = state.can_control(sid);
-                    if last_control.is_none_or(|(sent, at)| sent != controller || at.elapsed() >= std::time::Duration::from_secs(10)) {
-                        last_control = Some((controller, std::time::Instant::now()));
-                        let _ = tx.try_send(json!({"ivnc_control":{"controller":controller,"owner":owner}}).to_string());
-                    }
-                }
-                continue;
-            }
+        let Some(result) = ws_receiver.next().await else {
+            break;
         };
         match result {
             Ok(Message::Text(text)) => {
                 let text_str: &str = text.as_ref();
 
-                if crate::remote::worker::is_worker() {
-                    if let Ok(value) = serde_json::from_str::<Value>(text_str) {
-                        if let Some(action) = value["ivnc_control"].as_str() {
-                            if let Some(sid) = &session_id {
-                                match action {
-                                    "claim" => {
-                                        state.claim_control(sid, false);
-                                    }
-                                    "takeover" if owner => {
-                                        state.claim_control(sid, true);
-                                    }
-                                    "release" => state.release_control(sid),
-                                    _ => {}
-                                }
-                                let controller = state.can_control(sid);
-                                last_control = Some((controller, std::time::Instant::now()));
-                                let _ = tx.send_timeout(
-                                    json!({"ivnc_control":{"controller":controller,"owner":owner}})
-                                        .to_string(),
-                                    REPLY_TIMEOUT,
-                                ).await;
-                            }
-                            continue;
-                        }
-                    }
-                }
                 if let Some(reply) = handle_gstreamer_control_message(text_str, &mut wire_format) {
                     let _ = tx.send_timeout(reply, REPLY_TIMEOUT).await;
                     continue;
@@ -210,7 +170,6 @@ pub async fn handle_signaling_connection(
     // Clean up pending session if the WebSocket closes before ICE-TCP connects
     if let Some(ref sid) = session_id {
         session_manager.remove_pending_session(sid).await;
-        state.release_control(sid);
         if crate::remote::worker::is_worker() {
             state.disconnect_connection(sid);
         }
@@ -245,7 +204,6 @@ async fn handle_signaling_message(
         } => {
             if let Some(old) = session_id.take() {
                 session_manager.remove_pending_session(&old).await;
-                state.release_control(&old);
                 state.disconnect_connection(&old);
             }
             // Create session and accept offer in one step
@@ -255,9 +213,6 @@ async fn handle_signaling_message(
             {
                 Ok((sid, answer_sdp)) => {
                     *session_id = Some(sid.clone());
-                    if crate::remote::worker::is_worker() {
-                        state.claim_control(&sid, false);
-                    }
                     info!("Session {} created with SDP answer", sid);
 
                     // Send ready notification (Selkies format)
@@ -340,12 +295,7 @@ async fn handle_signaling_message(
                 "Bitrate change requested for session {}: {} kbps",
                 target, bitrate_kbps
             );
-            if session_id
-                .as_deref()
-                .is_some_and(|sid| state.can_control(sid))
-            {
-                state.runtime_settings.set_video_bitrate_kbps(bitrate_kbps);
-            }
+            state.runtime_settings.set_video_bitrate_kbps(bitrate_kbps);
             None
         }
 

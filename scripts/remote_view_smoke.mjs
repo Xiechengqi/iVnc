@@ -1,6 +1,13 @@
 // Drives a real headless Chrome through an iVnc application view and asserts
 // that WebRTC media, the input data channel and revocation all work end to end.
-// Usage: node scripts/remote_view_smoke.mjs <view-url> <workdir> [--no-input]
+// Usage: node scripts/remote_view_smoke.mjs <view-url> <workdir> [flags]
+//   --no-input  skip the upload and the mouse click
+//   --audio     also require application audio
+//   --embed     open the view as a stream tab does: a same-origin iframe with
+//               ?embed=1 inside a parent page, and assert that the view hides
+//               its own taskbar, connection indicator and status bar and
+//               reports readiness and its state to the parent over postMessage
+// REMOTE_VIEW_EXPECT_REVOKE=1 waits until the server ends the view.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { openSync, closeSync, writeFileSync } from 'node:fs';
@@ -12,9 +19,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 const { WebSocket } = createRequire(new URL('../web/ivnc/package.json', import.meta.url))('ws');
 
 const [viewUrl, root, ...flags] = process.argv.slice(2);
-assert(viewUrl && root, 'usage: remote_view_smoke.mjs <view-url> <workdir>');
+assert(viewUrl && root, 'usage: remote_view_smoke.mjs <view-url> <workdir> [flags]');
+const embed = flags.includes('--embed');
 const targetUrl = new URL(viewUrl);
+const credentials = targetUrl.username
+    ? Buffer.from(`${decodeURIComponent(targetUrl.username)}:${decodeURIComponent(targetUrl.password)}`).toString('base64')
+    : null;
 targetUrl.username = ''; targetUrl.password = ''; targetUrl.search = '';
+// In embed mode Chrome opens a small same-origin page that hosts the iframe.
+// /ui-config sits behind the instance's Basic Auth, so Chrome learns the
+// credentials from the launch URL for the iframe's requests too.
+const launchUrl = new URL(viewUrl);
+if (embed) { launchUrl.pathname = '/ui-config'; launchUrl.search = ''; }
+const pagePath = embed ? '/ui-config' : targetUrl.pathname;
 
 const server = net.createServer();
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -24,10 +41,11 @@ const log = openSync(path.join(root, 'browser.log'), 'a', 0o600);
 const browser = spawn(process.env.CHROME_BIN || 'google-chrome', [
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
     '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
-    '--ignore-certificate-errors', `--remote-debugging-port=${port}`,
+    '--ignore-certificate-errors', '--autoplay-policy=no-user-gesture-required',
+    `--remote-debugging-port=${port}`,
     `--user-data-dir=${path.join(root, 'browser')}`,
     // Navigate on launch and attach only to this page, ignoring extension targets.
-    '--window-size=1280,800', viewUrl
+    '--window-size=1280,800', launchUrl.href
 ], { stdio: ['ignore', log, log] });
 closeSync(log);
 
@@ -40,21 +58,31 @@ const call = (method, params = {}) => new Promise((resolve, reject) => {
     pending.set(key, { resolve, reject, timer });
     socket.send(JSON.stringify({ id: key, method, params }));
 });
-const evaluate = async (expression) => {
+// Evaluates in the top-level page.
+const evaluateTop = async (expression) => {
     const result = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
 };
+// Evaluates in the view: the page itself, or the embedded same-origin iframe,
+// whose window and document shadow the parent's.
+const evaluate = (expression) => evaluateTop(embed
+    ? `((frame) => ((window, document) => (${expression}))(frame.contentWindow, frame.contentWindow.document))(document.getElementById('ivnc-view'))`
+    : expression);
 const waitFor = async (name, predicate, timeoutMs = 60000) => {
     const deadline = Date.now() + timeoutMs;
-    let last;
+    let error;
     while (Date.now() < deadline) {
-        last = await predicate();
-        if (last) return last;
+        try {
+            const value = await predicate();
+            if (value) return value;
+        } catch (e) { error = e; /* the view may still be loading */ }
         await delay(250);
     }
-    throw Error(`timed out waiting for ${name}`);
+    throw Error(`timed out waiting for ${name}${error ? `: ${error.message}` : ''}`);
 };
+const parentMessages = (type) => evaluateTop(
+    `window.__viewMessages.filter(m => m && m.type === ${JSON.stringify(type)})`);
 
 try {
     let page;
@@ -64,13 +92,13 @@ try {
             page = targets.find(t => {
                 if (t.type !== 'page') return false;
                 const url = new URL(t.url);
-                return url.origin === targetUrl.origin && url.pathname === targetUrl.pathname;
+                return url.origin === targetUrl.origin && url.pathname === pagePath;
             });
             if (page?.webSocketDebuggerUrl) break;
         } catch { /* Chrome not ready yet */ }
         await delay(100);
     }
-    assert(page?.webSocketDebuggerUrl, 'isolated Chrome did not start');
+    assert(page?.webSocketDebuggerUrl, 'headless Chrome did not start');
     socket = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
     socket.onmessage = event => {
@@ -89,6 +117,34 @@ try {
     await call('Runtime.enable');
     await call('Page.enable');
 
+    if (embed) {
+        if (credentials) {
+            await call('Network.enable');
+            await call('Network.setExtraHTTPHeaders', { headers: { Authorization: `Basic ${credentials}` } });
+        }
+        await waitFor('parent page', () => evaluateTop(`document.readyState === 'complete'`), 20000);
+        // Like app-streams.js: collect same-origin messages from the view, then
+        // open it full-size so page coordinates equal view coordinates.
+        await evaluateTop(`(() => {
+            window.__viewMessages = [];
+            window.addEventListener('message', (event) => {
+                const frame = document.getElementById('ivnc-view');
+                if (event.origin === location.origin && event.source === frame?.contentWindow) {
+                    window.__viewMessages.push(event.data);
+                }
+            });
+            document.body.replaceChildren();
+            document.body.style.margin = '0';
+            const frame = document.createElement('iframe');
+            frame.id = 'ivnc-view';
+            frame.allow = 'autoplay; clipboard-read; clipboard-write';
+            frame.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0';
+            frame.src = ${JSON.stringify(targetUrl.pathname + '?embed=1')};
+            document.body.appendChild(frame);
+            return true;
+        })()`);
+    }
+
     // 1. Signaling + WebRTC must reach connected state.
     await waitFor('WebRTC connection', () => evaluate(
         `window.__ivncWebRTC && window.__ivncWebRTC.peerConnection?.connectionState`));
@@ -101,25 +157,21 @@ try {
         const pair = [...stats.values()].find(r => r.type === 'candidate-pair' && r.state === 'succeeded');
         return stats.get(pair?.remoteCandidateId)?.port;
     })()`);
-    assert.equal(remotePort, Number(new URL(viewUrl).port || (viewUrl.startsWith('https:') ? 443 : 80)));
+    assert.equal(remotePort, Number(targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80)));
     console.log('PASS media-uses-view-origin');
 
     // 2. Video frames must actually flow through the relay.
     await waitFor('video dimensions', () => evaluate(
         `(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 ? v.videoWidth : null; })()`));
-    const bytes0 = await evaluate(`(async () => {
+    const videoBytes = () => evaluate(`(async () => {
         let bytes = 0;
         for (const r of (await window.__ivncWebRTC.peerConnection.getStats()).values())
             if (r.type === 'inbound-rtp' && r.kind === 'video') bytes += r.bytesReceived;
         return bytes;
     })()`);
+    const bytes0 = await videoBytes();
     await delay(2000);
-    const bytes1 = await evaluate(`(async () => {
-        let bytes = 0;
-        for (const r of (await window.__ivncWebRTC.peerConnection.getStats()).values())
-            if (r.type === 'inbound-rtp' && r.kind === 'video') bytes += r.bytesReceived;
-        return bytes;
-    })()`);
+    const bytes1 = await videoBytes();
     assert(bytes1 > bytes0, `video bytes did not increase (${bytes0} -> ${bytes1})`);
     console.log(`PASS video-flowing bytes=${bytes1}`);
     if (flags.includes('--audio')) {
@@ -130,46 +182,49 @@ try {
         console.log('PASS application-audio-received');
     }
 
-    // 3. A second viewer cannot bypass the UI to take over, resize or upload.
-    await waitFor('data channel', () => evaluate(`window.__ivncWebRTC._send_channel?.readyState === 'open'`));
-    if (flags.includes('--viewer') || flags.includes('--owner')) {
-        await delay(1500);
-        assert.equal(await evaluate(`window.__ivncCanControl`), false);
-        if (flags.includes('--owner')) {
-            await evaluate(`window.__ivncWebRTC.signaling._ws_conn.send(JSON.stringify({ivnc_control:'takeover'}))`);
-            await waitFor('owner takeover', () => evaluate(`window.__ivncCanControl === true`));
-            console.log('PASS owner-takeover');
-        } else {
-            const before = await evaluate(`document.querySelector('video').videoWidth`);
-            await evaluate(`(() => {
-                const w = window.__ivncWebRTC;
-                w.signaling._ws_conn.send(JSON.stringify({ivnc_control:'takeover'}));
-                w._send_channel.send('r,310x240');
-                w._send_channel.send('FILE_UPLOAD_START:viewer-forbidden.txt:4');
-                w._send_channel.send(new Uint8Array([1, 116, 101, 115, 116]));
-                w._send_channel.send('FILE_UPLOAD_END:viewer-forbidden.txt');
-            })()`);
-            await delay(1500);
-            assert.equal(await evaluate(`window.__ivncCanControl`), false);
-            assert.equal(await evaluate(`document.querySelector('video').videoWidth`), before);
-            assert.equal(await evaluate(`fetch(location.pathname + 'app/files').then(r=>r.json()).then(r=>r.files.some(f=>f.name==='viewer-forbidden.txt'))`), false);
-            console.log('PASS viewer-cannot-takeover-resize-upload');
-        }
-    } else {
-        await waitFor('control granted', () => evaluate(`window.__ivncCanControl === true`), 15000);
-        console.log('PASS datachannel-control');
-        await evaluate(`(() => {
-            const w = window.__ivncWebRTC, bytes = new TextEncoder().encode('iVnc upload 中文');
-            w.sendDataChannelMessage('FILE_UPLOAD_START:smoke-upload.txt:' + bytes.length);
-            w.sendDataChannelMessage(new Uint8Array([1, ...bytes]));
-            w.sendDataChannelMessage('FILE_UPLOAD_END:smoke-upload.txt');
-        })()`);
-        await waitFor('uploaded file', () => evaluate(`fetch(location.pathname + 'app/files/smoke-upload.txt').then(r=>r.ok?r.text():'').then(s=>s==='iVnc upload 中文')`));
-        console.log('PASS upload-download-roundtrip');
+    // 3. Embedded views leave the toolbar, connection indicator and status bar
+    //    to the parent page and report their state to it.
+    if (embed) {
+        assert.equal(await evaluate(`window.__IVNC_EMBED__`), true);
+        const hidden = await evaluate(`({
+            taskbar: !document.getElementById('taskbar')?.isConnected,
+            trigger: !document.querySelector('.taskbar-trigger'),
+            connIndicator: !document.getElementById('conn-indicator')?.isConnected,
+            statusDisplay: !document.getElementById('status-display')?.isConnected,
+            noWindowOverlay: !document.querySelector('.no-window-overlay'),
+        })`);
+        assert.deepEqual(hidden, { taskbar: true, trigger: true, connIndicator: true, statusDisplay: true, noWindowOverlay: true });
+        console.log('PASS embed-hides-taskbar-indicator-status');
+        const viewPath = targetUrl.pathname;
+        await waitFor('ready message posted to the parent', async () =>
+            (await parentMessages('ivnc-view-ready')).some(m => m.view === viewPath), 15000);
+        console.log('PASS embed-posts-view-ready');
+        await waitFor('connected state posted to the parent', async () =>
+            (await parentMessages('ivnc-view-state')).some(m => m.state === 'connected' && m.view === viewPath), 15000);
+        console.log('PASS embed-posts-view-state');
+        // Select the tab, as the parent does before input.
+        await evaluateTop(`document.getElementById('ivnc-view').contentWindow.postMessage({type: 'ivnc-view-active', active: true}, location.origin)`);
+        await waitFor('view activation', () => evaluate(`window.__ivncViewActive === true`), 10000);
+        console.log('PASS embed-view-active');
     }
 
-    if (!flags.includes('--no-input') && !flags.includes('--viewer')) {
-        // 4. A real mouse click must travel browser -> A -> B -> worker compositor.
+    // 4. Every connection may control: upload and click through the relay.
+    await waitFor('data channel', () => evaluate(`window.__ivncWebRTC._send_channel?.readyState === 'open'`));
+    console.log('PASS datachannel-open');
+    if (!flags.includes('--no-input')) {
+        // The calling script checks that the file arrived in the app's Downloads.
+        const uploadName = process.env.REMOTE_VIEW_UPLOAD_NAME || 'smoke-upload.txt';
+        await evaluate(`(() => {
+            const w = window.__ivncWebRTC, bytes = new TextEncoder().encode('iVnc upload 中文');
+            const name = ${JSON.stringify(uploadName)};
+            w.sendDataChannelMessage('FILE_UPLOAD_START:' + name + ':' + bytes.length);
+            w.sendDataChannelMessage(new Uint8Array([1, ...bytes]));
+            w.sendDataChannelMessage('FILE_UPLOAD_END:' + name);
+            return true;
+        })()`);
+        console.log('PASS upload-sent');
+
+        // A real mouse click must travel browser -> A -> B -> worker compositor.
         const point = await evaluate(`(() => {
             const v = document.querySelector('video').getBoundingClientRect();
             return { x: Math.round(v.left + v.width / 2), y: Math.round(v.top + v.height / 2) };
@@ -190,6 +245,11 @@ try {
         await waitFor('revocation disconnect', () => evaluate(
             `window.__FORCE_DISCONNECTED__ === true ? true : null`), 120000);
         console.log('PASS revocation-disconnect');
+        if (embed) {
+            await waitFor('ended state posted to the parent', async () =>
+                (await parentMessages('ivnc-view-state')).some(m => m.state === 'ended'), 15000);
+            console.log('PASS embed-posts-ended');
+        }
     }
 
     const shot = await call('Page.captureScreenshot', { format: 'png' });

@@ -1,4 +1,3 @@
-import { attachAppControls, isActiveAppView } from './remote-apps.js';
 /*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -34,6 +33,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { t, onLangChange, getLang } from "./lib/i18n.js?v=1";
+import { createAppStreams } from "./app-streams.js";
 
 const MAIN_I18N = {
 	zh: {
@@ -603,6 +603,48 @@ function InitUI() {
 		background: rgba(76, 134, 230, 0.35);
 		color: #fff;
 		border-color: rgba(76, 134, 230, 0.6);
+	}
+	.taskbar-app-dot {
+		flex-shrink: 0;
+		width: 7px;
+		height: 7px;
+		margin-right: 6px;
+		border-radius: 50%;
+		background: #64748b;
+	}
+	.taskbar-app-dot.connecting { background: #f59e0b; }
+	.taskbar-app-dot.connected { background: #22c55e; }
+	/* Stream tabs: laid over the video, below the taskbar and overlays. */
+	.app-streams {
+		position: fixed;
+		z-index: 990;
+		visibility: hidden;
+		pointer-events: none;
+	}
+	.app-stream {
+		position: absolute;
+		inset: 0;
+		background: #000;
+	}
+	.app-stream.active {
+		visibility: visible;
+		pointer-events: auto;
+	}
+	.app-stream iframe {
+		width: 100%;
+		height: 100%;
+		border: 0;
+		display: block;
+	}
+	.app-stream-status {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: rgba(255, 255, 255, 0.75);
+		font: 14px system-ui, sans-serif;
+		pointer-events: none;
 	}
 	.web-terminal-modal {
 		position: fixed;
@@ -1373,6 +1415,13 @@ function installOverlayModalInputGuard() {
 			}
 		});
 	}, true);
+	// Pointer input inside a stream tab iframe never reaches this document;
+	// focus moving into it is the only signal.
+	window.addEventListener('blur', () => {
+		setTimeout(() => {
+			if (document.activeElement?.closest?.('.app-streams')) minimizeOverlayControllersExcept();
+		}, 0);
+	});
 }
 
 function registerOverlayController(controller) {
@@ -2092,6 +2141,10 @@ export default function webrtc() {
 
 	var videoElement = null;
 	var audioElement = null;
+	let appStreams = null;
+	// An active stream tab covers the main desktop.
+	let mainCovered = false;
+	let lastTaskbarData = {};
 	let serverLatency = 0;
 	let resizeRemote = false;
 	let scaleLocal = false;
@@ -2124,8 +2177,8 @@ export default function webrtc() {
 
 	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1; // 64KiB, excluding a byte for prefix
 
-	// Set storage key based on URL
-	const urlForKey = window.location.href.split('#')[0];
+	// Set storage key based on URL; app views share one key instead of one per view token.
+	const urlForKey = window.__IVNC_APP_VIEW__ ? `${window.location.origin}/app-view/` : window.location.href.split('#')[0];
 	const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
 	const _urlParams = new URLSearchParams(window.location.search);
 
@@ -2409,7 +2462,9 @@ export default function webrtc() {
 		if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') return;
 		const payload = {
 			event,
-			visible: document.visibilityState !== 'hidden' && !window.__ivncRootViewSuspended && (!window.__IVNC_APP_VIEW__ || window.__ivncViewActive),
+			// Hidden stream tab (embedded view), or main desktop covered by an
+			// active stream tab: the compositor behind it may idle.
+			visible: document.visibilityState !== 'hidden' && window.__ivncViewActive !== false && !appStreams?.activeId(),
 			focused: document.hasFocus(),
 			input: Boolean(input),
 			ts: Date.now(),
@@ -2753,7 +2808,9 @@ export default function webrtc() {
 
 	// callback invoked when "message" event is triggerd
 	function handleMessage(event) {
+		if (event.origin !== window.location.origin) return;
 		let message = event.data;
+		if (!message) return;
 		switch(message.type) {
 			case "setScaleLocally":
 				if (typeof message.value === 'boolean') {
@@ -2861,11 +2918,15 @@ export default function webrtc() {
 	}
 
 	async function handleFileInputChange(event) {
-		const files = event.target.files;
-		if (!files || files.length === 0) {
-			event.target.value = null;
-			return;
-		}
+		const files = Array.from(event.target.files || []);
+		event.target.value = null;
+		if (files.length === 0) return;
+		// Files picked while a stream tab is active go to that application.
+		if (appStreams && appStreams.upload(files)) return;
+		await uploadFiles(files);
+	}
+
+	async function uploadFiles(files) {
 		// For every user action 'upload' an auxiliary data is dynamically created.
 		// Currently only one aux channel is allowed to operate at a given time, since the backend
 		// doesn't support simultaneous reception of multiple files, yet.
@@ -2880,7 +2941,6 @@ export default function webrtc() {
 				message: errorMsg
 				}
 			}, window.location.origin);
-			event.target.value = null;
 			return;
 		}
 		console.log(`File input changed, processing ${files.length} files sequentially.`);
@@ -2905,7 +2965,6 @@ export default function webrtc() {
 				}
 			}, window.location.origin);
 		} finally {
-			event.target.value = null;
 			webrtc.closeAuxDataChannel();
 		}
 	}
@@ -3026,7 +3085,6 @@ export default function webrtc() {
 	});
 
 	function uploadFileObject(file, pathToSend) {
-        if (!isActiveAppView()) return Promise.reject(new Error('Activate this application and obtain control before uploading.'));
 		return new Promise((resolve, reject) => {
 			// Start a heartbeat to prevent connection timeout during upload
 			const heartbeatInterval = setInterval(() => {
@@ -3065,7 +3123,6 @@ export default function webrtc() {
 					return;
 				}
 				try {
-                    if (!isActiveAppView()) throw new Error('Upload interrupted: application is no longer active or controlled.');
 					const prefixedView = new Uint8Array(1 + e.target.result.byteLength);
 					prefixedView[0] = 0x01; // Data prefix for file chunk
 					prefixedView.set(new Uint8Array(e.target.result), 1);
@@ -3280,7 +3337,7 @@ export default function webrtc() {
 			var sessionCountPending = false;
 
 			async function refreshSessionCount() {
-				if (sessionCountPending) return;
+				if (sessionCountPending || window.__IVNC_EMBED__) return;
 				sessionCountPending = true;
 				try {
 					const resp = await fetch('/clients', { cache: 'no-store' });
@@ -3416,7 +3473,6 @@ export default function webrtc() {
 
 	var _lastSentClipboard = '';
 	function handleWindowFocus() {
-        if (!isActiveAppView()) return;
 		if (webrtc._send_channel === null || webrtc._send_channel.readyState !== 'open') return;
 		// reset keyboard to avoid stuck keys.
 		webrtc.sendDataChannelMessage("kr");
@@ -3425,7 +3481,7 @@ export default function webrtc() {
 			// Send clipboard contents if changed.
 			navigator.clipboard.readText()
 				.then(text => {
-						if (isActiveAppView() && text && text !== _lastSentClipboard) {
+						if (text && text !== _lastSentClipboard) {
 							_lastSentClipboard = text;
 							webrtc.sendDataChannelMessage(`cw,${stringToBase64(text)}`);
 						}
@@ -3526,7 +3582,7 @@ export default function webrtc() {
 			const noWindowOverlay = document.createElement('div');
 			noWindowOverlay.className = 'no-window-overlay hidden';
 			noWindowOverlay.innerHTML = `<div class="no-window-content"><h2>${tt('waitingAppTitle')}</h2><p>${tt('noAppRunning')}</p></div>`;
-			videoContainer.appendChild(noWindowOverlay);
+			if (!window.__IVNC_EMBED__) videoContainer.appendChild(noWindowOverlay);
 
 			// Taskbar: trigger zone + bar
 			const taskbarTrigger = document.createElement('div');
@@ -3556,6 +3612,7 @@ export default function webrtc() {
 				pinBtn.innerHTML = taskbarPinned ? pinSvgPinned : pinSvgUnpinned;
 				setLiveTitle(pinBtn, taskbarPinned ? 'unpinTaskbar' : 'pinTaskbar');
 				setBoolParam('taskbar_pinned', taskbarPinned);
+				appStreams?.layout();
 			});
 			taskbar.appendChild(pinBtn);
 
@@ -3566,8 +3623,15 @@ export default function webrtc() {
 			imeBtn.className = 'taskbar-pin' + (imeModeActive ? ' active' : '');
 			imeBtn.innerHTML = imeSvg;
 			setLiveTitle(imeBtn, imeModeActive ? 'imeOff' : 'imeOn');
+			const syncImeButton = () => {
+				const active = appStreams?.imeState() ?? !!input?._imeModeActive;
+				imeBtn.classList.toggle('active', active);
+				setLiveTitle(imeBtn, active ? 'imeOff' : 'imeOn');
+			};
 			imeBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
+				// The active stream tab answers with ivnc-ime-state.
+				if (appStreams?.toggleIme()) return;
 				if (input) {
 					const active = input.toggleImeMode();
 					imeBtn.classList.toggle('active', active);
@@ -3599,7 +3663,7 @@ export default function webrtc() {
 			uploadBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				// Check if WebRTC data channel is open
-				if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') {
+				if (!appStreams?.activeId() && (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open')) {
 					console.warn('Cannot upload: data channel not ready');
 					return;
 				}
@@ -3693,8 +3757,11 @@ export default function webrtc() {
 			resetNetworkQuality('unknown');
 			taskbar.appendChild(connIndicator);
 
-			document.body.appendChild(taskbarTrigger);
-			document.body.appendChild(taskbar);
+			// Embedded stream tabs use the parent page's toolbar.
+			if (!window.__IVNC_EMBED__) {
+				document.body.appendChild(taskbarTrigger);
+				document.body.appendChild(taskbar);
+			}
 
 			let taskbarHideTimer = null;
 			const showTaskbar = () => {
@@ -3710,8 +3777,13 @@ export default function webrtc() {
 			// overlayInput captures all pointer events, so taskbar-trigger
 			// never receives mouseenter. Detect bottom-edge hover via
 			// mousemove on the document instead.
+			let atBottomEdge = false;
 			document.addEventListener('mousemove', (e) => {
-				if (e.clientY >= window.innerHeight - 6) {
+				if (window.__IVNC_EMBED__) {
+					const edge = e.clientY >= window.innerHeight - 6;
+					if (edge && !atBottomEdge) window.parent.postMessage({ type: 'ivnc-edge-hover' }, window.location.origin);
+					atBottomEdge = edge;
+				} else if (e.clientY >= window.innerHeight - 6) {
 					showTaskbar();
 				} else if (e.clientY < window.innerHeight - 42) {
 					hideTaskbar();
@@ -3720,7 +3792,30 @@ export default function webrtc() {
 			taskbar.addEventListener('mouseenter', showTaskbar);
 			taskbar.addEventListener('mouseleave', hideTaskbar);
 
-			videoContainer.appendChild(statusDisplayElement);
+			if (!window.__IVNC_APP_VIEW__) {
+				appStreams = createAppStreams({
+					video: videoElement,
+					taskbar,
+					isPinned: () => taskbarPinned,
+					onChange: () => {
+						renderTaskbar();
+						syncImeButton();
+						// Report the main desktop hidden while a stream tab covers it.
+						const streamActive = !!appStreams?.activeId();
+						if (streamActive !== mainCovered) {
+							mainCovered = streamActive;
+							sendClientActivity('view-switch');
+						}
+					},
+					// Pointer over a stream iframe never reaches this document.
+					onEdgeHover: () => {
+						showTaskbar();
+						hideTaskbar();
+					},
+				});
+			}
+
+			if (!window.__IVNC_EMBED__) videoContainer.appendChild(statusDisplayElement);
 			videoContainer.appendChild(overlayInput);
 			appDiv.appendChild(videoContainer);
 
@@ -3786,42 +3881,36 @@ export default function webrtc() {
 			var signaling = new WebRTCDemoSignaling(new URL(protocol + window.location.host + pathname + (window.__IVNC_APP_VIEW__ ? "webrtc" : appName + "/signaling/")));
 			webrtc = new WebRTCDemo(signaling, videoElement, 1);
             window.__ivncWebRTC = webrtc;
-            attachAppControls(signaling);
-            let wasController = false;
-            window.addEventListener('ivnc-control', event => {
-                if (event.detail.controller && !wasController && webrtc._send_channel?.readyState === 'open') {
-                    sendClientPersistedSettings();
-                    if (isActiveAppView()) enableAutoResize();
-                }
-                wasController = !!event.detail.controller;
-            });
-            const sendOriginal = webrtc.sendDataChannelMessage.bind(webrtc);
-            let rootAudioMuted;
-            window.addEventListener('ivnc-root-view-state', () => {
-                if (webrtc._audioElement) {
-                    if (window.__ivncRootViewSuspended) {
-                        rootAudioMuted ??= webrtc._audioElement.muted;
-                        webrtc._audioElement.muted = true;
-                    } else if (rootAudioMuted !== undefined) {
-                        webrtc._audioElement.muted = rootAudioMuted;
-                        rootAudioMuted = undefined;
-                    }
-                }
-                sendClientActivity('view-switch');
-            });
-            webrtc.sendDataChannelMessage = data => {
-                const housekeeping = typeof data === 'string' && (data === 'pong' || data.startsWith('pong,') || data.startsWith('_client_') || data.startsWith('_stats_'));
-                const active = isActiveAppView();
-                if (housekeeping || active) sendOriginal(data);
-            };
-            window.addEventListener('message', event => {
-                if (event.origin !== location.origin || event.source !== window.parent || event.data?.type !== 'ivnc-view-active') return;
-                if (!event.data.active && window.__ivncCanControl) sendOriginal('kr');
-                window.__ivncViewActive = !!event.data.active;
-                if (webrtc._audioElement) webrtc._audioElement.muted = !event.data.active;
-                sendClientActivity('view-switch');
-                if (event.data.active) window.focus();
-            });
+			// Embedded stream tab: the parent page drives activation, audio, upload and IME.
+			// `view` lets the parent ignore messages from a view it already replaced.
+			const postToParent = (message) => {
+				if (window.__IVNC_EMBED__) window.parent.postMessage({ ...message, view: window.location.pathname }, window.location.origin);
+			};
+			if (window.__IVNC_EMBED__) {
+				window.addEventListener('ivnc-view-ended', (event) => {
+					postToParent({ type: 'ivnc-view-state', state: 'ended', reason: event.detail });
+				});
+				window.addEventListener('message', (event) => {
+					if (event.origin !== window.location.origin || event.source !== window.parent) return;
+					const message = event.data || {};
+					const open = webrtc._send_channel?.readyState === 'open';
+					if (message.type === 'ivnc-view-active') {
+						window.__ivncViewActive = !!message.active;
+						// Release held keys when the tab is switched away.
+						if (!message.active && open) webrtc.sendDataChannelMessage('kr');
+						sendClientActivity('view-switch');
+						if (message.active) window.focus();
+					} else if (message.type === 'ivnc-unmute') {
+						webrtc.unmuteAudio();
+					} else if (message.type === 'ivnc-upload' && Array.isArray(message.files)) {
+						if (open) uploadFiles(message.files);
+					} else if (message.type === 'ivnc-ime' && input) {
+						input.onimetoggle(input.toggleImeMode());
+					}
+				});
+				// Messages the parent sent on iframe load may predate the listener above.
+				postToParent({ type: 'ivnc-view-ready' });
+			}
 			const send = (data) => {
 				webrtc.sendDataChannelMessage(data);
 			}
@@ -3836,16 +3925,14 @@ export default function webrtc() {
 				console.log("[signaling] " + message);
 			};
 			signaling.onerror = (message) => {
-                window.dispatchEvent(new CustomEvent('ivnc-view-error', {detail:message}));
 				logEntries.push(applyTimestamp("[signaling] [ERROR] " + message))
 				console.log("[signaling ERROR] " + message);
 			};
 
 			signaling.ondisconnect = (reconnect) => {
-                if (window.__IVNC_APP_VIEW__) {
-                    window.__ivncCanControl = false;
-                    window.dispatchEvent(new Event('ivnc-view-disconnected'));
-                }
+				postToParent(reconnect
+					? { type: 'ivnc-view-state', state: 'connecting' }
+					: { type: 'ivnc-view-state', state: 'ended', reason: window.__ivncViewEnded || 'closed' });
 				videoElement.style.cursor = "auto";
 				if (reconnect) {
 					// If WebRTC media is already flowing, don't tear it down
@@ -3901,6 +3988,7 @@ export default function webrtc() {
 						}, 15);
 					});
 					status = state;
+					postToParent({ type: 'ivnc-view-state', state: 'connected' });
 					if (!statWatchEnabled) {
 						enableStatWatch();
 					}
@@ -3929,7 +4017,7 @@ export default function webrtc() {
 
 				// Restore IME mode from localStorage
 				if (imeModeActive && input) {
-					input.toggleImeMode();
+					postToParent({ type: 'ivnc-ime-state', active: input.toggleImeMode() });
 				}
 
 				// Enable upload button
@@ -3967,6 +4055,7 @@ export default function webrtc() {
 				imeBtn.classList.toggle('active', active);
 				setLiveTitle(imeBtn, active ? 'imeOff' : 'imeOn');
 				setBoolParam('ime_mode', active);
+				postToParent({ type: 'ivnc-ime-state', active });
 			};
 
 			webrtc.onplaystreamrequired = () => {
@@ -4012,7 +4101,7 @@ export default function webrtc() {
 			var _programmaticCopy = false;
 
 			webrtc.onclipboardcontent = (content) => {
-				if (clipboardStatus !== 'enabled' || !isActiveAppView()) return;
+				if (clipboardStatus !== 'enabled') return;
 				webrtc._remoteClipboard = content;
 				if (navigator.clipboard && navigator.clipboard.writeText) {
 					navigator.clipboard.writeText(content).catch(() => {
@@ -4024,7 +4113,6 @@ export default function webrtc() {
 			}
 
 			function doCopyToSystem(text) {
-                if (!isActiveAppView()) return;
 				_clipTA.value = text;
 				_clipTA.select();
 				_programmaticCopy = true;
@@ -4056,7 +4144,7 @@ export default function webrtc() {
 					_overlayRef.readOnly = true;
 					_overlayRef.value = '';
 				}
-				if (clipboardStatus !== 'enabled' || !isActiveAppView()) return;
+				if (clipboardStatus !== 'enabled') return;
 				var now = Date.now();
 				if (now - _lastPasteTime < 1000) {
 					e.preventDefault();
@@ -4083,23 +4171,32 @@ export default function webrtc() {
 			}
 
 			webrtc.ontaskbarupdate = (data) => {
+				lastTaskbarData = data || {};
+				if (appStreams) appStreams.update(lastTaskbarData.apps || []);
+				renderTaskbar(true);
+			}
+
+			// Window tabs come from the compositor, stream tabs from app-streams.js.
+			function renderTaskbar(reveal = false) {
 				const tb = document.getElementById('taskbar');
 				if (!tb) return;
-				const wins = data.windows || [];
+				const wins = lastTaskbarData.windows || [];
+				const streamTabs = appStreams ? appStreams.tabs() : [];
+				const streamActive = !!appStreams?.activeId();
 				// Remove all items except the pin button
 				Array.from(tb.querySelectorAll('.taskbar-item')).forEach(el => el.remove());
 				// Hide taskbar when no windows
-				if (wins.length === 0) {
+				if (wins.length === 0 && streamTabs.length === 0) {
 					tb.classList.remove('visible');
 					return;
 				}
 				// Show taskbar when windows appear (if not pinned, it will auto-hide based on mouse position)
-				if (!taskbarPinned) {
+				if (reveal && !taskbarPinned) {
 					tb.classList.add('visible');
 				}
 				wins.forEach((w) => {
 					const item = document.createElement('div');
-					item.className = 'taskbar-item' + (w.focused ? ' focused' : '');
+					item.className = 'taskbar-item' + (w.focused && !streamActive ? ' focused' : '');
 					item.title = `${w.title} (${w.app_id})`;
 
 					// Label with title (truncate if too long)
@@ -4114,10 +4211,12 @@ export default function webrtc() {
 					// Click to focus
 					item.addEventListener('click', (e) => {
 						e.stopPropagation();
+						if (appStreams?.activeId()) appStreams.activate(null);
 						webrtc.sendDataChannelMessage(`focus,${w.id}`);
 					});
 					tb.appendChild(item);
 				});
+				streamTabs.forEach((item) => tb.appendChild(item));
 			}
 
 			webrtc.onsystemaction = (action) => {

@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GTK CSS injection to hide headerbars on fullscreen windows (preserving dialog controls)
 - `gtk3-nocsd` LD_PRELOAD for GTK3 CSD suppression
 - Dialog window detection (skip fullscreen, preserve headerbar)
+- Application-level remote access for desktop apps ([docs/REMOTE_APPS.md](docs/REMOTE_APPS.md))
+  - Configured in the app's Edit dialog: on/off switch, viewable access password, share address
+  - Apps with remote access run in their own runtime (worker compositor + private PulseAudio) as a plain child process; files, network and environment are the same as in the main desktop
+  - Remote apps on A are started/stopped (connect/disconnect) and shown as toolbar tabs; started state is restored after a quick restart, and remote apps honour the autostart flag like local apps
+  - B issues short-lived session tokens bound to the policy revision, capped per app; disabling sharing or changing the password disconnects all remote sessions
+- Toolbar stream tabs: taskbar message `apps` field (`id`, `name`, `kind`, `status`) and embedded app views (`/app-view/{token}/?embed=1`) driven over same-origin postMessage (with an `ivnc-view-ready` handshake); while a stream tab is active the page reports the main desktop as not visible so its compositor can idle
+- `GET /api/apps` reports `starting`, desktop `sharing {enabled, restart_required}` and remote `started` / `remote_state` (including `starting` while B's runtime starts) / `remote_detail`
 
 ### Changed
 - WebRTC migrated from webrtc-rs to str0m Sans-I/O library
@@ -40,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `datachannel_open_count` bumps on actual `Event::ChannelOpen`
 - Architecture documentation completely rewritten for current implementation
 - Protocol documentation updated for WebRTC DataChannel protocol
+- Desktop apps without remote access run again as Wayland clients of the main compositor (toolbar windows); Chrome DevTools listens on `0.0.0.0:9222` again
+- `GET/PUT /api/apps/{id}/sharing` reduced to `{enabled, password}`; `PUT` returns `{ok, revoked, restart_required}`
+- `remote.db` migrates to `user_version` 1: saved connections (grants) are dropped, B keeps an encrypted copy of the access password, and A stores remote-app passwords in a new column, so remote apps saved by the previous version need the password re-entered
+- Docker no longer needs `--security-opt` flags; the image drops the sandbox, Xwayland and Openbox packages and `IVNC_SECCOMP`
+
+### Removed
+- Application isolation: bubblewrap sandbox, namespaces, slirp4netns, nftables firewall, seccomp filters, allowed host paths/networks/background services, D-Bus session bus, SOCKS bridge and X11 compatibility (Xwayland/Openbox)
+- Control model (single controller, viewer restrictions, owner takeover); every connection may control
+- Saved-connection list and per-connection revocation, per-session disconnect, `remote-audit.log`, the downloads panel and worker `/app/files`
+- Endpoints `/api/desktop/services`, `DELETE /api/apps/{id}/sessions/{session}`, `DELETE /api/apps/{id}/grants/{grant}`, `DELETE /remote/v1/apps/{id}/credential`
+- `apps.before-isolation.db` backup, `public-ipv4` probe and `scripts/remote_isolation_smoke.py`
 
 ### Fixed
 - Remote app clipboard not syncing to browser (deferred read pattern)
