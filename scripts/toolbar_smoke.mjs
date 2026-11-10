@@ -53,13 +53,13 @@ const api = async (url, method = 'GET', body, expected = 200) => {
     return data;
 };
 const pending = new Map(); let seq = 0;
-const call = (method, params = {}) => new Promise((resolve, reject) => {
+const call = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
     const id = ++seq;
     const timer = setTimeout(() => { pending.delete(id); reject(Error(`CDP timeout: ${method}`)); }, 20000);
-    pending.set(id, { resolve, reject, timer }); socket.send(JSON.stringify({ id, method, params }));
+    pending.set(id, { resolve, reject, timer }); socket.send(JSON.stringify({ id, method, params, sessionId }));
 });
-const evaluate = async (expression) => {
-    const result = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+const evaluate = async (expression, sessionId) => {
+    const result = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId);
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
 };
@@ -71,10 +71,25 @@ const mouse = (type, x, y) => {
         button: type === 'mouseReleased' || mouseDown ? 'left' : 'none',
         buttons: mouseDown ? 1 : 0, clickCount: type === 'mouseMoved' ? 0 : 1 });
 };
-const key = async (name, code = name) => {
-    await call('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code });
-    await call('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code });
+const key = async (name, code = name, modifiers = 0) => {
+    await call('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code, modifiers });
+    await call('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code, modifiers });
 };
+const openRename = async (id, keyboard = false) => {
+    const point = await evaluate(`(() => {
+        const n = document.querySelector('.toolbar-list [data-app-id="${id}"]');
+        n.scrollIntoView({block:'nearest',inline:'nearest'}); n.focus({preventScroll:true});
+        const r=n.getBoundingClientRect();return {x:r.left+25,y:r.top+r.height/2};
+    })()`);
+    if (keyboard === 'menu') await key('F10','F10',8);
+    else if (keyboard) await key('F2');
+    else for (const type of ['mousePressed','mouseReleased']) await call('Input.dispatchMouseEvent', {
+        type, ...point, button:'right', buttons:type === 'mousePressed' ? 2 : 0, clickCount:1
+    });
+    await waitFor('rename editor', () => evaluate(`!document.querySelector('.toolbar-rename').hidden && document.activeElement === document.querySelector('.toolbar-rename-input')`));
+};
+const draftName = name => evaluate(`document.querySelector('.toolbar-rename-input').value=${JSON.stringify(name)}`);
+const editorClosed = () => evaluate(`document.querySelector('.toolbar-rename').hidden`);
 const firstPoint = () => evaluate(`(() => {
     const viewport = document.querySelector('.toolbar-viewport'); viewport.scrollLeft = 0;
     const n = document.querySelector('.toolbar-list .toolbar-grip'); const r = n.getBoundingClientRect();
@@ -108,6 +123,22 @@ try {
     await api('/api/apps/order', 'PUT', { ordered_ids: ids }, 400);
     assert.deepEqual(await api('/api/apps/order'), before);
     pass('API validates order atomically; new apps append');
+    const originalName = (await api(`/api/apps/${ids[0]}`)).name;
+    for (const body of [{name:'x'}, {name:'x',base_revision:-1}, {name:3,base_revision:0},
+        {name:'x',base_revision:0,env_vars:{}}, {name:' \n ',base_revision:0}, {name:'中'.repeat(86),base_revision:0}]) {
+        await api(`/api/apps/${ids[0]}/name`, 'PUT', body, 400);
+    }
+    await api(`/api/apps/${ids[0]}/name`, 'PUT', {name:'Toolbar 01 中文 long application title',base_revision:0}, 409);
+    await api('/api/apps/missing/name', 'PUT', {name:'valid',base_revision:0}, 404);
+    await api('/api/apps/builtin-miao/name', 'PUT', {name:'changed',base_revision:0}, 403);
+    const same = await api(`/api/apps/${ids[0]}/name`, 'PUT', {name:` ${originalName} `,base_revision:0});
+    assert.equal(same.name_revision, 0);
+    const boundary = '中'.repeat(85)+'a';
+    const maxName = await api(`/api/apps/${hidden}/name`, 'PUT', {name:boundary,base_revision:0});
+    assert.equal(maxName.name, boundary);
+    await api(`/api/apps/${hidden}/name`, 'PUT', {name:'Hidden CLI',base_revision:1});
+    assert.deepEqual(await api('/api/apps/order'), before);
+    pass('rename API validates bytes, malformed fields, duplicates, permissions and no-op independently of order');
 
     browser = launch(process.env.CHROME_BIN || 'google-chrome', ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
         '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--autoplay-policy=no-user-gesture-required',
@@ -124,8 +155,8 @@ try {
     await call('Runtime.enable'); await call('Page.enable');
     await waitFor('production toolbar and data channel', () => evaluate(`!!document.querySelector('.ivnc-toolbar') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
     const rows = (await api('/api/apps')).apps;
-    const fake = { windows: rows.filter(a => ids.slice(0, 20).includes(a.id)).map((a, i) => ({ id: i, managed_app_id: a.id, title: a.name, app_id: 'test.class', focused: false })),
-        apps: rows.filter(a => ids.slice(20).includes(a.id)).map((a, i) => ({ id: a.id, name: a.name, kind: i % 2 ? 'shared' : 'remote', status: i % 2 ? 'starting' : 'connecting' })), ...before };
+    const fake = { windows: rows.filter(a => ids.slice(0, 20).includes(a.id)).map((a, i) => ({ id: i, managed_app_id: a.id, managed_app_name:a.name, name_revision:a.name_revision, can_rename:a.can_rename, title: a.name, app_id: 'test.class', focused: false })),
+        apps: rows.filter(a => ids.slice(20).includes(a.id)).map((a, i) => ({ id: a.id, name: a.name, name_revision:a.name_revision, can_rename:a.can_rename, kind: i % 2 ? 'shared' : 'remote', status: i % 2 ? 'starting' : 'connecting' })), ...before };
     await evaluate(`(() => {
         window.__synthetic = ${JSON.stringify(fake)};
         const rtc = window.__ivncWebRTC, update = rtc.ontaskbarupdate;
@@ -143,6 +174,12 @@ try {
         rtc.sendDataChannelMessage = message => { window.__messages.push(message); return send(message); };
         window.__fetch = window.fetch;
         window.fetch = (url, options) => {
+            if (url.endsWith('/name') && options?.method === 'PUT') {
+                window.__renameCount = (window.__renameCount || 0) + 1;
+                if (window.__nameMode === 'offline') return Promise.reject(Error('simulated offline'));
+                if (window.__nameMode === 'lost') return window.__fetch(url, options).then(() => { throw new DOMException('simulated timeout after commit','AbortError'); });
+                if (window.__nameMode === 'delay') return new Promise(resolve => setTimeout(resolve,300)).then(() => window.__fetch(url,options));
+            }
             if (url === '/api/apps/order' && options?.method === 'PUT') {
                 window.__putCount = (window.__putCount || 0) + 1;
                 if (window.__failOrder) return Promise.reject(Error('simulated offline'));
@@ -216,6 +253,115 @@ try {
     await evaluate(`document.querySelector('.web-console-modal iframe').contentDocument.querySelector('[data-section="apps"]').click()`);
     await waitFor('console rows', () => evaluate(`document.querySelector('.web-console-modal iframe').contentDocument.querySelectorAll('#app-list tr[data-app-id]').length === ${rows.length}`));
     await evaluate(`document.querySelector('#web-console-minimize').click(); window.__messages = []`);
+
+    // Right-click is a local editing gesture and leaves the current window,
+    // sort order and remote keyboard alone. Input keeps its native menu.
+    const renameOrder = await api('/api/apps/order');
+    await openRename(ids[0]);
+    assert(await evaluate(`(() => {const i=document.querySelector('.toolbar-rename-input'); return i.value===${JSON.stringify(originalName)} && i.selectionStart===0 && i.selectionEnd===i.value.length;})()`));
+    assert(await evaluate(`document.querySelector('.toolbar-rename-input').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))`));
+    await draftName('Cancelled draft'); await key('Escape');
+    assert(await editorClosed());
+    assert.equal((await api(`/api/apps/${ids[0]}`)).name, originalName);
+    await openRename(ids[0], true);
+    await evaluate(`document.querySelector('.toolbar-rename-input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',isComposing:true,bubbles:true,cancelable:true}))`);
+    await evaluate(`document.querySelector('.toolbar-rename').requestSubmit()`);
+    assert(!(await editorClosed()));
+    assert.equal(await evaluate(`window.__renameCount || 0`), 0);
+    await evaluate(`document.querySelector('.toolbar-status').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`);
+    assert(await editorClosed());
+    pass('right-click/F2 edit locally, select the name, preserve native input menus, cancel and respect IME Enter');
+
+    await openRename(ids[0]);
+    await draftName('中'.repeat(86)); await key('Enter');
+    assert.equal(await evaluate(`window.__renameCount || 0`), 0);
+    await draftName('Toolbar 01 中文 long application title'); await key('Enter');
+    await waitFor('duplicate name error', () => evaluate(`!!document.querySelector('.toolbar-rename-error').textContent && !document.querySelector('.toolbar-rename-save').disabled`));
+    assert(!(await editorClosed()));
+    const newName = '应用重命名 中文';
+    await draftName(newName); await key('Enter');
+    await waitFor('rename saved', editorClosed);
+    assert.equal((await api(`/api/apps/${ids[0]}`)).name, newName);
+    assert.equal(await evaluate(`document.querySelector('.toolbar-list [data-app-id="${ids[0]}"] .toolbar-label').textContent`), newName);
+    await waitFor('immediate console name update', () => evaluate(`document.querySelector('.web-console-modal iframe').contentDocument.querySelector('#app-list tr[data-app-id="${ids[0]}"] strong')?.textContent===${JSON.stringify(newName)}`), 2000);
+    assert.deepEqual(await api('/api/apps/order'), renameOrder);
+    assert.equal(await evaluate(`window.__messages.filter(m=>/^(focus|kd|ku|m|m2|cw),/.test(m)).length`),0);
+    // A delayed synthetic snapshot cannot restore the old name.
+    await evaluate(`window.__ivncWebRTC.ontaskbarupdate(window.__synthetic)`);
+    assert.equal(await evaluate(`document.querySelector('.toolbar-list [data-app-id="${ids[0]}"] .toolbar-label').textContent`), newName);
+    pass('rename validates UTF-8 bytes, keeps failed drafts, updates the console immediately and rejects stale snapshots');
+
+    await openRename(ids[0]); await draftName('My concurrent draft');
+    await api(`/api/apps/${ids[0]}/name`,'PUT',{name:'Other client name',base_revision:1});
+    await key('Enter');
+    await waitFor('name conflict',()=>evaluate(`document.querySelector('.toolbar-rename-error').textContent.includes('changed') && !document.querySelector('.toolbar-rename-save').disabled`));
+    assert.equal(await evaluate(`document.querySelector('.toolbar-rename-input').value`),'My concurrent draft');
+    assert(await evaluate(`document.querySelector('.toolbar-rename-latest').textContent.includes('Other client name')`));
+    assert.equal((await api(`/api/apps/${ids[0]}`)).name,'Other client name');
+    await key('Enter'); await waitFor('explicit name retry',editorClosed);
+    assert.equal((await api(`/api/apps/${ids[0]}`)).name_revision,3);
+    pass('concurrent rename displays the latest name, preserves the draft and requires an explicit retry');
+
+    await openRename(ids[0],true); await draftName('Recovered after lost response');
+    await evaluate(`window.__nameMode='offline'`); await key('Enter');
+    await waitFor('offline rename draft',()=>evaluate(`document.querySelector('.toolbar-rename-error').textContent.includes('simulated offline') && !document.querySelector('.toolbar-rename-save').disabled`));
+    assert.equal(await evaluate(`document.querySelector('.toolbar-rename-input').value`),'Recovered after lost response');
+    await evaluate(`window.__nameMode='lost'`); await key('Enter');
+    await waitFor('lost rename response recovery',editorClosed);
+    assert.equal((await api(`/api/apps/${ids[0]}`)).name_revision,4);
+    await evaluate(`window.__nameMode='delay'; window.__renameCount=0`);
+    await openRename(ids[0]); await draftName('Serialized rename');
+    await key('Enter'); await key('Enter');
+    await waitFor('serialized rename',editorClosed);
+    assert.equal(await evaluate(`window.__renameCount`),1);
+    assert.equal((await api(`/api/apps/${ids[0]}`)).name_revision,5);
+    await evaluate(`window.__nameMode='delay';window.__renameCount=0;window.__messages=[]`);
+    await openRename(ids[0]);
+    const savePoint=await evaluate(`(() => {const r=document.querySelector('.toolbar-rename-save').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`);
+    await mouse('mousePressed',savePoint.x,savePoint.y); await mouse('mouseReleased',savePoint.x,savePoint.y);
+    await key('Enter'); await waitFor('no-op editor save',editorClosed);
+    assert.equal(await evaluate(`window.__renameCount`),1);
+    assert.equal(await evaluate(`window.__messages.filter(m=>/^(focus|kd|ku|m|m2|cw),/.test(m)).length`),0);
+    await evaluate(`window.__nameMode=null`);
+    assert.equal((await api(`/api/apps/${ids[0]}`)).name_revision,5);
+    pass('offline drafts survive, committed timeouts recover, saves serialize and same-name saves keep the revision');
+
+    await call('Emulation.setDeviceMetricsOverride',{width:320,height:800,deviceScaleFactor:2,mobile:false});
+    await delay(100); await openRename(ids[0],true);
+    assert(await evaluate(`(() => {const r=document.querySelector('.toolbar-rename').getBoundingClientRect();return r.left>=0 && r.right<=innerWidth;})()`));
+    const renameShot=await call('Page.captureScreenshot',{format:'png'});
+    writeFileSync(path.join(work,'rename-narrow.png'),Buffer.from(renameShot.data,'base64'));
+    await key('Escape');
+    await call('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
+    await delay(100);
+    await openRename(ids[0]);
+    await evaluate(`window.__renameSynthetic=window.__synthetic;window.__synthetic={...window.__synthetic,windows:window.__synthetic.windows.filter(w=>w.managed_app_id!==${JSON.stringify(ids[0])})};window.__ivncWebRTC.ontaskbarupdate(window.__synthetic)`);
+    assert(await editorClosed());
+    await evaluate(`window.__synthetic=window.__renameSynthetic;window.__ivncWebRTC.ontaskbarupdate(window.__synthetic);window.__messages=[]`);
+    pass('rename editor fits narrow HiDPI screens and closes when the application disappears');
+
+    await evaluate(`document.querySelector('.toolbar-tools .taskbar-pin').click()`);
+    await openRename(ids[0],'menu');
+    await mouse('mouseMoved',100,100); await delay(600);
+    assert(await evaluate(`document.querySelector('.taskbar').classList.contains('visible')`));
+    await key('Escape'); await delay(600);
+    assert(await evaluate(`!document.querySelector('.taskbar').classList.contains('visible')`));
+    await evaluate(`document.querySelector('.toolbar-tools .taskbar-pin').click()`);
+    await waitFor('pinned toolbar transition',()=>evaluate(`document.querySelector('.taskbar').classList.contains('pinned') && Math.abs(document.querySelector('.taskbar').getBoundingClientRect().bottom-innerHeight)<1`));
+    await evaluate(`(() => {
+        const data=window.__synthetic;
+        window.__readOnlySynthetic=data;
+        window.__synthetic={...data,windows:data.windows.concat([
+            {id:900,title:'Unmanaged window',app_id:'unmanaged'},
+            {id:901,title:'Miao window',managed_app_id:'builtin-miao',managed_app_name:'Miao',name_revision:0,can_rename:false}
+        ])};
+        window.__ivncWebRTC.ontaskbarupdate(window.__synthetic);
+    })()`);
+    assert(await evaluate(`['window:900','window:901'].every(key=>document.querySelector('[data-key="'+key+'"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})))`));
+    assert(await editorClosed());
+    await evaluate(`window.__synthetic=window.__readOnlySynthetic;window.__ivncWebRTC.ontaskbarupdate(window.__synthetic);window.__messages=[]`);
+    pass('Shift+F10 keeps the toolbar visible while editing; unmanaged and read-only tabs have no rename action');
+
     const start = await firstPoint();
     const target = await evaluate(`(() => { const r = document.querySelectorAll('.toolbar-list .taskbar-item')[1].getBoundingClientRect(); return {x:r.right-5,y:r.top+14}; })()`);
     await evaluate(`window.__trace = []; ['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture','blur'].forEach(type => window.addEventListener(type, event => window.__trace.push({type, target:event.target.className, x:event.clientX, y:event.clientY}), true))`);
@@ -338,6 +484,30 @@ try {
     await waitFor('real peer reorder broadcast', () => evaluate(`(() => { const ids=[...document.querySelectorAll('.toolbar-list .taskbar-item')].map(n=>n.dataset.appId);return ids.indexOf(${JSON.stringify(real[1])})<ids.indexOf(${JSON.stringify(real[0])});})()`));
     assert.equal(await evaluate(`document.querySelectorAll('.toolbar-list [data-app-id="${real[0]}"]').length`), 2);
     pass('real GTK peer identity, multi-window grouping and order broadcast');
+    const realBefore = await api(`/api/apps/${real[0]}`);
+    const realNameOrder = await api('/api/apps/order');
+    const peer = await call('Target.createTarget',{url:base,background:true});
+    const {sessionId:peerSession} = await call('Target.attachToTarget',{targetId:peer.targetId,flatten:true});
+    await call('Runtime.enable',{},peerSession);
+    await waitFor('second desktop connection',()=>evaluate(`!!document.querySelector('.toolbar-list [data-app-id="${real[0]}"]') && window.__ivncWebRTC?._send_channel?.readyState==='open'`,peerSession),60000);
+    await evaluate(`(() => {
+        const rtc=window.__ivncWebRTC, update=rtc.ontaskbarupdate;
+        window.__peerChannel=rtc._send_channel;
+        rtc.ontaskbarupdate=data=>{window.__peerTaskbar=data;update(data);};
+    })()`,peerSession);
+    await openRename(real[0]);
+    await call('Input.insertText',{text:'GTK 多窗口新名称'}); await key('Enter');
+    await waitFor('real multiwindow rename',editorClosed);
+    await waitFor('metadata-only name broadcast',()=>evaluate(`window.__actual.windows.filter(w=>w.managed_app_id===${JSON.stringify(real[0])}).every(w=>w.managed_app_name==='GTK 多窗口新名称' && w.name_revision===1 && w.can_rename)`));
+    assert(await evaluate(`[...document.querySelectorAll('.toolbar-list [data-app-id="${real[0]}"]')].every(n=>n.querySelector('.toolbar-label').textContent.startsWith('GTK 多窗口新名称 · ') && n.title.includes('GTK'))`));
+    const realAfter = await api(`/api/apps/${real[0]}`);
+    for (const property of ['pid','env_vars','exec_command','autostart','sort_order']) assert.deepEqual(realAfter[property],realBefore[property]);
+    assert.deepEqual(await api('/api/apps/order'),realNameOrder);
+    pass('real multiwindow rename changes all labels and broadcasts metadata while preserving title, PID, settings and order');
+    await waitFor('name reaches second desktop',()=>evaluate(`window.__peerTaskbar?.windows.some(w=>w.managed_app_id===${JSON.stringify(real[0])} && w.managed_app_name==='GTK 多窗口新名称' && w.name_revision===1) && [...document.querySelectorAll('.toolbar-list [data-app-id="${real[0]}"] .toolbar-label')].every(n=>n.textContent.startsWith('GTK 多窗口新名称'))`,peerSession));
+    assert(await evaluate(`window.__peerChannel===window.__ivncWebRTC._send_channel && window.__peerChannel.readyState==='open'`,peerSession));
+    await call('Target.closeTarget',{targetId:peer.targetId});
+    pass('a second desktop receives authoritative name metadata without reconnecting');
     await api(`/api/apps/${real[1]}/sharing`, 'PUT', { enabled: true, password: 'toolbar-smoke-password' });
     await api(`/api/apps/${real[1]}/restart`, 'POST');
     await waitFor('shared stream tab', () => evaluate(`!!document.querySelector('.toolbar-list [data-key="app:${real[1]}"]')`), 30000);
@@ -349,6 +519,12 @@ try {
     await waitFor('shared reorder', () => evaluate(`(() => { const ids=[...document.querySelectorAll('.toolbar-list .taskbar-item')].map(n=>n.dataset.appId);return ids.indexOf(${JSON.stringify(real[0])})<ids.indexOf(${JSON.stringify(real[1])});})()`));
     assert(await evaluate(`window.__frame === document.querySelector('.app-stream iframe') && window.__frameUrl === window.__frame.src && window.__frame.contentWindow.__ivncWebRTC._send_channel.readyState === 'open' && document.querySelector('.toolbar-list [data-key="app:${real[1]}"]').classList.contains('focused')`));
     pass('sorting a live shared app keeps the iframe, connection and active selection');
+    await openRename(real[1]); await draftName('Shared live alias');
+    await evaluate(`document.querySelector('.toolbar-rename-save').click()`);
+    await waitFor('shared rename saved',editorClosed);
+    await waitFor('shared iframe title synchronized',()=>evaluate(`window.__frame.title==='Shared live alias'`));
+    assert(await evaluate(`window.__frame === document.querySelector('.app-stream iframe') && window.__frameUrl === window.__frame.src && window.__frame.contentWindow.__ivncWebRTC._send_channel.readyState==='open' && document.querySelector('.toolbar-list [data-key="app:${real[1]}"]').classList.contains('focused')`));
+    pass('renaming a live shared app preserves the iframe, view token, channel and active selection');
     for (const id of real) await api(`/api/apps/${id}/stop`, 'POST');
 
     const final = await api('/api/apps/order');
@@ -356,6 +532,10 @@ try {
     server = launch(binary, ['--http-port', String(port), '--basic-auth-enabled', 'false', '--proxy-enabled', 'false', '--proxy-autostart', 'false', '--width', '800', '--height', '600'], 'server.log', { env, cwd: root });
     await waitFor('restart preserves order', async () => { const order=await api('/api/apps/order'); assert.deepEqual(order, final); return true; }, 30000);
     pass('service restart preserves order and revision');
+    assert.equal((await api(`/api/apps/${real[0]}`)).name,'GTK 多窗口新名称');
+    assert.equal((await api(`/api/apps/${real[1]}`)).name,'Shared live alias');
+    assert.equal((await api(`/api/apps/${real[1]}`)).name_revision,1);
+    pass('service restart preserves names and per-application name revisions');
     console.log(`RESULT ${passed} passed; artifacts: ${work}`);
 } catch (error) {
     if (socket?.readyState === WebSocket.OPEN) {

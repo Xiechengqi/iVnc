@@ -22,6 +22,39 @@ pub struct OrderedApps {
     pub order: AppOrder,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AppName {
+    pub id: String,
+    pub name: String,
+    pub name_revision: u64,
+}
+
+pub fn validate_app_name(name: &str) -> Result<String, ApiError> {
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(ApiError::new(
+            "app_name_invalid",
+            "Application name cannot contain control characters or line breaks",
+        ));
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiError::new(
+            "app_name_required",
+            "Enter an application name",
+        ));
+    }
+    if name.len() > 256 {
+        return Err(ApiError::new(
+            "app_name_too_long",
+            "Application name exceeds 256 UTF-8 bytes",
+        ));
+    }
+    Ok(name.to_owned())
+}
+
 impl AppStore {
     pub fn new() -> Result<Self, String> {
         let db_path = Self::db_path();
@@ -62,6 +95,7 @@ impl AppStore {
         .map_err(|e| format!("Failed to init db: {}", e))?;
         Self::ensure_column(&conn, "cli_binary_path", "TEXT")?;
         Self::ensure_column(&conn, "cli_env_vars", "TEXT")?;
+        Self::ensure_column(&conn, "name_revision", "INTEGER NOT NULL DEFAULT 0")?;
 
         // Adding the column and backfilling are one migration. Later opens must
         // never reset positions saved by the user (including timestamp ties).
@@ -172,7 +206,23 @@ impl AppStore {
     }
 
     pub fn update(&self, app: &ManagedApp) -> Result<(), ApiError> {
-        let conn = self.conn.lock().unwrap();
+        self.update_with_name(app, None)
+    }
+
+    /// Configuration writes never restore a name from an earlier read. The
+    /// legacy remote edit API can explicitly rename in this same transaction.
+    pub fn update_with_name(
+        &self,
+        app: &ManagedApp,
+        name: Option<(&str, u64)>,
+    ) -> Result<(), ApiError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        if let Some((name, revision)) = name {
+            Self::rename_in(&tx, &app.id, name, revision)?;
+        }
 
         let url = app.url.as_deref().unwrap_or("");
         let exec_command = app.exec_command.as_deref().unwrap_or("");
@@ -192,24 +242,80 @@ impl AppStore {
             .and_then(|v| serde_json::to_string(v).ok())
             .unwrap_or_default();
 
-        let changed = conn.execute(
-            "UPDATE apps SET name=?13, app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11 WHERE id=?12",
-            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, app.name],
-        ).map_err(|e| {
-            let message = format!("Failed to update app: {}", e);
-            if e.to_string().contains("UNIQUE") {
-                ApiError::new("app_name_exists", message).param("name", app.name.as_str())
-            } else {
-                message.into()
-            }
-        })?;
+        let changed = tx.execute(
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11 WHERE id=?12",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id],
+        ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(ApiError::new(
                 "app_not_found",
                 format!("App '{}' not found", app.id),
             ));
         }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn rename(&self, id: &str, name: &str, base_revision: u64) -> Result<AppName, ApiError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let renamed = Self::rename_in(&tx, id, name, base_revision)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(renamed)
+    }
+
+    fn rename_in(
+        conn: &Connection,
+        id: &str,
+        name: &str,
+        base_revision: u64,
+    ) -> Result<AppName, ApiError> {
+        let name = validate_app_name(name)?;
+        let current = conn
+            .query_row(
+                "SELECT name, name_revision FROM apps WHERE id=?1",
+                [id],
+                |row| {
+                    Ok(AppName {
+                        id: id.to_owned(),
+                        name: row.get(0)?,
+                        name_revision: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| ApiError::new("app_not_found", "Application no longer exists"))?;
+        if current.name_revision != base_revision {
+            return Err(ApiError::new(
+                "app_name_conflict",
+                "Application name changed; review the latest name and retry",
+            )
+            .param("name", current.name)
+            .param("name_revision", current.name_revision));
+        }
+        if current.name == name {
+            return Ok(current);
+        }
+        conn.execute(
+            "UPDATE apps SET name=?1, name_revision=name_revision+1 WHERE id=?2",
+            params![name, id],
+        )
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                ApiError::new("app_name_exists", "Application name already exists")
+                    .param("name", name.as_str())
+            } else {
+                ApiError::from(e.to_string())
+            }
+        })?;
+        Ok(AppName {
+            id: id.to_owned(),
+            name,
+            name_revision: current.name_revision + 1,
+        })
     }
 
     pub fn delete(&self, id: &str) -> Result<(), ApiError> {
@@ -234,7 +340,7 @@ impl AppStore {
     pub fn get_optional(&self, id: &str) -> Result<Option<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).optional().map_err(|e| format!("Failed to read app: {}", e))
@@ -247,7 +353,7 @@ impl AppStore {
 
     fn read_apps(conn: &Connection, order: &str) -> Result<Vec<ManagedApp>, String> {
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order FROM apps ORDER BY {order}"
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision FROM apps ORDER BY {order}"
         )).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -376,6 +482,7 @@ impl AppStore {
         ManagedApp {
             id: row.get(0).unwrap_or_default(),
             name: row.get(1).unwrap_or_default(),
+            name_revision: row.get(15).unwrap_or_default(),
             app_type,
             autostart,
             url,
@@ -504,5 +611,77 @@ mod tests {
         assert_eq!(migrated.order().unwrap().ordered_ids, ids(&["z", "a", "b"]));
         assert_eq!(migrated.order().unwrap().order_revision, 0);
         assert_eq!(migrated.get("a").unwrap().sort_order, 1);
+    }
+
+    #[test]
+    fn names_use_independent_cas_and_stale_configuration_cannot_overwrite_them() {
+        let store = AppStore::in_memory();
+        seed(&store, &["a", "b"]);
+        let mut stale = store.get("a").unwrap();
+        let order = store.order().unwrap();
+        let renamed = store.rename("a", "  中文 app  ", 0).unwrap();
+        assert_eq!(renamed.name, "中文 app");
+        assert_eq!(renamed.name_revision, 1);
+        assert_eq!(store.rename("a", "中文 app", 1).unwrap().name_revision, 1);
+        assert_eq!(
+            store.rename("a", "old", 0).unwrap_err().code,
+            "app_name_conflict"
+        );
+        assert_eq!(
+            store.rename("a", "b", 1).unwrap_err().code,
+            "app_name_exists"
+        );
+        stale.exec_command = Some("new command".into());
+        stale.name = "stale name".into();
+        store.update(&stale).unwrap();
+        assert_eq!(store.get("a").unwrap().name, "中文 app");
+        assert_eq!(store.get("a").unwrap().exec_command, stale.exec_command);
+        stale.exec_command = Some("must roll back".into());
+        assert_eq!(
+            store
+                .update_with_name(&stale, Some(("changed", 0)))
+                .unwrap_err()
+                .code,
+            "app_name_conflict"
+        );
+        assert_ne!(store.get("a").unwrap().exec_command, stale.exec_command);
+        assert_eq!(store.order().unwrap(), order);
+        let reopened = AppStore::from_connection(store.conn.into_inner().unwrap()).unwrap();
+        assert_eq!(reopened.get("a").unwrap().name_revision, 1);
+        assert_eq!(reopened.get("a").unwrap().name, "中文 app");
+    }
+
+    #[test]
+    fn names_validate_utf8_bytes_and_control_characters_without_mutation() {
+        let store = AppStore::in_memory();
+        seed(&store, &["a"]);
+        for name in [
+            "",
+            "   ",
+            "a\nb",
+            "\na",
+            "a\rb",
+            "a\tb",
+            "a\0b",
+            "a\u{7f}",
+            "a\u{85}",
+            "a\u{2028}",
+            &"中".repeat(86),
+        ] {
+            assert!(store.rename("a", name, 0).is_err(), "accepted {name:?}");
+            assert_eq!(store.get("a").unwrap().name_revision, 0);
+        }
+        let max = format!("{}a", "中".repeat(85));
+        assert_eq!(store.rename("a", &max, 0).unwrap().name, max);
+        assert_eq!(
+            store.rename("missing", "valid", 0).unwrap_err().code,
+            "app_not_found"
+        );
+        let conn = store.conn.into_inner().unwrap();
+        conn.execute_batch("ALTER TABLE apps DROP COLUMN name_revision;")
+            .unwrap();
+        let migrated = AppStore::from_connection(conn).unwrap();
+        assert_eq!(migrated.get("a").unwrap().name, max);
+        assert_eq!(migrated.get("a").unwrap().name_revision, 0);
     }
 }

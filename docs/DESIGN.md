@@ -390,14 +390,16 @@ Axum HTTP 服务器，同端口复用 HTTP/WebSocket/ICE-TCP。
 
 #### 工具栏布局与排序
 
-工具、可滚动应用区和状态区采用三列布局，右侧状态占据实际宽度。应用节点按键增量更新；拖动、溢出滚动和网络状态变化不会重建应用连接。SQLite 保存 `sort_order` 和排序版本，后台应用监视器把完整顺序、流式应用和普通窗口的 PID 归属缓存到统一快照；主循环读取快照并广播。展示排序独立于应用启动顺序，详见 [工具栏与排序](TOOLBAR.md)。
+工具、可滚动应用区和状态区采用三列布局，右侧状态占据实际宽度。应用节点按键增量更新；拖动、溢出滚动和网络状态变化不会重建应用连接。SQLite 保存 `sort_order` 和排序版本，后台应用监视器把完整顺序、流式应用、普通窗口的 PID 归属及名称元数据缓存到统一快照；主循环读取快照并广播。展示排序独立于应用启动顺序，详见 [工具栏、排序与改名](TOOLBAR.md)。
+
+右键改名使用独立的名称接口和每个应用的 `name_revision`，在事务中校验版本及名称唯一性，一般配置更新不写名称。远程应用只修改本实例的别名。前端编辑器保留输入焦点，隔离远程键盘和 IME 表单提交；按名称版本合并 API 与 DataChannel 结果，同源通知使控制台立即重新查询。改名不更换应用 PID、排序或应用视图。
 
 #### 应用标签
 
 开启远程访问的桌面应用在独立运行环境中运行，已启动的远程应用运行在另一台实例上，二者都不在主合成器中绘制，因此以应用标签出现在同一工具栏：
 
 1. `AppsState` 在应用启动、停止、删除、运行环境就绪以及远程连接状态变化时更新 `SharedState` 中的应用快照，并递增 `apps_generation`（`AtomicU64`）
-2. 主循环像比较 `datachannel_open_count` 一样比较 `apps_generation`，变化时重发 `taskbar` 消息，`apps` 字段为快照内容（`id`、`name`、`kind`、`status`，见 [PROTOCOL.md](PROTOCOL.md) §5.3）；主循环不访问 SQLite
+2. 主循环像比较 `datachannel_open_count` 一样比较 `apps_generation`，变化时重发 `taskbar` 消息，`apps` 字段为快照内容（`id`、`name`、`name_revision`、`can_rename`、`kind`、`status`，见 [PROTOCOL.md](PROTOCOL.md) §5.3）；主循环不访问 SQLite
 3. 应用运行环境（worker）内的 `apps` 始终为空
 4. 前端 `app-streams.js` 提供流式应用标签数据，`toolbar.js` 将其与窗口按展示顺序合并；首次选中流式应用时，`app-streams.js` 为该应用申请视图令牌，创建同源 iframe（`/app-view/{token}/?embed=1`）覆盖在主画面上（固定工具栏时不覆盖工具栏），之后保持连接，切走只隐藏
 5. 父页面与 iframe 通过 postMessage 传递激活、取消静音、上传、输入法和连接状态（见 PROTOCOL.md “内嵌视图”），双方都校验 `event.origin` 与 `event.source`；iframe 安装监听后发送 `ivnc-view-ready`，父页面据此重发当前激活状态，避免 `load` 时的消息丢失

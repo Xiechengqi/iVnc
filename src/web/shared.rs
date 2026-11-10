@@ -97,9 +97,18 @@ fn deliver<T: Clone>(subs: &mut Vec<Subscriber<T>>, item: &T) -> bool {
 pub struct StreamApp {
     pub id: String,
     pub name: String,
+    pub name_revision: u64,
+    pub can_rename: bool,
     /// "shared": a local application in its own runtime; "remote": an application of another instance.
     pub kind: &'static str,
     pub status: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskbarAppName {
+    pub name: String,
+    pub name_revision: u64,
+    pub can_rename: bool,
 }
 
 /// The taskbar message body: desktop windows and application tabs.
@@ -113,6 +122,7 @@ pub struct TaskbarApps {
     pub apps: Vec<StreamApp>,
     pub order: crate::apps::store::AppOrder,
     pub window_apps: BTreeMap<i32, String>,
+    pub names: BTreeMap<String, TaskbarAppName>,
 }
 
 /// Shared state for the application
@@ -970,12 +980,16 @@ mod tests {
             StreamApp {
                 id: "local".into(),
                 name: "Chrome".into(),
+                name_revision: 0,
+                can_rename: true,
                 kind: "shared",
                 status: "starting",
             },
             StreamApp {
                 id: "mapping".into(),
                 name: "Remote".into(),
+                name_revision: 0,
+                can_rename: true,
                 kind: "remote",
                 status: "auth_required",
             },
@@ -992,8 +1006,8 @@ mod tests {
         assert_eq!(
             value["apps"],
             json!([
-                {"id": "local", "name": "Chrome", "kind": "shared", "status": "starting"},
-                {"id": "mapping", "name": "Remote", "kind": "remote", "status": "auth_required"},
+                {"id": "local", "name": "Chrome", "name_revision": 0, "can_rename": true, "kind": "shared", "status": "starting"},
+                {"id": "mapping", "name": "Remote", "name_revision": 0, "can_rename": true, "kind": "remote", "status": "auth_required"},
             ])
         );
     }
@@ -1013,6 +1027,8 @@ mod tests {
         let app = StreamApp {
             id: "app".into(),
             name: "App".into(),
+            name_revision: 0,
+            can_rename: true,
             kind: "remote",
             status: "connecting",
         };
@@ -1070,6 +1086,18 @@ mod tests {
         assert_eq!(message["ordered_ids"], json!(["b", "a"]));
         assert_eq!(message["order_revision"], 3);
         assert_eq!(message["apps"], json!([]));
+        snapshot.names.insert(
+            "a".into(),
+            TaskbarAppName {
+                name: "Renamed".into(),
+                name_revision: 1,
+                can_rename: true,
+            },
+        );
+        state.set_taskbar_apps(snapshot.clone());
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 4);
+        state.set_taskbar_apps(snapshot);
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 4);
     }
 
     #[test]

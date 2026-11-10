@@ -104,7 +104,8 @@
 .ivnc-toolbar :focus-visible { outline: 2px solid #8abbff; outline-offset: -2px; }
 .ivnc-toolbar .toolbar-more-menu,
 .ivnc-toolbar .toolbar-info,
-.ivnc-toolbar .toolbar-notice {
+.ivnc-toolbar .toolbar-notice,
+.ivnc-toolbar .toolbar-rename {
     position: absolute;
     bottom: 38px;
     background: #222b36;
@@ -130,6 +131,33 @@
 .ivnc-toolbar .toolbar-more-menu .toolbar-tool-label { display: inline; }
 .ivnc-toolbar .toolbar-info { right: 0; width: max-content; }
 .ivnc-toolbar .toolbar-notice { right: 8px; max-width: min(420px, calc(100vw - 16px)); }
+.ivnc-toolbar .toolbar-rename { width: 320px; z-index: 3; white-space: normal; }
+.ivnc-toolbar .toolbar-rename-label { display: grid; gap: 6px; }
+.ivnc-toolbar .toolbar-rename-input {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    border: 1px solid #738398;
+    border-radius: 3px;
+    padding: 6px 8px;
+    color: #fff;
+    background: #141c25;
+    font: inherit;
+    user-select: text;
+}
+.ivnc-toolbar .toolbar-rename-latest { margin-top: 6px; color: #bac7d7; overflow-wrap: anywhere; }
+.ivnc-toolbar .toolbar-rename-error { margin-top: 6px; color: #ffc1bb; overflow-wrap: anywhere; }
+.ivnc-toolbar .toolbar-rename-error:empty { display: none; }
+.ivnc-toolbar .toolbar-rename-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.ivnc-toolbar .toolbar-rename-actions button {
+    border: 1px solid #738398;
+    border-radius: 4px;
+    background: #303f52;
+    color: #fff;
+    padding: 4px 12px;
+    font: inherit;
+    cursor: pointer;
+}
 .toolbar-drag-ghost {
     position: fixed;
     pointer-events: none;

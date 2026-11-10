@@ -45,6 +45,9 @@ pub enum AppStatus {
 pub struct ManagedApp {
     pub id: String,
     pub name: String,
+    /// Name changes are independent of launch settings and display order.
+    #[serde(default)]
+    pub name_revision: u64,
     pub app_type: AppType,
     pub autostart: bool,
 
@@ -83,6 +86,7 @@ impl ManagedApp {
         Self {
             id: id.into(),
             name: "App".into(),
+            name_revision: 0,
             app_type,
             autostart: false,
             url: None,

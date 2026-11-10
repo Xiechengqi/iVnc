@@ -763,13 +763,18 @@ fn run(
                     .and_then(|c| c.get_credentials(&comp.display_handle).ok())
                     .map(|c| c.pid);
                 window_pids.extend(pid);
+                let managed_app_id = pid.and_then(|pid| snapshot.window_apps.get(&pid));
+                let name = managed_app_id.and_then(|id| snapshot.names.get(id));
                 windows_json.push(serde_json::json!({
                     "id": idx,
                     "title": title,
                     "app_id": app_id,
                     "display_name": resolve_display_name(&app_id),
                     "focused": is_focused,
-                    "managed_app_id": pid.and_then(|pid| snapshot.window_apps.get(&pid)),
+                    "managed_app_id": managed_app_id,
+                    "managed_app_name": name.map(|n| &n.name),
+                    "name_revision": name.map(|n| n.name_revision),
+                    "can_rename": name.is_some_and(|n| n.can_rename),
                 }));
             }
             // Runtimes have no apps manager, so their list of tabs stays empty.

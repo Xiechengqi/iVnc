@@ -162,6 +162,7 @@ mod tests {
             cli_env_vars: None,
             created_at: String::new(),
             sort_order: 0,
+            name_revision: 0,
         }
     }
 

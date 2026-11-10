@@ -330,6 +330,7 @@ mod tests {
             cli_env_vars: None,
             created_at: "now".to_string(),
             sort_order: 0,
+            name_revision: 0,
         }
     }
 

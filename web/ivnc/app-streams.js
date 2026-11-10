@@ -205,7 +205,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	// user just started the app from this page's console.
 	function update(apps) {
 		order = [];
-		for (const app of apps) {
+		for (let app of apps) {
 			if (!app || typeof app.id !== 'string' || order.includes(app.id)) continue;
 			order.push(app.id);
 			let s = streams.get(app.id);
@@ -214,6 +214,11 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 				streams.set(app.id, s);
 			}
 			const wasReady = ready(s);
+			// A delayed taskbar snapshot may carry an older alias, while its
+			// runtime status is still useful. Preserve only the newer name.
+			if ((s.app?.name_revision ?? -1) > (app.name_revision ?? -1)) {
+				app = { ...app, name: s.app.name, name_revision: s.app.name_revision };
+			}
 			s.app = app;
 			if (s.frame) s.frame.title = app.name;
 			// The app came back (remote reachable again, worker restarted).
@@ -241,6 +246,8 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 			return {
 				key: `app:${s.id}`, appId: s.id, dot,
 				label: s.app.name || s.id, title: `${s.app.name} · ${text}`,
+				appName: s.app.name, nameRevision: s.app.name_revision, canRename: s.app.can_rename,
+				statusText: text,
 				active: s.id === activeId, activate: () => activate(s.id),
 			};
 		});

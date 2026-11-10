@@ -217,6 +217,10 @@ token="$(curl -sS -m 15 -X POST "$SHARE_URL/authenticate" -H 'Content-Type: appl
 [ -n "$token" ] && pass "session token issued" || fail "session token issued"
 check_status "token reads the shared app" "200" "$SHARE_URL/info" -H "Authorization: Bearer $token"
 check_status "token cannot list B applications" "401" "$BASE_B/api/apps" -H "Authorization: Bearer $token"
+check_status "view token cannot rename B application" "401" "$BASE_B/api/apps/$APP_ID/name" \
+  -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d '{"name":"denied","base_revision":0}'
+check_status "cross-origin rename is rejected" "403" "$BASE_B/api/apps/$APP_ID/name" \
+  -u "$B_AUTH" -X PUT -H 'Origin: https://invalid.example' -H 'Content-Type: application/json' -d '{"name":"denied","base_revision":0}'
 check_status "token cannot access another desktop" "401" "$BASE_B/remote/v1/apps/builtin-chrome/info" -H "Authorization: Bearer $token"
 check_status "data proxy rejects management routes" "404" "$SHARE_URL/data/api/apps" -H "Authorization: Bearer $token"
 check_status "data proxy offers no file downloads" "404" "$SHARE_URL/data/app/files" -H "Authorization: Bearer $token"
@@ -282,6 +286,21 @@ eventually 15 test -s "$UPLOADED"
 check_eq "upload reached the app's Downloads on B" "iVnc upload 中文" "$(cat "$UPLOADED" 2>/dev/null)"
 
 hdr "parallel connections"
+remote_pid_before="$(curl -sS -m 15 -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.pid')"
+remote_order_before="$(curl -sS -m 15 "$BASE_A/api/apps/order")"
+resp="$(curl -sS -m 15 -X PUT "$BASE_A/api/apps/$REMOTE_ID/name" \
+  -H 'Content-Type: application/json' -d '{"name":"A local alias 中文","base_revision":0}')"
+check_eq "remote mapping renamed on A" "A local alias 中文" "$(jq -r '.name' <<<"$resp")"
+check_eq "rename increments only the name revision" "1" "$(remote_field name_revision)"
+check_eq "A alias rename preserves B application name" "remote-demo" "$(curl -sS -m 15 -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.name')"
+check_eq "A alias rename preserves B process" "$remote_pid_before" "$(curl -sS -m 15 -u "$B_AUTH" "$BASE_B/api/apps/$APP_ID" | jq -r '.pid')"
+check_eq "A alias rename preserves display order" "$remote_order_before" "$(curl -sS -m 15 "$BASE_A/api/apps/order")"
+check_status "alias rename keeps the existing view token valid" "200" "$BASE_A${VIEW_PATH}ui-config"
+check_status "stale legacy alias edit conflicts" "409" "$BASE_A/api/apps/$REMOTE_ID" \
+  -X PUT -H 'Content-Type: application/json' -d '{"name":"stale alias","name_revision":0}'
+curl -sS -m 15 -X PUT "$BASE_A/api/apps/$REMOTE_ID" \
+  -H 'Content-Type: application/json' -d '{"autostart":false}' >/dev/null
+check_eq "configuration edit preserves alias" "A local alias 中文" "$(remote_field name)"
 check_eq "A reports the active connection" "connected" "$(remote_field remote_state)"
 clicks() { local n; n="$(grep -c 'ButtonMask changed' "$APP_LOG" 2>/dev/null)"; printf '%s' "${n:-0}"; }
 clicks_increased() { [ "$(clicks)" -gt "$clicks_before" ]; }

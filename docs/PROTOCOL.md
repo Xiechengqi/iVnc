@@ -155,7 +155,10 @@ taskbar,{json_data}
             "app_id": "org.gnome.Terminal",
             "display_name": "Terminal",
             "focused": true,
-            "managed_app_id": "terminal-app"
+            "managed_app_id": "terminal-app",
+            "managed_app_name": "Terminal",
+            "name_revision": 2,
+            "can_rename": true
         },
         {
             "id": 1,
@@ -163,19 +166,26 @@ taskbar,{json_data}
             "app_id": "org.gnome.Nautilus",
             "display_name": "Files",
             "focused": false,
-            "managed_app_id": null
+            "managed_app_id": null,
+            "managed_app_name": null,
+            "name_revision": null,
+            "can_rename": false
         }
     ],
     "apps": [
         {
             "id": "a1b2c3",
             "name": "Chrome",
+            "name_revision": 1,
+            "can_rename": true,
             "kind": "shared",
             "status": "running"
         },
         {
             "id": "d4e5f6",
             "name": "remote-demo",
+            "name_revision": 0,
+            "can_rename": true,
             "kind": "remote",
             "status": "connected"
         }
@@ -191,12 +201,16 @@ taskbar,{json_data}
 |------|------|
 | `id` | 应用 ID，与 `/api/apps` 相同 |
 | `name` | 显示名称 |
+| `name_revision` | 本实例为此应用保存的名称版本，与排序版本独立 |
+| `can_rename` | 应用本身是否允许改名，客户端还须检查控制台及内嵌视图权限 |
 | `kind` | `shared`：本实例开启远程访问、在独立运行环境中运行的桌面应用；`remote`：本实例已启动的远程应用 |
 | `status` | `shared` 为 `starting` 或 `running`；`remote` 为 `/api/apps` 的 `remote_state`（`connecting`、`connected`、`starting`、`stopped`、`not_ready`、`auth_required`、`incompatible`、`unreachable`） |
 
 任务栏消息另含 `ordered_ids`（本实例完整应用展示顺序）和 `order_revision`（持久化排序版本）。`windows` 中的 `managed_app_id` 为关联的应用 ID，无法关联时为 `null`；它与 Wayland `app_id` 的桌面类名不同。客户端将普通窗口与 `apps` 按同一应用顺序合并，保留窗口 ID 用于聚焦。同一应用的多个窗口保留组内顺序。排序 API 和合并规则见 [工具栏与排序](TOOLBAR.md)。
 
-排序或窗口关联变化、`apps` 变化时以及每个新 DataChannel 打开时重发整条消息；应用运行环境（worker）内的 `apps` 始终为空数组。客户端在 `status` 为 `running`（`shared`）或 `connected`（`remote`）时才打开视图。
+关联的普通窗口还包含 `managed_app_name`、`name_revision`、`can_rename`；未关联时前两项为 `null`，`can_rename` 为 `false`。原始 `title` 保持窗口自己的标题。名称元数据由后台应用监视器缓存，主合成循环不读取数据库。
+
+排序、名称或窗口关联变化、`apps` 变化时以及每个新 DataChannel 打开时重发整条消息；即使没有流式应用，名称变化也触发广播。客户端保留较新版本的名称，避免旧 API 或 DataChannel 快照覆盖改名结果。应用运行环境（worker）内的 `apps` 始终为空数组。客户端在 `status` 为 `running`（`shared`）或 `connected`（`remote`）时才打开视图。
 
 ### 5.4 统计消息 `stats`
 

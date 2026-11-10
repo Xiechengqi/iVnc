@@ -6,12 +6,18 @@ import { createOrderNotifications } from './app-order.js';
 
 const STRINGS = {
     zh: { apps: '应用', previous: '向左滚动应用', next: '向右滚动应用', more: '更多工具',
-        move: '拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态' },
+        move: '拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态',
+        rename: '修改应用名', save: '保存', cancel: '取消', pending: '保存中…', nameFailed: '无法保存应用名',
+        latest: '当前名称：', changed: '应用名已发生变化。请核对当前名称，再次保存以使用你的输入。',
+        invalid: '名称不能为空、不能包含换行或控制字符，且不能超过 256 个 UTF-8 字节。' },
     en: { apps: 'Applications', previous: 'Scroll apps left', next: 'Scroll apps right', more: 'More tools',
-        move: 'Drag to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status' }
+        move: 'Drag to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
+        rename: 'Rename application', save: 'Save', cancel: 'Cancel', pending: 'Saving…', nameFailed: 'Could not save application name',
+        latest: 'Current name: ', changed: 'The application name changed. Review the current name, then save again to use your draft.',
+        invalid: 'Enter a name without line breaks or control characters, up to 256 UTF-8 bytes.' }
 };
 
-export function createToolbar({ element, canReorder = false, activateWindow, onInteraction = () => {} }) {
+export function createToolbar({ element, canReorder = false, canRename = false, activateWindow, onInteraction = () => {} }) {
     // The desktop entry is loaded as a module at runtime by index.html; Vite
     // cannot attach its extracted styles to that dynamically created script.
     if (!document.getElementById('ivnc-toolbar-styles')) {
@@ -49,11 +55,152 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
     info.hidden = true;
     const notice = make('div', 'toolbar-notice', element);
     notice.hidden = true; notice.setAttribute('role', 'status');
-    const notifications = createOrderNotifications();
+    const renamePanel = make('form', 'toolbar-rename allow-native-input', element);
+    renamePanel.hidden = true;
+    renamePanel.setAttribute('role', 'dialog'); renamePanel.setAttribute('aria-modal', 'false');
+    const renameLabel = make('label', 'toolbar-rename-label', renamePanel);
+    const renameCaption = make('span', '', renameLabel);
+    const renameInput = make('input', 'toolbar-rename-input', renameLabel);
+    renameInput.type = 'text'; renameInput.autocomplete = 'off'; renameInput.spellcheck = false;
+    const renameLatest = make('div', 'toolbar-rename-latest', renamePanel);
+    const renameError = make('div', 'toolbar-rename-error', renamePanel);
+    renameError.setAttribute('role', 'alert');
+    const renameActions = make('div', 'toolbar-rename-actions', renamePanel);
+    const renameCancel = make('button', 'toolbar-rename-cancel', renameActions); renameCancel.type = 'button';
+    const renameSave = make('button', 'toolbar-rename-save', renameActions); renameSave.type = 'button';
+    const names = new Map(), requests = new Set(), nameRefreshes = new Set();
+    const notifications = createOrderNotifications(undefined, async (id, revision) => {
+        if (destroyed || revision <= (names.get(id)?.name_revision ?? -1) || nameRefreshes.has(id) || !entries.some(e => e.appId === id)) return;
+        nameRefreshes.add(id);
+        try {
+            const app = await request(`/api/apps/${encodeURIComponent(id)}`);
+            if (!destroyed && entries.some(e => e.appId === id)) { acceptName(app); paint(); }
+        } catch (_) {} finally { nameRefreshes.delete(id); }
+    });
     const toolEntries = [], nodes = new Map();
     let entries = [], confirmed = { ordered_ids: [], order_revision: -1 }, pendingIds = null;
     let drag = null, saving = false, destroyed = false, ghost = null, frame = 0, noticeTimer;
-    let lastActive = null, suppressClickUntil = 0, requestController;
+    let lastActive = null, suppressClickUntil = 0, editor = null, renameBusy = false;
+
+    function acceptName(app) {
+        if (!app || typeof app.id !== 'string' || typeof app.name !== 'string' || !Number.isSafeInteger(app.name_revision) || app.name_revision < 0) return;
+        const previous = names.get(app.id);
+        if (previous && app.name_revision <= previous.name_revision) return;
+        names.set(app.id, { name: app.name, name_revision: app.name_revision });
+        if (previous) notifications.publishName(app.id, app.name_revision);
+    }
+
+    function describe(entry) {
+        const app = names.get(entry.appId);
+        if (!app) return;
+        const manyWindows = entry.windowTitle !== undefined && entries.filter(e => e.windowTitle !== undefined && e.appId === entry.appId).length > 1;
+        entry.label = app.name;
+        if (manyWindows && entry.windowTitle && entry.windowTitle !== app.name) entry.label += ` · ${entry.windowTitle}`;
+        entry.title = [app.name, entry.windowTitle || entry.statusText].filter(Boolean).join(' · ');
+        if (entry.windowClass) entry.title += ` (${entry.windowClass})`;
+    }
+
+    function positionEditor() {
+        if (!editor) return;
+        const anchor = nodes.get(editor.key)?.getBoundingClientRect();
+        if (!anchor) return;
+        const rect = element.getBoundingClientRect();
+        const left = Math.max(8, Math.min(window.innerWidth - renamePanel.offsetWidth - 8, anchor.left));
+        renamePanel.style.left = `${left - rect.left}px`;
+    }
+
+    function paintEditor() {
+        if (!editor) return;
+        const app = names.get(editor.id);
+        renameLatest.textContent = app ? `${tr('latest')}${app.name}` : '';
+        renameSave.disabled = renameBusy;
+        // Disabling the focused input would move focus to the desktop and
+        // leak the matching keyup (or a retry's Enter) into remote input.
+        renameInput.readOnly = editor.saving;
+        renamePanel.setAttribute('aria-busy', String(editor.saving));
+        renameSave.textContent = tr(editor.saving ? 'pending' : 'save');
+        positionEditor();
+    }
+
+    function closeEditor(restoreFocus = false) {
+        if (!editor) return;
+        const state = editor; editor = null;
+        state.controller?.abort(); renamePanel.hidden = true;
+        if (restoreFocus) nodes.get(state.key)?.focus({ preventScroll: true });
+        onInteraction(false);
+    }
+
+    function openEditor(node) {
+        const entry = node._entry, app = names.get(entry.appId);
+        if (!canRename || !entry.canRename || !app || destroyed) return;
+        closeEditor(); cancelDrag(); closeMenu(); closeInfo();
+        editor = { id: entry.appId, key: entry.key, revision: app.name_revision, saving: false };
+        renameInput.value = app.name; renameError.textContent = '';
+        renamePanel.hidden = false; paintEditor(); onInteraction(true);
+        renameInput.focus({ preventScroll: true }); renameInput.select();
+    }
+
+    async function saveName() {
+        if (!editor || renameBusy || destroyed) return;
+        const state = editor, raw = renameInput.value, name = raw.trim();
+        if (!name || /[\p{Cc}\u2028\u2029]/u.test(raw) || new TextEncoder().encode(name).length > 256) {
+            renameError.textContent = tr('invalid'); return;
+        }
+        renameBusy = state.saving = true; renameError.textContent = '';
+        renameInput.focus({ preventScroll: true }); paintEditor();
+        state.controller = new AbortController();
+        const url = `/api/apps/${encodeURIComponent(state.id)}`;
+        const success = app => {
+            acceptName(app);
+            closeEditor(true); paint();
+        };
+        try {
+            const app = await request(`${url}/name`, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, base_revision: state.revision }) }, state.controller);
+            if (!destroyed && editor === state) success(app);
+        } catch (error) {
+            if (destroyed || editor !== state) return;
+            if (error.status === 404) { closeEditor(); return; }
+            let current;
+            if (error.body?.code === 'app_name_conflict') {
+                current = { id: state.id, name: error.body.params.name, name_revision: error.body.params.name_revision };
+            } else if (!error.status) {
+                // A lost response can follow a committed transaction. Resolve
+                // it from the API before allowing an explicit retry.
+                state.controller = new AbortController();
+                try { current = await request(url, {}, state.controller); }
+                catch (readError) { if (readError.status === 404 && editor === state) closeEditor(); }
+                if (destroyed || editor !== state) return;
+                if (current?.name === name && current.name_revision >= state.revision) { success(current); return; }
+            }
+            if (current) { acceptName(current); state.revision = names.get(state.id).name_revision; paint(); }
+            renameError.textContent = error.body?.code === 'app_name_conflict' ? tr('changed') : `${tr('nameFailed')}: ${error.message}`;
+        } finally {
+            renameBusy = false; state.saving = false;
+            if (!destroyed) paintEditor();
+        }
+    }
+
+    // Only explicit button clicks and non-composing Enter save. Native form
+    // submission during IME confirmation must never submit the draft.
+    listen(renamePanel, 'submit', event => event.preventDefault());
+    listen(renameSave, 'click', saveName);
+    listen(renameInput, 'keydown', event => {
+        if (event.isComposing || event.keyCode === 229) return;
+        if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); saveName(); }
+    });
+    listen(renameCancel, 'click', () => closeEditor(true));
+    listen(list, 'contextmenu', event => {
+        const node = event.target.closest('.taskbar-item');
+        if (!canRename || !node?._entry.canRename) return;
+        event.preventDefault(); event.stopPropagation(); openEditor(node);
+    });
+    listen(list, 'keydown', event => {
+        if (event.key !== 'F2' && !(event.shiftKey && event.key === 'F10')) return;
+        const node = event.target.closest('.taskbar-item');
+        if (!canRename || !node?._entry.canRename) return;
+        event.preventDefault(); event.stopPropagation(); openEditor(node);
+    });
 
     function notify(message, error = false) {
         if (destroyed) return;
@@ -94,6 +241,7 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
         let cursor = list.firstElementChild;
         let firstDragged = true;
         for (const entry of sorted) {
+            describe(entry);
             let node = nodes.get(entry.key);
             if (!node) {
                 node = make('div', 'taskbar-item');
@@ -136,6 +284,8 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
             node.title = entry.title;
             node.setAttribute('aria-label', entry.title);
             node.setAttribute('aria-pressed', String(!!entry.active));
+            if (canRename && entry.canRename) node.setAttribute('aria-keyshortcuts', 'F2 Shift+F10');
+            else node.removeAttribute('aria-keyshortcuts');
             node._parts.label.textContent = entry.label;
             node._parts.dot.hidden = !entry.dot;
             node._parts.dot.className = `taskbar-app-dot ${entry.dot || ''}`;
@@ -148,6 +298,7 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
         }
         viewport.scrollLeft = left;
         updateOverflow();
+        paintEditor();
         const active = sorted.find(e => e.active)?.key || null;
         if (active !== lastActive && !drag && !saving) {
             lastActive = active;
@@ -180,6 +331,7 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
         }
         if (!compact) closeMenu();
         updateOverflow();
+        positionEditor();
     }
 
     function closeMenu() {
@@ -194,18 +346,17 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
         if (open) onInteraction(false);
     }
 
-    async function request(url, options = {}) {
-        requestController = new AbortController();
-        const controller = requestController;
+    async function request(url, options = {}, controller = new AbortController()) {
+        requests.add(controller);
         const timer = setTimeout(() => controller.abort(), 10000);
         try {
             const response = await fetch(url, { ...options, signal: controller.signal });
             const body = await response.json();
-            if (!response.ok) throw new Error(serverErrorText(body) || response.statusText);
+            if (!response.ok) throw Object.assign(new Error(serverErrorText(body) || response.statusText), { status: response.status, body });
             return body;
         } finally {
             clearTimeout(timer);
-            if (requestController === controller) requestController = null;
+            requests.delete(controller);
         }
     }
 
@@ -316,6 +467,8 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
     listen(document, 'visibilitychange', () => { if (document.hidden) cancelDrag(); });
     listen(document, 'keydown', (event) => {
         if (event.key !== 'Escape') return;
+        if (event.isComposing || event.keyCode === 229) return;
+        if (editor) { event.preventDefault(); event.stopPropagation(); closeEditor(true); }
         if (drag?.started) { event.preventDefault(); event.stopPropagation(); }
         cancelDrag(); closeMenu(); closeInfo();
     }, { capture: true });
@@ -325,7 +478,7 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
         event.preventDefault(); event.stopPropagation();
         viewport.scrollLeft += event.deltaY * (event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? viewport.clientWidth : 1);
     }, { passive: false });
-    listen(viewport, 'scroll', updateOverflow, { passive: true });
+    listen(viewport, 'scroll', () => { updateOverflow(); positionEditor(); }, { passive: true });
     listen(previous, 'click', () => viewport.scrollBy({ left: -Math.max(100, viewport.clientWidth * .7), behavior: 'smooth' }));
     listen(next, 'click', () => viewport.scrollBy({ left: Math.max(100, viewport.clientWidth * .7), behavior: 'smooth' }));
     listen(more, 'click', () => {
@@ -334,6 +487,7 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
     // Tool handlers stop propagation; close before they open their own panels.
     listen(menu, 'click', (event) => { if (event.target.closest('.taskbar-pin')) closeMenu(); }, { capture: true });
     listen(document, 'pointerdown', (event) => {
+        if (!renamePanel.contains(event.target)) closeEditor();
         if (!tools.contains(event.target)) closeMenu();
         if (!status.contains(event.target)) closeInfo();
     });
@@ -355,6 +509,8 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
         previous.title = tr('previous'); next.title = tr('next'); more.title = tr('more');
         [previous, next, more].forEach(n => n.setAttribute('aria-label', n.title));
         apps.setAttribute('aria-label', tr('apps'));
+        renameCaption.textContent = tr('rename'); renamePanel.setAttribute('aria-label', tr('rename'));
+        renameInput.setAttribute('aria-label', tr('rename')); renameCancel.textContent = tr('cancel');
         layout(); paint();
     };
     const untranslate = onLangChange(translate);
@@ -374,20 +530,26 @@ export function createToolbar({ element, canReorder = false, activateWindow, onI
         },
         update(data, streams = [], streamActive = false) {
             acceptOrder(data);
+            for (const w of data.windows || []) acceptName({ id: w.managed_app_id, name: w.managed_app_name, name_revision: w.name_revision });
+            for (const s of streams) acceptName({ id: s.appId, name: s.appName, name_revision: s.nameRevision });
             entries = (data.windows || []).map(w => ({
                 key: `window:${w.id}`, appId: w.managed_app_id,
+                canRename: w.can_rename === true,
+                windowTitle: w.title || '', windowClass: w.app_id,
                 label: w.title || w.display_name || w.app_id || `Window ${w.id}`,
                 title: `${w.title || w.display_name || w.app_id || ''} (${w.app_id || ''})`,
                 active: w.focused && !streamActive,
                 activate: () => activateWindow(w.id)
             })).concat(streams);
+            if (editor && !entries.some(e => e.key === editor.key && e.appId === editor.id && e.canRename)) closeEditor();
+            for (const id of names.keys()) if (!entries.some(e => e.appId === id)) names.delete(id);
             if (drag && (drag.revision !== confirmed.order_revision || drag.ids.length !== visibleIdsFromConfirmed().length || !drag.ids.every(id => entries.some(e => e.appId === id)))) cancelDrag();
             paint();
         },
-        interacting: () => !!drag?.started || !menu.hidden || !info.hidden,
+        interacting: () => !!editor || !!drag?.started || !menu.hidden || !info.hidden,
         destroy() {
             destroyed = true;
-            cancelDrag(); requestController?.abort(); events.abort(); resize.disconnect();
+            closeEditor(); cancelDrag(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
             clearTimeout(noticeTimer); untranslate(); notifications.destroy();
             element.remove(); nodes.clear();
         }

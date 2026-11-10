@@ -6,14 +6,14 @@ use super::native;
 use super::process::ProcessManager;
 use super::service_process::{self, ServiceProcessManager};
 use super::state_recovery::AppRunningState;
-use super::store::{AppStore, OrderedApps};
+use super::store::{validate_app_name, AppStore, OrderedApps};
 use crate::proxy_panel::{ProxyPanelManager, BUILTIN_MIAO_ID, MIAO_START_TIMEOUT_SECS};
 use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
     response::Response,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use serde_json::json;
@@ -132,6 +132,20 @@ impl AppsState {
                 apps: self.stream_apps(&listed.apps),
                 order: listed.order.clone(),
                 window_apps: self.process.apps_for_clients(&shared.window_pids()),
+                names: listed
+                    .apps
+                    .iter()
+                    .map(|app| {
+                        (
+                            app.id.clone(),
+                            crate::web::shared::TaskbarAppName {
+                                name: app.name.clone(),
+                                name_revision: app.name_revision,
+                                can_rename: app.id != BUILTIN_MIAO_ID,
+                            },
+                        )
+                    })
+                    .collect(),
             });
         }
         listed
@@ -156,6 +170,8 @@ impl AppsState {
                 Some(crate::web::shared::StreamApp {
                     id: app.id.clone(),
                     name: app.name.clone(),
+                    name_revision: app.name_revision,
+                    can_rename: app.id != BUILTIN_MIAO_ID,
                     kind,
                     status,
                 })
@@ -545,6 +561,7 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
                 cli_env_vars: None,
                 created_at: chrono_now(),
                 sort_order: 0,
+                name_revision: 0,
             })?;
         }
     }
@@ -608,6 +625,7 @@ fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), S
                 cli_env_vars: None,
                 created_at: chrono_now(),
                 sort_order: 0,
+                name_revision: 0,
             };
             match store.add(&app) {
                 Ok(()) => log::info!("Added built-in Chrome desktop app"),
@@ -674,6 +692,7 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
                 created_at: chrono_now(),
                 sort_order: 0,
+                name_revision: 0,
             };
             match store.add(&app) {
                 Ok(()) => log::info!("Added built-in agent-browser CLI app"),
@@ -755,6 +774,7 @@ pub fn router(state: Arc<AppsState>) -> Router {
     Router::new()
         .route("/api/apps", get(list_apps).post(add_app))
         .route("/api/apps/order", get(get_order).put(reorder_apps))
+        .route("/api/apps/{id}/name", put(rename_app))
         .route(
             "/api/apps/{id}",
             get(get_app).put(update_app).delete(delete_app),
@@ -871,6 +891,8 @@ fn app_json(
     let mut obj = json!({
         "id": app.id,
         "name": app.name,
+        "name_revision": app.name_revision,
+        "can_rename": app.id != BUILTIN_MIAO_ID,
         "app_type": app.app_type.as_str(),
         "autostart": app.autostart,
         "status": status,
@@ -1045,12 +1067,55 @@ async fn reorder_apps(
     }
 }
 
+fn name_error(error: ApiError) -> Response {
+    let status = match error.code {
+        "app_name_required" | "app_name_invalid" | "app_name_too_long" => StatusCode::BAD_REQUEST,
+        "app_name_exists" | "app_name_conflict" => StatusCode::CONFLICT,
+        "app_not_found" => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    err_response(status, error)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameRequest {
+    name: String,
+    base_revision: u64,
+}
+
+async fn rename_app(
+    State(state): State<Arc<AppsState>>,
+    Path(id): Path<String>,
+    body: Result<axum::Json<RenameRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if id == BUILTIN_MIAO_ID {
+        return err_response(
+            StatusCode::FORBIDDEN,
+            ApiError::new("miao_read_only", "Miao application settings are read-only"),
+        );
+    }
+    let Ok(axum::Json(body)) = body else {
+        return name_error(ApiError::new(
+            "app_name_invalid",
+            "Expected name and base_revision",
+        ));
+    };
+    match state.store.rename(&id, &body.name, body.base_revision) {
+        Ok(app) => {
+            state.refresh_stream_apps();
+            json_response(StatusCode::OK, json!(app))
+        }
+        Err(e) => name_error(e),
+    }
+}
+
 async fn add_app(
     State(state): State<Arc<AppsState>>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
     let mut name = match body.get("name").and_then(|v| v.as_str()) {
-        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        Some(n) if !n.trim().is_empty() => n.to_string(),
         _ if body["app_type"] == "remote" => String::new(),
         _ => {
             return err_response(
@@ -1087,12 +1152,10 @@ async fn add_app(
             name = target.name.clone();
         }
     }
-    if name.len() > 256 {
-        return err_response(
-            StatusCode::BAD_REQUEST,
-            ApiError::new("app_name_too_long", "Application name is too long"),
-        );
-    }
+    name = match validate_app_name(&name) {
+        Ok(name) => name,
+        Err(e) => return name_error(e),
+    };
 
     let (
         url,
@@ -1219,6 +1282,7 @@ async fn add_app(
         cli_env_vars,
         created_at: chrono_now(),
         sort_order: 0,
+        name_revision: 0,
     };
 
     if let Err(e) = state.store.add(&app) {
@@ -1299,15 +1363,38 @@ async fn update_app(
         );
     }
 
-    if app.app_type == AppType::RemoteApp {
-        if let Some(name) = body
-            .get("name")
-            .and_then(|v| v.as_str())
-            .filter(|n| !n.trim().is_empty())
-        {
-            app.name = name.trim().to_owned();
+    let rename = if app.app_type == AppType::RemoteApp && body.get("name").is_some() {
+        let Some(name) = body["name"].as_str() else {
+            return name_error(ApiError::new("app_name_invalid", "Expected a string name"));
+        };
+        let name = match validate_app_name(name) {
+            Ok(name) => name,
+            Err(e) => return name_error(e),
+        };
+        let revision = match body.get("name_revision") {
+            Some(value) => match value.as_u64() {
+                Some(revision) => revision,
+                None => {
+                    return name_error(ApiError::new("app_name_invalid", "Expected name_revision"))
+                }
+            },
+            // Older clients are protected against changes during this request.
+            None => app.name_revision,
+        };
+        if revision != app.name_revision {
+            return name_error(
+                ApiError::new(
+                    "app_name_conflict",
+                    "Application name changed; review and retry",
+                )
+                .param("name", app.name.clone())
+                .param("name_revision", app.name_revision),
+            );
         }
-    }
+        Some((name, revision))
+    } else {
+        None
+    };
     match app.app_type {
         AppType::RemoteApp => {
             if body["password"].as_str().is_some_and(|s| !s.is_empty()) {
@@ -1403,12 +1490,21 @@ async fn update_app(
         app.autostart = app.app_type != AppType::CliApp && autostart;
     }
 
-    if let Err(e) = state.store.update(&app) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err(e) = state.store.update_with_name(
+        &app,
+        rename
+            .as_ref()
+            .map(|(name, revision)| (name.as_str(), *revision)),
+    ) {
+        return name_error(e);
     }
     // Tabs show the name.
     state.refresh_stream_apps();
-    json_response(StatusCode::OK, json!({"ok": true}))
+    let current = state.store.get(&id).unwrap_or(app);
+    json_response(
+        StatusCode::OK,
+        json!({"ok": true, "id": id, "name": current.name, "name_revision": current.name_revision}),
+    )
 }
 
 async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
@@ -1882,6 +1978,8 @@ mod tests {
             [crate::web::shared::StreamApp {
                 id: app.id.clone(),
                 name: "Remote".into(),
+                name_revision: 0,
+                can_rename: true,
                 kind: "remote",
                 status: "connecting",
             }]
@@ -1974,5 +2072,109 @@ mod tests {
         assert_eq!(listed.apps.len(), 1);
         state.refresh_stream_apps();
         assert_eq!(state.publish_stream_apps(listed).apps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rename_changes_only_the_name_and_respects_read_only_apps() {
+        let state = state(None, None);
+        ensure_builtin_chrome(&state.store, "test-chrome").unwrap();
+        let mut app = ManagedApp::for_test("rename-desktop", AppType::DesktopApp);
+        app.name = "Rename desktop".into();
+        app.env_vars = Some(HashMap::from([("KEEP".into(), "value".into())]));
+        app.autostart = true;
+        state.store.add(&app).unwrap();
+        let before = state.store.get(&app.id).unwrap();
+        let order = state.store.order().unwrap();
+        let rename = |id: String, name: &str, revision| {
+            rename_app(
+                State(state.clone()),
+                Path(id),
+                Ok(axum::Json(RenameRequest {
+                    name: name.to_owned(),
+                    base_revision: revision,
+                })),
+            )
+        };
+        assert_eq!(
+            rename(app.id.clone(), "Renamed desktop", 0).await.status(),
+            StatusCode::OK
+        );
+        let mut expected = serde_json::to_value(before).unwrap();
+        expected["name"] = json!("Renamed desktop");
+        expected["name_revision"] = json!(1);
+        assert_eq!(
+            serde_json::to_value(state.store.get(&app.id).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(state.store.order().unwrap(), order);
+        assert_eq!(
+            rename(app.id.clone(), "Stale", 0).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            rename(app.id.clone(), "Chrome", 1).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            rename(app.id.clone(), "x\ny", 1).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            rename("missing".into(), "valid", 0).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            rename(BUILTIN_MIAO_ID.into(), "Changed Miao", 0)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let chrome = state
+            .store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name == "Chrome")
+            .unwrap();
+        assert_eq!(
+            rename(chrome.id, "Browser alias", 0).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_configuration_uses_name_versions_and_cannot_restore_a_stale_alias() {
+        let state = state(None, None);
+        let mut app = ManagedApp::for_test("rename-remote", AppType::RemoteApp);
+        app.name = "Remote alias".into();
+        state.store.add(&app).unwrap();
+        state.store.rename(&app.id, "Toolbar alias", 0).unwrap();
+        let update =
+            |body| update_app(State(state.clone()), Path(app.id.clone()), axum::Json(body));
+        assert_eq!(
+            update(json!({"autostart": true})).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.store.get(&app.id).unwrap().name, "Toolbar alias");
+        assert_eq!(
+            update(json!({"name": "Stale alias", "name_revision": 0, "autostart": false}))
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(state.store.get(&app.id).unwrap().autostart);
+        assert_eq!(
+            update(json!({"name": "Current alias", "name_revision": 1}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.store.get(&app.id).unwrap().name_revision, 2);
+        // Legacy clients without revisions still pass through the same validator.
+        assert_eq!(
+            update(json!({"name": "bad\nname"})).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(state.store.get(&app.id).unwrap().name, "Current alias");
     }
 }

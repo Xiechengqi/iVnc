@@ -14,8 +14,13 @@ let modalSaved = false;    // the open dialog has saved at least once
 let lastDataHash = '';
 let appsLoadGeneration = 0;
 let latestOrderRevision = -1;
+const latestNames = new Map();
 const orderNotifications = createOrderNotifications((revision) => {
     if (revision <= latestOrderRevision) return;
+    lastDataHash = '';
+    if (activeSection === 'apps') load();
+}, (id, revision) => {
+    if (revision <= (latestNames.get(id)?.name_revision ?? -1)) return;
     lastDataHash = '';
     if (activeSection === 'apps') load();
 });
@@ -410,6 +415,7 @@ function getHash(data) {
         install: a.install_status,
         skills: a.skill_paths,
         name: a.name,
+        name_revision: a.name_revision,
         sharing: a.sharing,
         started: a.started,
         remote: [a.remote_state, a.remote_detail, a.remote_detail_code, a.remote_detail_params, a.remote_plaintext]
@@ -685,6 +691,21 @@ async function load() {
         const caps = capResp && capResp.ok ? await capResp.json() : null;
         if (generation !== appsLoadGeneration || (d.order_revision ?? -1) < latestOrderRevision) return;
         latestOrderRevision = d.order_revision ?? latestOrderRevision;
+        for (const app of d.apps || []) {
+            const previous = latestNames.get(app.id);
+            if (previous && previous.name_revision > app.name_revision) {
+                app.name = previous.name; app.name_revision = previous.name_revision;
+            } else latestNames.set(app.id, { name: app.name, name_revision: app.name_revision });
+            if (app.id === editId && editApp && app.name_revision > editApp.name_revision) {
+                const input = document.getElementById('f-name');
+                // Keep a dirty draft and its baseline so a concurrent rename
+                // produces a conflict instead of an unnoticed overwrite.
+                if (input.value.trim() === editApp.name) {
+                    input.value = app.name;
+                    editApp = { ...editApp, name: app.name, name_revision: app.name_revision };
+                }
+            }
+        }
         d.capabilities = caps;
         const capByApp = new Map((caps?.apps || []).map(app => [app.id, app]));
 
@@ -1470,8 +1491,10 @@ function readAppBody(appType) {
         skill_paths: parseListText(document.getElementById('f-skill-paths').value)
     };
 
-    if (!editId || appType === 'remote') {
-        body.name = document.getElementById('f-name').value.trim();
+    const name = document.getElementById('f-name').value.trim();
+    if (!editId || (appType === 'remote' && name !== editApp?.name)) {
+        body.name = name;
+        if (editId) body.name_revision = editApp.name_revision;
     }
 
     if (appType === 'remote') {
@@ -1538,9 +1561,15 @@ async function saveApp() {
         });
         const d = await parseJsonResponse(r);
         if (!r.ok || d.error) {
+            if (d.code === 'app_name_conflict' && editApp && Number.isSafeInteger(d.params?.name_revision)) {
+                editApp = { ...editApp, name: d.params.name, name_revision: d.params.name_revision };
+                latestNames.set(editId, { name: editApp.name, name_revision: editApp.name_revision });
+                load();
+            }
             showModalError(serverErrorText(d) || r.statusText);
             return;
         }
+        if (d.id && Number.isSafeInteger(d.name_revision)) orderNotifications.publishName(d.id, d.name_revision);
         const wasEditing = !!editId;
         let restart = false;
         let revoked = false;

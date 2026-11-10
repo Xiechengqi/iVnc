@@ -3596,6 +3596,7 @@ export default function webrtc() {
 			toolbarController = createToolbar({
 				element: taskbar,
 				canReorder: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
+				canRename: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
 				activateWindow: (id) => {
 					if (appStreams?.activeId()) appStreams.activate(null);
 					webrtc.sendDataChannelMessage(`focus,${id}`);

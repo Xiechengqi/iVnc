@@ -2275,6 +2275,7 @@ mod tests {
             "/api/console/sessions",
             "/api/apps",
             "/api/apps/chrome/start",
+            "/api/apps/chrome/name",
             "/api/capabilities",
             "/api/capabilities/providers",
         ] {
