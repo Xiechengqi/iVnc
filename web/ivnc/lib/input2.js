@@ -1248,6 +1248,10 @@ export class Input {
     }
 
     _handleOutsideClick(event) {
+        if (this._targetHasClass(event.target, 'taskbar')) {
+            this.send('kr');
+            this.resetKeyboard();
+        }
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (!this.use_browser_cursors && !this.element.contains(event.target)) {
             this.cursorDiv.style.display = 'none';
@@ -1393,6 +1397,7 @@ export class Input {
     }
 
     _handleKeyDown(event) {
+        if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
@@ -1580,12 +1585,14 @@ export class Input {
     }
 
     _handleKeyPress(event) {
+        if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
     }
 
     _handleKeyUp(event) {
+        if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;

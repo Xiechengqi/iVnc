@@ -6,7 +6,7 @@ use super::native;
 use super::process::ProcessManager;
 use super::service_process::{self, ServiceProcessManager};
 use super::state_recovery::AppRunningState;
-use super::store::AppStore;
+use super::store::{AppStore, OrderedApps};
 use crate::proxy_panel::{ProxyPanelManager, BUILTIN_MIAO_ID, MIAO_START_TIMEOUT_SECS};
 use axum::{
     body::Body,
@@ -74,7 +74,7 @@ impl AppsState {
     pub fn start_monitor(self: &Arc<Self>) {
         let apps = self.clone();
         tokio::spawn(async move {
-            let mut listed = Vec::new();
+            let mut listed = OrderedApps::default();
             loop {
                 let started: Vec<String> = apps.started.lock().unwrap().iter().cloned().collect();
                 crate::remote::gateway::refresh_remote_health(apps.clone(), started);
@@ -102,15 +102,19 @@ impl AppsState {
         self.wake.notify_one();
     }
 
+    pub fn refresh_window_apps(&self) {
+        self.wake.notify_one();
+    }
+
     /// Publishes the applications shown as taskbar tabs: local applications in
     /// their own runtime, and started remote applications. Returns the list it
     /// used, which is `listed` unless the applications changed.
-    fn publish_stream_apps(&self, listed: Vec<ManagedApp>) -> Vec<ManagedApp> {
+    fn publish_stream_apps(&self, listed: OrderedApps) -> OrderedApps {
         let listed = if self
             .apps_changed
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            match self.store.list() {
+            match self.store.list_ordered() {
                 Ok(apps) => apps,
                 Err(e) => {
                     log::warn!("Cannot list application tabs: {}", e);
@@ -124,7 +128,11 @@ impl AppsState {
             listed
         };
         if let Some(shared) = self.shared.get().and_then(std::sync::Weak::upgrade) {
-            shared.set_stream_apps(self.stream_apps(&listed));
+            shared.set_taskbar_apps(crate::web::shared::TaskbarApps {
+                apps: self.stream_apps(&listed.apps),
+                order: listed.order.clone(),
+                window_apps: self.process.apps_for_clients(&shared.window_pids()),
+            });
         }
         listed
     }
@@ -536,6 +544,7 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
                 cli_binary_path: None,
                 cli_env_vars: None,
                 created_at: chrono_now(),
+                sort_order: 0,
             })?;
         }
     }
@@ -598,6 +607,7 @@ fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), S
                 cli_binary_path: None,
                 cli_env_vars: None,
                 created_at: chrono_now(),
+                sort_order: 0,
             };
             match store.add(&app) {
                 Ok(()) => log::info!("Added built-in Chrome desktop app"),
@@ -663,6 +673,7 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
                 cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
                 created_at: chrono_now(),
+                sort_order: 0,
             };
             match store.add(&app) {
                 Ok(()) => log::info!("Added built-in agent-browser CLI app"),
@@ -743,6 +754,7 @@ pub(crate) fn chrome_devtools_port() -> u16 {
 pub fn router(state: Arc<AppsState>) -> Router {
     Router::new()
         .route("/api/apps", get(list_apps).post(add_app))
+        .route("/api/apps/order", get(get_order).put(reorder_apps))
         .route(
             "/api/apps/{id}",
             get(get_app).put(update_app).delete(delete_app),
@@ -866,6 +878,7 @@ fn app_json(
         "data_size_bytes": data_bytes,
         "data_size_human": datadir::size_human(data_bytes),
         "created_at": app.created_at,
+        "sort_order": app.sort_order,
     });
 
     if app.id == BUILTIN_MIAO_ID {
@@ -968,9 +981,10 @@ fn app_json(
 }
 
 async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
-    match state.store.list() {
-        Ok(apps) => {
-            let items: Vec<_> = apps
+    match state.store.list_ordered() {
+        Ok(listed) => {
+            let items: Vec<_> = listed
+                .apps
                 .iter()
                 .map(|app| {
                     let st = state.app_status(app);
@@ -979,9 +993,55 @@ async fn list_apps(State(state): State<Arc<AppsState>>) -> Response {
                     app_json(&state, app, &format!("{:?}", st).to_lowercase(), pid, size)
                 })
                 .collect();
-            json_response(StatusCode::OK, json!({"apps": items}))
+            json_response(
+                StatusCode::OK,
+                json!({"apps": items, "order_revision": listed.order.order_revision}),
+            )
         }
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn get_order(State(state): State<Arc<AppsState>>) -> Response {
+    match state.store.order() {
+        Ok(order) => json_response(StatusCode::OK, json!(order)),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReorderRequest {
+    ordered_ids: Vec<String>,
+    base_revision: u64,
+}
+
+async fn reorder_apps(
+    State(state): State<Arc<AppsState>>,
+    body: Result<axum::Json<ReorderRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(axum::Json(body)) = body else {
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            ApiError::new(
+                "app_order_invalid",
+                "Expected ordered_ids and base_revision",
+            ),
+        );
+    };
+    match state.store.reorder(&body.ordered_ids, body.base_revision) {
+        Ok(order) => {
+            state.refresh_stream_apps();
+            json_response(StatusCode::OK, json!(order))
+        }
+        Err(e) => {
+            let status = match e.code {
+                "app_order_invalid" => StatusCode::BAD_REQUEST,
+                "app_order_conflict" => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            err_response(status, e)
+        }
     }
 }
 
@@ -1158,6 +1218,7 @@ async fn add_app(
         cli_binary_path,
         cli_env_vars,
         created_at: chrono_now(),
+        sort_order: 0,
     };
 
     if let Err(e) = state.store.add(&app) {
@@ -1167,6 +1228,7 @@ async fn add_app(
     if let Some((target, token)) = remote_target {
         if let Err(e) = state.remote.save_target(&app.id, &target) {
             let _ = state.store.delete(&app.id);
+            state.refresh_stream_apps();
             return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
         state.remote_health.remember_token(&app.id, token);
@@ -1186,10 +1248,13 @@ async fn add_app(
                     delete_err
                 );
             }
+            state.refresh_stream_apps();
             return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
     }
 
+    state.refresh_stream_apps();
+    let app = state.store.get(&app.id).unwrap_or(app);
     let status = state.app_status(&app);
     let pid = state.app_pid(&app);
     let size = datadir::durable_size(&app);
@@ -1898,16 +1963,16 @@ mod tests {
     #[test]
     fn tabs_reread_applications_only_after_a_change() {
         let state = state(None, None);
-        let listed = state.publish_stream_apps(Vec::new());
-        assert_eq!(listed.len(), 1);
+        let listed = state.publish_stream_apps(OrderedApps::default());
+        assert_eq!(listed.apps.len(), 1);
         state
             .store
             .add(&ManagedApp::for_test("added", AppType::DesktopApp))
             .unwrap();
         // The periodic pass keeps the list it has.
         let listed = state.publish_stream_apps(listed);
-        assert_eq!(listed.len(), 1);
+        assert_eq!(listed.apps.len(), 1);
         state.refresh_stream_apps();
-        assert_eq!(state.publish_stream_apps(listed).len(), 2);
+        assert_eq!(state.publish_stream_apps(listed).apps.len(), 2);
     }
 }

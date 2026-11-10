@@ -1,5 +1,6 @@
 import { getLang, setLang, onLangChange, APP_STRINGS, remoteStateText, serverErrorText } from './lib/i18n.js?v=1';
 import { notifyAppStarted } from './app-streams.js';
+import { createOrderNotifications } from './app-order.js';
 
 const API = '/api/apps';
 const CONSOLE_API = '/api/console';
@@ -11,6 +12,14 @@ let sharingState = null;   // GET /api/apps/{id}/sharing of the desktop app bein
 let appSignature = '';     // launch settings as last saved; a change on a running app needs a restart
 let modalSaved = false;    // the open dialog has saved at least once
 let lastDataHash = '';
+let appsLoadGeneration = 0;
+let latestOrderRevision = -1;
+const orderNotifications = createOrderNotifications((revision) => {
+    if (revision <= latestOrderRevision) return;
+    lastDataHash = '';
+    if (activeSection === 'apps') load();
+});
+window.addEventListener('pagehide', () => orderNotifications.destroy(), { once: true });
 let currentLang = getLang();
 let activeSection = 'overview';
 let overviewCache = null;
@@ -666,6 +675,7 @@ function sharingBadge(a) {
 }
 
 async function load() {
+    const generation = ++appsLoadGeneration;
     try {
         const [appsResp, capResp] = await Promise.all([
             fetch(API),
@@ -673,6 +683,8 @@ async function load() {
         ]);
         const d = await appsResp.json();
         const caps = capResp && capResp.ok ? await capResp.json() : null;
+        if (generation !== appsLoadGeneration || (d.order_revision ?? -1) < latestOrderRevision) return;
+        latestOrderRevision = d.order_revision ?? latestOrderRevision;
         d.capabilities = caps;
         const capByApp = new Map((caps?.apps || []).map(app => [app.id, app]));
 
@@ -689,6 +701,7 @@ async function load() {
         const fragment = document.createDocumentFragment();
         d.apps.forEach(a => {
             const tr = document.createElement('tr');
+            tr.dataset.appId = a.id;
             const cap = capByApp.get(a.id);
             const isRemote = a.app_type === 'remote';
             const type = isRemote ? t('remote') : a.app_type === 'desktop' ? t('desktop') : (a.app_type === 'cli' ? t('cli') : t('background'));

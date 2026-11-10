@@ -122,7 +122,11 @@ try {
             await call('Network.enable');
             await call('Network.setExtraHTTPHeaders', { headers: { Authorization: `Basic ${credentials}` } });
         }
-        await waitFor('parent page', () => evaluateTop(`document.readyState === 'complete'`), 20000);
+        // Chrome can advertise the startup target URL while its active
+        // document is still about:blank (also readyState=complete). Wait for
+        // the real same-origin page before inserting a relative iframe URL.
+        await waitFor('parent page', () => evaluateTop(
+            `location.origin === ${JSON.stringify(targetUrl.origin)} && location.pathname === ${JSON.stringify(pagePath)} && document.readyState === 'complete'`), 60000);
         // Like app-streams.js: collect same-origin messages from the view, then
         // open it full-size so page coordinates equal view coordinates.
         await evaluateTop(`(() => {

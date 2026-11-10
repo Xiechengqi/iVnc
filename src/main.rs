@@ -726,6 +726,8 @@ fn run(
             comp.taskbar_dirty = false;
             let focused_wl = comp.seat.get_keyboard().and_then(|kb| kb.current_focus());
             let mut windows_json = Vec::new();
+            let snapshot = shared_state.taskbar_apps();
+            let mut window_pids = std::collections::HashSet::new();
             for (idx, wl_surface) in comp.window_registry.iter().enumerate() {
                 // Skip if window not in space anymore (being destroyed)
                 if comp
@@ -756,16 +758,23 @@ fn run(
                 if is_focused {
                     comp.focused_surface_id = Some(idx as u32);
                 }
+                let pid = wl_surface
+                    .client()
+                    .and_then(|c| c.get_credentials(&comp.display_handle).ok())
+                    .map(|c| c.pid);
+                window_pids.extend(pid);
                 windows_json.push(serde_json::json!({
                     "id": idx,
                     "title": title,
                     "app_id": app_id,
                     "display_name": resolve_display_name(&app_id),
                     "focused": is_focused,
+                    "managed_app_id": pid.and_then(|pid| snapshot.window_apps.get(&pid)),
                 }));
             }
             // Runtimes have no apps manager, so their list of tabs stays empty.
-            let json = web::shared::taskbar_json(windows_json, &shared_state.stream_apps());
+            shared_state.set_window_pids(window_pids);
+            let json = web::shared::taskbar_json(windows_json, &snapshot);
             if json != prev_taskbar_json {
                 prev_taskbar_json = json.clone();
                 let msg = format!("taskbar,{}", json);

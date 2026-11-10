@@ -36,6 +36,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	let order = [];
 	let activeId = null;
 	let pendingSelect = null;
+	let disposed = false;
 
 	const layer = document.createElement('div');
 	layer.className = 'app-streams';
@@ -43,6 +44,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 
 	// Same box as the main video, minus the pinned taskbar.
 	function layout() {
+		if (disposed) return;
 		const rect = video.getBoundingClientRect();
 		const bottom = isPinned() ? Math.min(rect.bottom, window.innerHeight - taskbar.offsetHeight) : rect.bottom;
 		layer.style.left = `${rect.left}px`;
@@ -51,7 +53,8 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 		layer.style.height = `${Math.max(0, bottom - rect.top)}px`;
 	}
 	window.addEventListener('resize', layout);
-	new ResizeObserver(layout).observe(video);
+	const resizeObserver = new ResizeObserver(layout);
+	resizeObserver.observe(video);
 	layout();
 
 	const ready = (s) => s.app.status === READY[s.app.kind];
@@ -72,7 +75,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	async function open(s) {
 		clearTimeout(s.timer);
 		s.timer = null;
-		if (s.minting || !ready(s)) return;
+		if (disposed || s.minting || !ready(s)) return;
 		s.minting = true;
 		s.state = 'connecting';
 		s.error = null;
@@ -107,6 +110,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	}
 
 	function loaded(s) {
+		if (disposed || streams.get(s.id) !== s) return;
 		// An expired token answers with an error document instead of the client.
 		let client = false;
 		try {
@@ -129,6 +133,7 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	}
 
 	function end(s, reason, error = null) {
+		if (disposed || streams.get(s.id) !== s) return;
 		s.state = 'ended';
 		s.error = error;
 		// Withdrawn access is not retried until the user clicks the tab or the app recovers.
@@ -167,11 +172,13 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	}
 
 	function refresh() {
+		if (disposed) return;
 		paint();
 		onChange();
 	}
 
 	function activate(id) {
+		if (disposed) return;
 		const next = (id && streams.get(id)) || null;
 		activeId = next ? next.id : null;
 		for (const s of streams.values()) {
@@ -231,27 +238,15 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	function tabs() {
 		return order.map((id) => streams.get(id)).filter(Boolean).map((s) => {
 			const { dot, text } = describe(s);
-			const item = document.createElement('div');
-			item.className = 'taskbar-item taskbar-app' + (s.id === activeId ? ' focused' : '');
-			item.title = `${s.app.name} · ${text}`;
-			const mark = document.createElement('span');
-			mark.className = `taskbar-app-dot ${dot}`;
-			const label = document.createElement('span');
-			label.textContent = s.app.name || s.id;
-			label.style.textOverflow = 'ellipsis';
-			label.style.overflow = 'hidden';
-			label.style.whiteSpace = 'nowrap';
-			label.style.maxWidth = '160px';
-			item.append(mark, label);
-			item.addEventListener('click', (e) => {
-				e.stopPropagation();
-				activate(s.id);
-			});
-			return item;
+			return {
+				key: `app:${s.id}`, appId: s.id, dot,
+				label: s.app.name || s.id, title: `${s.app.name} · ${text}`,
+				active: s.id === activeId, activate: () => activate(s.id),
+			};
 		});
 	}
 
-	window.addEventListener('message', (event) => {
+	const receiveMessage = (event) => {
 		if (event.origin !== window.location.origin) return;
 		const message = event.data || {};
 		if (message.type === 'ivnc-app-started') {
@@ -290,17 +285,29 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 				if (s.id === activeId) onEdgeHover();
 				break;
 		}
-	});
+	};
+	window.addEventListener('message', receiveMessage);
 
 	// Each page closes only the view tokens it minted.
-	window.addEventListener('pagehide', () => {
+	const closePage = () => {
 		for (const s of streams.values()) {
 			if (s.url) closeView(s.url);
 		}
-	});
+	};
+	window.addEventListener('pagehide', closePage);
 
 	const active = () => (activeId && streams.get(activeId)) || null;
 	return {
+		destroy() {
+			disposed = true;
+			window.removeEventListener('resize', layout);
+			window.removeEventListener('message', receiveMessage);
+			window.removeEventListener('pagehide', closePage);
+			resizeObserver.disconnect();
+			closePage();
+			for (const s of streams.values()) clearTimeout(s.timer);
+			streams.clear(); activeId = null; layer.remove();
+		},
 		update,
 		tabs,
 		activate,

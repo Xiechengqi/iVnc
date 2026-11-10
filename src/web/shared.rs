@@ -12,7 +12,7 @@ use base64::Engine;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -103,8 +103,16 @@ pub struct StreamApp {
 }
 
 /// The taskbar message body: desktop windows and application tabs.
-pub fn taskbar_json(windows: Vec<Value>, apps: &[StreamApp]) -> String {
-    json!({ "windows": windows, "apps": apps }).to_string()
+pub fn taskbar_json(windows: Vec<Value>, snapshot: &TaskbarApps) -> String {
+    json!({ "windows": windows, "apps": snapshot.apps,
+        "ordered_ids": snapshot.order.ordered_ids, "order_revision": snapshot.order.order_revision }).to_string()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaskbarApps {
+    pub apps: Vec<StreamApp>,
+    pub order: crate::apps::store::AppOrder,
+    pub window_apps: BTreeMap<i32, String>,
 }
 
 /// Shared state for the application
@@ -115,8 +123,9 @@ pub struct SharedState {
 
     /// Applications shown as their own taskbar tabs, kept current by the apps
     /// manager so that the compositor never queries it.
-    stream_apps: Arc<Mutex<Vec<StreamApp>>>,
-    /// Bumped whenever `stream_apps` changes (used to trigger taskbar resend)
+    taskbar_apps: Arc<Mutex<TaskbarApps>>,
+    window_pids: Arc<Mutex<HashSet<i32>>>,
+    /// Bumped whenever the taskbar app/order/identity snapshot changes.
     pub apps_generation: Arc<AtomicU64>,
     /// Configuration
     pub config: Arc<Config>,
@@ -236,7 +245,8 @@ impl SharedState {
         Self {
             media_router: Arc::new(crate::remote::media::MediaRouter::default()),
             app_views: Arc::new(crate::remote::gateway::Views::default()),
-            stream_apps: Arc::new(Mutex::new(Vec::new())),
+            taskbar_apps: Arc::new(Mutex::new(TaskbarApps::default())),
+            window_pids: Arc::new(Mutex::new(HashSet::new())),
             apps_generation: Arc::new(AtomicU64::new(0)),
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
@@ -271,17 +281,31 @@ impl SharedState {
         }
     }
 
-    /// Replaces the application tabs; the taskbar is resent only when they changed.
-    pub fn set_stream_apps(&self, apps: Vec<StreamApp>) {
-        let mut current = self.stream_apps.lock().unwrap();
-        if *current != apps {
-            *current = apps;
+    /// Publishes one consistent app/order/identity snapshot; unchanged snapshots do not resend.
+    pub fn set_taskbar_apps(&self, snapshot: TaskbarApps) {
+        let mut current = self.taskbar_apps.lock().unwrap();
+        if *current != snapshot {
+            *current = snapshot;
             self.apps_generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub fn stream_apps(&self) -> Vec<StreamApp> {
-        self.stream_apps.lock().unwrap().clone()
+    pub fn taskbar_apps(&self) -> TaskbarApps {
+        self.taskbar_apps.lock().unwrap().clone()
+    }
+
+    pub fn window_pids(&self) -> HashSet<i32> {
+        self.window_pids.lock().unwrap().clone()
+    }
+
+    pub fn set_window_pids(&self, pids: HashSet<i32>) {
+        let mut current = self.window_pids.lock().unwrap();
+        if *current != pids {
+            *current = pids;
+            if let Some(apps) = self.apps_state.get() {
+                apps.refresh_window_apps();
+            }
+        }
     }
 
     /// Attach the apps manager once it has been constructed during startup.
@@ -936,8 +960,12 @@ mod tests {
 
     #[test]
     fn taskbar_lists_windows_and_application_tabs() {
-        let empty: serde_json::Value = serde_json::from_str(&taskbar_json(vec![], &[])).unwrap();
-        assert_eq!(empty, json!({"windows": [], "apps": []}));
+        let empty: serde_json::Value =
+            serde_json::from_str(&taskbar_json(vec![], &TaskbarApps::default())).unwrap();
+        assert_eq!(
+            empty,
+            json!({"windows": [], "apps": [], "ordered_ids": [], "order_revision": 0})
+        );
         let apps = [
             StreamApp {
                 id: "local".into(),
@@ -954,7 +982,10 @@ mod tests {
         ];
         let value: serde_json::Value = serde_json::from_str(&taskbar_json(
             vec![json!({"id": 0, "title": "Files"})],
-            &apps,
+            &TaskbarApps {
+                apps: apps.to_vec(),
+                ..Default::default()
+            },
         ))
         .unwrap();
         assert_eq!(value["windows"][0]["title"], "Files");
@@ -985,16 +1016,60 @@ mod tests {
             kind: "remote",
             status: "connecting",
         };
-        state.set_stream_apps(vec![app.clone()]);
+        state.set_taskbar_apps(TaskbarApps {
+            apps: vec![app.clone()],
+            ..Default::default()
+        });
         assert_eq!(state.apps_generation.load(Ordering::Relaxed), 1);
-        state.set_stream_apps(vec![app.clone()]);
+        state.set_taskbar_apps(TaskbarApps {
+            apps: vec![app.clone()],
+            ..Default::default()
+        });
         assert_eq!(state.apps_generation.load(Ordering::Relaxed), 1);
-        state.set_stream_apps(vec![StreamApp {
-            status: "connected",
-            ..app
-        }]);
+        state.set_taskbar_apps(TaskbarApps {
+            apps: vec![StreamApp {
+                status: "connected",
+                ..app
+            }],
+            ..Default::default()
+        });
         assert_eq!(state.apps_generation.load(Ordering::Relaxed), 2);
-        assert_eq!(state.stream_apps()[0].status, "connected");
+        assert_eq!(state.taskbar_apps().apps[0].status, "connected");
+    }
+
+    #[test]
+    fn order_and_peer_identity_changes_resend_even_without_stream_tabs() {
+        let (input, _) = mpsc::unbounded_channel();
+        let config = Config::default();
+        let state = SharedState::new(
+            config.clone(),
+            UiConfig::from_env(&config),
+            input,
+            Arc::new(RuntimeSettings::new(&config)),
+            None,
+            None,
+        );
+        let mut snapshot = TaskbarApps {
+            order: crate::apps::store::AppOrder {
+                ordered_ids: vec!["a".into(), "b".into()],
+                order_revision: 2,
+            },
+            ..Default::default()
+        };
+        state.set_taskbar_apps(snapshot.clone());
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 1);
+        snapshot.order.ordered_ids.reverse();
+        snapshot.order.order_revision += 1;
+        state.set_taskbar_apps(snapshot.clone());
+        state.set_taskbar_apps(snapshot.clone());
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 2);
+        snapshot.window_apps.insert(42, "a".into());
+        state.set_taskbar_apps(snapshot.clone());
+        assert_eq!(state.apps_generation.load(Ordering::Relaxed), 3);
+        let message: Value = serde_json::from_str(&taskbar_json(vec![], &snapshot)).unwrap();
+        assert_eq!(message["ordered_ids"], json!(["b", "a"]));
+        assert_eq!(message["order_revision"], 3);
+        assert_eq!(message["apps"], json!([]));
     }
 
     #[test]

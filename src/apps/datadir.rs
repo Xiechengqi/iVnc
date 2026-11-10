@@ -161,6 +161,7 @@ mod tests {
             cli_binary_path: None,
             cli_env_vars: None,
             created_at: String::new(),
+            sort_order: 0,
         }
     }
 

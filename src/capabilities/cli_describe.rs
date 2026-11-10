@@ -329,6 +329,7 @@ mod tests {
             cli_binary_path: Some("/tmp/twitter-cli".to_string()),
             cli_env_vars: None,
             created_at: "now".to_string(),
+            sort_order: 0,
         }
     }
 

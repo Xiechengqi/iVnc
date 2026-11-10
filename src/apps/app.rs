@@ -71,6 +71,9 @@ pub struct ManagedApp {
     pub cli_env_vars: Option<HashMap<String, String>>,
 
     pub created_at: String,
+    /// Persistent display position. Launch order is independent of this field.
+    #[serde(default)]
+    pub sort_order: i64,
 }
 
 #[cfg(test)]
@@ -92,6 +95,7 @@ impl ManagedApp {
             cli_binary_path: None,
             cli_env_vars: None,
             created_at: String::new(),
+            sort_order: 0,
         }
     }
 }

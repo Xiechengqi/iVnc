@@ -3,7 +3,7 @@ use super::error::ApiError;
 use super::native;
 use crate::remote::store::RemoteStore;
 use log::{info, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
@@ -300,6 +300,50 @@ impl ProcessManager {
     pub fn pid(&self, app_id: &str) -> Option<u32> {
         let procs = self.processes.lock().unwrap();
         procs.get(app_id).map(|r| r.pid)
+    }
+
+    /// Resolve Wayland peer credentials against live managed process trees.
+    /// Called by the blocking monitor, never from the rendering loop. Process
+    /// groups also identify children adopted by the application's reaper.
+    pub fn apps_for_clients(&self, pids: &HashSet<i32>) -> BTreeMap<i32, String> {
+        let roots: HashMap<i32, String> = self
+            .processes
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter_map(|(id, r)| {
+                (!r.worker && matches!(r.child.try_wait(), Ok(None)))
+                    .then(|| (r.pid as i32, id.clone()))
+            })
+            .collect();
+        pids.iter()
+            .filter_map(|&peer| {
+                let group = unsafe { libc::getpgid(peer) };
+                let mut pid = peer;
+                if let Some(id) = roots.get(&group) {
+                    return Some((peer, id.clone()));
+                }
+                for _ in 0..64 {
+                    if let Some(id) = roots.get(&pid) {
+                        return Some((peer, id.clone()));
+                    }
+                    if pid <= 1 {
+                        break;
+                    }
+                    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                    // comm may contain spaces or parentheses. Fields after its last
+                    // closing parenthesis start with state, then PPID.
+                    pid = stat
+                        .rsplit_once(')')?
+                        .1
+                        .split_whitespace()
+                        .nth(1)?
+                        .parse()
+                        .ok()?;
+                }
+                None
+            })
+            .collect()
     }
 
     pub fn runtime_dir(&self, app_id: &str) -> PathBuf {

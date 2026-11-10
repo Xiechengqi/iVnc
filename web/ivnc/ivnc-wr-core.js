@@ -34,6 +34,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { t, onLangChange, getLang } from "./lib/i18n.js?v=1";
 import { createAppStreams } from "./app-streams.js";
+import { createToolbar } from "./toolbar.js";
 
 const MAIN_I18N = {
 	zh: {
@@ -2142,6 +2143,7 @@ export default function webrtc() {
 	var videoElement = null;
 	var audioElement = null;
 	let appStreams = null;
+	let toolbarController = null;
 	// An active stream tab covers the main desktop.
 	let mainCovered = false;
 	let lastTaskbarData = {};
@@ -2258,6 +2260,7 @@ export default function webrtc() {
 		} else {
 			networkQualityBadge.title = tt(key);
 		}
+		networkQualityBadge.setAttribute('aria-label', `${tt(key)}: ${networkQualityBadge.title}`);
 	}
 
 	function setNetworkQuality(level, metrics = null) {
@@ -3590,6 +3593,15 @@ export default function webrtc() {
 			const taskbar = document.createElement('div');
 			taskbar.className = 'taskbar';
 			taskbar.id = 'taskbar';
+			toolbarController = createToolbar({
+				element: taskbar,
+				canReorder: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
+				activateWindow: (id) => {
+					if (appStreams?.activeId()) appStreams.activate(null);
+					webrtc.sendDataChannelMessage(`focus,${id}`);
+				},
+				onInteraction: (active) => active ? showTaskbar() : hideTaskbar(),
+			});
 
 			// Pin button (first element in taskbar)
 			let taskbarPinned = getBoolParam('taskbar_pinned', true);
@@ -3614,7 +3626,7 @@ export default function webrtc() {
 				setBoolParam('taskbar_pinned', taskbarPinned);
 				appStreams?.layout();
 			});
-			taskbar.appendChild(pinBtn);
+			toolbarController.addTool(pinBtn, true);
 
 			// IME toggle button
 			let imeModeActive = getBoolParam('ime_mode', false);
@@ -3639,7 +3651,7 @@ export default function webrtc() {
 					setBoolParam('ime_mode', active);
 				}
 			});
-			taskbar.appendChild(imeBtn);
+			toolbarController.addTool(imeBtn, true);
 
 			// Change password button
 			const pwdSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
@@ -3651,7 +3663,7 @@ export default function webrtc() {
 				e.stopPropagation();
 				showChangePasswordModal();
 			});
-			if (!window.__IVNC_APP_VIEW__) taskbar.appendChild(pwdBtn);
+			if (!window.__IVNC_APP_VIEW__) toolbarController.addTool(pwdBtn);
 
 			// File upload button
 			const uploadSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
@@ -3673,7 +3685,7 @@ export default function webrtc() {
 					hiddenInput.click();
 				}
 			});
-			taskbar.appendChild(uploadBtn);
+			toolbarController.addTool(uploadBtn, true);
 
 			// Restart / upgrade button
 			const updateSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>`;
@@ -3686,7 +3698,7 @@ export default function webrtc() {
 				e.stopPropagation();
 				showForceUpdateModal();
 			});
-			if (!window.__IVNC_APP_VIEW__) taskbar.appendChild(updateBtn);
+			if (!window.__IVNC_APP_VIEW__) toolbarController.addTool(updateBtn);
 
 			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('proxy')) {
 				const proxySvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
@@ -3702,7 +3714,7 @@ export default function webrtc() {
 					proxyController.toggle();
 				});
 				proxyController.setButton(proxyBtn);
-				taskbar.appendChild(proxyBtn);
+				toolbarController.addTool(proxyBtn);
 			}
 
 			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('terminal')) {
@@ -3719,7 +3731,7 @@ export default function webrtc() {
 					terminalController.toggle();
 				});
 				terminalController.setButton(terminalBtn);
-				taskbar.appendChild(terminalBtn);
+				toolbarController.addTool(terminalBtn);
 			}
 
 			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console')) {
@@ -3736,7 +3748,7 @@ export default function webrtc() {
 					consoleController.toggle();
 				});
 				consoleController.setButton(consoleBtn);
-				taskbar.appendChild(consoleBtn);
+				toolbarController.addTool(consoleBtn);
 			}
 
 			const connIndicator = document.createElement('div');
@@ -3753,9 +3765,11 @@ export default function webrtc() {
 			networkQualityBadge = document.createElement('div');
 			networkQualityBadge.className = 'taskbar-network-quality unknown';
 			networkQualityBadge.id = 'network-quality';
-			taskbar.appendChild(networkQualityBadge);
+			toolbarController.status.appendChild(networkQualityBadge);
+			networkQualityBadge.tabIndex = 0;
+			networkQualityBadge.setAttribute('role', 'button');
 			resetNetworkQuality('unknown');
-			taskbar.appendChild(connIndicator);
+			toolbarController.status.appendChild(connIndicator);
 
 			// Embedded stream tabs use the parent page's toolbar.
 			if (!window.__IVNC_EMBED__) {
@@ -3769,9 +3783,9 @@ export default function webrtc() {
 				taskbar.classList.add('visible');
 			};
 			const hideTaskbar = () => {
-				if (taskbarPinned) return;
+				if (taskbarPinned || toolbarController?.interacting()) return;
 				taskbarHideTimer = setTimeout(() => {
-					taskbar.classList.remove('visible');
+					if (!toolbarController?.interacting()) taskbar.classList.remove('visible');
 				}, 400);
 			};
 			// overlayInput captures all pointer events, so taskbar-trigger
@@ -4178,45 +4192,14 @@ export default function webrtc() {
 
 			// Window tabs come from the compositor, stream tabs from app-streams.js.
 			function renderTaskbar(reveal = false) {
-				const tb = document.getElementById('taskbar');
-				if (!tb) return;
-				const wins = lastTaskbarData.windows || [];
-				const streamTabs = appStreams ? appStreams.tabs() : [];
-				const streamActive = !!appStreams?.activeId();
-				// Remove all items except the pin button
-				Array.from(tb.querySelectorAll('.taskbar-item')).forEach(el => el.remove());
-				// Hide taskbar when no windows
-				if (wins.length === 0 && streamTabs.length === 0) {
-					tb.classList.remove('visible');
-					return;
+				if (!toolbarController) return;
+				const streams = appStreams ? appStreams.tabs() : [];
+				toolbarController.update(lastTaskbarData, streams, !!appStreams?.activeId());
+				if (!(lastTaskbarData.windows || []).length && !streams.length) {
+					taskbar.classList.remove('visible');
+				} else if (reveal && !taskbarPinned) {
+					showTaskbar();
 				}
-				// Show taskbar when windows appear (if not pinned, it will auto-hide based on mouse position)
-				if (reveal && !taskbarPinned) {
-					tb.classList.add('visible');
-				}
-				wins.forEach((w) => {
-					const item = document.createElement('div');
-					item.className = 'taskbar-item' + (w.focused && !streamActive ? ' focused' : '');
-					item.title = `${w.title} (${w.app_id})`;
-
-					// Label with title (truncate if too long)
-					const label = document.createElement('span');
-					label.textContent = w.title || w.display_name || w.app_id || `Window ${w.id}`;
-					label.style.textOverflow = 'ellipsis';
-					label.style.overflow = 'hidden';
-					label.style.whiteSpace = 'nowrap';
-					label.style.maxWidth = '160px';
-					item.appendChild(label);
-
-					// Click to focus
-					item.addEventListener('click', (e) => {
-						e.stopPropagation();
-						if (appStreams?.activeId()) appStreams.activate(null);
-						webrtc.sendDataChannelMessage(`focus,${w.id}`);
-					});
-					tb.appendChild(item);
-				});
-				streamTabs.forEach((item) => tb.appendChild(item));
 			}
 
 			webrtc.onsystemaction = (action) => {
@@ -4354,6 +4337,9 @@ export default function webrtc() {
 			if (metricsLoopId) { clearInterval(metricsLoopId); metricsLoopId = null; }
 			resetNetworkQuality('unknown');
 			networkQualityBadge = null;
+			appStreams?.destroy(); appStreams = null;
+			toolbarController?.destroy(); toolbarController = null;
+			window._ipv4Element = null;
 			terminalController.destroy();
 			proxyController.destroy();
 			consoleController.destroy();

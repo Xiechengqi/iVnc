@@ -1,0 +1,159 @@
+.taskbar.ivnc-toolbar {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 6px;
+    isolation: isolate;
+}
+.ivnc-toolbar .toolbar-tools,
+.ivnc-toolbar .toolbar-status {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    position: relative;
+    min-width: 0;
+}
+.ivnc-toolbar .taskbar-pin {
+    box-sizing: border-box;
+    width: 28px;
+    margin: 0;
+}
+.ivnc-toolbar .toolbar-tool-label { display: none; }
+.ivnc-toolbar .toolbar-status { gap: 6px; }
+.ivnc-toolbar .taskbar-network-quality,
+.ivnc-toolbar .taskbar-conn {
+    position: static;
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    height: 26px;
+    line-height: 24px;
+}
+.ivnc-toolbar .taskbar-conn { min-width: 20px; text-align: center; }
+.ivnc-toolbar .toolbar-apps {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+    gap: 2px;
+}
+.ivnc-toolbar .toolbar-viewport {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    touch-action: pan-x;
+}
+.ivnc-toolbar .toolbar-viewport::-webkit-scrollbar { display: none; }
+.ivnc-toolbar .toolbar-list {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: max-content;
+    min-width: 100%;
+    height: 32px;
+}
+.ivnc-toolbar .taskbar-item {
+    position: relative;
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    min-width: 120px;
+    max-width: 200px;
+    margin: 0;
+    gap: 5px;
+    padding: 0 9px;
+}
+.ivnc-toolbar .toolbar-label {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.ivnc-toolbar .taskbar-app-dot { margin-right: 0; }
+.ivnc-toolbar .toolbar-grip {
+    border: 0;
+    padding: 0;
+    width: 14px;
+    flex: 0 0 14px;
+    height: 24px;
+    background: transparent;
+    color: #aaa;
+    cursor: grab;
+    touch-action: none;
+    font-size: 13px;
+}
+.ivnc-toolbar .toolbar-grip:disabled { cursor: default; opacity: .35; }
+.ivnc-toolbar .taskbar-item.dragging { opacity: .45; }
+.ivnc-toolbar .taskbar-item.drop-target { border-left: 3px solid #7cb3ff; }
+.ivnc-toolbar button.toolbar-scroll,
+.ivnc-toolbar button.toolbar-more {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: rgba(255,255,255,.1);
+    color: #ddd;
+    cursor: pointer;
+    font-size: 18px;
+}
+.ivnc-toolbar button.toolbar-more { width: 28px; }
+.ivnc-toolbar button:disabled { opacity: .35; cursor: default; }
+.ivnc-toolbar [hidden] { display: none !important; }
+.ivnc-toolbar :focus-visible { outline: 2px solid #8abbff; outline-offset: -2px; }
+.ivnc-toolbar .toolbar-more-menu,
+.ivnc-toolbar .toolbar-info,
+.ivnc-toolbar .toolbar-notice {
+    position: absolute;
+    bottom: 38px;
+    background: #222b36;
+    border: 1px solid #536273;
+    border-radius: 6px;
+    box-shadow: 0 4px 18px #0008;
+    padding: 8px;
+    color: #eee;
+    font: 12px/1.5 system-ui, sans-serif;
+    white-space: pre-wrap;
+    z-index: 2;
+    max-width: calc(100vw - 16px);
+    box-sizing: border-box;
+}
+.ivnc-toolbar .toolbar-more-menu { left: 0; width: max-content; }
+.ivnc-toolbar .toolbar-more-menu .taskbar-pin {
+    width: auto;
+    justify-content: flex-start;
+    padding: 0 8px;
+    gap: 9px;
+    margin: 2px 0;
+}
+.ivnc-toolbar .toolbar-more-menu .toolbar-tool-label { display: inline; }
+.ivnc-toolbar .toolbar-info { right: 0; width: max-content; }
+.ivnc-toolbar .toolbar-notice { right: 8px; max-width: min(420px, calc(100vw - 16px)); }
+.toolbar-drag-ghost {
+    position: fixed;
+    pointer-events: none;
+    z-index: 1105;
+    padding: 5px 12px;
+    border: 1px solid #7cb3ff;
+    border-radius: 4px;
+    background: #233b5a;
+    color: #fff;
+    font: 12px/20px system-ui, sans-serif;
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+@media (max-width: 700px) {
+    .taskbar.ivnc-toolbar { gap: 4px; }
+    .ivnc-toolbar .toolbar-status { gap: 3px; }
+    .ivnc-toolbar .taskbar-network-quality {
+        font-size: 0;
+        padding: 0;
+        width: 26px;
+    }
+    .ivnc-toolbar .taskbar-network-quality::before { content: '◉'; font-size: 16px; }
+    .ivnc-toolbar .ipv4-display { display: none !important; }
+    .ivnc-toolbar .taskbar-item { min-width: 96px; max-width: 160px; padding: 0 6px; }
+}

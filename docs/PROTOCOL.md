@@ -154,14 +154,16 @@ taskbar,{json_data}
             "title": "Terminal",
             "app_id": "org.gnome.Terminal",
             "display_name": "Terminal",
-            "focused": true
+            "focused": true,
+            "managed_app_id": "terminal-app"
         },
         {
             "id": 1,
             "title": "Files",
             "app_id": "org.gnome.Nautilus",
             "display_name": "Files",
-            "focused": false
+            "focused": false,
+            "managed_app_id": null
         }
     ],
     "apps": [
@@ -177,7 +179,9 @@ taskbar,{json_data}
             "kind": "remote",
             "status": "connected"
         }
-    ]
+    ],
+    "ordered_ids": ["terminal-app", "a1b2c3", "d4e5f6"],
+    "order_revision": 12
 }
 ```
 
@@ -190,7 +194,9 @@ taskbar,{json_data}
 | `kind` | `shared`：本实例开启远程访问、在独立运行环境中运行的桌面应用；`remote`：本实例已启动的远程应用 |
 | `status` | `shared` 为 `starting` 或 `running`；`remote` 为 `/api/apps` 的 `remote_state`（`connecting`、`connected`、`starting`、`stopped`、`not_ready`、`auth_required`、`incompatible`、`unreachable`） |
 
-`apps` 变化时以及每个新 DataChannel 打开时重发整条消息；应用运行环境（worker）内的 `apps` 始终为空数组。客户端在 `status` 为 `running`（`shared`）或 `connected`（`remote`）时才打开视图。
+任务栏消息另含 `ordered_ids`（本实例完整应用展示顺序）和 `order_revision`（持久化排序版本）。`windows` 中的 `managed_app_id` 为关联的应用 ID，无法关联时为 `null`；它与 Wayland `app_id` 的桌面类名不同。客户端将普通窗口与 `apps` 按同一应用顺序合并，保留窗口 ID 用于聚焦。同一应用的多个窗口保留组内顺序。排序 API 和合并规则见 [工具栏与排序](TOOLBAR.md)。
+
+排序或窗口关联变化、`apps` 变化时以及每个新 DataChannel 打开时重发整条消息；应用运行环境（worker）内的 `apps` 始终为空数组。客户端在 `status` 为 `running`（`shared`）或 `connected`（`remote`）时才打开视图。
 
 ### 5.4 统计消息 `stats`
 
