@@ -337,11 +337,20 @@ Noble 系统级回归时构建临时的旧运行时镜像。
 Docker 镜像使用 Ubuntu 24.04。正式镜像和发布二进制保留默认 PulseAudio feature，
 并启用 `tls` feature；音频仍需在配置中启用，HTTPS 运行时使用 `--tls`。
 
-GitHub Actions 的独立二进制构建容器使用 `--network host`，复用 Linux runner 的网络与
-DNS 路径，避开默认 Docker bridge 的 DNS 转发路径。容器继续使用 Azure Ubuntu 镜像源和
-Ubuntu 安全更新源，APT 索引更新启用重试及 `--error-on=any`，索引下载失败时立即终止构建，
-防止使用不完整索引继续安装。镜像拉取由 Docker daemon 执行，因此拉取成功不代表容器内
-DNS 一定可用；出现 `Could not resolve` 时应检查实际构建容器中的网络和解析配置。
+GitHub Actions 的独立二进制构建容器使用 `--network host`，但共享网络命名空间并不保证
+容器使用与宿主机相同的 `/etc/resolv.conf`。构建前，`scripts/ci_container_dns.sh` 在相同
+Ubuntu 22.04 镜像和网络模式中依次测试 runner 的 `/etc/resolv.conf`、systemd-resolved
+上游配置；它保留解析器地址，并设置有限的查询超时和重试。只有这些配置失败后，才分别
+测试公共 DNS `1.1.1.1`、`8.8.8.8`，不假设 runner 允许访问公共 DNS。
+
+预检覆盖 APT、Node.js、npm、Rust、Cargo 和 GitHub 的依赖域名。首个通过预检的配置会
+只读挂载到实际构建容器的 `/etc/resolv.conf`；如果全部失败，则在启动 APT 前终止。
+日志会显示候选解析配置、失败域名及最终选择，镜像拉取和容器启动错误也会单独报告。
+镜像拉取由 Docker daemon 执行，因此拉取成功不能证明容器内 DNS 可用；如果预检失败，
+应根据日志检查 runner 的解析器和 DNS 出站访问。
+
+容器继续使用 Azure Ubuntu 镜像源和 Ubuntu 安全更新源，APT 索引更新启用重试及
+`--error-on=any`，索引下载失败时立即终止构建，防止使用不完整索引继续安装。
 
 ## 验证
 

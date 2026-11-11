@@ -31,6 +31,9 @@ jobs:
       - name: Test Docker entrypoint argument forwarding
         run: python3 scripts/docker_entrypoint_test.py -v
 
+      - name: Test build-container DNS selection
+        run: python3 scripts/ci_container_dns_test.py -v
+
       - name: Resolve build metadata
         id: build-meta
         run: |
@@ -98,10 +101,14 @@ jobs:
           chmod +x docker-build.sh
           mkdir -p output
 
-          # Use the Linux runner's network/DNS instead of Docker bridge forwarding.
+          build_resolv_file="$RUNNER_TEMP/ivnc-build-resolv.conf"
+          bash scripts/ci_container_dns.sh ubuntu:22.04 "${{ matrix.docker_platform }}" "$build_resolv_file"
+
+          # Keep the resolver configuration that passed the container probes.
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
             --network host \
+            --mount "type=bind,src=$build_resolv_file,dst=/etc/resolv.conf,readonly" \
             -v "$(pwd):/workspace" \
             -v "$(pwd)/output:/output" \
             -v "$(pwd)/docker-build.sh:/docker-build.sh" \
