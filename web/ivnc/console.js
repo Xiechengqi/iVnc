@@ -1,6 +1,8 @@
 import { getLang, setLang, onLangChange, APP_STRINGS, remoteStateText, serverErrorText } from './lib/i18n.js?v=1';
 import { notifyAppStarted } from './app-streams.js';
 import { createOrderNotifications } from './app-order.js';
+import { createConsoleDialogs } from './console-dialogs.js';
+import { enhanceSelect } from './select-control.js';
 
 const API = '/api/apps';
 const CONSOLE_API = '/api/console';
@@ -11,6 +13,9 @@ let editApp = null;        // record of the app being edited
 let sharingState = null;   // GET /api/apps/{id}/sharing of the desktop app being edited
 let appSignature = '';     // launch settings as last saved; a change on a running app needs a restart
 let modalSaved = false;    // the open dialog has saved at least once
+const dialogs = createConsoleDialogs();
+const pendingAppWrites = new Map();
+let appDialog = null, appTypeControl = null;
 let lastDataHash = '';
 let appsLoadGeneration = 0;
 let latestOrderRevision = -1;
@@ -588,10 +593,15 @@ function applyTranslations() {
     setPlaceholderById('f-cli-env', t('cliEnvPlaceholder'));
     updateTypePlaceholders();
 
-    if (!editId) {
+    if (!editId && appDialog?.kind !== 'edit') {
         setText('modal-title', 'addModal');
         setText('modal-save', 'addSave');
+    } else {
+        setText('modal-title', 'editModal');
+        setText('modal-save', 'editSave');
     }
+    if (appDialog?.saving) setText('modal-save', 'savePending');
+    if (appDialog?.restarting) setText('restart-now', 'restarting');
 
     const logTitle = document.getElementById('log-title');
     if (logTitle && !logTitle.dataset.appName) {
@@ -624,6 +634,8 @@ function switchSection(section) {
     document.body.dataset.section = section;
     document.querySelectorAll('.nav-item').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.section === section);
+        if (btn.dataset.section === section) btn.setAttribute('aria-current', 'page');
+        else btn.removeAttribute('aria-current');
     });
     document.querySelectorAll('.section').forEach(el => {
         el.classList.toggle('active', el.id === `section-${section}`);
@@ -1019,8 +1031,9 @@ async function putJson(url, body) {
     return d;
 }
 
-async function postJson(url, body) {
+async function postJson(url, body, options = {}) {
     const r = await fetch(url, {
+        ...options,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -1165,27 +1178,54 @@ function resetModal() {
     setValue('f-share-url', '');
     showRestartNotice(null);
     clearFormErrors();
+    document.getElementById('remote-test').disabled = false;
+    document.getElementById('restart-now').disabled = false;
+    setText('restart-now', 'restartNow');
+}
+
+function openAppDialog() {
+    dialogs.close(false);
+    resetModal();
+    const modal = document.getElementById('modal');
+    appDialog = dialogs.open(modal, () => {
+        appTypeControl?.close();
+        appDialog = null;
+        modal.classList.remove('loading');
+        modal.removeAttribute('aria-busy');
+        resetModal();
+    });
+    return appDialog;
 }
 
 function showAdd() {
-    resetModal();
+    openAppDialog();
     const modal = document.getElementById('modal');
     modal.querySelector('#modal-title').textContent = t('addModal');
     modal.querySelector('#modal-save').textContent = t('addSave');
     document.getElementById('f-app-type').value = 'background';
     updateAppTypeVisibility();
-    modal.classList.add('show');
+    appTypeControl?.sync();
     document.getElementById('f-name').focus();
 }
 
 async function showEdit(id) {
+    const session = openAppDialog();
+    session.kind = 'edit';
+    const modal = document.getElementById('modal');
+    modal.classList.add('loading');
+    modal.setAttribute('aria-busy', 'true');
+    modal.querySelector('#modal-title').textContent = t('editModal');
+    document.getElementById('modal-save').disabled = true;
     try {
-        const a = await fetchJson(API + '/' + id);
-        resetModal();
+        // Reopening the same app waits for the previous submitted operation,
+        // so it cannot read and overwrite an intermediate app/sharing state.
+        if (pendingAppWrites.has(id)) await pendingAppWrites.get(id);
+        if (!session.isCurrent()) return;
+        const a = await fetchJson(API + '/' + id, { signal: session.abort.signal });
+        if (!session.isCurrent()) return;
         editId = id;
         editApp = a;
         editBuiltin = a.builtin === true && a.managed_by === 'ivnc';
-        const modal = document.getElementById('modal');
         modal.querySelector('#modal-title').textContent = t('editModal');
         modal.querySelector('#modal-save').textContent = t('editSave');
 
@@ -1213,16 +1253,20 @@ async function showEdit(id) {
         }
         updateAppTypeVisibility();
         appSignature = JSON.stringify(readAppBody(appType));
-        modal.classList.add('show');
-        if (appType === 'desktop' && !editBuiltin) loadSharing(id);
+        appTypeControl?.sync();
+        if (appType === 'desktop' && !editBuiltin) loadSharing(id, session);
     } catch (e) {
-        toast(t('fetchFailed') + e.message, 'err');
+        if (session.isCurrent()) { hideModal(); toast(t('fetchFailed') + e.message, 'err'); }
+    } finally {
+        if (session.isCurrent()) {
+            modal.classList.remove('loading'); modal.removeAttribute('aria-busy');
+            dialogs.current?.element.querySelector('.modal').focus({ preventScroll: true });
+        }
     }
 }
 
 function hideModal() {
-    document.getElementById('modal').classList.remove('show');
-    resetModal();
+    if (appDialog?.isCurrent()) dialogs.close();
 }
 
 function clearFormErrors() {
@@ -1298,16 +1342,16 @@ function setTestResult(text, tone) {
 
 // ---------- Remote access (desktop apps) ----------
 
-async function loadSharing(id) {
+async function loadSharing(id, session = appDialog) {
     document.getElementById('sharing-section').hidden = false;
     document.getElementById('basic-title').hidden = false;
     document.getElementById('f-share-enabled').disabled = true;
     document.getElementById('sharing-fields').hidden = true;
     try {
-        const data = await fetchJson(`${API}/${id}/sharing`);
-        if (editId === id) renderSharing(data);
+        const data = await fetchJson(`${API}/${id}/sharing`, { signal: session.abort.signal });
+        if (session.isCurrent()) renderSharing(data);
     } catch (e) {
-        if (editId === id) setTextById('err-f-share-enabled', t('sharingLoadFailed') + e.message);
+        if (session.isCurrent()) setTextById('err-f-share-enabled', t('sharingLoadFailed') + e.message);
     }
 }
 
@@ -1368,24 +1412,17 @@ function readSharingChange() {
 }
 
 async function saveSharing(id, body) {
-    const result = await putJson(`${API}/${id}/sharing`, body);
-    sharingState = {
-        ...sharingState,
-        enabled: body.enabled,
-        password_set: sharingState.password_set || !!body.password,
-        password: body.password ?? sharingState.password,
-        password_viewable: body.password ? true : sharingState.password_viewable,
-        restart_required: !!result.restart_required
-    };
-    return result;
+    return putJson(`${API}/${id}/sharing`, body);
 }
 
 async function copyShareUrl() {
+    const session = appDialog;
     const btn = document.getElementById('share-url-copy');
     try {
         await copyText(document.getElementById('f-share-url').value);
+        if (!session?.isCurrent()) return;
         btn.textContent = t('copied');
-        setTimeout(() => setText('share-url-copy', 'copy'), 1500);
+        setTimeout(() => { if (session.isCurrent()) setText('share-url-copy', 'copy'); }, 1500);
     } catch (e) {
         console.warn('Failed to copy share URL:', e);
         toast(t('copyFailed'), 'err');
@@ -1393,26 +1430,31 @@ async function copyShareUrl() {
 }
 
 async function restartFromModal() {
+    const session = appDialog;
     const id = editId;
-    if (!id) return;
+    if (!id || !session?.isCurrent() || session.saving || session.restarting) return;
+    session.restarting = true;
     const btn = document.getElementById('restart-now');
     btn.disabled = true;
     btn.textContent = t('restarting');
     try {
         await fetchJson(`${API}/${id}/restart`, { method: 'POST' });
         notifyAppStarted(id);
-        hideModal();
+        if (session.isCurrent()) hideModal();
         toast(t('restarted'), 'ok');
         load();
     } catch (e) {
-        showModalError(t('actionFailed') + e.message);
+        if (session.isCurrent()) showModalError(t('actionFailed') + e.message);
+        else toast(t('actionFailed') + e.message, 'err');
     } finally {
-        btn.disabled = false;
-        btn.textContent = t('restartNow');
+        session.restarting = false;
+        if (session.isCurrent()) { btn.disabled = false; btn.textContent = t('restartNow'); }
     }
 }
 
 async function testRemote() {
+    const session = appDialog;
+    if (!session?.isCurrent() || session.testing) return;
     const btn = document.getElementById('remote-test');
     ['f-remote-url', 'f-remote-password'].forEach(id => {
         setTextById('err-' + id, '');
@@ -1423,17 +1465,22 @@ async function testRemote() {
     if (!url) return fieldError('f-remote-url', t('remoteUrlRequired'));
     if (!isHttpUrl(url)) return fieldError('f-remote-url', t('remoteUrlInvalid'));
     if (!password) return fieldError('f-remote-password', t('remotePasswordRequired'));
+    session.testing = true;
+    const stillRelevant = () => session.isCurrent() && document.getElementById('f-app-type').value === 'remote'
+        && document.getElementById('f-remote-url').value.trim() === url && document.getElementById('f-remote-password').value === password;
     btn.disabled = true;
     setTestResult(t('remoteTesting'), '');
     try {
-        const data = await postJson('/api/remote/test', { url, password });
+        const data = await postJson('/api/remote/test', { url, password }, { signal: session.abort.signal });
+        if (!stillRelevant()) return;
         setTestResult(testResultText(data), 'ok');
         const name = document.getElementById('f-name');
         if (!name.value.trim() && data.name) name.value = data.name;
     } catch (e) {
-        setTestResult(e.message, 'err');
+        if (stillRelevant()) setTestResult(e.message, 'err');
     } finally {
-        btn.disabled = false;
+        session.testing = false;
+        if (session.isCurrent()) btn.disabled = false;
     }
 }
 
@@ -1539,76 +1586,92 @@ function validateAppBody(body) {
 }
 
 async function saveApp() {
-    if (editBuiltin) return;
+    const session = appDialog;
+    if (!session?.isCurrent() || session.saving || session.restarting || editBuiltin
+        || session.element.classList.contains('loading')) return;
     clearFormErrors();
-    const btn = document.getElementById('modal-save');
     const appType = document.getElementById('f-app-type').value;
     const body = readAppBody(appType);
     if (!validateAppBody(body)) return;
     const sharing = editId && appType === 'desktop' ? readSharingChange() : null;
     if (sharing === false) return;
     if (sharing?.password && sharingState.enabled && sharingState.password_set && !confirm(t('confirmPasswordChange'))) return;
-
-    btn.disabled = true;
-    const originalText = btn.textContent;
-    btn.textContent = t('savePending');
-
-    try {
-        const r = await fetch(editId ? API + '/' + editId : API, {
-            method: editId ? 'PUT' : 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-        const d = await parseJsonResponse(r);
-        if (!r.ok || d.error) {
-            if (d.code === 'app_name_conflict' && editApp && Number.isSafeInteger(d.params?.name_revision)) {
-                editApp = { ...editApp, name: d.params.name, name_revision: d.params.name_revision };
-                latestNames.set(editId, { name: editApp.name, name_revision: editApp.name_revision });
-                load();
-            }
-            showModalError(serverErrorText(d) || r.statusText);
-            return;
-        }
-        if (d.id && Number.isSafeInteger(d.name_revision)) orderNotifications.publishName(d.id, d.name_revision);
-        const wasEditing = !!editId;
-        let restart = false;
-        let revoked = false;
-        if (wasEditing && !['cli', 'remote'].includes(appType)) {
-            // Launch settings of a running app apply on its next start.
-            const signature = JSON.stringify(body);
-            restart = signature !== appSignature && isActive(editApp);
-            appSignature = signature;
-        }
-        if (sharing) {
-            try {
-                const result = await saveSharing(editId, sharing);
-                revoked = !!result.revoked;
-                restart = restart || !!result.restart_required;
-            } catch (e) {
-                // The app itself is saved; keep the dialog open on the failed part.
-                modalSaved = true;
-                setText('modal-cancel', 'close');
-                setTextById('err-f-share-enabled', e.message);
-                load();
+    const snapshot = { id: editId, app: editApp && { ...editApp }, signature: appSignature,
+        sharing: sharingState && { ...sharingState }, wasEditing: !!editId };
+    const btn = document.getElementById('modal-save');
+    session.saving = true;
+    btn.disabled = true; btn.textContent = t('savePending');
+    const report = message => {
+        if (session.isCurrent()) showModalError(message);
+        else toast(`${body.name || snapshot.app?.name || ''}: ${message}`, 'err');
+    };
+    const operation = Promise.resolve().then(async () => {
+        try {
+            const r = await fetch(snapshot.id ? API + '/' + snapshot.id : API, {
+                method: snapshot.id ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            });
+            const d = await parseJsonResponse(r);
+            if (!r.ok || d.error) {
+                if (d.code === 'app_name_conflict' && snapshot.app && Number.isSafeInteger(d.params?.name_revision)) {
+                    const app = { ...snapshot.app, name: d.params.name, name_revision: d.params.name_revision };
+                    latestNames.set(snapshot.id, { name: app.name, name_revision: app.name_revision });
+                    if (session.isCurrent()) editApp = app;
+                    load();
+                }
+                report(serverErrorText(d) || r.statusText);
                 return;
             }
+            if (d.id && Number.isSafeInteger(d.name_revision)) orderNotifications.publishName(d.id, d.name_revision);
+            const signature = JSON.stringify(body);
+            let restart = snapshot.wasEditing && !['cli', 'remote'].includes(appType)
+                && signature !== snapshot.signature && isActive(snapshot.app);
+            let revoked = false;
+            if (session.isCurrent()) {
+                appSignature = signature;
+                if (d.id) editApp = { ...editApp, ...d };
+            }
+            if (sharing) {
+                try {
+                    const result = await saveSharing(snapshot.id, sharing);
+                    revoked = !!result.revoked;
+                    restart = restart || !!result.restart_required;
+                    if (session.isCurrent()) {
+                        sharingState = { ...snapshot.sharing, enabled: sharing.enabled,
+                            password_set: snapshot.sharing.password_set || !!sharing.password,
+                            password: sharing.password ?? snapshot.sharing.password,
+                            password_viewable: sharing.password ? true : snapshot.sharing.password_viewable,
+                            restart_required: !!result.restart_required };
+                    }
+                } catch (e) {
+                    if (session.isCurrent()) {
+                        modalSaved = true; setText('modal-cancel', 'close');
+                        setTextById('err-f-share-enabled', e.message);
+                    }
+                    // The application write has succeeded, even if sharing failed.
+                    toast(`${body.name || snapshot.app?.name || ''}: ${t('updated')} · ${e.message}`, 'err');
+                    load(); return;
+                }
+            }
+            load();
+            if (session.isCurrent()) {
+                if (restart) { modalSaved = true; setText('modal-cancel', 'close'); showRestartNotice('restartSaved'); }
+                else hideModal();
+            }
+            toast(revoked ? t('sharingRevoked') : snapshot.wasEditing ? t('updated') : t('added'), 'ok');
+        } catch (e) {
+            report(t('actionFailed') + e.message);
+        } finally {
+            session.saving = false;
+            if (snapshot.id && pendingAppWrites.get(snapshot.id) === operation) pendingAppWrites.delete(snapshot.id);
+            if (session.isCurrent()) {
+                btn.disabled = editBuiltin;
+                btn.textContent = t(snapshot.wasEditing ? 'editSave' : 'addSave');
+            }
         }
-        load();
-        if (restart) {
-            modalSaved = true;
-            setText('modal-cancel', 'close');
-            showRestartNotice('restartSaved');
-            toast(revoked ? t('sharingRevoked') : t('updated'), 'ok');
-            return;
-        }
-        hideModal();
-        toast(revoked ? t('sharingRevoked') : wasEditing ? t('updated') : t('added'), 'ok');
-    } catch (e) {
-        showModalError(t('actionFailed') + e.message);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = originalText;
-    }
+    });
+    if (snapshot.id) pendingAppWrites.set(snapshot.id, operation);
+    await operation;
 }
 
 async function act(id, action) {
@@ -1670,26 +1733,26 @@ function toast(msg, type = 'info') {
 async function showLogs(id, name) {
     const modal = document.getElementById('log-modal');
     const title = document.getElementById('log-title');
+    const session = dialogs.open(modal, () => {
+        delete title.dataset.appName;
+        title.textContent = t('logsTitle');
+    });
     title.dataset.appName = name;
     title.textContent = t('logsFor')(name);
     const content = document.getElementById('log-content');
     content.textContent = t('logLoading');
-    modal.classList.add('show');
     try {
-        const r = await fetch(`${API}/${id}/logs`);
-        const d = await r.json();
+        const d = await fetchJson(`${API}/${id}/logs`, { signal: session.abort.signal });
+        if (!session.isCurrent()) return;
         content.textContent = d.logs || '(empty)';
         content.scrollTop = content.scrollHeight;
     } catch (e) {
-        content.textContent = t('logLoadFailed') + e;
+        if (session.isCurrent()) content.textContent = t('logLoadFailed') + e.message;
     }
 }
 
 function hideLogModal() {
-    const title = document.getElementById('log-title');
-    delete title.dataset.appName;
-    title.textContent = t('logsTitle');
-    document.getElementById('log-modal').classList.remove('show');
+    if (dialogs.current?.element.id === 'log-modal') dialogs.close();
 }
 
 function updateAppTypeVisibility() {
@@ -1738,8 +1801,9 @@ function updateAppTypeVisibility() {
     document.getElementById('f-app-type').disabled = !!editId;
     document.getElementById('f-autostart').disabled = editBuiltin;
     document.getElementById('modal-save').hidden = editBuiltin;
-    document.getElementById('modal-save').disabled = editBuiltin;
+    document.getElementById('modal-save').disabled = editBuiltin || !!appDialog?.saving;
     document.getElementById('modal-cancel').textContent = t(editBuiltin || modalSaved ? 'close' : 'cancel');
+    appTypeControl?.sync();
 }
 
 // Placeholders that depend on the selected type and on add vs. edit.
@@ -1752,6 +1816,8 @@ function updateTypePlaceholders() {
 
 document.addEventListener('DOMContentLoaded', () => {
     document.body.dataset.section = activeSection;
+    appTypeControl = enhanceSelect(document.getElementById('f-app-type'), document.getElementById('label-app-type'));
+    document.getElementById('nav-overview').setAttribute('aria-current', 'page');
     document.querySelectorAll('.nav-item').forEach(btn => {
         btn.addEventListener('click', () => switchSection(btn.dataset.section));
     });
@@ -1776,11 +1842,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('modal-close').addEventListener('click', hideModal);
     document.getElementById('modal-cancel').addEventListener('click', hideModal);
     document.getElementById('log-close-btn').addEventListener('click', hideLogModal);
-    document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
-        if (document.getElementById('log-modal').classList.contains('show')) hideLogModal();
-        else if (document.getElementById('modal').classList.contains('show')) hideModal();
-    });
     // Editing a field clears its inline error.
     document.getElementById('modal').addEventListener('input', (e) => {
         if (!e.target.classList?.contains('invalid')) return;

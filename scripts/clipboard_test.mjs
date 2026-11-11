@@ -33,9 +33,18 @@ test('actual keyboard path sends no V before clipboard capture and queues later 
     try {
         const inputSource = readFileSync(new URL('../web/ivnc/lib/input2.js', import.meta.url), 'utf8')
             .replace(/^import .*;\s*$/gm, '').replace('export class Input', 'class Input');
-        const ctx = { navigator: { platform: 'Linux' }, window: {}, document: { fullscreenElement: null }, pasteShortcut, setTimeout, clearTimeout };
+        let modalBlocked = false;
+        const ctx = { navigator: { platform: 'Linux' }, window: {}, document: { fullscreenElement: null,
+            documentElement: { hasAttribute: name => name === 'data-ivnc-modal-blocked' && modalBlocked } }, pasteShortcut, setTimeout, clearTimeout };
         vm.createContext(ctx); vm.runInContext(inputSource + '\nglobalThis.InputClass = Input;', ctx);
         const input = Object.assign(Object.create(ctx.InputClass.prototype), { _keyDownList: { ControlLeft: 0xffe3 }, _EVENT_MARKER: 'handled', clipboard: t.controller, send: t.controller.sendInput });
+        modalBlocked = true;
+        const beforeBlocked = t.sent.length;
+        input._handleKeyDown(t.event());
+        input._handleKeyPress(t.event());
+        input._handleKeyUp(t.event());
+        assert.equal(t.sent.length, beforeBlocked, 'a parent-owned modal must block remote keyboard capture');
+        modalBlocked = false;
         input._handleKeyDown(t.event());
         assert.equal(t.sent.some(m => m === 'kd,118'), false);
         assert.equal(t.requests('start').length, 0);

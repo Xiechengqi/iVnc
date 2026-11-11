@@ -34,13 +34,18 @@ const call = (method, params = {}) => new Promise((resolve, reject) => {
 });
 
 try {
-    let tabs;
+    let target;
     for (let attempt = 0; attempt < 100; attempt++) {
-        try { tabs = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); break; }
-        catch { await delay(100); }
+        try {
+            const tabs = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+            target = tabs.find(tab => tab.type === 'page');
+            if (target) break;
+        }
+        catch { /* Wait for the isolated browser's page target. */ }
+        await delay(100);
     }
-    assert(tabs?.[0]?.webSocketDebuggerUrl, 'isolated Chrome did not start');
-    socket = new WebSocket(tabs[0].webSocketDebuggerUrl);
+    assert(target?.webSocketDebuggerUrl, 'isolated Chrome did not start');
+    socket = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
     socket.onmessage = event => {
         const result = JSON.parse(event.data);
@@ -95,8 +100,9 @@ try {
             const edit = row.querySelector('.btn-edit');
             if (edit.disabled) throw Error('cannot view managed configuration while running');
             edit.click();
-            await wait(() => document.querySelector('#modal').classList.contains('show'));
+            await wait(() => document.querySelector('#modal').classList.contains('show') && !document.querySelector('#modal').classList.contains('loading'));
             const modal = document.querySelector('#modal');
+            if (!document.querySelector('.console-select').disabled) throw Error('managed app type selector is editable');
             if (getComputedStyle(document.querySelector('#background-config')).display === 'none') throw Error('background configuration is hidden');
             if (modal.querySelector('#miao-config,#miao-settings-help,#miao-panel-link')) throw Error('obsolete managed settings section remains');
             for (const field of modal.querySelectorAll('input,textarea,select')) {
@@ -127,6 +133,7 @@ try {
             await wait(() => modal.classList.contains('show'));
             const assertEditable = () => {
                 for (const field of modal.querySelectorAll('input,textarea')) {
+                    if (!field.getClientRects().length) continue;
                     if (field.readOnly || (field.disabled && field.id !== 'f-name')) throw Error(field.id + ' remains read-only');
                 }
                 if (save.hidden || save.disabled || getComputedStyle(save).display === 'none') throw Error('ordinary form cannot save');
@@ -147,7 +154,7 @@ try {
             const findNormal = () => Array.from(document.querySelectorAll('#app-list tr')).find(item => item.querySelector('strong')?.textContent === 'Modal regression');
             await wait(findNormal);
             findNormal().querySelector('.btn-edit').click();
-            await wait(() => modal.classList.contains('show'));
+            await wait(() => modal.classList.contains('show') && !modal.classList.contains('loading'));
             assertEditable();
             document.querySelector('#f-launch-command').value = 'sleep 61';
             save.click();

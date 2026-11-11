@@ -8,20 +8,18 @@
 </head>
 <body>
     <div class="console-shell">
-        <aside class="console-sidebar">
-            <div class="brand-block">
-                <div class="brand-title" id="page-title">管理控制台</div>
-                <div class="brand-subtitle" id="console-subtitle">管理应用与运行参数</div>
+        <header class="console-topbar">
+            <div class="console-brand" hidden>
+                <span id="page-title">管理控制台</span>
+                <span id="console-subtitle">管理应用与运行参数</span>
             </div>
             <nav class="nav-list" aria-label="Console sections">
                 <button class="nav-item active" data-section="overview" id="nav-overview" type="button">概览</button>
                 <button class="nav-item" data-section="apps" id="nav-apps" type="button">应用</button>
                 <button class="nav-item" data-section="settings" id="nav-settings" type="button">连接质量</button>
             </nav>
-            <div class="sidebar-footer">
-                <button class="lang-toggle" id="lang-toggle" type="button">English</button>
-            </div>
-        </aside>
+            <button class="lang-toggle" id="lang-toggle" type="button">English</button>
+        </header>
 
         <main class="console-main">
             <div class="page-header">
@@ -174,7 +172,7 @@
                 <div class="field-hint field-error" id="err-f-name"></div>
             </div>
             <div class="form-line">
-                <label class="form-label required-label">
+                <label class="form-label required-label" for="f-app-type">
                     <span id="label-app-type">应用类型</span>
                     <span class="required-mark">*</span>
                 </label>

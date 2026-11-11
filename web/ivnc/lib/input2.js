@@ -1398,6 +1398,7 @@ export class Input {
     }
 
     _handleKeyDown(event) {
+        if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
         if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
@@ -1584,6 +1585,7 @@ export class Input {
     }
 
     _handleKeyPress(event) {
+        if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
         if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
@@ -1591,6 +1593,7 @@ export class Input {
     }
 
     _handleKeyUp(event) {
+        if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
         if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
@@ -2492,11 +2495,11 @@ export class Input {
     }
 
     _onFullscreenChange() {
-        if (document.fullscreenElement === this.element.parentElement) {
-            if (document.pointerLockElement !== this.element) {
+        if (this._ownsFullscreen()) {
+            if (document.pointerLockElement !== this.element && !this._overlayIsOpen()) {
                 this.element.requestPointerLock().catch(err => console.warn("Pointer lock failed on fullscreen:", err));
             }
-            this.requestKeyboardLock();
+            if (!this._overlayIsOpen()) this.requestKeyboardLock();
         } else {
             if (document.pointerLockElement === this.element) {
                 document.exitPointerLock();
@@ -2504,6 +2507,21 @@ export class Input {
             this.send("kr");
             this.resetKeyboard();
         }
+    }
+
+    _ownsFullscreen() {
+        return !!document.fullscreenElement?.contains(this.element);
+    }
+
+    _overlayIsOpen() {
+        return !!document.querySelector('.web-terminal-modal:not(.minimized), .pwd-overlay, .update-overlay');
+    }
+
+    _onOverlayInteraction() {
+        this.send('kr');
+        this.resetKeyboard();
+        if (this.buttonMask) { this.buttonMask = 0; this._sendMouseState(); }
+        this.cursorDiv.style.display = 'none';
     }
 
     _targetHasClass(target, className) {
@@ -2535,6 +2553,7 @@ export class Input {
         this.listeners.push(addListener(this.element, 'resize', this._windowMath, this));
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
         this.listeners.push(addListener(document, 'fullscreenchange', this._onFullscreenChange, this));
+        this.listeners.push(addListener(window, 'ivnc-overlay-interaction', this._onOverlayInteraction, this));
         this.listeners.push(addListener(window, 'resize', this._windowMath, this));
         this.listeners.push(addListener(window, 'message', this._handleVisibilityMessage, this));
 
@@ -2603,11 +2622,11 @@ export class Input {
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
 
-        if (document.fullscreenElement === this.element.parentElement) {
-             if (document.pointerLockElement !== this.element) {
+        if (this._ownsFullscreen()) {
+             if (document.pointerLockElement !== this.element && !this._overlayIsOpen()) {
                 this.element.requestPointerLock().catch(()=>{});
              }
-             this.requestKeyboardLock();
+             if (!this._overlayIsOpen()) this.requestKeyboardLock();
         } else if (document.pointerLockElement === this.element) {
              this._pointerLock();
         }
@@ -2653,7 +2672,10 @@ export class Input {
 
     enterFullscreen() {
         if (this.element.parentElement && document.fullscreenElement === null) {
-            this.element.parentElement.requestFullscreen()
+            // The main page's tools and application iframes are siblings of the
+            // video. Fullscreen their common root without moving live iframes.
+            const root = window.__IVNC_EMBED__ ? this.element.parentElement : document.documentElement;
+            root.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
         } else if (document.fullscreenElement !== null && document.pointerLockElement !== this.element) {
              this.element.requestPointerLock().catch(()=>{});
@@ -2661,7 +2683,7 @@ export class Input {
     }
 
     requestKeyboardLock() {
-        if (document.fullscreenElement && 'keyboard' in navigator && (navigator.keyboard && 'lock' in navigator.keyboard)) {
+        if (document.fullscreenElement && !this._overlayIsOpen() && 'keyboard' in navigator && (navigator.keyboard && 'lock' in navigator.keyboard)) {
             const keys = [ "AltLeft", "AltRight", "Tab", "Escape", "MetaLeft", "MetaRight", "ContextMenu" ];
             navigator.keyboard.lock(keys).then(() => {
                 // console.log('Keyboard lock active.');
