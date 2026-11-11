@@ -24,7 +24,7 @@
 
 /*eslint no-unused-vars: ["error", { "vars": "local" }]*/
 
-import { Input } from "./input2.js?v=16";
+import { Input } from "./input2.js?v=20";
 import { base64ToString, Queue } from "./util.js?v=1";
 /**
  * @typedef {Object} WebRTCDemo
@@ -139,6 +139,7 @@ export class WebRTCDemo {
 		 * @type {function}
 		 */
 		this.onclipboardcontent = null;
+		this.onclipboardmessage = null;
 
 		/**
 		 * @type {function}
@@ -436,15 +437,17 @@ export class WebRTCDemo {
 	 * @param {RTCdataChannelEvent} event
 	 */
 	_onPeerdDataChannel(event) {
+		if (event.target && event.target !== this.peerConnection) return;
 		this._setStatus("Peer data channel created: " + event.channel.label);
 
 		// Bind the data channel event handlers.
 		this._send_channel = event.channel;
 		this._send_channel.onmessage = this._onPeerDataChannelMessage.bind(this);
+		const channel = this._send_channel;
 
 		let openFired = false;
 		const fireOpen = () => {
-			if (!openFired && this.ondatachannelopen !== null) {
+			if (this._send_channel === channel && !openFired && this.ondatachannelopen !== null) {
 				openFired = true;
 				this.ondatachannelopen();
 			}
@@ -452,10 +455,11 @@ export class WebRTCDemo {
 
 		this._send_channel.onopen = fireOpen;
 		this._send_channel.onclose = () => {
-			if (this.ondatachannelclose !== null)
+			if (this._send_channel === channel && this.ondatachannelclose !== null)
 				this.ondatachannelclose();
 		};
 		this._send_channel.onerror = () => {
+			if (this._send_channel !== channel) return;
 			this._setError("Unexpected error, data channel closed")
 		}
 
@@ -473,6 +477,8 @@ export class WebRTCDemo {
 	 * @param {MessageEvent} event
 	 */
 	_onPeerDataChannelMessage(event) {
+		// A closed peer may still have queued callbacks after reconnect.
+		if (event.target && event.target !== this._send_channel) return;
 		// Convert binary data to string if needed
 		var rawData;
 		if (typeof event.data === 'string') {
@@ -506,7 +512,9 @@ export class WebRTCDemo {
 			}
 		}
 
-		if (msg.type === 'pipeline') {
+		if (msg.type === 'clipboard_caps' || msg.type === 'paste_ack') {
+			this.onclipboardmessage?.(msg.type, msg.data);
+		} else if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);
 		} else if (msg.type === 'gpu_stats') {
 			if (this.ongpustats !== null) {
@@ -516,11 +524,12 @@ export class WebRTCDemo {
 			if (msg.data !== null && this.onclipboardcontent !== null) {
 				var text = base64ToString(typeof msg.data === 'string' ? msg.data : msg.data.content || '');
 				this._setDebug("received clipboard contents, length: " + text.length);
-				this.onclipboardcontent(text);
+				this.onclipboardcontent(text, typeof msg.data === 'object' ? msg.data : null);
 			}
 		} else if (msg.type === 'clipboard_start') {
 			// Start of chunked clipboard transfer
 			this.clipboardcontent.length = 0;
+			this._clipboardMetadata = typeof msg.data === 'object' ? msg.data : null;
 		} else if (msg.type === 'clipboard_data') {
 			// Chunk of clipboard data (base64)
 			if (msg.data !== null) {
@@ -531,9 +540,10 @@ export class WebRTCDemo {
 			var text = base64ToString(this.clipboardcontent.join(''));
 			this._setDebug("received chunked clipboard contents, length: " + text.length);
 			if (this.onclipboardcontent !== null) {
-				this.onclipboardcontent(text);
+				this.onclipboardcontent(text, this._clipboardMetadata);
 			}
 			this.clipboardcontent.length = 0;
+			this._clipboardMetadata = null;
 		} else if (msg.type === 'clipboard_binary') {
 			// Binary clipboard: clipboard_binary,mime,base64
 			this._setDebug("received binary clipboard");
@@ -647,8 +657,10 @@ export class WebRTCDemo {
 	sendDataChannelMessage(message) {
 		if (this._send_channel !== null && this._send_channel.readyState === 'open') {
 			this._send_channel.send(message);
+			return true;
 		} else {
 			this._setError("attempt to send data channel message before channel was open.");
+			return false;
 		}
 	}
 
@@ -665,7 +677,9 @@ export class WebRTCDemo {
 				ordered: true,
 				negotiated: false,
 			});
+			const channel = this._aux_channel;
 			this._aux_channel.onopen = () => {
+				if (this._aux_channel !== channel) return;
 				this._setStatus("An auxiliary data channel opened up");
 				// A theoretical buffer threshold to not overflow the browser impl buffer limit
 				this._aux_channel.bufferedAmountLowThreshold = 10 * 1024 * 1024;
@@ -674,10 +688,12 @@ export class WebRTCDemo {
 				this._setDebug("Received msg from auxiliary data channel: ", msg);
 			}
 			this._aux_channel.onerror = (err) => {
+				if (this._aux_channel !== channel) return;
 				this._aux_channel = null;
 				this._setError("Auxiliary data channel error: " + (err.message || err));
 			}
 			this._aux_channel.onclose = () => {
+				if (this._aux_channel !== channel) return;
 				this._aux_channel = null;
 				this._setStatus("Gracefully closed the auxiliary data channel");
 			}
@@ -1047,19 +1063,21 @@ export class WebRTCDemo {
 		// The server will accept it via str0m's ChannelOpen event.
 		this._send_channel = this.peerConnection.createDataChannel("input", { ordered: true });
 		this._send_channel.onmessage = this._onPeerDataChannelMessage.bind(this);
+		const channel = this._send_channel;
 		let openFired = false;
 		const fireOpen = () => {
-			if (!openFired && this.ondatachannelopen !== null) {
+			if (this._send_channel === channel && !openFired && this.ondatachannelopen !== null) {
 				openFired = true;
 				this.ondatachannelopen();
 			}
 		};
 		this._send_channel.onopen = fireOpen;
 		this._send_channel.onclose = () => {
-			if (this.ondatachannelclose !== null)
+			if (this._send_channel === channel && this.ondatachannelclose !== null)
 				this.ondatachannelclose();
 		};
 		this._send_channel.onerror = () => {
+			if (this._send_channel !== channel) return;
 			this._setError("Unexpected error, data channel closed");
 		};
 
@@ -1068,7 +1086,9 @@ export class WebRTCDemo {
 		// Keep ondatachannel for server-initiated channels (e.g. auxiliary)
 		this.peerConnection.ondatachannel = this._onPeerdDataChannel.bind(this);
 
+		const peer = this.peerConnection;
 		this.peerConnection.onconnectionstatechange = () => {
+			if (this.peerConnection !== peer) return;
 			// Local event handling.
 			this._handleConnectionStateChange(this.peerConnection.connectionState);
 
@@ -1090,11 +1110,17 @@ export class WebRTCDemo {
 		// Clear cursor cache.
 		this.cursor_cache = new Map();
 
-		var signalState = this.peerConnection.signalingState;
-		if (this._send_channel !== null && this._send_channel.readyState === "open") {
-			this._send_channel.close();
-		}
-		if (this.peerConnection !== null) this.peerConnection.close();
+		const peer = this.peerConnection;
+		const signalState = peer?.signalingState || "stable";
+		const channel = this._send_channel;
+		this.ondatachannelclose?.();
+		this._send_channel = null;
+		this.clipboardcontent.length = 0;
+		this._clipboardMetadata = null;
+		if (channel) channel.close();
+		if (this._aux_channel) { this._aux_channel.close(); this._aux_channel = null; }
+		this.peerConnection = null;
+		if (peer) peer.close();
 		if (signalState !== "stable") {
 			setTimeout(() => {
 					this.connect();

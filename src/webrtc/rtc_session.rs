@@ -247,6 +247,12 @@ pub async fn drive_session(
     }
 
     let last_pong = Arc::new(AtomicU64::new(now_millis()));
+    let (paste_reply_tx, mut paste_reply_rx) = mpsc::unbounded_channel();
+    let paste = Mutex::new(crate::clipboard::paste::PasteReceiver::new(
+        shared_state.config.input.enable_clipboard,
+        input_tx.clone(),
+        paste_reply_tx,
+    ));
     let ctx = EventContext {
         input_tx: &input_tx,
         upload_handler: &upload_handler,
@@ -254,6 +260,7 @@ pub async fn drive_session(
         runtime_settings: &runtime_settings,
         shared_state: &shared_state,
         last_pong: &last_pong,
+        paste: &paste,
     };
 
     let mut decoder = TcpFrameDecoder::new();
@@ -400,6 +407,11 @@ pub async fn drive_session(
                 }
             }
 
+            // Clipboard capabilities/results belong only to the requesting connection.
+            Some(reply) = paste_reply_rx.recv() => {
+                let _ = session.send_datachannel_text(&reply);
+            }
+
             // Keepalive ping
             _ = ping_interval.tick() => {
                 if session.connected {
@@ -435,6 +447,11 @@ pub async fn drive_session(
     }
 
     info!("Session {} drive loop ended", session_id);
+    paste.lock().unwrap_or_else(|e| e.into_inner()).cancel_all();
+    let _ = input_tx.send(InputEventData {
+        event_type: InputEvent::KeyboardReset,
+        ..Default::default()
+    });
     shared_state.remove_connection(&session_id);
     shared_state.decrement_webrtc_sessions();
 }
@@ -514,6 +531,7 @@ struct EventContext<'a> {
     runtime_settings: &'a Arc<RuntimeSettings>,
     shared_state: &'a Arc<SharedState>,
     last_pong: &'a Arc<AtomicU64>,
+    paste: &'a Mutex<crate::clipboard::paste::PasteReceiver>,
 }
 
 /// Handle a str0m event.
@@ -561,7 +579,10 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
         }
 
         Event::ChannelOpen(id, label) => {
-            session.dc_id = Some(id);
+            // File upload's auxiliary channel must not steal clipboard replies.
+            if label != "data" {
+                session.dc_id = Some(id);
+            }
             info!(
                 "Session {} DataChannel '{}' opened (id={:?})",
                 session.id, label, id
@@ -577,6 +598,14 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
 
         Event::ChannelClose(id) => {
             if session.dc_id == Some(id) {
+                ctx.paste
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .cancel_all();
+                let _ = ctx.input_tx.send(InputEventData {
+                    event_type: InputEvent::KeyboardReset,
+                    ..Default::default()
+                });
                 session.dc_id = None;
             }
             info!("Session {} DataChannel closed (id={:?})", session.id, id);
@@ -613,6 +642,20 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
 
     if text.starts_with("pong") {
         ctx.last_pong.store(now_millis(), Ordering::Relaxed);
+        return;
+    }
+
+    if text.starts_with("paste,") && session.dc_id != Some(data.id) {
+        return;
+    }
+    if ctx
+        .paste
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .handle(text)
+    {
+        ctx.shared_state
+            .record_connection_input_activity(&session.id);
         return;
     }
 

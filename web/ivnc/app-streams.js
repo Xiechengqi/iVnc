@@ -31,7 +31,7 @@ const closeView = (url) => fetch(`${url}close`, { method: 'POST', keepalive: tru
 const fromConsole = (source) => Array.from(document.querySelectorAll('iframe.web-console-frame'))
 	.some((frame) => frame.contentWindow === source);
 
-export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHover }) {
+export function createAppStreams({ viewport, onChange, onEdgeHover }) {
 	const streams = new Map();
 	let order = [];
 	let activeId = null;
@@ -42,19 +42,19 @@ export function createAppStreams({ video, taskbar, isPinned, onChange, onEdgeHov
 	layer.className = 'app-streams';
 	document.body.appendChild(layer);
 
-	// Same box as the main video, minus the pinned taskbar.
+	// The parent work area already reserves its toolbar. Embedded views use
+	// this entire box and must not subtract the toolbar a second time.
 	function layout() {
 		if (disposed) return;
-		const rect = video.getBoundingClientRect();
-		const bottom = isPinned() ? Math.min(rect.bottom, window.innerHeight - taskbar.offsetHeight) : rect.bottom;
+		const rect = viewport.getBoundingClientRect();
 		layer.style.left = `${rect.left}px`;
 		layer.style.top = `${rect.top}px`;
 		layer.style.width = `${rect.width}px`;
-		layer.style.height = `${Math.max(0, bottom - rect.top)}px`;
+		layer.style.height = `${rect.height}px`;
 	}
 	window.addEventListener('resize', layout);
 	const resizeObserver = new ResizeObserver(layout);
-	resizeObserver.observe(video);
+	resizeObserver.observe(viewport);
 	layout();
 
 	const ready = (s) => s.app.status === READY[s.app.kind];

@@ -532,6 +532,8 @@ fn run(
     // Non-blocking clipboard pipe read state
     let mut clipboard_pipe: Option<std::fs::File> = None;
     let mut clipboard_pipe_buf: Vec<u8> = Vec::new();
+    let mut clipboard_pipe_revision = 0;
+    let mut clipboard_pipe_started = Instant::now();
 
     info!("Compositor loop starting at {} fps", target_fps);
 
@@ -555,15 +557,19 @@ fn run(
             use std::os::fd::{AsRawFd, FromRawFd};
 
             let mut fds = [0i32; 2];
-            if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
+            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
                 let read_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
                 let write_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
                 // Set read end to non-blocking
-                unsafe {
+                let nonblocking = unsafe {
                     let flags = libc::fcntl(read_fd.as_raw_fd(), libc::F_GETFL);
-                    if flags >= 0 {
-                        libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
-                    }
+                    flags >= 0
+                        && libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
+                            == 0
+                };
+                if !nonblocking {
+                    warn!("Deferred clipboard: cannot make read pipe non-blocking");
+                    continue;
                 }
                 info!(
                     "Deferred clipboard: requesting client data for mime={}",
@@ -583,41 +589,6 @@ fn run(
             }
         }
 
-        // Browser clipboard → remote compositor (drain all pending items).
-        // Process BEFORE input events so that when Ctrl+V arrives, the
-        // clipboard selection is already set and the app can read it.
-        {
-            let mut rx = shared_state.clipboard_incoming_rx.lock().unwrap();
-            while let Ok(b64) = rx.try_recv() {
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
-                    if let Ok(text) = String::from_utf8(bytes) {
-                        use smithay::wayland::selection::data_device::set_data_device_selection;
-                        comp.pending_paste = Some(text.clone());
-                        let dh = comp.display_handle.clone();
-                        let seat = comp.seat.clone();
-                        set_data_device_selection(
-                            &dh,
-                            &seat,
-                            vec![
-                                "text/plain;charset=utf-8".into(),
-                                "text/plain".into(),
-                                "UTF8_STRING".into(),
-                            ],
-                            (),
-                        );
-                        // Suppress client clipboard re-assertions for a short window.
-                        // The focused client (e.g. Chromium) will re-assert its own
-                        // wl_data_source with stale content in response to our selection change.
-                        comp.clipboard_suppress_until =
-                            Some(Instant::now() + Duration::from_millis(500));
-                        last_visual_activity_at = Instant::now();
-                        info!("Clipboard from browser: {} bytes", text.len());
-                    }
-                }
-            }
-        }
-        comp.display_handle.flush_clients().ok();
-
         if drain_input_events(
             &mut input_rx,
             &mut comp,
@@ -635,6 +606,14 @@ fn run(
         if let Some(fd) = comp.clipboard_read_fd.take() {
             clipboard_pipe_buf.clear();
             clipboard_pipe = Some(std::fs::File::from(fd));
+            clipboard_pipe_revision = comp.clipboard_revision;
+            clipboard_pipe_started = Instant::now();
+        }
+        if clipboard_pipe_revision != comp.clipboard_revision
+            || clipboard_pipe_started.elapsed() > Duration::from_secs(10)
+        {
+            clipboard_pipe = None;
+            clipboard_pipe_buf.clear();
         }
         if let Some(ref mut file) = clipboard_pipe {
             let mut tmp = [0u8; 4096];
@@ -642,13 +621,16 @@ fn run(
                 match file.read(&mut tmp) {
                     Ok(0) => {
                         // EOF — client closed write end, data is complete
-                        if !clipboard_pipe_buf.is_empty() {
+                        if shared_state.config.input.enable_clipboard {
                             if let Ok(text) = String::from_utf8(clipboard_pipe_buf.clone()) {
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(&text);
-                                let msg = format!("clipboard,{}", encoded);
                                 info!("Clipboard from remote app: {} bytes", text.len());
-                                shared_state.send_text(msg);
+                                shared_state.set_clipboard(
+                                    encoded,
+                                    clipboard_pipe_revision,
+                                    "remote",
+                                );
                                 info!("Clipboard broadcast to remote");
                             }
                         }
@@ -657,6 +639,11 @@ fn run(
                         break;
                     }
                     Ok(n) => {
+                        if clipboard_pipe_buf.len() + n > clipboard::MAX_CLIPBOARD_BYTES {
+                            clipboard_pipe = None;
+                            clipboard_pipe_buf.clear();
+                            break;
+                        }
                         clipboard_pipe_buf.extend_from_slice(&tmp[..n]);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1132,6 +1119,37 @@ fn drain_input_events(
             InputEvent::Ping => {
                 shared.send_text("pong".to_string());
             }
+            InputEvent::Clipboard => {
+                if shared.config.input.enable_clipboard {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&ev.text) {
+                        if bytes.len() <= clipboard::MAX_CLIPBOARD_BYTES
+                            && std::str::from_utf8(&bytes).is_ok()
+                        {
+                            let revision = state.install_clipboard(Arc::from(bytes), None);
+                            shared.set_clipboard(ev.text, revision, "browser");
+                        }
+                    }
+                }
+            }
+            InputEvent::PasteStart => {
+                if let Some(command) = ev.paste {
+                    state.reserve_paste(&command);
+                }
+            }
+            InputEvent::Paste => {
+                if let Some(command) = ev.paste {
+                    match state.paste(&command) {
+                        Ok(revision) => {
+                            shared.set_clipboard(
+                                base64::engine::general_purpose::STANDARD.encode(&command.text),
+                                revision,
+                                "browser",
+                            );
+                        }
+                        Err(reason) => command.respond(reason, None),
+                    }
+                }
+            }
             InputEvent::TextInput => {
                 inject_text(state, &ev);
             }
@@ -1193,7 +1211,6 @@ fn drain_input_events(
                     }
                 }
             }
-            _ => {}
         }
     }
     had_input
@@ -1318,90 +1335,18 @@ fn inject_text(state: &mut Compositor, ev: &InputEventData) {
     });
 
     if sent {
-        info!("Injected text via text_input protocol: {:?}", ev.text);
+        info!(
+            "Injected text via text_input protocol: {} bytes",
+            ev.text.len()
+        );
     } else {
         // Fallback: set compositor-side clipboard selection, then simulate Ctrl+Shift+V
         info!(
-            "No text_input client, using clipboard paste for: {:?}",
-            ev.text
+            "No text_input client, using clipboard paste: {} bytes",
+            ev.text.len()
         );
-        use smithay::wayland::selection::data_device::set_data_device_selection;
-
-        state.pending_paste = Some(ev.text.clone());
-        let dh = state.display_handle.clone();
-        let seat = state.seat.clone();
-        set_data_device_selection(
-            &dh,
-            &seat,
-            vec![
-                "text/plain;charset=utf-8".into(),
-                "text/plain".into(),
-                "UTF8_STRING".into(),
-            ],
-            (),
-        );
-
-        // Simulate Ctrl+Shift+V (terminal paste shortcut).
-        // Use known evdev keycodes directly to avoid keysym mapping gaps.
-        let keyboard = state.seat.get_keyboard().unwrap();
-        let ctrl_code: u32 = 37; // Control_L
-        let shift_code: u32 = 50; // Shift_L
-        let v_code: u32 = 55; // v
-
-        let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(
-            state,
-            smithay::input::keyboard::Keycode::from(ctrl_code),
-            smithay::backend::input::KeyState::Pressed,
-            s,
-            0,
-            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-        );
-        let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(
-            state,
-            smithay::input::keyboard::Keycode::from(shift_code),
-            smithay::backend::input::KeyState::Pressed,
-            s,
-            0,
-            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-        );
-        let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(
-            state,
-            smithay::input::keyboard::Keycode::from(v_code),
-            smithay::backend::input::KeyState::Pressed,
-            s,
-            0,
-            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-        );
-        let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(
-            state,
-            smithay::input::keyboard::Keycode::from(v_code),
-            smithay::backend::input::KeyState::Released,
-            s,
-            0,
-            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-        );
-        let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(
-            state,
-            smithay::input::keyboard::Keycode::from(shift_code),
-            smithay::backend::input::KeyState::Released,
-            s,
-            0,
-            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-        );
-        let s = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(
-            state,
-            smithay::input::keyboard::Keycode::from(ctrl_code),
-            smithay::backend::input::KeyState::Released,
-            s,
-            0,
-            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-        );
+        state.install_clipboard(Arc::from(ev.text.as_bytes()), None);
+        state.paste_shortcut(clipboard::paste::Shortcut::CtrlShiftV);
     }
 }
 

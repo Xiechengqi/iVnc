@@ -1,12 +1,14 @@
 //! Clipboard message handling (text + binary, single or multipart).
 
+pub mod paste;
+
 use crate::system_clipboard;
 use crate::web::SharedState;
 use base64::Engine;
 use log::{info, warn};
 use std::sync::Arc;
 
-const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct ClipboardReceiver {
     state: Arc<SharedState>,
@@ -86,8 +88,7 @@ impl ClipboardReceiver {
                     return;
                 }
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let _ = self.state.clipboard_incoming_tx.send(encoded.clone());
-                self.state.set_clipboard(encoded);
+                self.enqueue_text(encoded);
             }
             None => warn!("Failed to decode clipboard text payload"),
         }
@@ -198,12 +199,8 @@ impl ClipboardReceiver {
             self.state
                 .set_clipboard_binary(self.mime_type.clone(), buffer);
         } else {
-            if system_clipboard::write("text/plain", &buffer) {
-                self.state.mark_clipboard_written("text/plain", &buffer);
-            }
             let encoded = base64::engine::general_purpose::STANDARD.encode(buffer);
-            let _ = self.state.clipboard_incoming_tx.send(encoded.clone());
-            self.state.set_clipboard(encoded);
+            self.enqueue_text(encoded);
         }
         self.reset();
     }
@@ -214,6 +211,15 @@ impl ClipboardReceiver {
         self.mime_type = "text/plain".to_string();
         self.in_progress = false;
         self.is_binary = false;
+    }
+
+    fn enqueue_text(&self, encoded: String) {
+        // Share the input queue: a later key must never overtake this update.
+        let _ = self.state.input_sender.send(crate::input::InputEventData {
+            event_type: crate::input::InputEvent::Clipboard,
+            text: encoded,
+            ..Default::default()
+        });
     }
 }
 

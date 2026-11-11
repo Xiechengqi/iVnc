@@ -124,17 +124,13 @@ cursor,{"override":"none"}
 
 ### 5.2 剪贴板消息 `clipboard`
 
-传输远程应用的剪贴板内容到浏览器。
+远端文本回传携带内容、合成器 revision 和来源：
 
-**格式:**
-```
-clipboard,{base64_text_data}
+```text
+clipboard,{"content":"SGVsbG8=","revision":12,"origin":"remote"}
 ```
 
-**示例:**
-```
-clipboard,SGVsbG8gV29ybGQh
-```
+`origin` 为 `remote` 或 `browser`。浏览器写入的回声不再次写本机剪贴板。客户端仍接受旧的 `clipboard,{base64}`。大文本通过 `clipboard_start,{"mime":"text/plain","revision":12,"origin":"remote"}`、`clipboard_data,{base64}` 和 `clipboard_finish` 传输；中间块没有 base64 padding。
 
 ### 5.3 任务栏消息 `taskbar`
 
@@ -385,6 +381,25 @@ cw,{base64_text_data}
 cw,SGVsbG8gV29ybGQh
 ```
 
+#### 可靠粘贴 `paste` v1
+
+使用输入 DataChannel，能力及确认只回到请求连接：
+
+```text
+paste,{"type":"hello"}
+clipboard_caps,{"version":1,"enabled":true,"max_bytes":16777216,"chunk_bytes":12288}
+paste,{"type":"start","id":1,"size":5,"shortcut":"ctrl-v","target":0}
+paste,{"type":"chunk","id":1,"data":"SGVsbG8="}
+paste,{"type":"commit","id":1}
+paste_ack,{"id":1,"status":"applied","revision":12}
+```
+
+`id` 在同一连接中递增，`size` 为 UTF-8 字节数（允许 0），`target` 是当前窗口 ID 或 null。快捷键可为 `ctrl-v`、`ctrl-shift-v`、`shift-insert`。每块最多 12 KiB 原始字节，完整长度与 UTF-8 校验通过后才允许执行；start 绑定实际 surface，窗口关闭/替换不会把已开始的粘贴转给新窗口。
+
+`paste,{"type":"cancel","id":1}` 取消尚未执行的操作。重复 ID 被拒绝；操作期限为 30 秒，断线失效。`applied` 在 selection 设置、按键派发、应用请求的数据写入管道并关闭写端后返回，不能当作应用完成插入的确认。其他状态包括 `duplicate`、`disabled`、`limit`、`invalid_request`、`invalid_chunk`、`invalid_content`、`unknown_request`、`expired`、`superseded`、`cancelled`、`unavailable`、`no_focus`、`focus_changed`、`delivery_failed`（管道写入失败或超过 10 秒）、`busy`（同一 seat 的另一次事务尚未完成交付）。客户端不得根据超时自动重放粘贴。
+
+旧 `cw` 等文本协议保留，应用后广播；新前端连接旧服务器时提示升级，不降级为有竞态的跨端粘贴。详细语义与测试见 [CLIPBOARD.md](CLIPBOARD.md)。
+
 ### 6.7 分辨率调整 `r`
 
 **格式:**
@@ -502,16 +517,18 @@ Client                                          Server
    │           → request_data_device_client_selection│
    │           → 非阻塞 pipe 读取                   │
    │                                               │
-   │◀────────── clipboard,SGVsbG8... ──────────────│
+   │◀────────── clipboard,{content,revision,origin} ─│
    │                                               │
    │           [浏览器粘贴到远程]                    │
    │                                               │
-   │─────────── cw,V29ybGQh... ───────────────────▶│
+   │─────────── paste,start/chunk/commit ─────────▶│
    │                                               │
    │           → set_data_device_selection()        │
-   │           → clipboard_suppress_until (500ms)   │
+   │           → paste shortcut                     │
    │           → Wayland client reads via           │
    │             send_selection()                   │
+   │           → asynchronous pipe write + EOF       │
+   │◀────────── paste_ack,applied ───────────────────│
    │                                               │
 ```
 

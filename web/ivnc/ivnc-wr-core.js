@@ -25,16 +25,18 @@
  *   limitations under the License.
  */
 
-import { WebRTCDemo } from "./lib/webrtc.js?v=24";
+import { WebRTCDemo } from "./lib/webrtc.js?v=25";
 import { WebRTCDemoSignaling } from "./lib/signaling.js?v=1";
 import { stringToBase64 } from "./lib/util.js?v=1";
-import { Input } from "./lib/input2.js?v=18";
+import { Input } from "./lib/input2.js?v=20";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import "@xterm/xterm/css/xterm.css";
+import terminalStyles from "@xterm/xterm/css/xterm.css?inline";
 import { t, onLangChange, getLang } from "./lib/i18n.js?v=1";
 import { createAppStreams } from "./app-streams.js";
 import { createToolbar } from "./toolbar.js";
+import { createClipboard } from "./clipboard.js";
+import { createViewport } from "./viewport.js";
 
 const MAIN_I18N = {
 	zh: {
@@ -257,11 +259,14 @@ function InitUI() {
 	#app {
 		display: flex;
 		flex-direction: column;
-		height: calc(var(--vh, 1vh) * 100);
+		height: calc(var(--vh, 1vh) * 100 - var(--ivnc-toolbar-height, 0px));
+		height: calc(100dvh - var(--ivnc-toolbar-height, 0px));
 		width: 100%;
 	}
 
 	.video-container {
+		min-height: 0;
+		min-width: 0;
 		flex-grow: 1;
 		flex-shrink: 1;
 		display: flex;
@@ -273,6 +278,8 @@ function InitUI() {
 		position: relative;
 		overflow: hidden;
 	}
+	.video-container.manual-exact { overflow: auto; }
+	.video-container:fullscreen { width: 100%; height: 100%; }
 
 	.video-container video,
 	.video-container #overlayInput{
@@ -721,23 +728,6 @@ function InitUI() {
 	}
 	.web-terminal-body .xterm {
 		height: 100%;
-	}
-	.web-terminal-body .xterm .xterm-helper-textarea {
-		position: absolute !important;
-		left: -9999em !important;
-		top: 0 !important;
-		width: 0 !important;
-		height: 0 !important;
-		opacity: 0 !important;
-		border: 0 !important;
-		background: transparent !important;
-		pointer-events: none !important;
-		clip: rect(0 0 0 0) !important;
-		clip-path: inset(50%) !important;
-	}
-	.web-terminal-body .xterm .composition-view,
-	.web-terminal-body .xterm .xterm-accessibility {
-		display: none !important;
 	}
 	.web-console-modal {
 		width: var(--ivnc-console-width, min(1080px, calc(100vw - 48px)));
@@ -1474,7 +1464,6 @@ function createWebTerminalController() {
 	let terminalBtn = null;
 	let intentionalRestart = false;
 	let destroyed = false;
-	let startupClearTimer = null;
 	let reconnectTimer = null;
 	let reconnectAttempt = 0;
 	let socketGeneration = 0;
@@ -1501,6 +1490,14 @@ function createWebTerminalController() {
 	function ensureModal() {
 		if (destroyed) return;
 		if (modal) return;
+		// index.html loads this entry dynamically, so Vite cannot attach its
+		// extracted CSS. Install the complete xterm styles before opening it.
+		if (!document.getElementById('ivnc-terminal-styles')) {
+			const style = document.createElement('style');
+			style.id = 'ivnc-terminal-styles';
+			style.textContent = terminalStyles;
+			document.head.appendChild(style);
+		}
 		updateOverlayModalScale();
 
 		modal = document.createElement('div');
@@ -1702,7 +1699,6 @@ function createWebTerminalController() {
 		switch (message.type) {
 			case 'ready':
 				setStatus(message.shell || 'ready');
-				scheduleStartupClear();
 				break;
 			case 'output':
 				terminal?.write(Uint8Array.from(atob(message.data || ''), c => c.charCodeAt(0)));
@@ -1740,15 +1736,6 @@ function createWebTerminalController() {
 		}, 250);
 	}
 
-	function scheduleStartupClear() {
-		clearTimeout(startupClearTimer);
-		startupClearTimer = setTimeout(() => {
-			if (destroyed || !terminal) return;
-			terminal.clear();
-			fitAndResize();
-		}, 300);
-	}
-
 	function send(message) {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		socket.send(JSON.stringify(message));
@@ -1775,7 +1762,6 @@ function createWebTerminalController() {
 	function destroy() {
 		if (destroyed) return;
 		destroyed = true;
-		clearTimeout(startupClearTimer);
 		clearTimeout(resizeTimer);
 		clearReconnectTimer();
 		resizeObserver?.disconnect();
@@ -2116,7 +2102,6 @@ export default function webrtc() {
 	const terminalController = createWebTerminalController();
 	const proxyController = createProxyModalController();
 	const consoleController = createConsoleModalController();
-	let clipboardStatus = 'enabled';
 	let windowResolution = "";
 	let encoderLabel = "";
 	let encoder = ""
@@ -2144,6 +2129,7 @@ export default function webrtc() {
 	var audioElement = null;
 	let appStreams = null;
 	let toolbarController = null;
+	let viewportController = null;
 	// An active stream tab covers the main desktop.
 	let mainCovered = false;
 	let lastTaskbarData = {};
@@ -2153,9 +2139,10 @@ export default function webrtc() {
 	let debug = false;
 	let playButtonElement = null;
 	let statusDisplayElement = null;
-	let rtime = null;
 	let rdelta = 500; // time in milliseconds
-	let rtimeout = false;
+	let resizeTimer = null;
+	let autoResizeEnabled = false;
+	let lastSentResolution = null;
 	let manualWidth = 0, manualHeight = 0;
 	window.isManualResolutionMode = false;
 	window.fps = 0;
@@ -2699,38 +2686,7 @@ export default function webrtc() {
 			videoElement.height = logicalHeight;
 			console.log(`Video Element set to: ${targetWidth}x${targetHeight}`);
 		}
-		const container = videoElement.parentElement;
-		const containerWidth = container.clientWidth;
-		const containerHeight = container.clientHeight;
-		if (scaleToFit) {
-			const targetAspectRatio = targetWidth / targetHeight;
-			const containerAspectRatio = containerWidth / containerHeight;
-			let cssWidth, cssHeight;
-			if (targetAspectRatio > containerAspectRatio) {
-				cssWidth = containerWidth;
-				cssHeight = containerWidth / targetAspectRatio;
-			} else {
-				cssHeight = containerHeight;
-				cssWidth = containerHeight * targetAspectRatio;
-			}
-			const topOffset = (containerHeight - cssHeight) / 2;
-			const leftOffset = (containerWidth - cssWidth) / 2;
-			videoElement.style.position = 'absolute';
-			videoElement.style.width = `${cssWidth}px`;
-			videoElement.style.height = `${cssHeight}px`;
-			videoElement.style.top = `${topOffset}px`;
-			videoElement.style.left = `${leftOffset}px`;
-			videoElement.style.objectFit = 'contain'; // Should be 'fill' if CSS handles aspect ratio
-			console.log(`Applied manual style (Scaled): CSS ${cssWidth}x${cssHeight}, Pos ${leftOffset},${topOffset}`);
-		} else {
-			videoElement.style.position = 'absolute';
-			videoElement.style.width = `${targetWidth}px`;
-			videoElement.style.height = `${targetHeight}px`;
-			videoElement.style.top = '0px';
-			videoElement.style.left = '0px';
-			videoElement.style.objectFit = 'contain';
-			console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Pos 0,0`);
-		}
+		viewportController?.manual(targetWidth, targetHeight, scaleToFit);
 		updateVideoImageRendering();
 		updateOverlayModalScale();
 	}
@@ -2748,57 +2704,53 @@ export default function webrtc() {
 			console.log(`Video Element set to: ${logicalWidth}x${logicalHeight}`);
 		}
 
-		videoElement.style.position = 'absolute';
-		videoElement.style.width = '100%';
-		videoElement.style.height = '100%';
-		videoElement.style.top = '0px';
-		videoElement.style.left = '0px';
-		videoElement.style.objectFit = 'fill';
+		viewportController?.automatic();
 		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight}`);
 		updateOverlayModalScale();
 	}
 
 	function sendResolutionToServer(width, height) {
+		if (width < 2 || height < 2 || webrtc?._send_channel?.readyState !== 'open') return;
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 		const realWidth = roundDownToEven(width * dpr);
 		const realHeight = roundDownToEven(height * dpr);
 		const resString = `${realWidth}x${realHeight}`;
+		if (resString === lastSentResolution) return;
 		console.log(`Sending resolution to server: ${resString}, Pixel Ratio Used: ${dpr}, useCssScaling: ${useCssScaling}`);
 		webrtc.sendDataChannelMessage(`r,${resString}`);
+		lastSentResolution = resString;
 	}
 
 	function enableAutoResize() {
-		window.addEventListener("resize", resizeStart);
+		autoResizeEnabled = true;
 	}
 
 	function disableAutoResize() {
-		window.removeEventListener("resize", resizeStart);
+		autoResizeEnabled = false;
+		clearTimeout(resizeTimer); resizeTimer = null;
 	}
 
 	function resizeStart() {
-		rtime = new Date();
-		if (rtimeout === false) {
-			rtimeout = true;
-			setTimeout(() => { resizeEnd() }, rdelta);
-		}
+		if (!autoResizeEnabled || window.isManualResolutionMode) return;
+		clearTimeout(resizeTimer);
+		resizeTimer = setTimeout(resizeEnd, rdelta);
 	}
 
 	function resizeEnd() {
-		if (new Date() - rtime < rdelta) {
-			setTimeout(() => { resizeEnd() }, rdelta);
-		} else {
-			rtimeout = false;
-			windowResolution = input.getWindowResolution();
-			sendResolutionToServer(windowResolution[0], windowResolution[1])
-			resetToWindowResolution(windowResolution[0], windowResolution[1])
-		}
+		resizeTimer = null;
+		if (!autoResizeEnabled || window.isManualResolutionMode || !input) return;
+		windowResolution = input.getWindowResolution();
+		sendResolutionToServer(...windowResolution);
+		resetToWindowResolution(...windowResolution);
 	}
 
 	function loadLastSessionSettings() {
 		// Preset the video element to last session resolution
 		if (window.isManualResolutionMode && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
+			disableAutoResize();
 			applyManualStyle(manualWidth, manualHeight, scaleLocal);
+			sendResolutionToServer(manualWidth, manualHeight);
 		} else {
 			console.log("Applying window resolution");
 			// If manual resolution is not set, reset to window resolution
@@ -2832,14 +2784,15 @@ export default function webrtc() {
 			case "resetResolutionToWindow":
 				console.log("Resetting to window size");
 				manualHeight = manualWidth = 0; // clear manual W&H
+				window.isManualResolutionMode = false;
+				viewportController?.automatic();
 				let currentWindowRes = input.getWindowResolution();
 				resetToWindowResolution(...currentWindowRes);
 				sendResolutionToServer(...currentWindowRes);
 				enableAutoResize();
-				setIntParam('manualWidth', null);
-				setIntParam('manualHeight', null);
-				setBoolParam('isManualResolutionMode', false);
-				window.isManualResolutionMode = false;
+				setIntParam('manual_width', null);
+				setIntParam('manual_height', null);
+				setBoolParam('is_manual_resolution_mode', false);
 				break;
 			case "setManualResolution":
 				const width = parseInt(message.width, 10);
@@ -2852,12 +2805,12 @@ export default function webrtc() {
 				disableAutoResize();
 				manualWidth = width;
 				manualHeight = height;
+				window.isManualResolutionMode = true;
 				applyManualStyle(manualWidth, manualHeight, scaleLocal);
 				sendResolutionToServer(manualWidth, manualHeight);
-				setIntParam('manualWidth', manualWidth);
-				setIntParam('manualHeight', manualHeight);
-				setBoolParam('isManualResolutionMode', true);
-				window.isManualResolutionMode = true;
+				setIntParam('manual_width', manualWidth);
+				setIntParam('manual_height', manualHeight);
+				setBoolParam('is_manual_resolution_mode', true);
 				break;
 			case "setUseCssScaling":
 				console.warn("Skipping cssScaling since hidpi needs to be implemented")
@@ -3474,31 +3427,33 @@ export default function webrtc() {
 		}, 1000);
 	}
 
-	var _lastSentClipboard = '';
-	function handleWindowFocus() {
-		if (webrtc._send_channel === null || webrtc._send_channel.readyState !== 'open') return;
-		// reset keyboard to avoid stuck keys.
-		webrtc.sendDataChannelMessage("kr");
-		// clipboard interface is only available in secure context
-		if (window.isSecureContext) {
-			// Send clipboard contents if changed.
-			navigator.clipboard.readText()
-				.then(text => {
-						if (text && text !== _lastSentClipboard) {
-							_lastSentClipboard = text;
-							webrtc.sendDataChannelMessage(`cw,${stringToBase64(text)}`);
-						}
-				})
-				.catch(err => {
-						webrtc._setStatus('Failed to read clipboard contents: ' + err);
-				});
+	let clipboardController = null;
+	let clipboardNotice = null, clipboardNoticeTimer = null;
+	function reportClipboardError(reason) {
+		const zh = getLang() === 'zh';
+		const messages = {
+			unsupported: zh ? '服务端尚不支持可靠粘贴，请更新服务端后重新连接。' : 'Update the server and reconnect to enable clipboard paste.',
+			text_required: zh ? '此次剪贴板没有可粘贴的文本。' : 'The clipboard does not contain text.',
+			limit: zh ? '剪贴板内容过大或待处理操作过多。' : 'Clipboard size or pending operation limit exceeded.',
+			busy: zh ? '远端正在处理另一次粘贴，请稍后再试。' : 'Another paste is still being delivered. Try again shortly.',
+			copy_unavailable: zh ? '无法写入本机剪贴板，请检查浏览器剪贴板权限。' : 'Cannot write the local clipboard. Check browser clipboard permissions.',
+		};
+		const message = messages[reason] || (zh ? '本次粘贴未能确认完成，请检查连接和输入焦点。' : 'Paste could not be confirmed. Check the connection and input focus.');
+		if (!clipboardNotice) {
+			clipboardNotice = document.createElement('div');
+			clipboardNotice.className = 'upload-toast error';
+			clipboardNotice.setAttribute('role', 'alert');
+			document.body.appendChild(clipboardNotice);
 		}
+		clipboardNotice.textContent = message;
+		clearTimeout(clipboardNoticeTimer);
+		clipboardNoticeTimer = setTimeout(() => { clipboardNotice?.remove(); clipboardNotice = null; }, 6000);
 	}
-
+	function handleWindowFocus() {
+		if (webrtc?._send_channel?.readyState === 'open') webrtc.sendDataChannelMessage('kr');
+	}
 	function handleWindowBlur() {
-		if (webrtc._send_channel === null || webrtc._send_channel.readyState !== 'open') return;
-		// reset keyboard to avoid stuck keys.
-		webrtc.sendDataChannelMessage("kr");
+		clipboardController?.cancel();
 	}
 
 	function setupKeyBoardAssisstant() {
@@ -3625,7 +3580,7 @@ export default function webrtc() {
 				pinBtn.innerHTML = taskbarPinned ? pinSvgPinned : pinSvgUnpinned;
 				setLiveTitle(pinBtn, taskbarPinned ? 'unpinTaskbar' : 'pinTaskbar');
 				setBoolParam('taskbar_pinned', taskbarPinned);
-				appStreams?.layout();
+				viewportController?.layout();
 			});
 			toolbarController.addTool(pinBtn, true);
 
@@ -3800,7 +3755,7 @@ export default function webrtc() {
 					atBottomEdge = edge;
 				} else if (e.clientY >= window.innerHeight - 6) {
 					showTaskbar();
-				} else if (e.clientY < window.innerHeight - 42) {
+				} else if (e.clientY < window.innerHeight - taskbar.getBoundingClientRect().height - 6) {
 					hideTaskbar();
 				}
 			});
@@ -3809,9 +3764,7 @@ export default function webrtc() {
 
 			if (!window.__IVNC_APP_VIEW__) {
 				appStreams = createAppStreams({
-					video: videoElement,
-					taskbar,
-					isPinned: () => taskbarPinned,
+					viewport: videoContainer,
 					onChange: () => {
 						renderTaskbar();
 						syncImeButton();
@@ -3819,6 +3772,7 @@ export default function webrtc() {
 						const streamActive = !!appStreams?.activeId();
 						if (streamActive !== mainCovered) {
 							mainCovered = streamActive;
+							clipboardController?.cancel();
 							sendClientActivity('view-switch');
 						}
 					},
@@ -3833,6 +3787,18 @@ export default function webrtc() {
 			if (!window.__IVNC_EMBED__) videoContainer.appendChild(statusDisplayElement);
 			videoContainer.appendChild(overlayInput);
 			appDiv.appendChild(videoContainer);
+			viewportController?.destroy();
+			viewportController = createViewport({
+				root: appDiv, container: videoContainer, video: videoElement, overlay: overlayInput,
+				toolbar: taskbar, isPinned: () => taskbarPinned, embedded: !!window.__IVNC_EMBED__,
+				onChange: ({ changed }) => {
+					input?.resize();
+					appStreams?.layout();
+					updateVideoImageRendering();
+					updateOverlayModalScale();
+					if (changed) resizeStart();
+				},
+			});
 
 			if (!document.getElementById('keyboard-input-assist')) {
 				const keyboardInputAssist = document.createElement('input');
@@ -3912,7 +3878,7 @@ export default function webrtc() {
 					if (message.type === 'ivnc-view-active') {
 						window.__ivncViewActive = !!message.active;
 						// Release held keys when the tab is switched away.
-						if (!message.active && open) webrtc.sendDataChannelMessage('kr');
+						if (!message.active) clipboardController?.cancel();
 						sendClientActivity('view-switch');
 						if (message.active) window.focus();
 					} else if (message.type === 'ivnc-unmute') {
@@ -3927,7 +3893,8 @@ export default function webrtc() {
 				postToParent({ type: 'ivnc-view-ready' });
 			}
 			const send = (data) => {
-				webrtc.sendDataChannelMessage(data);
+				if (clipboardController) clipboardController.sendInput(data);
+				else webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, false, useCssScaling=useCssScaling);
 
@@ -4021,9 +3988,11 @@ export default function webrtc() {
 			};
 
 			webrtc.ondatachannelopen = () => {
+				lastSentResolution = null;
 				console.log("Data channel opened");
 				// Bind input handlers.
 				input.attach();
+				clipboardController?.connected();
 				loadLastSessionSettings();
 				fetchInitialIPv4();
 				sendClientPersistedSettings();
@@ -4052,8 +4021,11 @@ export default function webrtc() {
 			}
 
 			webrtc.ondatachannelclose = () => {
+				lastSentResolution = null;
+				clearTimeout(resizeTimer); resizeTimer = null;
 				resetNetworkQuality('offline');
 				stopClientActivityReporting();
+				clipboardController?.disconnected();
 				input.detach();
 				// Disable upload button
 				const uploadBtn = document.getElementById('upload-btn');
@@ -4106,80 +4078,17 @@ export default function webrtc() {
 			window.addEventListener('focus', handleWindowFocus);
 			window.addEventListener('blur', handleWindowBlur);
 
-			// --- Clipboard sync ---
-			// Hidden textarea for programmatic clipboard operations
-			var _clipTA = document.createElement('textarea');
-			_clipTA.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0.01;';
-			_clipTA.id = '_ivnc_clip';
-			document.body.appendChild(_clipTA);
-
-			var _programmaticCopy = false;
-
-			webrtc.onclipboardcontent = (content) => {
-				if (clipboardStatus !== 'enabled') return;
-				webrtc._remoteClipboard = content;
-				if (navigator.clipboard && navigator.clipboard.writeText) {
-					navigator.clipboard.writeText(content).catch(() => {
-						doCopyToSystem(content);
-					});
-				} else {
-					doCopyToSystem(content);
-				}
-			}
-
-			function doCopyToSystem(text) {
-				_clipTA.value = text;
-				_clipTA.select();
-				_programmaticCopy = true;
-				document.execCommand('copy');
-				_programmaticCopy = false;
-				var ime = document.querySelector('textarea[autocomplete="off"]');
-				if (ime) ime.focus({ preventScroll: true });
-			}
-
-			// Expose clipboard helpers globally for input2.js to call
-			var _lastPasteTime = 0;
-			var _overlayRef = document.getElementById('overlayInput');
-			window.__ivncClipboard = {
-				enablePaste: function() {
-					var now = Date.now();
-					if (now - _lastPasteTime < 1000) return; // Throttle here
-					if (!_overlayRef) _overlayRef = document.getElementById('overlayInput');
-					if (_overlayRef) {
-						_overlayRef.readOnly = false;
-						_overlayRef.value = '';
-					}
-				}
-			};
-
-			// Paste event handler — works when overlayInput is temporarily editable
-			document.addEventListener('paste', (e) => {
-				// Restore readonly immediately
-				if (_overlayRef) {
-					_overlayRef.readOnly = true;
-					_overlayRef.value = '';
-				}
-				if (clipboardStatus !== 'enabled') return;
-				var now = Date.now();
-				if (now - _lastPasteTime < 1000) {
-					e.preventDefault();
-					return;
-				}
-				_lastPasteTime = now;
-				var text = e.clipboardData && e.clipboardData.getData('text/plain');
-				if (text) {
-					e.preventDefault();
-					// Skip sending if the pasted text matches what the remote
-					// app already has (avoids overwriting with stale browser
-					// clipboard when navigator.clipboard.writeText is still
-					// pending from a recent remote→browser sync).
-					if (text === webrtc._remoteClipboard || text === _lastSentClipboard) {
-						return;
-					}
-					_lastSentClipboard = text;
-					webrtc.sendDataChannelMessage('cw,' + stringToBase64(text));
-				}
+			clipboardController?.destroy();
+			clipboardController = createClipboard({
+				webrtc, overlay: overlayInput, imeTarget: () => input?._imeTextarea,
+				isActive: () => window.__ivncViewActive !== false && !appStreams?.activeId() && document.visibilityState !== 'hidden',
+				getTarget: () => lastTaskbarData?.windows?.find(w => w.focused)?.id,
+				report: reportClipboardError,
 			});
+			input.clipboard = clipboardController;
+			window.__ivncClipboard = clipboardController;
+			webrtc.onclipboardcontent = clipboardController.receive;
+			webrtc.onclipboardmessage = clipboardController.message;
 
 			webrtc.oncursorchange = (cursorData) => {
 				input.updateServerCursor(cursorData);
@@ -4239,7 +4148,7 @@ export default function webrtc() {
 					const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
 					if (serverWidth > 0 && serverHeight > 0) {
 							console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
-							window.is_manual_resolution_mode = true;
+							window.isManualResolutionMode = true;
 							manualWidth = serverWidth;
 							manualHeight = serverHeight;
 							applyManualStyle(manualWidth, manualHeight, scaleLocal);
@@ -4253,24 +4162,6 @@ export default function webrtc() {
 				}
 			}
 
-			// Safari without Permission API enabled fails
-			if (navigator.permissions) {
-				navigator.permissions.query({
-					name: 'clipboard-read'
-				}).then(permissionStatus => {
-					// Will be 'granted', 'denied' or 'prompt':
-					if (permissionStatus.state === 'granted') {
-							clipboardStatus = 'enabled';
-					}
-
-					// Listen for changes to the permission state
-					permissionStatus.onchange = () => {
-							if (permissionStatus.state === 'granted') {
-									clipboardStatus = 'enabled';
-							}
-					};
-				});
-			}
 
 			// TCP-only: directly connect using the SDP answer's TCP candidate.
 			windowResolution = input.getWindowResolution();
@@ -4278,6 +4169,13 @@ export default function webrtc() {
 			webrtc.connect();
 		},
 		cleanup() {
+			disableAutoResize();
+			viewportController?.destroy(); viewportController = null;
+			clipboardController?.destroy(); clipboardController = null;
+			window.__ivncClipboard = null;
+			clipboardNotice?.remove(); clipboardNotice = null;
+			clearTimeout(clipboardNoticeTimer);
+			input?.detach();
 			// reset the data
 			window.isManualResolutionMode = false;
 			window.fps = 0;
@@ -4299,7 +4197,6 @@ export default function webrtc() {
 			logEntries = [];
 			debugEntries = [];
 			status = 'connecting';
-			clipboardStatus = 'enabled';
 			windowResolution = "";
 			encoderLabel = "";
 			encoder = ""
@@ -4327,9 +4224,8 @@ export default function webrtc() {
 			debug = false;
 			playButtonElement = null;
 			statusDisplayElement = null;
-			rtime = null;
 			rdelta = 500;
-			rtimeout = false;
+			lastSentResolution = null;
 			manualWidth = manualHeight = 0;
 			videoConnected = "";
 			audioConnected = "";

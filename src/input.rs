@@ -13,6 +13,8 @@ pub enum InputEvent {
     KeyboardReset,
     TextInput,
     Clipboard,
+    PasteStart,
+    Paste,
     Ping,
     WindowFocus,
     WindowClose,
@@ -34,6 +36,7 @@ pub struct InputEventData {
     pub text: String,
     pub timestamp: u64,
     pub window_id: u32,
+    pub paste: Option<crate::clipboard::paste::PasteCommand>,
 }
 
 impl Default for InputEventData {
@@ -52,6 +55,7 @@ impl Default for InputEventData {
             text: String::new(),
             timestamp: 0,
             window_id: 0,
+            paste: None,
         }
     }
 }

@@ -3,6 +3,7 @@
 //! Provides an embedded headless Wayland compositor using smithay's
 //! Pixman software renderer for zero-copy frame capture.
 
+pub mod clipboard;
 pub mod grabs;
 pub mod handlers;
 pub mod headless;

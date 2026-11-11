@@ -5,7 +5,6 @@ pub mod xdg_shell;
 
 use crate::compositor::Compositor;
 
-use std::io::Write;
 use std::os::fd::OwnedFd;
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
@@ -45,6 +44,7 @@ impl SeatHandler for Compositor {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        self.taskbar_dirty = true;
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client);
@@ -81,7 +81,7 @@ impl SeatHandler for Compositor {
 delegate_seat!(Compositor);
 
 impl SelectionHandler for Compositor {
-    type SelectionUserData = ();
+    type SelectionUserData = crate::compositor::clipboard::Snapshot;
 
     fn new_selection(
         &mut self,
@@ -97,6 +97,9 @@ impl SelectionHandler for Compositor {
         if ty != SelectionTarget::Clipboard {
             return;
         }
+        self.clipboard_revision += 1;
+        self.clipboard_pending_mime = None;
+        self.clipboard_read_fd = None;
         let source = match source {
             Some(s) => s,
             None => {
@@ -104,17 +107,6 @@ impl SelectionHandler for Compositor {
                 return;
             }
         };
-
-        // Suppress client re-assertions that happen right after browser→compositor
-        // clipboard set. When we call set_data_device_selection, the focused client
-        // (e.g. Chromium) re-asserts its own wl_data_source with stale content.
-        if let Some(until) = self.clipboard_suppress_until {
-            if std::time::Instant::now() < until {
-                log::info!("new_selection: suppressed (within browser clipboard window)");
-                return;
-            }
-            self.clipboard_suppress_until = None;
-        }
 
         let mime_types = source.mime_types();
         log::info!("new_selection: mime_types={:?}", mime_types);
@@ -143,21 +135,13 @@ impl SelectionHandler for Compositor {
         mime_type: String,
         fd: OwnedFd,
         _seat: Seat<Self>,
-        _user_data: &Self::SelectionUserData,
+        user_data: &Self::SelectionUserData,
     ) {
-        log::info!(
-            "send_selection called: mime={}, has_pending_paste={}",
-            mime_type,
-            self.pending_paste.is_some()
-        );
-        if let Some(ref text) = self.pending_paste {
-            if mime_type.contains("text")
-                || mime_type.contains("string")
-                || mime_type.contains("utf8")
-            {
-                let mut file = std::fs::File::from(fd);
-                let _ = file.write_all(text.as_bytes());
-            }
+        if matches!(
+            mime_type.as_str(),
+            "text/plain;charset=utf-8" | "text/plain" | "UTF8_STRING"
+        ) {
+            crate::compositor::clipboard::send_snapshot(fd, user_data.clone());
         }
     }
 }

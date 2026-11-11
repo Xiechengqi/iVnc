@@ -183,14 +183,6 @@ pub struct SharedState {
     /// Last clipboard hash written by server (to suppress echo)
     pub last_clipboard_write_hash: Arc<Mutex<Option<u64>>>,
 
-    /// Flag: browser sent new clipboard content, compositor should pick it up
-    #[allow(dead_code)]
-    pub clipboard_incoming_dirty: Arc<AtomicBool>,
-
-    /// Channel for browser→compositor clipboard content (replaces dirty flag for new data)
-    pub clipboard_incoming_tx: mpsc::UnboundedSender<String>,
-    pub clipboard_incoming_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
-
     /// Cached keyframe RTP packets for new session replay
     pub keyframe_cache: Arc<Mutex<Vec<Vec<u8>>>>,
 
@@ -244,7 +236,6 @@ impl SharedState {
         proxy_ip: Option<std::net::IpAddr>,
         proxy_autostart: Option<bool>,
     ) -> Self {
-        let (clipboard_incoming_tx, clipboard_incoming_rx) = mpsc::unbounded_channel();
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
         let proxy_panel = Arc::new(ProxyPanelManager::new(
             config.ui_features.proxy_enabled,
@@ -274,9 +265,6 @@ impl SharedState {
             last_webrtc_stats_video: Arc::new(Mutex::new(None)),
             last_webrtc_stats_audio: Arc::new(Mutex::new(None)),
             last_clipboard_write_hash: Arc::new(Mutex::new(None)),
-            clipboard_incoming_dirty: Arc::new(AtomicBool::new(false)),
-            clipboard_incoming_tx,
-            clipboard_incoming_rx: Arc::new(Mutex::new(clipboard_incoming_rx)),
             keyframe_cache: Arc::new(Mutex::new(Vec::new())),
             rtp_subscribers: Arc::new(Mutex::new(Vec::new())),
             audio_subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -391,14 +379,21 @@ impl SharedState {
     }
 
     /// Store clipboard and broadcast to clients
-    pub fn set_clipboard(&self, base64_text: String) {
+    pub fn set_clipboard(&self, base64_text: String, revision: u64, origin: &str) {
         let mut clipboard = self.clipboard.lock().unwrap();
         *clipboard = Some(base64_text.clone());
         if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&base64_text) {
             let total_size = decoded.len();
             if total_size > 8192 {
-                self.send_text(format!("clipboard_start,text/plain,{}", total_size));
-                for chunk in decoded.chunks(4096) {
+                self.send_text(format!(
+                    "clipboard_start,{}",
+                    serde_json::json!({
+                        "mime": "text/plain", "revision": revision, "origin": origin
+                    })
+                ));
+                // Keep intermediate base64 chunks unpadded so legacy clients
+                // can join them before decoding, including split UTF-8 chars.
+                for chunk in decoded.chunks(4095) {
                     let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
                     self.send_text(format!("clipboard_data,{}", encoded));
                 }
@@ -407,7 +402,12 @@ impl SharedState {
             }
         }
 
-        self.send_text(format!("clipboard,{}", base64_text));
+        self.send_text(format!(
+            "clipboard,{}",
+            serde_json::json!({
+                "content": base64_text, "revision": revision, "origin": origin
+            })
+        ));
     }
 
     /// Store binary clipboard and broadcast to clients
@@ -1051,6 +1051,43 @@ mod tests {
         });
         assert_eq!(state.apps_generation.load(Ordering::Relaxed), 2);
         assert_eq!(state.taskbar_apps().apps[0].status, "connected");
+    }
+
+    #[test]
+    fn clipboard_chunks_join_as_valid_base64_with_revision_metadata() {
+        let (input, _) = mpsc::unbounded_channel();
+        let config = Config::default();
+        let state = SharedState::new(
+            config.clone(),
+            UiConfig::from_env(&config),
+            input,
+            Arc::new(RuntimeSettings::new(&config)),
+            None,
+            None,
+        );
+        let mut rx = state.subscribe_text_mpsc();
+        let text = "中文😀\n".repeat(4000);
+        state.set_clipboard(
+            base64::engine::general_purpose::STANDARD.encode(&text),
+            8,
+            "remote",
+        );
+        let start = rx.try_recv().unwrap();
+        assert!(start.starts_with("clipboard_start,"));
+        assert!(start.contains("\"revision\":8"));
+        let mut data = String::new();
+        while let Ok(message) = rx.try_recv() {
+            if message == "clipboard_finish" {
+                break;
+            }
+            data.push_str(message.strip_prefix("clipboard_data,").unwrap());
+        }
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap(),
+            text.as_bytes()
+        );
     }
 
     #[test]

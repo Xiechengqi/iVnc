@@ -23,6 +23,7 @@
  */
 
 import { Queue } from './util.js?v=1';
+import { pasteShortcut } from '../clipboard.js';
 
 /**
  * Class used by frontend to whitelist elements for input
@@ -1549,25 +1550,23 @@ export class Input {
             return;
         }
 
-        // Clipboard shortcuts (Ctrl+C/V/X or Cmd+C/V/X)
-        const isClipboardKey = (code === 'KeyC' || code === 'KeyV' || code === 'KeyX') &&
+        const shortcut = pasteShortcut(event);
+        if (shortcut) {
+            if (this.clipboard?.beginPaste(event, shortcut)) return;
+            // Clipboard sync explicitly disabled: use the remote selection.
+            if (!event.repeat) {
+                this._sendKeyEvent(keysym, code, true);
+                this._sendKeyEvent(keysym, code, false);
+            }
+            _stopEvent(event);
+            return;
+        }
+        const isClipboardKey = (code === 'KeyC' || code === 'KeyX') &&
             (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
         if (isClipboardKey) {
-            if (code === 'KeyV') {
-                var now = Date.now();
-                if (!this._lastPasteKeyTime || (now - this._lastPasteKeyTime >= 1000)) {
-                    this._lastPasteKeyTime = now;
-                    this._sendKeyEvent(keysym, code, true);
-                    this._sendKeyEvent(keysym, code, false); // Immediate keyup to prevent remote key repeat
-                    if (window.__ivncClipboard) window.__ivncClipboard.enablePaste();
-                    // Don't _stopEvent — let browser trigger paste
-                } else {
-                    _stopEvent(event);
-                }
-            } else {
-                this._sendKeyEvent(keysym, code, true);
-                _stopEvent(event);
-            }
+            this.clipboard?.noteCopy();
+            this._sendKeyEvent(keysym, code, true);
+            _stopEvent(event);
             return;
         }
         _stopEvent(event);
@@ -1790,7 +1789,6 @@ export class Input {
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         var mtype = "m";
         let canvas = document.getElementById('videoCanvas');
-        let videoEle = document.getElementById("stream");
         if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
             if (event.button === 1) { 
                 event.preventDefault(); 
@@ -1830,22 +1828,7 @@ export class Input {
                 } else {
                     this.x = 0; this.y = 0;
                 }
-            } else if (window.isManualResolutionMode && videoEle) {
-                // TODO: the below code is redundant, can be made genric to canvas and video element
-                const vidoeRect = videoEle.getBoundingClientRect();
-                if (vidoeRect.width > 0 && vidoeRect.height > 0 && videoEle.width > 0 && videoEle.height > 0) {
-                    const mouseX_on_video = event.clientX - vidoeRect.left;
-                    const mouseY_on_video = event.clientY - vidoeRect.top;
-                    const scaleX = videoEle.width / vidoeRect.width;
-                    const scaleY = videoEle.height / vidoeRect.height;
-                    let serverX = mouseX_on_video * scaleX;
-                    let serverY = mouseY_on_video * scaleY;
-                    this.x = Math.max(0, Math.min(videoEle.width, Math.round(serverX))); // Assign scaled absolute to this.x
-                    this.y = Math.max(0, Math.min(videoEle.height, Math.round(serverY))); // Assign scaled absolute to this.y
-                } else {
-                    this.x = 0; this.y = 0; // Fallback
-                }
-            } else { // Auto resolution mode (non-manual)
+            } else {
                 this._windowMath();
                 if (this.m) {
                     let logicalX_on_element = this._clientToServerX(event.clientX);
@@ -2034,8 +2017,6 @@ export class Input {
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
-        const client_dpr = window.devicePixelRatio || 1; // Actual client DPR
-        const dpr_for_input_coords = this.useCssScaling ? 1 : client_dpr;
         let canvas = document.getElementById('videoCanvas');
 
         if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
@@ -2055,16 +2036,16 @@ export class Input {
             } else {
                 this.x = 0; this.y = 0;
             }
-        } else { // Auto resolution mode (non-manual)
-            if (!this.m) this._windowMath();
+        } else {
+            this._windowMath();
             if (this.m) {
                 let logicalX_on_element = this._clientToServerX(touchPoint.clientX);
                 let logicalY_on_element = this._clientToServerY(touchPoint.clientY);
-                this.x = Math.round(logicalX_on_element * dpr_for_input_coords);
-                this.y = Math.round(logicalY_on_element * dpr_for_input_coords);
+                this.x = logicalX_on_element;
+                this.y = logicalY_on_element;
             } else {
-                this.x = Math.round(touchPoint.clientX * dpr_for_input_coords);
-                this.y = Math.round(touchPoint.clientY * dpr_for_input_coords);
+                this.x = 0;
+                this.y = 0;
             }
         }
     }
@@ -2469,21 +2450,26 @@ export class Input {
     }
 
     _windowMath() {
-        const elementRect = this.element.getBoundingClientRect();
+        const videoEle = document.getElementById("stream");
+        const elementRect = (videoEle || this.element).getBoundingClientRect();
         const windowW = elementRect.width; const windowH = elementRect.height;
         if (windowW <= 0 || windowH <= 0) { this.m = null; return; }
 
         // Use the video element's native resolution as the server coordinate space
-        const videoEle = document.getElementById("stream");
         const frameW = (videoEle && videoEle.videoWidth > 0) ? videoEle.videoWidth : 0;
         const frameH = (videoEle && videoEle.videoHeight > 0) ? videoEle.videoHeight : 0;
         if (frameW <= 0 || frameH <= 0) { this.m = null; return; }
 
-        // object-fit: fill — video stretches to fill the entire element, no offsets
-        const mouseMultiX = frameW / windowW;
-        const mouseMultiY = frameH / windowH;
+        // Manual fitting and resize transitions can have letterboxing. Use the
+        // rendered frame's box for both mouse and touch, without applying DPR twice.
+        const scale = Math.min(windowW / frameW, windowH / frameH);
+        const contain = videoEle?.style.objectFit === 'contain';
+        const contentW = contain ? frameW * scale : windowW;
+        const contentH = contain ? frameH * scale : windowH;
+        const mouseMultiX = frameW / contentW;
+        const mouseMultiY = frameH / contentH;
         this.m = {
-            mouseMultiX, mouseMultiY, mouseOffsetX: 0, mouseOffsetY: 0,
+            mouseMultiX, mouseMultiY, mouseOffsetX: (windowW - contentW) / 2, mouseOffsetY: (windowH - contentH) / 2,
             elementClientX: elementRect.left, elementClientY: elementRect.top,
             frameW, frameH,
         };
@@ -2494,7 +2480,7 @@ export class Input {
         const elementRelativeX = clientX - this.m.elementClientX;
         const viewportRelativeX = elementRelativeX - this.m.mouseOffsetX;
         let serverX = viewportRelativeX * this.m.mouseMultiX;
-        return Math.round(serverX);
+        return Math.max(0, Math.min(this.m.frameW - 1, Math.round(serverX)));
     }
 
     _clientToServerY(clientY) {
@@ -2502,7 +2488,7 @@ export class Input {
         const elementRelativeY = clientY - this.m.elementClientY;
         const viewportRelativeY = elementRelativeY - this.m.mouseOffsetY;
         let serverY = viewportRelativeY * this.m.mouseMultiY;
-        return Math.round(serverY);
+        return Math.max(0, Math.min(this.m.frameH - 1, Math.round(serverY)));
     }
 
     _onFullscreenChange() {
@@ -2530,11 +2516,11 @@ export class Input {
     }
 
     getWindowResolution() {
-        // Return CSS pixel dimensions (even-aligned).
-        // DPR scaling is handled by the caller (sendResolutionToServer / resetToWindowResolution).
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        return [ Math.max(1, w - w % 2), Math.max(1, h - h % 2) ];
+        // Keep CSS dimensions intact. The caller applies DPR and even alignment
+        // once, so odd CSS sizes do not lose extra physical pixels on HiDPI.
+        const w = this.element.parentElement.clientWidth;
+        const h = this.element.parentElement.clientHeight;
+        return [w, h];
     }
 
     resize() {

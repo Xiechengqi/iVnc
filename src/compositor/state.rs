@@ -53,11 +53,11 @@ pub struct Compositor {
     /// Set by surface commit, cleared after rendering
     pub needs_redraw: bool,
 
-    /// Text pending for clipboard paste injection
-    pub pending_paste: Option<String>,
+    /// Generation of the current selection; also fences asynchronous pipe reads.
+    pub clipboard_revision: u64,
 
-    /// Clipboard content set by a Wayland client (to broadcast to browser)
-    pub clipboard_outgoing: Option<String>,
+    /// Prevent concurrent paste transactions from replacing an unread offer.
+    pub clipboard_paste: super::clipboard::PasteGate,
 
     /// Pipe read fd for reading client clipboard data
     pub clipboard_read_fd: Option<OwnedFd>,
@@ -65,11 +65,6 @@ pub struct Compositor {
     /// Deferred clipboard read: mime type to request after event_loop.dispatch()
     /// (smithay updates seat selection AFTER new_selection returns, so we must defer)
     pub clipboard_pending_mime: Option<String>,
-
-    /// Suppress client clipboard reads shortly after browser→compositor clipboard set.
-    /// When set_data_device_selection is called, the focused client may re-assert its
-    /// own selection, triggering new_selection with stale content. We skip those.
-    pub clipboard_suppress_until: Option<std::time::Instant>,
 
     /// Surfaces that have already had their CSD titlebar offset applied
     pub titlebar_adjusted: HashSet<u32>,
@@ -139,11 +134,10 @@ impl Compositor {
             seat,
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
             needs_redraw: false,
-            pending_paste: None,
-            clipboard_outgoing: None,
+            clipboard_revision: 0,
+            clipboard_paste: Default::default(),
             clipboard_read_fd: None,
             clipboard_pending_mime: None,
-            clipboard_suppress_until: None,
             titlebar_adjusted: HashSet::new(),
             csd_retry_count: 0,
             taskbar_dirty: false,

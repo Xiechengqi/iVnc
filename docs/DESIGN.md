@@ -136,9 +136,10 @@ Browser (RTCDataChannel)
 剪贴板流 (浏览器 → 远程应用):
 ═════════════════════════════
 
-Browser clipboard → DataChannel "cw,{base64}" → clipboard_incoming_rx
-      → set_data_device_selection() → Wayland client reads via send_selection()
-      → clipboard_suppress_until 防止回声循环
+Browser paste → DataChannel "paste,{json}" → unified input queue
+      → reserve target → immutable selection → paste shortcut
+      → Wayland client reads the offer snapshot via send_selection()
+      → asynchronous pipe write + EOF → applied acknowledgement
 
 剪贴板流 (远程应用 → 浏览器):
 ═════════════════════════════
@@ -160,7 +161,7 @@ Wayland client copies → new_selection() → clipboard_pending_mime (延迟)
 │  │                                                         │   │
 │  │  - Wayland 协议处理 (event_loop.dispatch)               │   │
 │  │  - 延迟剪贴板请求 (clipboard_pending_mime)              │   │
-│  │  - 浏览器剪贴板注入 (clipboard_incoming_rx)             │   │
+│  │  - 粘贴事务与剪贴板注入 (input_rx)             │   │
 │  │  - 输入事件注入 (drain_input_events)                    │   │
 │  │  - 非阻塞剪贴板 pipe 读取                               │   │
 │  │  - 光标/任务栏状态广播                                   │   │
@@ -210,7 +211,7 @@ Wayland client copies → new_selection() → clipboard_pending_mime (延迟)
 | `audio_sender` | tokio broadcast | Audio Thread → RtcSession | 音频 Opus 包广播 |
 | `text_sender` | tokio broadcast | Main → RtcSession | 光标/剪贴板/统计/任务栏消息 |
 | `input_tx` | mpsc unbounded | RtcSession → Main | 输入事件（键盘/鼠标/窗口操作） |
-| `clipboard_incoming_rx` | mpsc | RtcSession → Main | 浏览器剪贴板数据 |
+| `input_rx` 内剪贴板命令 | mpsc | RtcSession → Main | selection 更新与粘贴事务，与输入保持顺序 |
 
 ---
 
@@ -358,27 +359,11 @@ Axum HTTP 服务器，同端口复用 HTTP/WebSocket/ICE-TCP。
 
 ### 4.1 剪贴板同步
 
-#### 浏览器 → 远程应用
+浏览器在原生 `paste` 事件取得本次文本后发送带操作 ID 的粘贴事务。服务端统一输入队列先绑定目标 surface，完整接收内容后在合成器中设置不可变 selection 并派发快捷键，再向请求会话确认。旧 `cw` 文本同步也使用相同输入队列，不提前广播未应用的内容。
 
-1. 浏览器通过 DataChannel 发送 `cw,{base64}` 消息
-2. `clipboard_incoming_rx` 接收，base64 解码为文本
-3. 调用 `set_data_device_selection()` 设置合成器剪贴板
-4. 设置 `clipboard_suppress_until`（500ms 窗口）防止回声循环
-5. Wayland 客户端通过 `send_selection()` 读取剪贴板内容
+远端复制仍在 `new_selection()` 后延迟请求数据（Smithay 在回调返回后才更新 seat selection）。非阻塞读取绑定 revision，过期读取被丢弃；回传携带 revision 与来源。前端只允许当前视图同步本机剪贴板，并区分浏览器内容回声和远端复制。原有 500ms 抑制窗口已移除。
 
-回声循环防护：当合成器设置剪贴板后，焦点 Wayland 客户端（如 Chromium）会重新断言自己的 `wl_data_source`，触发 `new_selection` 回调。`clipboard_suppress_until` 在 500ms 内抑制这些重新断言，避免旧内容覆盖新内容。
-
-#### 远程应用 → 浏览器
-
-1. Wayland 客户端复制内容，触发 `new_selection()` 回调
-2. `new_selection()` 仅保存 mime type 到 `clipboard_pending_mime`（延迟模式）
-3. 主循环 `event_loop.dispatch()` 后，smithay 已更新 seat selection
-4. 创建非阻塞 pipe，调用 `request_data_device_client_selection()`
-5. 立即 `flush_clients()` 确保客户端收到 fd
-6. 后续循环迭代中非阻塞读取 pipe 数据
-7. EOF 时 base64 编码，通过 `text_sender` 广播到所有 DataChannel
-
-延迟读取原因：smithay 在 `new_selection()` 返回后才更新 `seat_data.clipboard_selection`，在回调内调用 `request_data_device_client_selection()` 会失败。
+Wayland offer 保存独立内容快照，管道写入在有限并发的异步执行器完成，避免大文本阻塞合成器。协议、兼容边界和回归入口见 [CLIPBOARD.md](CLIPBOARD.md)。
 
 ### 4.2 任务栏同步
 
@@ -390,9 +375,13 @@ Axum HTTP 服务器，同端口复用 HTTP/WebSocket/ICE-TCP。
 
 #### 工具栏布局与排序
 
+固定工具栏的高度由统一工作区域管理，视频、输入层、自动分辨率和共享视图使用同一可用区域；嵌入页不重复扣减。手动显示、全屏与坐标映射的细节见 [VIEWPORT.md](VIEWPORT.md)。
+
 工具、可滚动应用区和状态区采用三列布局，右侧状态占据实际宽度。应用节点按键增量更新；拖动、溢出滚动和网络状态变化不会重建应用连接。SQLite 保存 `sort_order` 和排序版本，后台应用监视器把完整顺序、流式应用、普通窗口的 PID 归属及名称元数据缓存到统一快照；主循环读取快照并广播。展示排序独立于应用启动顺序，详见 [工具栏、排序与改名](TOOLBAR.md)。
 
 右键改名使用独立的名称接口和每个应用的 `name_revision`，在事务中校验版本及名称唯一性，一般配置更新不写名称。远程应用只修改本实例的别名。前端编辑器保留输入焦点，隔离远程键盘和 IME 表单提交；按名称版本合并 API 与 DataChannel 结果，同源通知使控制台立即重新查询。改名不更换应用 PID、排序或应用视图。
+
+终端弹窗在初始化前显式注入完整 xterm 样式，避免动态入口遗漏生产构建中的 CSS 而暴露字宽测量字符。最小化保留会话和历史；首次连接与重连不自动清屏。详见 [Web 终端](TERMINAL.md)。
 
 #### 应用标签
 
