@@ -14,7 +14,9 @@ RUN npm run build
 
 FROM rust:1.88-bookworm AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN cat /etc/resolv.conf \
+    && apt-get -o Acquire::Retries=5 update --error-on=any \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     build-essential \
     pkg-config \
     cmake \
@@ -58,8 +60,17 @@ FROM ${RUNTIME_IMAGE}
 ARG AGENT_BROWSER_VERSION=0.29.0
 ARG EXPECTED_RUNTIME_VERSION
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# Ubuntu 24.04 uses deb822 .sources files; older fallback images use .list files.
+# Keep repository suites, components, signing keys and the security source intact.
+RUN set -eu; \
+    for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
+        if [ -f "$source_file" ]; then \
+            sed -i 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g; s|https://archive.ubuntu.com/ubuntu|https://azure.archive.ubuntu.com/ubuntu|g' "$source_file"; \
+        fi; \
+    done; \
+    cat /etc/resolv.conf; \
+    apt-get -o Acquire::Retries=5 update --error-on=any && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     tzdata \
     bash \
     curl \
@@ -85,7 +96,7 @@ RUN apt-get update && \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-x \
     && curl -fL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/google-chrome-stable_current_amd64.deb \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/google-chrome-stable_current_amd64.deb \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends /tmp/google-chrome-stable_current_amd64.deb \
     && rm -f /tmp/google-chrome-stable_current_amd64.deb \
     && curl -fsSL "https://github.com/vercel-labs/agent-browser/releases/download/v${AGENT_BROWSER_VERSION}/agent-browser-linux-x64" -o /usr/local/bin/agent-browser \
     && chmod +x /usr/local/bin/agent-browser \

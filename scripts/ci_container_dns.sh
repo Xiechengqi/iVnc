@@ -11,6 +11,11 @@ build_image="$1"
 build_platform="$2"
 output_file="$3"
 shift 3
+read -r -a probe_hosts <<< "${IVNC_DNS_PROBE_HOSTS:-azure.archive.ubuntu.com security.ubuntu.com deb.nodesource.com registry.npmjs.org sh.rustup.rs static.rust-lang.org index.crates.io github.com}"
+if [[ ${#probe_hosts[@]} == 0 ]]; then
+    echo "::error::No build dependency hostnames were provided for DNS probes." >&2
+    exit 2
+fi
 if [[ $# == 0 ]]; then
     set -- /etc/resolv.conf /run/systemd/resolve/resolv.conf
 fi
@@ -28,17 +33,16 @@ try_dns() {
     echo "Checking build-container DNS: $label"
     docker run --rm --network host --platform "$build_platform" \
         --mount "type=bind,src=$candidate,dst=/etc/resolv.conf,readonly" \
-        "$build_image" timeout --kill-after=2s 20s /bin/bash -ec '
+        "$build_image" timeout --kill-after=2s 30s /bin/bash -ec '
             cat /etc/resolv.conf
-            for hostname in azure.archive.ubuntu.com security.ubuntu.com \
-                deb.nodesource.com registry.npmjs.org sh.rustup.rs \
-                static.rust-lang.org index.crates.io github.com; do
+            for hostname in "$@"; do
+                echo "Resolving build dependency: $hostname"
                 if ! getent ahostsv4 "$hostname" >/dev/null; then
                     echo "DNS lookup failed: $hostname" >&2
                     exit 1
                 fi
             done
-        ' || status=$?
+        ' -- "${probe_hosts[@]}" || status=$?
     if [[ "$status" == 0 ]]; then
         cp -- "$candidate" "$output_file" || exit 1
         echo "Selected build-container DNS: $label"

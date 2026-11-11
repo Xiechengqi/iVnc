@@ -352,6 +352,19 @@ Ubuntu 22.04 镜像和网络模式中依次测试 runner 的 `/etc/resolv.conf`�
 容器继续使用 Azure Ubuntu 镜像源和 Ubuntu 安全更新源，APT 索引更新启用重试及
 `--error-on=any`，索引下载失败时立即终止构建，防止使用不完整索引继续安装。
 
+Docker 镜像发布由另一个 job 中的 BuildKit 执行，不会继承独立二进制构建容器的 DNS
+挂载。该 job 单独在 Ubuntu 24.04 容器中预检 Ubuntu、Debian、npm、Cargo、GitHub
+及 Chrome 下载域名，将通过的解析器写入 BuildKit 的 `[dns]` 配置。BuildKit 容器与
+构建中的 `RUN` 指令均使用 runner 的 host 网络，让本地 DNS stub 可达；首次构建和
+两次重试采用同样的配置。这些设置仅作用于 CI 构建网络，不改变发布镜像的运行网络。
+需要手动运行 DNS 预检时，可用 `IVNC_DNS_PROBE_HOSTS` 指定一行以空格分隔的域名。
+
+Dockerfile 的 Debian 编译阶段和 Ubuntu 运行时阶段均要求 APT 索引完整更新后再安装，
+并对索引和软件包下载启用重试。Ubuntu 运行时将 archive 源切换到 Azure 镜像，兼容
+Ubuntu 24.04 的 deb822 `.sources` 和旧版 `.list` 格式，保留发行版、仓库组件、签名
+密钥及 security 源。若某个源无法访问，构建会直接报告索引下载错误，避免继续安装后
+将索引缺失误报为软件包不存在。
+
 ## 验证
 
 ```bash

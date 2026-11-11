@@ -117,6 +117,20 @@ sys.exit(status)
         self.assertEqual(len(self.calls("probe")), 1)
         self.assertIn("container could not run", result.stderr)
 
+    def test_build_specific_hostnames_are_passed_as_separate_probe_arguments(self):
+        hosts = ["deb.debian.org", "security.ubuntu.com", "dl.google.com"]
+        result = self.run_helper([self.resolver("runner.conf", "127.0.0.53")],
+                                 {"127.0.0.53": 0}, IVNC_DNS_PROBE_HOSTS=" ".join(hosts))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        probe = self.calls("probe")[0]
+        self.assertEqual(probe["args"][probe["args"].index("--") + 1:], hosts)
+
+    def test_empty_host_list_cannot_pass_without_any_dns_lookup(self):
+        result = self.run_helper([], IVNC_DNS_PROBE_HOSTS="   ")
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.calls_file.exists())
+        self.assertFalse(self.output.exists())
+
     def run_workflow_build(self, status):
         workflow = (ROOT / ".github/workflows/build-release.yml").read_text()
         run = workflow.split("      - name: Build binary in Docker container\n        run: |\n", 1)[1]
@@ -145,6 +159,56 @@ sys.exit(status)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.calls("build"), [])
         self.assertFalse(self.output.exists())
+
+    def run_workflow_buildkit_preparation(self, status):
+        workflow = (ROOT / ".github/workflows/build-release.yml").read_text()
+        step = workflow.split("      - name: Prepare Docker build DNS\n", 1)[1].split("\n      - name:", 1)[0]
+        env = step.split("          IVNC_DNS_PROBE_HOSTS: >-\n", 1)[1].split("        run: |\n", 1)[0]
+        hosts = " ".join(env.split())
+        run = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        self.github_output = self.root / "github-output"
+        return subprocess.run(["bash", "-e", "-c", run], cwd=self.workspace,
+                              env=dict(self.env, DNS_TEST_DEFAULT_STATUS=str(status),
+                                       IVNC_DNS_PROBE_HOSTS=hosts, GITHUB_OUTPUT=str(self.github_output)),
+                              capture_output=True, text=True, timeout=10)
+
+    def test_buildkit_configuration_preserves_the_probed_dns_addresses(self):
+        result = self.run_workflow_buildkit_preparation(0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config_file = self.output.parent / "ivnc-buildkitd.toml"
+        config = config_file.read_text()
+        self.assertTrue(config.startswith("[dns]\n"))
+        nameservers = json.loads(re.search(r"^nameservers = (.*)$", config, re.M)[1])
+        options = json.loads(re.search(r"^options = (.*)$", config, re.M)[1])
+        probe = self.calls("probe")[-1]
+        tested_addresses = [line.split()[1] for line in probe["config"].splitlines()
+                            if line.startswith("nameserver ")]
+        self.assertEqual(nameservers, tested_addresses)
+        self.assertEqual(options, ["timeout:2", "attempts:2"])
+        self.assertEqual(self.github_output.read_text(), f"config={config_file}\n")
+        self.assertIn("ubuntu:24.04", probe["args"])
+        self.assertIn("deb.debian.org", probe["args"])
+        self.assertIn("dl.google.com", probe["args"])
+
+    def test_buildkit_configuration_is_not_exported_when_dns_preflight_fails(self):
+        result = self.run_workflow_buildkit_preparation(1)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse((self.output.parent / "ivnc-buildkitd.toml").exists())
+        self.assertFalse(self.github_output.exists())
+
+    def test_all_image_build_attempts_use_the_prepared_dns_and_host_network(self):
+        workflow = (ROOT / ".github/workflows/build-release.yml").read_text()
+        job = workflow.split("\n  docker:\n", 1)[1].split("\n  release:\n", 1)[0]
+        setup = job.split("uses: docker/setup-buildx-action@v3\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("buildkitd-config: ${{ steps.buildkit-dns.outputs.config }}", setup)
+        self.assertIn("driver-opts: network=host", setup)
+        self.assertIn("buildkitd-flags: --allow-insecure-entitlement network.host", setup)
+        attempts = job.split("uses: docker/build-push-action@v6\n")[1:]
+        self.assertEqual(len(attempts), 3)
+        for attempt in attempts:
+            inputs = attempt.split("\n      - name:", 1)[0]
+            self.assertIn("network: host", inputs)
+            self.assertIn("allow: network.host", inputs)
 
 
 if __name__ == "__main__":
