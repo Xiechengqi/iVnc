@@ -65,6 +65,7 @@ const MAIN_I18N = {
 		terminalPin: '置顶终端',
 		terminalUnpin: '取消终端置顶',
 		terminalPinned: '终端置顶',
+		terminalRestore: '还原窗口位置和大小',
 		consoleTitle: '控制台',
 		proxyTitle: '代理',
 		consoleFrameTitle: 'iVnc 控制台',
@@ -161,6 +162,7 @@ const MAIN_I18N = {
 		terminalPin: 'Pin terminal on top',
 		terminalUnpin: 'Unpin terminal',
 		terminalPinned: 'Terminal always on top',
+		terminalRestore: 'Restore window position and size',
 		consoleTitle: 'Console',
 		proxyTitle: 'Proxy',
 		consoleFrameTitle: 'iVnc Console',
@@ -699,7 +701,6 @@ function InitUI() {
 	.web-terminal-floating.window-interacting > .web-terminal-header { cursor: grabbing; }
 	.web-terminal-floating .web-terminal-actions { position: relative; z-index: 4; }
 	.web-terminal-floating[data-terminal-pinned="true"] { z-index: 1900; }
-	.web-terminal-pin[aria-pressed="true"] { color: #a6ccff; background: #2b4c76; }
 	.web-terminal-action:focus-visible { outline: 2px solid #8bbcff; outline-offset: 1px; }
 	.web-terminal-resize { position: absolute; z-index: 3; touch-action: none; }
 	.resize-n, .resize-s { left: var(--terminal-resize-corner); right: var(--terminal-resize-corner); height: var(--terminal-resize-hit); cursor: ns-resize; }
@@ -759,6 +760,24 @@ function InitUI() {
 		background: rgba(255, 255, 255, 0.16);
 		color: #fff;
 	}
+	.web-terminal-modal[data-terminal-background] .web-terminal-action {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		flex: 0 0 24px;
+	}
+	.web-terminal-background[aria-pressed="true"] .web-terminal-background-solid { display: none; }
+	.web-terminal-pin { transition: background-color 150ms ease, color 150ms ease; }
+	.web-terminal-pin > svg { transform: rotate(-35deg); transition: transform 150ms ease; }
+	.web-terminal-pin[aria-pressed="true"] { color: #a6ccff; background: #2b4c76; }
+	.web-terminal-pin[aria-pressed="true"] > svg { transform: rotate(0deg); }
+	.web-terminal-pin[aria-pressed="true"]:hover,
+	.web-terminal-pin[aria-pressed="true"]:focus-visible { color: #c4deff; background: #355d8e; }
+	.web-terminal-pin[aria-pressed="true"]:active { color: #c4deff; background: #244268; }
+	@media (prefers-reduced-motion: reduce) {
+		.web-terminal-pin, .web-terminal-pin > svg { transition: none; }
+	}
 	.web-terminal-body {
 		flex: 1;
 		min-height: 0;
@@ -794,16 +813,6 @@ function InitUI() {
 	.web-terminal-modal[data-terminal-background] .web-terminal-status {
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-	.web-terminal-background {
-		width: auto;
-		padding: 0 8px;
-		font: inherit;
-		white-space: nowrap;
-	}
-	.web-terminal-background:focus-visible {
-		outline: 2px solid #8bbcff;
-		outline-offset: 1px;
 	}
 	.web-console-modal {
 		width: var(--ivnc-console-width, min(1080px, calc(100vw - 48px)));
@@ -1525,7 +1534,7 @@ function createWebTerminalController() {
 	let controller = null;
 	const backgroundStorageKey = 'ivnc.terminal.background';
 	let backgroundMode = readBackgroundMode();
-	const unsubscribeBackgroundLanguage = onLangChange(renderBackgroundMode);
+	const unsubscribeTerminalLanguage = onLangChange(renderTerminalActions);
 	window.addEventListener('storage', handleBackgroundStorage);
 
 	const terminalSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
@@ -1538,13 +1547,12 @@ function createWebTerminalController() {
 		}
 	}
 
-	function renderBackgroundMode() {
+	function renderTerminalActions() {
 		if (!modal) return;
 		modal.dataset.terminalBackground = backgroundMode;
 		const translucent = backgroundMode === 'translucent';
 		const button = modal.querySelector('#web-terminal-background');
-		button.textContent = tt(translucent ? 'terminalBackgroundTranslucent' : 'terminalBackgroundOpaque');
-		button.title = tt(translucent ? 'terminalSwitchToOpaque' : 'terminalSwitchToTranslucent');
+		button.title = `${tt(translucent ? 'terminalBackgroundTranslucent' : 'terminalBackgroundOpaque')} · ${tt(translucent ? 'terminalSwitchToOpaque' : 'terminalSwitchToTranslucent')}`;
 		// Keep the accessible name stable while aria-pressed describes the mode.
 		button.setAttribute('aria-label', tt('terminalTranslucentBackground'));
 		button.setAttribute('aria-pressed', String(translucent));
@@ -1555,6 +1563,9 @@ function createWebTerminalController() {
 		pinButton.title = tt(floating?.isPinned() ? 'terminalUnpin' : 'terminalPin');
 		pinButton.setAttribute('aria-label', tt('terminalPinned'));
 		pinButton.setAttribute('aria-pressed', String(!!floating?.isPinned()));
+		const restoreButton = modal.querySelector('#web-terminal-restore');
+		restoreButton.title = tt('terminalRestore');
+		restoreButton.setAttribute('aria-label', tt('terminalRestore'));
 	}
 
 	function handleBackgroundStorage(event) {
@@ -1565,7 +1576,7 @@ function createWebTerminalController() {
 			return;
 		}
 		backgroundMode = readBackgroundMode();
-		renderBackgroundMode();
+		renderTerminalActions();
 	}
 
 	function setButton(btn) {
@@ -1603,18 +1614,24 @@ function createWebTerminalController() {
 			<div class="web-terminal-header">
 				<div class="web-terminal-title">${terminalSvgSmall}<span>Terminal</span><span class="web-terminal-status">connecting</span></div>
 				<div class="web-terminal-actions">
-					<button class="web-terminal-action web-terminal-background" id="web-terminal-background" type="button"></button>
-					<button class="web-terminal-action web-terminal-pin" id="web-terminal-pin" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M16 3l5 5-4 1-3 5v4l-3-3-5 6 2-8-3-3h4l5-3z"/></svg></button>
+					<button class="web-terminal-action web-terminal-background" id="web-terminal-background" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><path d="M6 4h6v16H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" fill="currentColor" stroke="none"/><path class="web-terminal-background-solid" d="M12 4h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6Z" fill="currentColor" stroke="none"/><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
+					<button class="web-terminal-action web-terminal-pin" id="web-terminal-pin" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 3h6l-1 6 4 4v2H6v-2l4-4-1-6Z"/><path d="M12 15v7"/></svg></button>
+					<button class="web-terminal-action" id="web-terminal-restore" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg></button>
 					<button class="web-terminal-action" id="web-terminal-minimize" type="button" title="${tt('minimize')}">_</button>
 				</div>
 			</div>
 			<div class="web-terminal-body" id="web-terminal-body"></div>
 		`;
-		renderBackgroundMode();
+		renderTerminalActions();
 		document.body.appendChild(modal);
 		modal.querySelector('#web-terminal-pin').addEventListener('click', event => {
 			event.stopPropagation();
-			floating.setPinned(!floating.isPinned()); renderBackgroundMode();
+			floating.setPinned(!floating.isPinned()); renderTerminalActions();
+			if (event.detail > 0) terminal?.focus();
+		});
+		modal.querySelector('#web-terminal-restore').addEventListener('click', event => {
+			event.stopPropagation();
+			floating.resetGeometry();
 			if (event.detail > 0) terminal?.focus();
 		});
 		modal.querySelector('#web-terminal-background').addEventListener('click', (event) => {
@@ -1625,7 +1642,7 @@ function createWebTerminalController() {
 			} catch (_) {
 				// Keep the in-memory choice when browser storage is unavailable.
 			}
-			renderBackgroundMode();
+			renderTerminalActions();
 			// Mouse users can keep typing; keyboard users retain the button focus.
 			if (event.detail > 0) terminal?.focus();
 		});
@@ -1679,7 +1696,7 @@ function createWebTerminalController() {
 			onResize: () => { clearTimeout(resizeTimer); resizeTimer = null; fitAndResize(); },
 			onInteraction: () => { releaseOverlayInput(); terminal?.focus(); },
 		});
-		renderBackgroundMode();
+		renderTerminalActions();
 		modal.addEventListener('pointerdown', (event) => {
 			if (!event.target.closest('.web-terminal-actions')) terminal?.focus();
 		});
@@ -1920,7 +1937,7 @@ function createWebTerminalController() {
 		} catch (_) {}
 		terminal?.dispose();
 		modal?.remove();
-		unsubscribeBackgroundLanguage();
+		unsubscribeTerminalLanguage();
 		window.removeEventListener('storage', handleBackgroundStorage);
 		window.removeEventListener('beforeunload', destroy);
 		unregisterOverlayController(controller);

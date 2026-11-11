@@ -47,6 +47,17 @@ async function waitFor(name, fn, timeout = 30000) {
 const pass = name => { ++passed; console.log(`PASS ${name}`); };
 const backgroundStorageKey = 'ivnc.terminal.background';
 const backgroundMode = () => evaluate(`document.querySelector('[data-terminal-background]')?.dataset.terminalBackground`);
+async function assertBackgroundIcon(translucent) {
+    const icon = await evaluate(`(() => {
+        const button=document.getElementById('web-terminal-background'),svg=button.querySelector('svg');
+        return {text:button.textContent.trim(),hidden:svg?.getAttribute('aria-hidden'),
+            solid:getComputedStyle(button.querySelector('.web-terminal-background-solid')).display,
+            width:button.offsetWidth,height:button.offsetHeight};
+    })()`);
+    assert.equal(icon.text, ''); assert.equal(icon.hidden, 'true');
+    assert.equal(icon.solid === 'none', translucent);
+    assert.equal(icon.width, 24); assert.equal(icon.height, 24);
+}
 const rowsExpression = `[...document.querySelectorAll('.xterm-rows > div')].map(n=>n.textContent.trimEnd())`;
 const rows = () => evaluate(rowsExpression);
 const expectLine = text => waitFor(`rendered line ${text}`, async () => (await rows()).includes(text));
@@ -207,17 +218,20 @@ try {
 
     assert.equal(await backgroundMode(),'translucent');
     assert.equal(await evaluate(`document.getElementById('web-terminal-background').getAttribute('aria-pressed')`),'true');
+    await assertBackgroundIcon(true);
     assertPixels(await backgroundPixels('#ff0000'),[43,5,6,255]);
     assertPixels(await backgroundPixels('#00ff00','translucent.png'),[4,43,6,255]);
     pass('first open defaults to 85% background opacity in both padding and terminal cells');
 
     const beforeAppearance=await rows();
     const beforeInput=await evaluate(`window.__terminalSent.filter(m=>m.type==='input').length`);
-    await evaluate(`window.__appearanceTerminal=document.querySelector('.xterm')`);
+    await evaluate(`window.__appearanceTerminal=document.querySelector('.xterm');window.__appearanceIcon=document.querySelector('#web-terminal-background svg')`);
     await clickBackground();
     assert.equal(await backgroundMode(),'opaque');
     assert.equal(await evaluate(`localStorage.getItem(${JSON.stringify(backgroundStorageKey)})`),'opaque');
     assert.equal(await evaluate(`document.getElementById('web-terminal-background').getAttribute('aria-pressed')`),'false');
+    await assertBackgroundIcon(false);
+    assert(await evaluate(`__appearanceIcon===document.querySelector('#web-terminal-background svg')`));
     assert(await evaluate(`document.activeElement===document.querySelector('.xterm-helper-textarea')`));
     assertPixels(await backgroundPixels('#ff0000'),[5,6,7,255]);
     assertPixels(await backgroundPixels('#00ff00','opaque.png'),[5,6,7,255]);
@@ -346,10 +360,17 @@ try {
     await evaluate(`window.__backgroundPeer=document.createElement('iframe');__backgroundPeer.hidden=true;document.body.appendChild(__backgroundPeer);
         __backgroundPeer.contentWindow.localStorage.setItem(${JSON.stringify(backgroundStorageKey)},'translucent')`);
     await waitFor('peer appearance change',async()=>await backgroundMode()==='translucent');
-    for (const [lang,label,title] of [['zh','半透明','切换为不透明背景'],['en','Translucent','Switch to opaque background']]) {
+    for (const [lang,title,label,restore] of [
+        ['zh','半透明 · 切换为不透明背景','半透明背景','还原窗口位置和大小'],
+        ['en','Translucent · Switch to opaque background','Translucent background','Restore window position and size']
+    ]) {
         await evaluate(`__backgroundPeer.contentWindow.localStorage.setItem('ivnc.lang',${JSON.stringify(lang)})`);
-        await waitFor('localized appearance button',()=>evaluate(`document.getElementById('web-terminal-background').textContent===${JSON.stringify(label)}`));
+        await waitFor('localized appearance button',()=>evaluate(`document.getElementById('web-terminal-background').title===${JSON.stringify(title)}`));
         assert.equal(await evaluate(`document.getElementById('web-terminal-background').title`),title);
+        assert.equal(await evaluate(`document.getElementById('web-terminal-background').getAttribute('aria-label')`),label);
+        assert.equal(await evaluate(`document.getElementById('web-terminal-restore').title`),restore);
+        assert.equal(await evaluate(`document.getElementById('web-terminal-restore').getAttribute('aria-label')`),restore);
+        await assertBackgroundIcon(true);
         await assertLayout();
     }
     await evaluate(`__backgroundPeer.contentWindow.sessionStorage.setItem(${JSON.stringify(backgroundStorageKey)},'opaque')`);

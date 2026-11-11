@@ -45,13 +45,23 @@ export function createFloatingWindow({ modal, getScale, getBounds, getLimits, on
         Object.assign(modal.style, { left: `${left}px`, top: `${top}px`, width: `${width / scale}px`, height: `${height / scale}px`, transform: `scale(${scale})` });
     }
     function layout() { if (!frame) frame = requestAnimationFrame(paint); }
-    function finish(rollback = false) {
-        if (!gesture) return;
+    function stopGesture(rollback = false) {
+        if (!gesture) return false;
         const previous = gesture; gesture = null;
         if (rollback) state = previous.state;
         try { previous.target.releasePointerCapture(previous.id); } catch (_) {}
         modal.classList.remove('window-interacting');
         if (frame) { cancelAnimationFrame(frame); frame = 0; }
+        return true;
+    }
+    function finish(rollback = false) {
+        if (!stopGesture(rollback)) return;
+        paint(); save(); onResize();
+    }
+    function resetGeometry() {
+        stopGesture();
+        if (frame) cancelAnimationFrame(frame);
+        state = { ...state, width: defaults.width, height: defaults.height, x: defaults.x, y: defaults.y };
         paint(); save(); onResize();
     }
     listen(modal, 'pointerdown', event => {
@@ -108,6 +118,7 @@ export function createFloatingWindow({ modal, getScale, getBounds, getLimits, on
         layout: () => { if (frame) cancelAnimationFrame(frame); paint(); },
         isPinned: () => state.pinned,
         setPinned(value) { state.pinned = !!value; modal.dataset.terminalPinned = String(state.pinned); save(); },
+        resetGeometry,
         cancel: () => finish(),
         destroy() { finish(); events.abort(); cancelAnimationFrame(frame); },
     };

@@ -57,6 +57,12 @@ const consoleWindow = `document.querySelector('iframe[title="iVnc Console"], ifr
 const con = expression => evaluate(`(() => {const w=${consoleWindow};return w.eval(${JSON.stringify(expression)});})()`);
 const rectCode = node => `(() => {const r=${node}.getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height};})()`;
 const terminalRect = () => evaluate(rectCode(`document.querySelector('[data-terminal-background]')`));
+const pinAppearance = () => evaluate(`(() => {
+    const button=document.querySelector('#web-terminal-pin'),style=getComputedStyle(button);
+    const transform=new DOMMatrixReadOnly(getComputedStyle(button.querySelector('svg')).transform);
+    return {pressed:button.getAttribute('aria-pressed'),background:style.backgroundColor,
+        angle:Math.atan2(transform.b,transform.a)*180/Math.PI};
+})()`);
 const isTerminalOpen = () => evaluate(`!!document.querySelector('[data-terminal-background]:not(.minimized)')`);
 const consoleOpen = () => evaluate(`!![...document.querySelectorAll('.web-console-modal')].find(n=>n.querySelector('#web-console-minimize')&&!n.classList.contains('minimized'))`);
 const childOpen = () => con(`!!document.querySelector('.modal-bg.show')`);
@@ -101,6 +107,15 @@ async function assertBounds() {
     assert(r.left>=area.left+7 && r.top>=area.top+7 && r.right<=area.right-7 && r.bottom<=area.bottom-7,JSON.stringify({r,area}));
     const dimensions=await evaluate(`window.__terminalSent.filter(m=>m.type==='resize').at(-1)`);
     assert(dimensions.cols>=20&&dimensions.cols<=400&&dimensions.rows>=5&&dimensions.rows<=160);
+}
+async function assertDefaultGeometry() {
+    await assertBounds();
+    const r=await terminalRect(),area=await evaluate(rectCode(`document.querySelector('.video-container')`));
+    const scale=await evaluate(`Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale'))`);
+    assert(Math.abs(r.width-Math.min(920*scale,area.width-16))<1,JSON.stringify({r,area,scale}));
+    assert(Math.abs(r.height-Math.min(560*scale,area.height-16))<1,JSON.stringify({r,area,scale}));
+    assert(Math.abs(r.left+r.width/2-(area.left+area.right)/2)<1);
+    assert(Math.abs(r.top+r.height/2-(area.top+area.bottom)/2)<1);
 }
 try {
     launch(binary,['--config',config,'--http-port',String(port),'--basic-auth-enabled','false','--proxy-enabled','false','--proxy-autostart','false','--width','800','--height','600'],'server',{env,cwd:root});
@@ -244,7 +259,31 @@ try {
     assert(!await evaluate(`__terminalSent.slice(${count}).some(m=>m.type==='input')`));
     pass('all eight resize handles and work-area limits behave consistently without sending terminal input');
 
-    await click('#web-terminal-pin');assert.equal(await evaluate(`document.querySelector('#web-terminal-pin').getAttribute('aria-pressed')`),'true');
+    await mouse('mouseMoved',8,8);
+    await waitFor('unpinned diagonal icon',async()=>{const p=await pinAppearance();return p.pressed==='false'&&Math.abs(p.angle+35)<.1&&p.background==='rgba(255, 255, 255, 0.08)'});
+    const actionsInput=await evaluate(`__terminalSent.filter(m=>m.type==='input').length`);
+    await click('#web-terminal-pin');await mouse('mouseMoved',8,8);
+    await waitFor('pinned vertical icon',async()=>{const p=await pinAppearance();return p.pressed==='true'&&Math.abs(p.angle)<.1&&p.background==='rgb(43, 76, 118)'});
+    const pinPoint=await point('#web-terminal-pin');await mouse('mouseMoved',pinPoint.x,pinPoint.y);
+    await waitFor('pinned hover stays blue',async()=>(await pinAppearance()).background==='rgb(53, 93, 142)');
+    await screenshot('terminal-pinned-hover.png');
+    await mouse('mousePressed',pinPoint.x,pinPoint.y);
+    await waitFor('pinned active stays blue',async()=>(await pinAppearance()).background==='rgb(36, 66, 104)');
+    await mouse('mouseReleased',pinPoint.x,pinPoint.y);
+    await waitFor('unpinned hover has no selected highlight',async()=>{const p=await pinAppearance();return p.pressed==='false'&&Math.abs(p.angle+35)<.1&&p.background==='rgba(255, 255, 255, 0.16)'});
+    await click('#web-terminal-pin');await mouse('mouseMoved',8,8);
+    await evaluate(`document.querySelector('#web-terminal-restore').focus()`);
+    await key('Tab','Tab',9,8);
+    await waitFor('pinned keyboard focus stays blue',async()=>(await pinAppearance()).background==='rgb(53, 93, 142)');
+    await key(' ','Space',32,0,' ');await waitFor('keyboard unpin',async()=>(await pinAppearance()).pressed==='false');
+    await key('Enter','Enter',13,0,'\r');await waitFor('keyboard pin',async()=>(await pinAppearance()).pressed==='true');
+    assert.equal(await evaluate('document.activeElement.id'),'web-terminal-pin');
+    assert.equal(await evaluate(`__terminalSent.filter(m=>m.type==='input').length`),actionsInput);
+    await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+    assert(await evaluate(`getComputedStyle(document.querySelector('#web-terminal-pin')).transitionDuration==='0s'&&getComputedStyle(document.querySelector('#web-terminal-pin svg')).transitionDuration==='0s'`));
+    await call('Emulation.setEmulatedMedia',{features:[]});
+    pass('pin direction and selected colors survive real hover, active and keyboard focus; reduced motion disables transitions');
+
     await clickPoint(8,8);assert(await isTerminalOpen());
     await click('#console-btn');assert(await isTerminalOpen());assert(await consoleOpen());
     await openAdd();assert(await evaluate(`getComputedStyle(document.querySelector('.has-child-dialog')).zIndex>getComputedStyle(document.querySelector('[data-terminal-background]')).zIndex`));
@@ -254,9 +293,48 @@ try {
     assert(Math.abs((await terminalRect()).width-savedRect.width)<1);
     pass('pinning survives tool switches and manual minimization while console child dialogs receive priority');
 
+    await evaluate(`window.__restoreTerminal=document.querySelector('.xterm');window.__restoreSocket=__terminalSockets[0];document.querySelector('.xterm-helper-textarea').focus()`);
+    await call('Input.insertText',{text:"printf 'RESTORE_ALIVE\\n'"});await key('Enter','Enter',13,0,'\r');
+    await waitFor('restore session marker',()=>evaluate(`[...document.querySelectorAll('.xterm-rows>div')].some(n=>n.textContent.trim()==='RESTORE_ALIVE')`));
+    await click('#web-terminal-background');
+    assert.equal(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalBackground`),'opaque');
+    const restoreInput=await evaluate(`__terminalSent.filter(m=>m.type==='input').length`);
+    await click('#web-terminal-restore');await assertDefaultGeometry();
+    assert(await evaluate(`__restoreTerminal===document.querySelector('.xterm')&&__terminalSockets.length===1&&__restoreSocket===__terminalSockets[0]&&__restoreSocket.readyState===1`));
+    assert(await evaluate(`[...document.querySelectorAll('.xterm-rows>div')].some(n=>n.textContent.trim()==='RESTORE_ALIVE')`));
+    assert(await evaluate(`document.activeElement===document.querySelector('.xterm-helper-textarea')`));
+    const stateKey=await evaluate(`'ivnc.terminal.window.v1:'+location.pathname`);
+    const defaultPinned={width:920,height:560,x:.5,y:.5,pinned:true};
+    assert.deepEqual(await evaluate(`JSON.parse(sessionStorage.getItem(${JSON.stringify(stateKey)}))`),defaultPinned);
+    assert.equal(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalBackground`),'opaque');
+    await delay(150);const resetResizes=await evaluate(`__terminalSent.filter(m=>m.type==='resize').length`);
+    for(let i=0;i<3;i++)await click('#web-terminal-restore');
+    await delay(150);assert.equal(await evaluate(`__terminalSent.filter(m=>m.type==='resize').length`),resetResizes);
+    assert.equal(await evaluate(`__terminalSent.filter(m=>m.type==='input').length`),restoreInput);
+    await click('#web-terminal-minimize');await click('#terminal-btn');await assertDefaultGeometry();
+    await screenshot('terminal-restored.png');
+    pass('restore centers the default size, saves geometry, retains pin/background/session/history and avoids redundant PTY resizes');
+
+    for(const [name,code,keyCode,text] of [['Enter','Enter',13,'\r'],[' ','Space',32,' ']]) {
+        await drag('.resize-se',-90,-60);
+        await evaluate(`document.querySelector('#web-terminal-restore').focus()`);
+        await key(name,code,keyCode,0,text);await assertDefaultGeometry();
+        assert.equal(await evaluate('document.activeElement.id'),'web-terminal-restore');
+    }
+    const dragPoint=await point('.web-terminal-floating .web-terminal-title');
+    await mouse('mousePressed',dragPoint.x,dragPoint.y);await mouse('mouseMoved',dragPoint.x+30,dragPoint.y+20);
+    await evaluate(`document.querySelector('#web-terminal-restore').click()`);
+    await mouse('mouseMoved',dragPoint.x+60,dragPoint.y+40);await mouse('mouseReleased',dragPoint.x+60,dragPoint.y+40);
+    await evaluate(`window.dispatchEvent(new Event('ivnc-overlay-layout'));document.querySelector('#web-terminal-restore').click()`);
+    await delay(150);await assertDefaultGeometry();
+    assert(!await evaluate(`document.querySelector('[data-terminal-background]').classList.contains('window-interacting')`));
+    assert.equal(await evaluate(`__terminalSent.filter(m=>m.type==='input').length`),restoreInput);
+    pass('Enter and Space restore without shell input; restoring during a captured drag cancels stale gestures and pending layouts');
+
     await evaluate(`window.__originalConsoleDocument=${consoleWindow}.document;window.__originalTerminal=document.querySelector('.xterm');document.querySelector('#overlayInput').focus()`);
     await key('F','KeyF',70,10);
     await waitFor('whole-page fullscreen',()=>evaluate('document.fullscreenElement===document.documentElement'));
+    await click('#web-terminal-restore');await assertDefaultGeometry();
     assert(await isTerminalOpen());assert(await evaluate(`__originalConsoleDocument===${consoleWindow}.document&&__originalTerminal===document.querySelector('.xterm')&&!document.pointerLockElement`));
     await evaluate('document.exitFullscreen()');await delay(150);
     assert(await evaluate(`__originalConsoleDocument===${consoleWindow}.document&&__terminalSockets.length===1`));
@@ -265,12 +343,17 @@ try {
 
     for(const [width,height,dpr] of [[375,600,2],[640,480,1],[1280,800,2],[4096,2160,1]]) {
         await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:dpr,mobile:false});await delay(250);await assertBounds();
+        await click('#web-terminal-restore');await assertDefaultGeometry();
     }
     await drag('.resize-ne',3500,-1600);await assertBounds();
     assert((await evaluate(`__terminalSent.filter(m=>m.type==='resize').at(-1)`)).cols<=400);
     await call('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});await delay(200);
     await evaluate(`postMessage({type:'setScaleLocally',value:true},location.origin);postMessage({type:'setManualResolution',width:1920,height:1080},location.origin)`);
     await waitFor('desktop scaled',()=>evaluate(`Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale'))<.9`));
+    // The desktop scale is published before floating-window paints its next
+    // frame; wait for that frame before taking a real pointer target.
+    await waitFor('scaled floating window painted',()=>evaluate(`Math.abs(new DOMMatrixReadOnly(getComputedStyle(document.querySelector('[data-terminal-background]')).transform).a-Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale')))<.001`));
+    await click('#web-terminal-restore');await assertDefaultGeometry();
     await assertBounds();await drag('.web-terminal-floating .web-terminal-title',-40,-25);await assertBounds();
     const pinBefore=await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalPinned`);
     await click('#web-terminal-pin');assert.notEqual(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalPinned`),pinBefore);
@@ -278,18 +361,45 @@ try {
     await evaluate(`postMessage({type:'resetResolutionToWindow'},location.origin)`);await delay(250);await assertBounds();
     pass('DPR, narrow and large viewports, manual scaling and fixed toolbar changes preserve reachable geometry and protocol limits');
 
-    const stateKey=await evaluate(`Object.keys(sessionStorage).find(k=>k.startsWith('ivnc.terminal.window.v1:'))`);
+    const toolbarPinned=await evaluate(`document.querySelector('.taskbar').classList.contains('pinned')`);
+    for(const pinned of [!toolbarPinned,toolbarPinned]) {
+        await evaluate(`document.querySelector('.taskbar-pin').click()`);
+        await waitFor('toolbar pin change',()=>evaluate(`document.querySelector('.taskbar').classList.contains('pinned')===${pinned}`));
+        await delay(250);await click('#web-terminal-restore');await assertDefaultGeometry();
+    }
+    pass('restore follows fullscreen, DPR, narrow/large screens, desktop scaling and fixed/unfixed toolbar work areas');
+
     const stored=await evaluate(`JSON.parse(sessionStorage.getItem(${JSON.stringify(stateKey)}))`);
     await evaluate('window.__windowUiReloading=true');await call('Page.reload');
     await waitFor('reloaded desktop',()=>evaluate(`!window.__windowUiReloading&&!!document.querySelector('#terminal-btn')`));await click('#terminal-btn');
     await waitFor('restored terminal',()=>evaluate(`__terminalSent.some(m=>m.type==='resize')`));await assertBounds();
     assert.equal(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalPinned`),'true');
+    await assertDefaultGeometry();
+    assert.equal(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalBackground`),'opaque');
     assert.deepEqual(await evaluate(`JSON.parse(sessionStorage.getItem(${JSON.stringify(stateKey)}))`),stored);
     await evaluate(`sessionStorage.setItem(${JSON.stringify(stateKey)},'invalid-json');window.__windowUiReloading=true`);await call('Page.reload');
     await waitFor('default desktop',()=>evaluate(`!window.__windowUiReloading&&!!document.querySelector('#terminal-btn')`));await click('#terminal-btn');
     await waitFor('default terminal',()=>evaluate(`__terminalSent.some(m=>m.type==='resize')`));await assertBounds();
     assert.equal(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalPinned`),'false');
     pass('tab-local window preferences survive refresh and invalid storage falls back to usable defaults');
+
+    await call('Page.addScriptToEvaluateOnNewDocument',{source:`(() => {
+        for(const name of ['getItem','setItem']) {const original=Storage.prototype[name];
+            Storage.prototype[name]=function(key,...args) {
+                if(String(key).startsWith('ivnc.terminal.window.v1:'))throw new DOMException('Storage blocked','SecurityError');
+                return original.call(this,key,...args);
+            };
+        }
+    })()`});
+    await evaluate('window.__windowUiReloading=true');await call('Page.reload');
+    await waitFor('storage-blocked desktop',()=>evaluate(`!window.__windowUiReloading&&!!document.querySelector('#terminal-btn')`));await click('#terminal-btn');
+    await waitFor('storage-blocked terminal',()=>evaluate(`__terminalSent.some(m=>m.type==='resize')`));
+    await drag('.resize-se',-90,-60);await drag('.web-terminal-floating .web-terminal-title',25,20);
+    await click('#web-terminal-pin');await click('#web-terminal-restore');await assertDefaultGeometry();
+    await click('#web-terminal-minimize');await click('#terminal-btn');await assertDefaultGeometry();
+    assert.equal(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalPinned`),'true');
+    assert.equal(await evaluate('__terminalSockets.length'),1);
+    pass('blocked window storage still permits restore, pinning and reopening using in-memory state');
 
     await call('Page.navigate',{url:base+'/console'});await waitFor('standalone console',()=>evaluate(`!!document.querySelector('.console-select')`));
     await click('#nav-apps');await click('#add-app-btn');await click('.console-select');
