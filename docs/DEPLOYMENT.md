@@ -337,6 +337,12 @@ Noble 系统级回归时构建临时的旧运行时镜像。
 Docker 镜像使用 Ubuntu 24.04。正式镜像和发布二进制保留默认 PulseAudio feature，
 并启用 `tls` feature；音频仍需在配置中启用，HTTPS 运行时使用 `--tls`。
 
+GitHub Actions 的独立二进制构建容器使用 `--network host`，复用 Linux runner 的网络与
+DNS 路径，避开默认 Docker bridge 的 DNS 转发路径。容器继续使用 Azure Ubuntu 镜像源和
+Ubuntu 安全更新源，APT 索引更新启用重试及 `--error-on=any`，索引下载失败时立即终止构建，
+防止使用不完整索引继续安装。镜像拉取由 Docker daemon 执行，因此拉取成功不代表容器内
+DNS 一定可用；出现 `Could not resolve` 时应检查实际构建容器中的网络和解析配置。
+
 ## 验证
 
 ```bash

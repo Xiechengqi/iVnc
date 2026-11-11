@@ -98,8 +98,10 @@ jobs:
           chmod +x docker-build.sh
           mkdir -p output
 
+          # Use the Linux runner's network/DNS instead of Docker bridge forwarding.
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
+            --network host \
             -v "$(pwd):/workspace" \
             -v "$(pwd)/output:/output" \
             -v "$(pwd)/docker-build.sh:/docker-build.sh" \
