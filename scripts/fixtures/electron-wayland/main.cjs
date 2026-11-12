@@ -37,6 +37,10 @@ app.whenReady().then(async () => {
             const w=windows.get(name); let result;
             switch(action) {
                 case 'state': result=state(); break;
+                case 'identity': result={uid:process.geteuid(),home:process.env.HOME,cwd:process.cwd(),
+                    sandboxDisabled:app.commandLine.hasSwitch('no-sandbox'),
+                    rendererSandboxPreferred:w.webContents.getLastWebPreferences().sandbox,
+                    rendererPid:w.webContents.getOSProcessId()}; break;
                 case 'second': await create('Electron Second'); result=state(); break;
                 case 'dialog': await create('Electron Dialog',{parent:w,modal:true,resizable:false,width:340,height:230}); result=state(); break;
                 case 'fixed': await create('Electron Fixed',{resizable:false,width:360,height:240}); result=state(); break;

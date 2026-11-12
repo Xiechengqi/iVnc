@@ -98,17 +98,20 @@ pub fn endpoint_in(runtimes: &Path, id: &str) -> Result<Endpoint, String> {
 /// Variables of the manager's own display, audio and bus session, and its own
 /// settings. A runtime brings its own session; `IVNC_HOME` is set explicitly.
 fn session_env(key: &str) -> bool {
-    matches!(key, "WAYLAND_DISPLAY" | "DISPLAY" | "XDG_RUNTIME_DIR")
-        || key.starts_with("PULSE_")
+    matches!(
+        key,
+        "WAYLAND_DISPLAY" | "WAYLAND_SOCKET" | "DISPLAY" | "XDG_RUNTIME_DIR"
+    ) || key.starts_with("PULSE_")
         || key.starts_with("DBUS_")
         || key.starts_with("IVNC_")
 }
 
-pub fn command(app: &ManagedApp) -> Result<Command, String> {
+pub fn command(app: &ManagedApp) -> Result<Command, crate::apps::error::ApiError> {
     if app.app_type != AppType::DesktopApp || !super::valid_id(&app.id) {
         return Err("Only managed desktop applications have a runtime".into());
     }
     let home = crate::paths::prepare_app_home(&app.id)?;
+    crate::apps::launch::validate_home(&home)?;
     let root = runtime_dir(&app.id);
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
@@ -591,6 +594,15 @@ fn start_application_inner() -> Result<(), String> {
     let Some(launch) = launch() else {
         return Ok(());
     };
+    let session = crate::apps::native::session_environment();
+    // IVNC_HOME is the worker's private state; the app HOME is in the launch.
+    let home = launch
+        .env
+        .iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, v)| Path::new(v))
+        .ok_or("Missing application HOME")?;
+    crate::apps::launch::validate_session(home, &session).map_err(String::from)?;
     // The worker's own helpers are not part of the application's process tree.
     let mut command = crate::apps::native::application_command(
         launch
@@ -599,7 +611,7 @@ fn start_application_inner() -> Result<(), String> {
             .as_deref()
             .ok_or("Desktop application has no command")?,
         launch.env.iter().cloned(),
-        crate::apps::native::session_environment(),
+        session,
     );
     let mut child = command
         .spawn()

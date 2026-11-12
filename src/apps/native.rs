@@ -17,7 +17,7 @@ pub const SESSION_ENV: [&str; 3] = ["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "PULSE
 fn reserved_env(key: &str) -> bool {
     SESSION_ENV.contains(&key)
         || crate::paths::APP_ENV_REMOVE.contains(&key)
-        || matches!(key, "HOME" | "DISPLAY" | "LD_PRELOAD")
+        || matches!(key, "HOME" | "DISPLAY" | "WAYLAND_SOCKET" | "LD_PRELOAD")
         || key.starts_with("DBUS_")
 }
 
@@ -71,7 +71,11 @@ pub fn application_command(
     env: impl IntoIterator<Item = (OsString, OsString)>,
     session: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Command {
+    let env: BTreeMap<OsString, OsString> = env.into_iter().collect();
     let mut cmd = Command::new("/proc/self/exe");
+    if let Some(home) = env.get(std::ffi::OsStr::new("HOME")) {
+        cmd.current_dir(home);
+    }
     cmd.args(["--app-reaper", "sh", "-c"])
         .arg(exec_command)
         .env_clear()
@@ -94,9 +98,9 @@ pub fn runs_in_worker(app: &ManagedApp, remote: &RemoteStore) -> Result<bool, St
 }
 
 /// Build the launch command for a desktop app, in its own runtime if `worker`.
-pub fn build_command(app: &ManagedApp, worker: bool) -> Result<Command, String> {
+pub fn build_command(app: &ManagedApp, worker: bool) -> Result<Command, super::error::ApiError> {
     if app.app_type != AppType::DesktopApp {
-        return Err("BackgroundApp runs as a background process".to_string());
+        return Err("BackgroundApp runs as a background process".into());
     }
 
     let mut cmd = if worker {
@@ -121,7 +125,7 @@ fn configure_process_group(cmd: &mut Command) {
     }
 }
 
-fn build_desktop_command(app: &ManagedApp) -> Result<Command, String> {
+fn build_desktop_command(app: &ManagedApp) -> Result<Command, super::error::ApiError> {
     let exec_cmd = app
         .exec_command
         .as_ref()
@@ -134,10 +138,12 @@ fn build_desktop_command(app: &ManagedApp) -> Result<Command, String> {
     }
 
     let home = crate::paths::prepare_app_home(&app.id)?;
+    let session = session_environment();
+    super::launch::validate_session(&home, &session)?;
     let mut cmd = application_command(
         exec_cmd,
         app_environment(app, &home, std::env::vars_os()),
-        session_environment(),
+        session,
     );
 
     let log_file = log_path(&app.id);
@@ -195,6 +201,7 @@ mod tests {
             ("DISPLAY", ":0"),
             ("XDG_DATA_HOME", "/root/.local/share"),
             ("WAYLAND_DISPLAY", "wayland-0"),
+            ("WAYLAND_SOCKET", "12"),
             ("XDG_RUNTIME_DIR", "/run/user/0"),
             ("XDG_SESSION_TYPE", "x11"),
         ]
@@ -221,6 +228,7 @@ mod tests {
                 .collect()
         };
         let main = application_command("app", env.clone(), session("wayland-0", "/run/user/0"));
+        assert_eq!(main.get_current_dir(), Some(home));
         let runtime = application_command("app", launch, session("wayland-1", "/tmp/ivnc-1"));
         assert_eq!(main.get_envs().count(), runtime.get_envs().count());
         assert_eq!(envs(main), envs(runtime));
@@ -243,6 +251,7 @@ mod tests {
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "WAYLAND_DISPLAY",
+            "WAYLAND_SOCKET",
             "XDG_RUNTIME_DIR",
             "PULSE_SERVER",
         ] {

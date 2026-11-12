@@ -1,0 +1,24 @@
+[Unit]
+Description=iVnc desktop session
+After=network.target
+
+[Service]
+Type=simple
+User=ivnc
+Group=ivnc
+StateDirectory=ivnc
+StateDirectoryMode=0700
+RuntimeDirectory=ivnc
+RuntimeDirectoryMode=0700
+Environment=HOME=/var/lib/ivnc
+Environment=IVNC_HOME=/var/lib/ivnc
+Environment=XDG_RUNTIME_DIR=/run/ivnc
+WorkingDirectory=/var/lib/ivnc
+ExecStart=/usr/local/bin/ivnc --config /etc/ivnc.toml --proxy-enabled false --proxy-autostart false
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

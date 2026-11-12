@@ -110,6 +110,28 @@ while True: signal.pause()
 
     def test_no_arguments_uses_ivnc_defaults(self):
         self.assertEqual(self.start()["args"], [])
+        self.assertEqual((self.root / "runtime").stat().st_mode & 0o777, 0o700)
+
+    def test_existing_public_runtime_is_rejected_without_chmod(self):
+        runtime = self.root / "runtime"
+        runtime.mkdir(mode=0o755)
+        result = subprocess.run(["bash", str(self.entrypoint)], env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mode 0700", result.stderr)
+        self.assertEqual(runtime.stat().st_mode & 0o777, 0o755)
+        self.assertFalse((self.root / "ivnc.json").exists())
+
+    def test_symlink_runtime_is_rejected_without_changing_its_target(self):
+        target = self.root / "target"
+        target.mkdir(mode=0o700)
+        (self.root / "runtime").symlink_to(target, target_is_directory=True)
+        result = subprocess.run(["bash", str(self.entrypoint)], env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("real directory", result.stderr)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.root / "ivnc.json").exists())
 
     def test_legacy_foreground_command_preserves_its_arguments(self):
         args = [str(self.foreground), "argument with spaces", "--proxy-ip", "203.0.113.10"]

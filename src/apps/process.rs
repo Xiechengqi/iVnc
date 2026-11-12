@@ -1,5 +1,6 @@
 use super::app::{AppStatus, ManagedApp};
 use super::error::ApiError;
+use super::launch::{self, LogCursor};
 use super::native;
 use crate::remote::store::RemoteStore;
 use log::{info, warn};
@@ -20,6 +21,8 @@ struct RunningApp {
     started: Instant,
     /// Runs in its own runtime rather than in the main desktop.
     worker: bool,
+    log: LogCursor,
+    window_ready: bool,
 }
 
 /// Watchdog restart state for an application that exited unexpectedly.
@@ -101,6 +104,7 @@ pub struct ProcessManager {
     /// App IDs that were explicitly stopped by the user (should not auto-restart)
     stopped_by_user: Arc<Mutex<HashSet<String>>>,
     restarts: Arc<Mutex<HashMap<String, Restart>>>,
+    failures: Arc<Mutex<HashMap<String, ApiError>>>,
     /// App store reference for watchdog restarts
     store: Option<Arc<super::store::AppStore>>,
     /// Decides whether an app runs in its own runtime.
@@ -116,6 +120,7 @@ impl ProcessManager {
             processes: Arc::new(Mutex::new(HashMap::new())),
             stopped_by_user: Arc::new(Mutex::new(HashSet::new())),
             restarts: Arc::new(Mutex::new(HashMap::new())),
+            failures: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             remote,
             runtimes,
@@ -150,16 +155,29 @@ impl ProcessManager {
             procs.retain(|app_id, running| match running.child.try_wait() {
                 Ok(Some(_)) | Err(_) => {
                     if !user_stopped.contains(app_id) {
-                        exited.push((app_id.clone(), running.started.elapsed()));
+                        exited.push((
+                            app_id.clone(),
+                            running.started.elapsed(),
+                            running.log.failure(),
+                        ));
                     }
                     false
                 }
                 Ok(None) => true,
             });
         }
-        for (app_id, ran) in exited {
+        for (app_id, ran, failure) in exited {
             let mut restarts = self.restarts.lock().unwrap();
-            let next = next_restart(restarts.get(&app_id).copied(), ran, now);
+            let mut next = next_restart(restarts.get(&app_id).copied(), ran, now);
+            if let Some(failure) = failure {
+                if launch::permanent(&failure) {
+                    next.due = None;
+                }
+                self.failures
+                    .lock()
+                    .unwrap()
+                    .insert(app_id.clone(), failure);
+            }
             if let Some(due) = next.due {
                 info!(
                     "Watchdog: app {} exited unexpectedly; restarting in {}s",
@@ -185,7 +203,6 @@ impl ProcessManager {
         for app_id in due {
             match store
                 .get(&app_id)
-                .map_err(String::from)
                 .and_then(|app| self.spawn(&app).map(|r| (app, r)))
             {
                 Ok((app, running)) => {
@@ -201,23 +218,33 @@ impl ProcessManager {
                 Err(e) => {
                     warn!("Watchdog: failed to restart {}: {}", app_id, e);
                     let mut restarts = self.restarts.lock().unwrap();
-                    let next = next_restart(restarts.get(&app_id).copied(), Duration::ZERO, now);
+                    let mut next =
+                        next_restart(restarts.get(&app_id).copied(), Duration::ZERO, now);
+                    if launch::permanent(&e) {
+                        next.due = None;
+                    }
+                    self.failures.lock().unwrap().insert(app_id.clone(), e);
                     restarts.insert(app_id, next);
                 }
             }
         }
     }
 
-    fn spawn(&self, app: &ManagedApp) -> Result<RunningApp, String> {
+    fn spawn(&self, app: &ManagedApp) -> Result<RunningApp, ApiError> {
         let worker = native::runs_in_worker(app, &self.remote)?;
-        let child = native::build_command(app, worker)?
+        let mut command = native::build_command(app, worker)?;
+        let log = LogCursor::new(native::log_path(&app.id));
+        let child = command
             .spawn()
             .map_err(|e| format!("Failed to start: {}", e))?;
+        self.failures.lock().unwrap().remove(&app.id);
         Ok(RunningApp {
             pid: child.id(),
             child,
             started: Instant::now(),
             worker,
+            log,
+            window_ready: false,
         })
     }
 
@@ -230,11 +257,22 @@ impl ProcessManager {
             ));
         }
 
+        // The watchdog may not have collected an exited reaper yet. Retire that
+        // generation before validating a new attempt, including failed preflight.
+        self.processes.lock().unwrap().remove(&app.id);
+
         // Remove from user-stopped set so watchdog will restart if it crashes
         self.stopped_by_user.lock().unwrap().remove(&app.id);
         self.restarts.lock().unwrap().remove(&app.id);
+        self.failures.lock().unwrap().remove(&app.id);
 
-        let running = self.spawn(app)?;
+        let running = self.spawn(app).map_err(|e| {
+            self.failures
+                .lock()
+                .unwrap()
+                .insert(app.id.clone(), e.clone());
+            e
+        })?;
         let pid = running.pid;
         info!("Started managed app '{}' (pid={})", app.name, pid);
 
@@ -253,6 +291,7 @@ impl ProcessManager {
             .unwrap()
             .insert(app_id.to_string());
         let pending = self.restarts.lock().unwrap().remove(app_id).is_some();
+        let failed = self.failures.lock().unwrap().remove(app_id).is_some();
 
         let mut procs = self.processes.lock().unwrap();
         if let Some(mut running) = procs.remove(app_id) {
@@ -262,7 +301,7 @@ impl ProcessManager {
             });
             let _ = running.child.wait();
             Ok(())
-        } else if pending {
+        } else if pending || failed {
             Ok(())
         } else {
             Err(ApiError::new("app_not_running", "App is not running"))
@@ -289,7 +328,9 @@ impl ProcessManager {
                 }
                 (true, _) => AppStatus::Running,
             }
-        } else if self.restarts.lock().unwrap().contains_key(app_id) {
+        } else if self.restarts.lock().unwrap().contains_key(app_id)
+            || self.failures.lock().unwrap().contains_key(app_id)
+        {
             // Waiting for a backoff restart, or given up after repeated failures.
             AppStatus::Crashed
         } else {
@@ -300,6 +341,45 @@ impl ProcessManager {
     pub fn pid(&self, app_id: &str) -> Option<u32> {
         let procs = self.processes.lock().unwrap();
         procs.get(app_id).map(|r| r.pid)
+    }
+
+    pub fn failure(&self, app_id: &str) -> Option<ApiError> {
+        if let Some(error) = self.failures.lock().unwrap().get(app_id).cloned() {
+            return Some(error);
+        }
+        self.processes
+            .lock()
+            .unwrap()
+            .get_mut(app_id)
+            .and_then(|r| {
+                r.child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .and_then(|_| r.log.failure())
+            })
+    }
+
+    pub fn record_failure(&self, app_id: &str, error: ApiError) {
+        let _operation = self.operations.lock().unwrap();
+        // An older HTTP startup request must not mark a newer live attempt failed.
+        if self.is_running(app_id) {
+            return;
+        }
+        self.failures
+            .lock()
+            .unwrap()
+            .insert(app_id.to_owned(), error);
+    }
+
+    pub fn window_ready(&self, app_id: &str) -> Option<bool> {
+        self.processes
+            .lock()
+            .unwrap()
+            .get_mut(app_id)
+            .and_then(|r| {
+                (!r.worker && matches!(r.child.try_wait(), Ok(None))).then_some(r.window_ready)
+            })
     }
 
     /// Resolve Wayland peer credentials against live managed process trees.
@@ -316,7 +396,8 @@ impl ProcessManager {
                     .then(|| (r.pid as i32, id.clone()))
             })
             .collect();
-        pids.iter()
+        let resolved: BTreeMap<i32, String> = pids
+            .iter()
             .filter_map(|&peer| {
                 let group = unsafe { libc::getpgid(peer) };
                 let mut pid = peer;
@@ -343,7 +424,16 @@ impl ProcessManager {
                 }
                 None
             })
-            .collect()
+            .collect();
+        let visible: HashSet<&String> = resolved.values().collect();
+        for (id, running) in self.processes.lock().unwrap().iter_mut() {
+            // The process may have restarted while /proc was being inspected.
+            // A snapshot of its previous generation cannot make it ready.
+            if roots.get(&(running.pid as i32)) == Some(id) {
+                running.window_ready = visible.contains(id);
+            }
+        }
+        resolved
     }
 
     pub fn runtime_dir(&self, app_id: &str) -> PathBuf {
@@ -368,6 +458,32 @@ impl ProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_preflight_cannot_be_overwritten_by_an_uncollected_old_exit() {
+        let manager = ProcessManager::new(Arc::new(RemoteStore::in_memory()), PathBuf::new());
+        let app = ManagedApp::for_test("stale-start", super::super::app::AppType::BackgroundApp);
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        manager.processes.lock().unwrap().insert(
+            app.id.clone(),
+            RunningApp {
+                pid: child.id(),
+                child,
+                started: Instant::now(),
+                worker: false,
+                log: LogCursor::new(PathBuf::new()),
+                window_ready: true,
+            },
+        );
+        let error = manager.start(&app).unwrap_err();
+        assert!(!manager.processes.lock().unwrap().contains_key(&app.id));
+        manager.watchdog_tick(&super::super::store::AppStore::in_memory());
+        assert!(manager.restarts.lock().unwrap().is_empty());
+        assert_eq!(manager.failure(&app.id).unwrap().message, error.message);
+        manager.stop(&app.id).unwrap();
+        assert_eq!(manager.status(&app.id), AppStatus::Stopped);
+    }
 
     #[test]
     fn quick_exits_back_off_and_give_up_while_stable_runs_reset() {
@@ -465,14 +581,21 @@ mod tests {
                 child,
                 started: Instant::now(),
                 worker,
+                log: LogCursor::new(runtimes.join(id).join("app.log")),
+                window_ready: false,
             };
             let pid = running.pid;
             manager.processes.lock().unwrap().insert(id.into(), running);
             pid
         };
         let local = format!("test-{}", crate::remote::token());
-        run(&local, false);
+        let local_pid = run(&local, false);
         assert_eq!(manager.status(&local), AppStatus::Running);
+        assert_eq!(manager.window_ready(&local), Some(false));
+        manager.apps_for_clients(&HashSet::from([local_pid as i32]));
+        assert_eq!(manager.window_ready(&local), Some(true));
+        manager.apps_for_clients(&HashSet::new());
+        assert_eq!(manager.window_ready(&local), Some(false));
         assert_eq!(manager.in_worker(&local), Some(false));
 
         let shared = format!("test-{}", crate::remote::token());

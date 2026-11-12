@@ -376,13 +376,16 @@ impl AppsState {
                         AppStatus::Running => return Ok(Some(pid)),
                         AppStatus::Starting => {}
                         _ => {
+                            if let Some(error) = self.process.failure(&app.id) {
+                                return Err(error);
+                            }
                             return Err(match crate::remote::worker::failure(&app.id) {
                                 Some(failure) => failure.message.into(),
                                 None => ApiError::new(
                                     "app_runtime_failed",
                                     "Application runtime failed to start; see the application log",
                                 ),
-                            })
+                            });
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -774,6 +777,7 @@ pub fn router(state: Arc<AppsState>) -> Router {
     Router::new()
         .route("/api/apps", get(list_apps).post(add_app))
         .route("/api/apps/order", get(get_order).put(reorder_apps))
+        .route("/api/apps/launch-context", get(launch_context))
         .route("/api/apps/{id}/name", put(rename_app))
         .route(
             "/api/apps/{id}",
@@ -786,6 +790,14 @@ pub fn router(state: Arc<AppsState>) -> Router {
         .route("/api/apps/{id}/clear-data", post(clear_data))
         .route("/api/apps/{id}/logs", get(get_logs))
         .with_state(state)
+}
+
+async fn launch_context() -> axum::Json<serde_json::Value> {
+    axum::Json(json!({
+        "identity": super::launch::identity(),
+        "session_type": "wayland",
+        "cross_user_supported": false,
+    }))
 }
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
@@ -979,6 +991,10 @@ fn app_json(
         AppType::DesktopApp => {
             obj["exec_command"] = json!(app.exec_command);
             obj["env_vars"] = json!(app.env_vars);
+            obj["launch_error"] = json!(state.process.failure(&app.id).map(|e| e.body()));
+            // A running process is not proof of a mapped application window.
+            // Worker status describes its session; it has a different compositor.
+            obj["window_ready"] = json!(state.process.window_ready(&app.id));
             let enabled = state
                 .remote
                 .policy(&app.id)
@@ -1556,6 +1572,9 @@ async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
         Err(e) => {
             if id != BUILTIN_MIAO_ID && app.app_type != AppType::RemoteApp {
                 let _ = state.stop_app_processes(&app).await;
+            }
+            if app.app_type == AppType::DesktopApp {
+                state.process.record_failure(&id, e.clone());
             }
             err_response(StatusCode::INTERNAL_SERVER_ERROR, e.or("app_start_failed"))
         }

@@ -305,13 +305,21 @@ fn run(
     // Ensure XDG_RUNTIME_DIR is set (required for Wayland socket)
     if env::var("XDG_RUNTIME_DIR").is_err() {
         let dir = format!("/run/user/{}", unsafe { libc::getuid() });
-        std::fs::create_dir_all(&dir).ok();
-        // XDG spec requires 0700 permissions on runtime dir
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| format!(
+            "Cannot create {dir}: {e}. Set XDG_RUNTIME_DIR to a private directory owned by the running user (mode 0700), or use a service manager RuntimeDirectory."
+        ))?;
+        // Existing directories are validated below, never chmod'ed or taken over.
         env::set_var("XDG_RUNTIME_DIR", &dir);
         info!("Set XDG_RUNTIME_DIR={}", dir);
     }
+
+    apps::launch::validate_runtime(std::path::Path::new(&env::var("XDG_RUNTIME_DIR")?))
+        .map_err(String::from)?;
 
     // Clean up wayland sockets: kill non-ivnc processes occupying them
     if let Ok(xdg_dir) = env::var("XDG_RUNTIME_DIR") {
@@ -1837,7 +1845,7 @@ fn write_env_file() {
     let runtime_dir = env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
     let content = format!(
-        "WAYLAND_DISPLAY={}\nXDG_RUNTIME_DIR={}\nGDK_BACKEND=wayland\n",
+        "WAYLAND_DISPLAY={}\nXDG_RUNTIME_DIR={}\nXDG_SESSION_TYPE=wayland\nGDK_BACKEND=wayland\n",
         wayland_display, runtime_dir
     );
     match std::fs::write(&path, &content) {

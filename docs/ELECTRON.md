@@ -14,6 +14,22 @@ iVnc 可以运行使用 Ozone/Wayland 的 Electron 应用。Electron 38 起可�
 
 默认保留应用自己的 sandbox 策略。root 运行的 Chromium/Electron 通常会以 `Running as root without --no-sandbox is not supported` 退出；这种部署可以显式在该应用的命令中添加 `--no-sandbox`。iVnc 不会给所有桌面应用自动关闭 sandbox。AppImage 的 FUSE/解包需求、应用二进制及依赖仍由部署者提供。
 
+应用编辑器显示 iVnc 实际的运行用户和 UID。Electron 模板默认保留沙箱；勾选“模板中禁用此应用的沙箱”后生成的命令才包含 `--no-sandbox`，已有命令不会被自动修改。该选项只控制模板，不是系统或所有应用的全局开关。
+
+以 root 部署的 t3code 原生 Linux 二进制可使用：
+
+```sh
+t3code --no-sandbox --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3
+```
+
+不要用 `su - ubuntu -c t3code` 切换身份来加入 root 的桌面：登录切换会清空显示环境，普通用户也不能访问 `/run/user/0` 和 `/root/.ivnc`。仅保留环境变量或改用 `su -m` 不能解决目录、socket、音频与 HOME 权限。需要沙箱时，参见 [普通用户部署](NONROOT.md)，让 iVnc 与应用从启动时就使用同一用户。
+
+每次启动前会检查应用 HOME、Wayland runtime 归属/0700 权限以及 socket。应用工作目录设置为自己的 HOME，不再继承管理进程可能不可访问的目录；不继承父进程的 `WAYLAND_SOCKET` 文件描述符设置。独立应用运行环境在自己的显示会话建立后执行相同检查。
+
+已有的相对路径命令（如 `./my-app`）现在相对于应用 HOME 解析，建议使用绝对路径。`ivnc env` 导出的同用户外部会话环境也包含 `XDG_SESSION_TYPE=wayland`；它不负责跨用户权限授权。
+
+控制台分别展示“进程运行中 · 等待窗口”和“窗口已出现”（主桌面）；独立应用的“运行中”表示其会话已启动，不代表应用已完成加载。已退出进程的日志按本次启动范围诊断，区分 root 沙箱、Wayland 连接、X11 后端及 sandbox 安装问题。确定的沙箱/后端配置错误停止自动重试，修改配置后手动启动即可重新尝试；临时显示连接失败与未知崩溃仍沿用有上限的退避重试。无致命退出的 D-Bus/GPU 警告不触发这些诊断。
+
 ## 窗口和输入
 
 | 能力 | 当前行为 |
@@ -71,3 +87,5 @@ ELECTRON_BIN=/path/to/unpacked-electron/electron IVNC_BIN=target/debug/ivnc node
 需要 Chromium、Node、C 编译器、wayland-client 开发文件、wayland-scanner 和 xdg-shell XML。脚本使用实际 Electron 和 WebRTC 浏览器验证窗口、IME、剪贴板、光标及相对输入；配套原生协议客户端验证 Electron 未发送的 parent 请求、拖动重绘和不同客户端复用相同 wire ID 的边界。`XDG_SHELL_XML` 可覆盖 XML 路径，`KEEP_TMP=1` 保留成功测试的临时目录。
 
 本轮完整验证记录、审查修正和已确认的上游限制见 [ELECTRON_REVIEW.md](ELECTRON_REVIEW.md)。
+
+启动身份、沙箱诊断、普通用户部署和远程 t3code 修复记录见 [ELECTRON_LAUNCH_REVIEW.md](ELECTRON_LAUNCH_REVIEW.md)。

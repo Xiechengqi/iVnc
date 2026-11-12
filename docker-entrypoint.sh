@@ -18,7 +18,14 @@ if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
     fail "XDG_RUNTIME_DIR is not set"
 fi
 
-mkdir -p "$XDG_RUNTIME_DIR" || fail "failed to create XDG_RUNTIME_DIR: $XDG_RUNTIME_DIR"
+[[ "$XDG_RUNTIME_DIR" == /* ]] || fail "XDG_RUNTIME_DIR must be an absolute path"
+if [[ ! -e "$XDG_RUNTIME_DIR" && ! -L "$XDG_RUNTIME_DIR" ]]; then
+    mkdir -p -m 0700 -- "$XDG_RUNTIME_DIR" || fail "failed to create XDG_RUNTIME_DIR: $XDG_RUNTIME_DIR"
+fi
+# Validate before starting PulseAudio; never chmod a mounted or foreign session.
+[[ -d "$XDG_RUNTIME_DIR" && ! -L "$XDG_RUNTIME_DIR" ]] || fail "XDG_RUNTIME_DIR must be a real directory"
+[[ "$(stat -c %u -- "$XDG_RUNTIME_DIR")" == "$(id -u)" ]] || fail "XDG_RUNTIME_DIR must belong to the running user"
+[[ "$(stat -c %a -- "$XDG_RUNTIME_DIR")" == 700 ]] || fail "XDG_RUNTIME_DIR must have mode 0700"
 
 if command -v pulseaudio >/dev/null 2>&1; then
     if ! pulseaudio --check >/dev/null 2>&1; then

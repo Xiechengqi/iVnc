@@ -438,6 +438,19 @@ impl Config {
 
     /// Validate configuration
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self
+            .server
+            .user
+            .as_ref()
+            .is_some_and(|v| !v.trim().is_empty())
+            || self
+                .server
+                .group
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty())
+        {
+            return Err("server.user/server.group privilege dropping is not implemented. Run iVnc as the intended user through your service manager (User=/Group=), with its own HOME and XDG_RUNTIME_DIR.".into());
+        }
         if self.display.width == 0 || self.display.height == 0 {
             return Err("Display dimensions must be non-zero".into());
         }
@@ -566,6 +579,19 @@ port = 9000
         assert_eq!(cfg.display.height, 1080);
         assert_eq!(cfg.display.refresh_rate, 60);
         assert_eq!(cfg.http.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn unsupported_privilege_settings_cannot_silently_keep_root() {
+        for setting in ["user = 'ubuntu'", "group = 'ubuntu'"] {
+            let cfg: Config = toml::from_str(&format!("[server]\n{setting}")).unwrap();
+            assert!(cfg
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("privilege dropping is not implemented"));
+        }
+        Config::default().validate().unwrap();
     }
 }
 

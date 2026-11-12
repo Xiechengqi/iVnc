@@ -251,6 +251,8 @@ bitrate = 128000
 
 ## 启动服务
 
+需要以普通用户运行 iVnc 并保留 Electron 沙箱时，使用 [普通用户部署说明](NONROOT.md) 和配套 systemd 单元。不要在应用命令中用 `su -` 加入 root 会话；`server.user/group` 尚未实现内部降权，非空配置会明确拒绝启动。
+
 ### 手动启动（前台）
 
 ```bash
@@ -281,7 +283,9 @@ User=root
 ExecStart=/usr/local/bin/ivnc -c /etc/ivnc.toml
 Restart=always
 RestartSec=5
-Environment="XDG_RUNTIME_DIR=/run/user/0"
+RuntimeDirectory=ivnc-root
+RuntimeDirectoryMode=0700
+Environment="XDG_RUNTIME_DIR=/run/ivnc-root"
 
 [Install]
 WantedBy=multi-user.target

@@ -797,6 +797,9 @@ tr:hover { background-color: #f8f9fa; }
 .form-line.command-line > .field-hint { grid-column: 1 / -1; }
 .electron-template-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .electron-template-row > span { flex: 1 1 240px; }
+.electron-sandbox-option { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.electron-sandbox-option input[type="checkbox"] { width: auto; margin: 0; }
+.launch-error { color: var(--danger); max-width: 360px; white-space: normal; overflow-wrap: anywhere; font-size: 12px; margin-top: 4px; }
 .form-error { margin-top: 12px; }
 .app-modal input.invalid,
 .app-modal textarea.invalid {

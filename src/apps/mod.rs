@@ -7,6 +7,7 @@ pub mod app;
 pub mod datadir;
 pub mod desktop_entry;
 pub mod error;
+pub mod launch;
 pub mod native;
 pub mod process;
 pub mod service_process;
