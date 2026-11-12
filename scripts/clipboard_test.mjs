@@ -8,13 +8,14 @@ const { createClipboard, pasteShortcut } = await import('data:text/javascript;ba
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function setup(options = {}) {
-    const listeners = new Map(), sent = [], errors = [], writes = [], states = [], diagnostics = [];
+    const listeners = new Map(), captureListeners = new Map(), sent = [], errors = [], writes = [], states = [], diagnostics = [];
     const overlay = { readOnly: true, value: '', closest: () => null };
     let active = true;
     globalThis.isSecureContext = options.secure ?? true;
     globalThis.document = { activeElement: overlay, visibilityState: 'visible',
         documentElement: { hasAttribute: () => false },
-        addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type), hasFocus: () => active };
+        addEventListener: (type, fn, capture) => (capture ? captureListeners : listeners).set(type, fn),
+        removeEventListener: (type, fn, capture) => (capture ? captureListeners : listeners).delete(type), hasFocus: () => active };
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
         permissions: options.permissions, clipboard: { writeText: options.write || (async text => writes.push(text)) } } });
     const rtc = { _send_channel: { readyState: 'open', bufferedAmount: 0 }, sendDataChannelMessage: message => { sent.push(message); return true; } };
@@ -32,7 +33,7 @@ function setup(options = {}) {
     const ack = () => controller.message('paste_ack', { id: requests('commit').at(-1).id, status: 'applied', revision: 1 });
     const assist = { closest: selector => selector.includes('.clipboard-assist') || selector.includes('.allow-native-input') ? {} : null };
     const focus = target => { document.activeElement = target; listeners.get('focusin')({target}); };
-    return { controller, overlay, assist, focus, rtc, sent, errors, writes, event, paste, requests, ack, listeners,
+    return { controller, overlay, assist, focus, rtc, sent, errors, writes, event, paste, requests, ack, listeners, captureListeners,
         states, diagnostics, state: () => states.at(-1), setActive: value => { active = value; } };
 }
 
@@ -315,6 +316,30 @@ test('MIME clipboard decoding rejects duplicate formats, mismatched lengths and 
 const deniedWrite = async () => { throw new DOMException('Write denied', 'NotAllowedError'); };
 const receiveCopy = (t, text = 'REMOTE', revision = 1) => t.controller.receive(text, {revision, origin:'remote'});
 
+function enableLegacy(t, options = {}) {
+    const legacy = { calls: [], writes: [], result: true, dispatch: true, ...options };
+    navigator.userActivation = { isActive: options.activation ?? true };
+    document.execCommand = command => {
+        legacy.calls.push(command);
+        if (legacy.error) throw legacy.error;
+        if (legacy.dispatch) {
+            const data = new Map();
+            const event = { target: document.activeElement,
+                clipboardData: legacy.noData ? null : { setData: (type, value) => {
+                    if (legacy.dataError) throw legacy.dataError;
+                    data.set(type, value);
+                } },
+                preventDefault() { this.defaultPrevented = true; },
+                stopImmediatePropagation() { this.stopped = true; } };
+            t.captureListeners.get('copy')?.(event);
+            if (!event.stopped) t.listeners.get('copy')?.(event);
+            if (legacy.result && event.defaultPrevented) legacy.writes.push(Object.fromEntries(data));
+        }
+        return legacy.result;
+    };
+    return legacy;
+}
+
 test('HTTP and missing APIs offer manual copy without trying an unavailable API', async () => {
     for (const mode of ['http', 'missing']) {
         const t = setup({secure: mode !== 'http'});
@@ -327,6 +352,119 @@ test('HTTP and missing APIs offer manual copy without trying an unavailable API'
             t.focus(t.assist);
             assert.equal(t.controller.copySnapshot().text, 'REMOTE');
             assert.equal(t.controller.retryCopy(), false);
+        } finally { t.controller.destroy(); }
+    }
+});
+
+test('HTTP legacy copy uses the latest complete plaintext without moving focus or cancelling queued input', async () => {
+    const t = setup({secure:false}), legacy = enableLegacy(t);
+    try {
+        t.controller.noteCopy(); t.controller.beginPaste(t.event(), 'ctrl-v'); t.paste('STALE_LOCAL');
+        receiveCopy(t, 'NEW_REMOTE'); await tick();
+        assert.deepEqual(legacy.writes, [{'text/plain':'NEW_REMOTE'}]);
+        assert.equal(document.activeElement, t.overlay);
+        assert.equal(Buffer.from(t.requests('chunk')[0].data, 'base64').toString(), 'NEW_REMOTE');
+        assert.equal(t.requests('cancel').length, 0);
+        assert.equal(t.captureListeners.size, 0);
+        assert.equal(t.state(), null); assert.deepEqual(t.writes, []);
+        t.ack(); await tick(); assert.deepEqual(t.errors, []);
+    } finally { t.controller.destroy(); }
+});
+
+test('legacy automatic writes require current activation; explicit retry writes synchronously', async () => {
+    for (const activation of [false, undefined]) {
+        const t = setup({secure:false}), legacy = enableLegacy(t, {activation:false});
+        try {
+            if (activation === undefined) delete navigator.userActivation;
+            receiveCopy(t); await tick();
+            assert.equal(t.state().reason, 'copy_gesture'); assert.equal(t.state().canRetry, true);
+            assert.deepEqual(legacy.calls, []);
+            t.focus(t.assist); const sent = [...t.sent];
+            assert(t.controller.retryCopy());
+            assert.deepEqual(legacy.writes, [{'text/plain':'REMOTE'}], 'no deferred command loses the click gesture');
+            assert.deepEqual(t.sent, sent, 'retry must not resend copy/cut to the application');
+            assert.equal(t.controller.retryCopy(), false);
+            await tick(); assert.equal(t.state().status, 'copied');
+            assert.equal(t.captureListeners.size, 0);
+        } finally { t.controller.destroy(); }
+    }
+});
+
+test('legacy failure or missing copy event retains a retryable manual snapshot and removes its listener', async () => {
+    for (const options of [{result:false}, {dispatch:false}, {noData:true}, {dataError:new Error('Cannot supply data')}, {error:new Error('Command failed')}]) {
+        const t = setup({secure:false}); enableLegacy(t, options);
+        try {
+            receiveCopy(t); await tick();
+            assert.equal(t.state().status, 'ready');
+            assert.equal(t.state().canRetry, true); assert.equal(t.state().canManual, true);
+            assert.equal(t.state().reason, options.error || options.dataError ? 'copy_failed' : 'copy_blocked');
+            assert.equal(t.controller.copySnapshot().text, 'REMOTE');
+            assert.equal(t.captureListeners.size, 0);
+            assert.deepEqual(t.errors, []);
+        } finally { t.controller.destroy(); }
+    }
+});
+
+test('late modern permission results preserve the HTTP click prompt without replaying writes', async () => {
+    let resolvePermission, onChange;
+    const t = setup({secure:false,permissions:{query:()=>new Promise(resolve=>{resolvePermission=resolve})}});
+    const legacy = enableLegacy(t, {activation:false});
+    try {
+        receiveCopy(t); await tick(); assert.equal(t.state().reason, 'copy_gesture');
+        const status = {state:'denied',addEventListener:(type,fn)=>{onChange=fn}};
+        resolvePermission(status); await tick(); assert.equal(t.state().reason, 'copy_gesture');
+        status.state='granted'; onChange(); await tick();
+        assert.equal(t.state().reason, 'copy_gesture'); assert.equal(t.state().canRetry, true);
+        assert.deepEqual(legacy.calls, []);
+        t.focus(t.assist); assert(t.controller.retryCopy()); await tick();
+        assert.deepEqual(legacy.writes, [{'text/plain':'REMOTE'}]);
+    } finally { t.controller.destroy(); }
+});
+
+test('legacy coalesces copies, preserves empty and Unicode text, and invalidates cancelled writes', async () => {
+    const t = setup({secure:false}), legacy = enableLegacy(t);
+    try {
+        receiveCopy(t, 'OLD', 1); receiveCopy(t, '中文😀\n', 2); await tick();
+        receiveCopy(t, '', 3); await tick();
+        assert.deepEqual(legacy.writes, [{'text/plain':'中文😀\n'}, {'text/plain':''}]);
+        receiveCopy(t, 'CANCELLED', 4); t.controller.suspend(); await tick();
+        assert.equal(legacy.calls.length, 2);
+        assert.equal(t.controller.copySnapshot().text, 'CANCELLED');
+        t.focus({closest:selector=>selector.includes('.allow-native-input') ? {} : null});
+        receiveCopy(t, 'WHILE_EDITING', 5); await tick();
+        assert.equal(legacy.calls.length, 2); assert.equal(t.state(), null);
+    } finally { t.controller.destroy(); }
+});
+
+test('legacy supports a missing modern API and text fallback from MIME offers, but never pure images', async () => {
+    for (const secure of [false, true]) {
+        const t = setup({secure}), legacy = enableLegacy(t);
+        try {
+            delete navigator.clipboard;
+            t.controller.receiveFormats([
+                {mime:'text/plain',data:new TextEncoder().encode('PLAIN')},
+                {mime:'text/html',data:new TextEncoder().encode('<b>PLAIN</b>')}
+            ], {revision:1,origin:'remote'});
+            await tick(); assert.deepEqual(legacy.writes, [{'text/plain':'PLAIN'}]);
+            t.controller.receiveFormats([{mime:'image/png',data:new Uint8Array([137,80,78,71])}], {revision:2,origin:'remote'});
+            await tick(); assert.equal(legacy.calls.length, 1);
+            assert.equal(t.state().canRetry, false); assert.equal(t.state().canManual, false);
+        } finally { t.controller.destroy(); }
+    }
+});
+
+test('modern permission/policy failures never trigger legacy writes', async () => {
+    for (const mode of ['permission', 'policy', 'http-policy', 'missing-policy', 'rejected']) {
+        const status = {state:'denied'};
+        const t = setup({secure:mode !== 'http-policy', permissions:mode === 'permission' ? {query:async()=>status} : undefined,
+            write:mode === 'rejected' ? deniedWrite : undefined});
+        const legacy = enableLegacy(t);
+        try {
+            if (mode.endsWith('policy')) document.featurePolicy = {features:()=>['clipboard-write'],allowsFeature:()=>false};
+            if (mode === 'missing-policy') delete navigator.clipboard;
+            await tick(); receiveCopy(t); await tick();
+            assert.equal(t.state().reason, mode.endsWith('policy') ? 'copy_policy' : {permission:'copy_permission',rejected:'copy_blocked'}[mode]);
+            assert.deepEqual(legacy.calls, []);
         } finally { t.controller.destroy(); }
     }
 });

@@ -58,21 +58,32 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     // Permission names and policy introspection are not supported by every browser.
     // Unknown means try the write; it is not evidence of a denied permission.
     function capability(ignorePermission = false) {
-        if (globalThis.isSecureContext === false) return 'copy_insecure';
-        if (typeof navigator.clipboard?.writeText !== 'function' && !(offer?.formats && navigator.clipboard?.write && globalThis.ClipboardItem)) return 'copy_unsupported';
-        if (offer?.text === null && (!navigator.clipboard?.write || !globalThis.ClipboardItem)) return 'copy_unsupported';
+        // Apply a recognized policy to both modern and legacy writes, including
+        // HTTP pages and browsers without the modern API.
         const policy = document.permissionsPolicy || document.featurePolicy;
         try {
             if (policy?.features?.().includes('clipboard-write') && !policy.allowsFeature('clipboard-write')) return 'copy_policy';
         } catch (_) {}
+        if (globalThis.isSecureContext === false) return 'copy_insecure';
+        if (typeof navigator.clipboard?.writeText !== 'function' && !(offer?.formats && navigator.clipboard?.write && globalThis.ClipboardItem)) return 'copy_unsupported';
+        if (offer?.text === null && (!navigator.clipboard?.write || !globalThis.ClipboardItem)) return 'copy_unsupported';
         if (!ignorePermission && permission?.state === 'denied') return 'copy_permission';
         return null;
     }
 
+    // The legacy command can write plaintext on ordinary HTTP, but the browser
+    // still decides whether the current user gesture permits it. Do not use it
+    // to retry a modern API's permission/policy rejection.
+    function canLegacyCopy(reason) {
+        return ['copy_insecure', 'copy_unsupported'].includes(reason)
+            && typeof offer?.text === 'string' && typeof document.execCommand === 'function';
+    }
+
     function publishCopy() {
         if (disposed) return;
+        const reason = capability(true);
         onCopyState(offer ? { id: offer.id, status: offer.status, reason: offer.reason,
-            busy: !!writing, canManual: typeof offer.text === 'string', canRetry: !capability(true) } : null);
+            busy: !!writing, canManual: typeof offer.text === 'string', canRetry: !reason || canLegacyCopy(reason) } : null);
     }
 
     function diagnose(reason, error, manual = false) {
@@ -84,7 +95,9 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
 
     function permissionChanged() {
         if (offer?.status === 'ready') {
-            offer.reason = capability() || (offer.reason === 'copy_permission' ? 'copy_blocked' : offer.reason);
+            const reason = capability();
+            offer.reason = (canLegacyCopy(reason) ? null : reason)
+                || (offer.reason === 'copy_permission' ? 'copy_blocked' : offer.reason);
             publishCopy();
         }
     }
@@ -126,7 +139,9 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         if (writing === job) writing = null;
         if (job.generation === writeGeneration && offer === job.offer && live()) {
             if (error) {
-                offer.reason = capability() || (['NotAllowedError', 'SecurityError'].includes(error?.name) ? 'copy_blocked' : 'copy_failed');
+                const reason = capability();
+                offer.reason = (canLegacyCopy(reason) ? null : reason)
+                    || (['NotAllowedError', 'SecurityError'].includes(error?.name) ? 'copy_blocked' : 'copy_failed');
                 offer.status = 'ready';
                 diagnose(offer.reason, error, job.manual);
             } else {
@@ -139,7 +154,28 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         drainWrite();
     }
 
-    function write(snapshot, manual) {
+    function legacyCopy(text) {
+        let handled = false, failure = null;
+        const copy = event => {
+            event.preventDefault();
+            // This event belongs to our synchronous command. Keep local UI copy
+            // handlers from replacing its data or cancelling remote paste intent.
+            event.stopImmediatePropagation();
+            if (!event.clipboardData) return;
+            try { event.clipboardData.setData('text/plain', text); handled = true; }
+            catch (error) { failure = error; }
+        };
+        document.addEventListener('copy', copy, true);
+        try {
+            // No selection/focus changes, cached content or asynchronous event
+            // handler: even an empty string replaces the previous clipboard.
+            const copied = document.execCommand('copy');
+            if (failure) throw failure;
+            if (!copied || !handled) throw new DOMException('Copy requires a user gesture', 'NotAllowedError');
+        } finally { document.removeEventListener('copy', copy, true); }
+    }
+
+    function write(snapshot, manual, legacy = false) {
         const job = { offer: snapshot, generation: writeGeneration, manual };
         writing = job;
         if (manual) snapshot.status = 'writing';
@@ -148,7 +184,8 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         // enqueue the API call after a user clicks the copy button.
         let result;
         try {
-            if (snapshot.formats && navigator.clipboard?.write && globalThis.ClipboardItem) {
+            if (legacy) legacyCopy(snapshot.text);
+            else if (snapshot.formats && navigator.clipboard?.write && globalThis.ClipboardItem) {
                 const data = Object.fromEntries(snapshot.records.filter(r => !ClipboardItem.supports || ClipboardItem.supports(r.mime))
                     .map(r => [r.mime, new Blob([r.data], { type: r.mime })]));
                 if (!Object.keys(data).length) throw Error('unsupported');
@@ -165,17 +202,21 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         const pending = scheduledWrite; scheduledWrite = null;
         if (pending.generation !== writeGeneration || pending.offer !== offer || !live() || !focusedRemote()) return;
         const reason = capability();
-        if (reason) { offer.reason = reason; offer.status = 'ready'; diagnose(reason); publishCopy(); }
-        else write(offer, false);
+        const legacy = canLegacyCopy(reason);
+        if (reason && (!legacy || navigator.userActivation?.isActive !== true)) {
+            offer.reason = legacy ? 'copy_gesture' : reason;
+            offer.status = 'ready'; diagnose(offer.reason); publishCopy();
+        } else write(offer, false, legacy);
     }
 
     function retryCopy() {
         if (!offer || offer.status !== 'ready' || writing || !live()
             || (!focusedRemote() && !assistTarget(document.activeElement))) return false;
         const reason = capability(true);
-        if (reason) { offer.reason = reason; diagnose(reason, null, true); publishCopy(); return false; }
+        const legacy = canLegacyCopy(reason);
+        if (reason && !legacy) { offer.reason = reason; diagnose(reason, null, true); publishCopy(); return false; }
         ++writeGeneration; scheduledWrite = null;
-        write(offer, true);
+        write(offer, true, legacy);
         return true;
     }
 

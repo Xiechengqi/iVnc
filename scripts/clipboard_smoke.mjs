@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, openSync, closeSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, networkInterfaces } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { createRequire } from 'node:module';
@@ -20,6 +20,9 @@ async function freePort() {
 }
 const port = await freePort(), browserPort = await freePort(), remotePort = await freePort();
 const base = `http://127.0.0.1:${port}`;
+const httpAddress = Object.values(networkInterfaces()).flat().find(address => address.family === 'IPv4' && !address.internal)?.address;
+assert(httpAddress, 'An actual non-loopback IPv4 address is required for HTTP clipboard coverage');
+const httpBase = `http://${httpAddress}:${port}`;
 const env = { ...process.env, IVNC_HOME: path.join(work, 'ivnc'),
     XDG_CONFIG_HOME: path.join(work, 'config'), XDG_CACHE_HOME: path.join(work, 'cache'), XDG_DATA_HOME: path.join(work, 'data'),
     XDG_RUNTIME_DIR: path.join(work, 'run'), IVNC_CHROME_DEBUG_PORT: String(remotePort), RUST_LOG:'info,ivnc::compositor::clipboard=debug' };
@@ -74,6 +77,7 @@ try {
     await waitFor('remote textarea', () => remote.evaluate('!!document.getElementById("text")'));
     launch(process.env.CHROME_BIN || 'google-chrome', ['--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',
         '--no-first-run','--no-default-browser-check','--disable-background-networking','--password-store=basic','--autoplay-policy=no-user-gesture-required',
+        '--no-proxy-server',
         `--user-data-dir=${path.join(work,'viewer')}`,`--remote-debugging-port=${browserPort}`,'--window-size=1280,800',base], 'viewer');
     local = await cdp(browserPort);
     // Transport cases inspect the OS clipboard directly. Default/denied write
@@ -193,12 +197,60 @@ try {
     // Reserve the old surface, then open another real Wayland window before commit.
     const interrupted = await local.evaluate(`(() => {const id=Math.max(...window.__clipSent.map(m=>JSON.parse(m.slice(6)).id||0))+1;
         window.__ivncWebRTC.sendDataChannelMessage('paste,'+JSON.stringify({type:'start',id,size:4,shortcut:'ctrl-v',target:0}));return id;})()`);
-    await remote.call('Target.createTarget',{url:'about:blank',newWindow:true});
+    const otherWindow = await remote.call('Target.createTarget',{url:'about:blank',newWindow:true});
     await waitFor('new focused window', () => remote.evaluate('!document.hasFocus()'));
     await local.evaluate(`(() => {const rtc=window.__ivncWebRTC;rtc.sendDataChannelMessage('paste,'+JSON.stringify({type:'chunk',id:${interrupted},data:btoa('NOPE')}));rtc.sendDataChannelMessage('paste,'+JSON.stringify({type:'commit',id:${interrupted}}));})()`);
     await waitFor('focus cancellation', () => local.evaluate(`window.__clipReplies.some(m=>m.data?.id===${interrupted}&&m.data.status==='focus_changed')`));
     assert.equal(await value(),'once');
     pass('focus change during transfer rejects paste instead of targeting another window');
+
+    // A non-loopback origin has no modern clipboard API. Exercise the actual
+    // production input path and Wayland selection without granting permissions.
+    await remote.call('Target.closeTarget',{targetId:otherWindow.targetId});
+    await remote.call('Page.bringToFront');
+    await waitFor('original remote window focused',()=>remote.evaluate('document.hasFocus()'));
+    await local.call('Browser.resetPermissions');
+    await local.call('Page.navigate',{url:httpBase});
+    await waitFor('HTTP WebRTC',()=>local.evaluate('window.__ivncWebRTC?._send_channel?.readyState === "open"'),60000);
+    await waitFor('HTTP decoded video',()=>local.evaluate('document.querySelector("video")?.videoWidth > 0'),60000);
+    assert.equal(await local.evaluate('isSecureContext'),false);
+    assert.equal(await local.evaluate('typeof navigator.clipboard'),'undefined');
+    await local.evaluate(`(() => {const rtc=window.__ivncWebRTC,content=rtc.onclipboardcontent;
+        window.__httpCopies=[];
+        rtc.onclipboardcontent=(text,meta)=>{
+            if(meta?.origin==='remote')setTimeout(()=>{content(text,meta);window.__httpCopies.push(text)},150);
+            else content(text,meta);
+        };
+    })()`);
+    const localTextarea = `(() => {const t=document.createElement('textarea');t.id='http-clipboard-local';
+        t.className='allow-native-input';t.style.cssText='position:fixed;top:20px;left:20px;z-index:10000';
+        document.body.append(t);return t;})()`;
+    const seedNative = async text => {
+        await local.evaluate(`(() => {const t=${localTextarea};t.value=${JSON.stringify(text)};t.focus();t.select()})()`);
+        await copy();
+        await local.evaluate(`document.getElementById('http-clipboard-local').remove();document.getElementById('overlayInput').focus()`);
+    };
+    const verifyNative = async text => {
+        await local.evaluate(`(${localTextarea}).focus()`);await paste();
+        assert.equal(await local.evaluate(`document.getElementById('http-clipboard-local').value`),text);
+        await local.evaluate(`document.getElementById('http-clipboard-local').remove();document.getElementById('overlayInput').focus()`);
+    };
+    await seedNative('HTTP_STALE_LOCAL');
+    await remote.evaluate(`(() => {const t=document.getElementById('text');t.value='HTTP_REMOTE_COPY';t.focus();t.select()})()`);
+    await copy();
+    await waitFor('HTTP remote copy applied',()=>local.evaluate(`window.__httpCopies.includes('HTTP_REMOTE_COPY')&&window.__ivncClipboard.copySnapshot()===null`));
+    assert.equal(await local.evaluate('document.activeElement.id'),'overlayInput');
+    await verifyNative('HTTP_REMOTE_COPY');
+    pass('ordinary HTTP copies from a real Wayland app through production input and delayed WebRTC delivery');
+
+    await seedNative('HTTP_STALE_BEFORE_PASTE');
+    await remote.evaluate(`(() => {const t=document.getElementById('text');t.value='HTTP_FAST_COPY';t.focus();t.select();
+        window.__httpPasted=[];t.addEventListener('paste',e=>window.__httpPasted.push(e.clipboardData.getData('text/plain')));})()`);
+    await copy();await paste();
+    await waitFor('HTTP immediate remote copy/paste',()=>remote.evaluate(`window.__httpPasted.length===1&&window.__httpPasted[0]==='HTTP_FAST_COPY'`));
+    await waitFor('HTTP immediate clipboard updated',()=>local.evaluate(`window.__httpCopies.includes('HTTP_FAST_COPY')&&window.__ivncClipboard.copySnapshot()===null`));
+    await verifyNative('HTTP_FAST_COPY');
+    pass('HTTP immediate remote copy/paste retains current text while compatibility copy updates the local clipboard');
     console.log(`Clipboard smoke: ${passed} passed`);
 } catch (error) {
     console.error(error); console.error(`Artifacts: ${work}`); process.exitCode = 1;

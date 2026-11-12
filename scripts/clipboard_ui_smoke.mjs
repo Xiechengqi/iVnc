@@ -29,7 +29,12 @@ window.controller=createClipboard({webrtc:{_send_channel:{readyState:'open',buff
 sent.push(m);if(m.startsWith('paste,')){const p=JSON.parse(m.slice(6));if(p.type==='commit')queueMicrotask(()=>controller.message('paste_ack',{id:p.id,status:'applied'}));}}},
 overlay:remote,imeTarget:()=>null,isActive:()=>window.active,getTarget:()=>1,report:e=>errors.push(e),onCopyState:s=>ui.update(s)});
 controller.message('clipboard_caps',{version:1,enabled:true,max_bytes:16777216,chunk_bytes:12288});
-remote.addEventListener('keydown',e=>{const shortcut=pasteShortcut(e);if(shortcut)controller.beginPaste(e,shortcut)});
+remote.addEventListener('keydown',e=>{
+    const shortcut=pasteShortcut(e);if(shortcut){controller.beginPaste(e,shortcut);return;}
+    if((e.code==='KeyC'||e.code==='KeyX')&&(e.ctrlKey||e.metaKey)&&!e.altKey&&!e.shiftKey){
+        controller.noteCopy();controller.sendInput('kd,'+(e.code==='KeyC'?99:120));e.preventDefault();
+    }
+});
 remote.addEventListener('pointerdown',()=>window.remoteClicks++);
 window.addEventListener('blur',()=>controller.suspend());
 window.receive=text=>controller.receive(text,{revision:++revision,origin:'remote'});
@@ -66,12 +71,13 @@ async function evaluate(expression, parent = false) {
     const result=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true,userGesture:false});
     if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value;
 }
-async function visit(url, frame = false) {
+async function visit(url, frame = false, activate = true) {
     framed=frame;await call('Browser.resetPermissions');await call('Page.navigate',{url});
     await wait('clipboard UI',()=>evaluate('window.ready'));
-    await call('Page.bringToFront');await click('#remote');
+    await call('Page.bringToFront');
+    if(activate)await click('#remote');else await evaluate(`document.getElementById('remote').focus()`);
     // postMessage reaches the parent asynchronously after the initial remote click.
-    if(frame)await wait('initial embedded interaction',()=>evaluate('window.overlayInteractions===1',true));
+    if(frame&&activate)await wait('initial embedded interaction',()=>evaluate('window.overlayInteractions===1',true));
 }
 async function click(selector) {
     const p=await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
@@ -85,6 +91,7 @@ async function shortcut(letter) {
         {type:'keyUp',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:0}])await call('Input.dispatchKeyEvent',e);
 }
 const receive = text => evaluate(`receive(${JSON.stringify(text)})`);
+const blockLegacy = () => evaluate(`document.execCommand=()=>false`);
 const notice = () => wait('copy notice',()=>evaluate(`!document.querySelector('.clipboard-assist').hidden`));
 async function verifyClipboard(text) {
     await evaluate(`(()=>{const t=document.getElementById('local');t.value='';t.focus()})()`);await shortcut('V');
@@ -137,15 +144,73 @@ try {
     await verifyClipboard('CLICK_RETRY');pass('explicit retry invokes the real API in a trusted click and preserves the snapshot through focus changes');
 
     await visit(httpUrl);assert.equal(await evaluate('isSecureContext'),false);assert.equal(await evaluate('!!navigator.clipboard'),false);
+    await evaluate(`document.getElementById('remote').value='UNCHANGED_LOCAL_SELECTION';document.getElementById('remote').setSelectionRange(2,8)`);
+    await receive('HTTP_AUTO');
+    await wait('HTTP automatic copy',()=>evaluate('controller.copySnapshot()===null'));
+    assert.equal(await evaluate('document.activeElement.id'),'remote');
+    assert.deepEqual(await evaluate(`({value:remote.value,start:remote.selectionStart,end:remote.selectionEnd})`),{value:'UNCHANGED_LOCAL_SELECTION',start:2,end:8});
+    await verifyClipboard('HTTP_AUTO');
+    pass('ordinary HTTP automatically copies plaintext during a real user activation without changing focus');
+
+    await visit(httpUrl);await seedClipboard('STALE_BEFORE_REMOTE');await visit(httpUrl,false,false);
+    assert.equal(await evaluate('navigator.userActivation.hasBeenActive'),false);await shortcut('C');
+    await evaluate(`new Promise(resolve=>setTimeout(()=>{receive('HTTP_ASYNC_COPY');resolve()},250))`);
+    await wait('asynchronous HTTP shortcut copy',()=>evaluate('controller.copySnapshot()===null'));
+    assert.equal(await evaluate('document.activeElement.id'),'remote');await verifyClipboard('HTTP_ASYNC_COPY');
+    pass('trusted Ctrl+C remains usable after asynchronous remote delivery and replaces an old clipboard');
+
+    await visit(httpUrl);await seedClipboard('STALE_BEFORE_PASTE');await visit(httpUrl,false,false);
+    await shortcut('C');await shortcut('V');
+    assert.equal(await evaluate(`sent.some(m=>m.startsWith('paste,'))`),false);
+    await receive('HTTP_COPY_THEN_PASTE');
+    await wait('remote paste commit',()=>evaluate(`sent.some(m=>m.startsWith('paste,')&&JSON.parse(m.slice(6)).type==='commit')`));
+    assert.equal(await evaluate(`sent.filter(m=>m.startsWith('paste,')).map(m=>JSON.parse(m.slice(6))).filter(m=>m.type==='chunk').map(m=>atob(m.data)).join('')`),'HTTP_COPY_THEN_PASTE');
+    assert.equal(await evaluate(`sent.some(m=>m.startsWith('paste,')&&JSON.parse(m.slice(6)).type==='cancel')`),false);
+    assert.deepEqual(await evaluate('errors'),[]);await verifyClipboard('HTTP_COPY_THEN_PASTE');
+    pass('HTTP copy followed immediately by paste waits for current remote content and compatibility copy does not cancel the transaction');
+
+    await visit(httpUrl,false,false);
+    await evaluate(`window.copyAttempts=0;window.nativeExec=document.execCommand.bind(document);document.execCommand=c=>{copyAttempts++;return nativeExec(c)}`);
+    await receive('HTTP_CLICK');await notice();
+    assert.equal(await evaluate('navigator.userActivation.isActive'),false);
+    assert.equal(await evaluate('copyAttempts'),0);
+    assert.equal(await evaluate(`document.querySelector('.clipboard-copy').hidden`),false);
+    await click('.clipboard-copy');
+    await wait('HTTP click success',()=>evaluate(`document.querySelector('.clipboard-assist-message').textContent.includes('Copied to')`));
+    assert.equal(await evaluate('copyAttempts'),1);assert.equal(await evaluate('document.activeElement.id'),'remote');
+    await verifyClipboard('HTTP_CLICK');pass('HTTP with no user activation offers a single trusted click that copies directly');
+
+    await visit(httpUrl);await wait('user activation expires',()=>evaluate('!navigator.userActivation.isActive'));
+    await receive('HTTP_LATE');await notice();
+    assert.equal(await evaluate(`document.querySelector('.clipboard-assist-message').textContent.includes('Click')`),true);
+    await click('.clipboard-copy');
+    await wait('late HTTP retry succeeds',()=>evaluate(`document.querySelector('.clipboard-assist-message').textContent.includes('Copied to')`));
+    await verifyClipboard('HTTP_LATE');pass('late remote delivery never assumes a fixed activation timeout and can be copied with one click');
+
+    await visit(httpUrl);
+    await evaluate(`controller.receiveFormats([{mime:'image/png',data:new Uint8Array([137,80,78,71])}],{revision:1,origin:'remote'})`);
+    await notice();assert.equal(await evaluate(`document.querySelector('.clipboard-copy').hidden&&document.querySelector('.clipboard-manual').hidden`),true);
+    assert.match(await evaluate(`document.querySelector('.clipboard-assist-message').textContent`),/content type.*HTTPS/);
+    pass('HTTP pure images explain the format limitation without offering an unusable text copy action');
+
+    await visit(httpUrl);await seedClipboard('OLD_BEFORE_AUTO_EMPTY');await receive('');
+    await wait('HTTP empty copy',()=>evaluate('controller.copySnapshot()===null'));await verifyClipboard('');
+    pass('HTTP compatibility copy clears an old clipboard for an empty remote string');
+
+    await visit(httpUrl);const autoUnicode='中文😀\n'.repeat(12000);await receive(autoUnicode);
+    await wait('HTTP Unicode copy',()=>evaluate('controller.copySnapshot()===null'));await verifyClipboard(autoUnicode);
+    pass('HTTP compatibility copy preserves large Unicode text');
+
+    await visit(httpUrl);await blockLegacy();
     await receive('HTTP_MANUAL');await manualCopy('HTTP_MANUAL');pass('ordinary HTTP copies via visible native selection without Clipboard API');
 
-    await visit(httpUrl);await seedClipboard('OLD_BEFORE_EMPTY');await receive('');await manualCopy('');
+    await visit(httpUrl);await blockLegacy();await seedClipboard('OLD_BEFORE_EMPTY');await receive('');await manualCopy('');
     pass('native manual copy clears an old clipboard for an empty remote string');
 
-    await visit(httpUrl);const unicode='中文😀\n'.repeat(12000);await receive(unicode);await manualCopy(unicode);
+    await visit(httpUrl);await blockLegacy();const unicode='中文😀\n'.repeat(12000);await receive(unicode);await manualCopy(unicode);
     pass('large Unicode text survives manual selection and native clipboard');
 
-    await visit(httpUrl);await receive('A');await receive('LATEST_B');await notice();await click('.clipboard-manual');
+    await visit(httpUrl);await blockLegacy();await receive('A');await receive('LATEST_B');await notice();await click('.clipboard-manual');
     assert.equal(await evaluate(`document.querySelector('.clipboard-assist textarea').value`),'LATEST_B');
     await receive('BACKGROUND_C');assert.equal(await evaluate(`document.querySelector('.clipboard-assist textarea').value`),'LATEST_B');
     await evaluate(`setLang('zh')`);assert.equal(await evaluate(`document.querySelector('.clipboard-assist textarea').value`),'LATEST_B');
@@ -159,6 +224,11 @@ try {
     assert.match(await evaluate(`document.querySelector('.clipboard-assist-message').textContent`),/policy/);
     await manualCopy('POLICY');pass('Permissions-Policy restriction is diagnosed and native copy still works');
 
+    await visit(httpUrl+'?policy=deny');await receive('HTTP_POLICY');await notice();
+    assert.match(await evaluate(`document.querySelector('.clipboard-assist-message').textContent`),/policy/);
+    assert.equal(await evaluate(`document.querySelector('.clipboard-copy').hidden`),true);
+    await manualCopy('HTTP_POLICY');pass('HTTP compatibility copy respects an explicit clipboard-write policy and retains native manual selection');
+
     await visit(secureUrl+'?frame=1',true);await receive('IFRAME_DEFAULT');
     await wait('iframe copy',()=>evaluate('controller.copySnapshot()===null'));await verifyClipboard('IFRAME_DEFAULT');
     pass('active same-origin embedded view copies with its delegated clipboard policy');
@@ -168,7 +238,7 @@ try {
     assert.equal(await evaluate('window.overlayInteractions',true),interactions);
     pass('parent policy restrictions retain the manual copy route inside embedded views');
 
-    await visit(httpUrl);
+    await visit(httpUrl);await blockLegacy();
     await evaluate(`document.getElementById('remote').addEventListener('click',async()=>{
         await document.querySelector('.video-container').requestFullscreen();document.getElementById('remote').focus();
     },{once:true})`);
@@ -181,7 +251,7 @@ try {
     assert.equal(await evaluate('document.activeElement.value'),'FULLSCREEN_MANUAL');
     await verifyClipboard('FULLSCREEN_MANUAL');pass('manual copy remains visible in a fullscreen video container and preserves focus on exit');
 
-    await visit(httpUrl);await receive('DISCONNECT');await notice();await evaluate(`controller.disconnected()`);
+    await visit(httpUrl);await blockLegacy();await receive('DISCONNECT');await notice();await evaluate(`controller.disconnected()`);
     assert.equal(await evaluate(`document.querySelector('.clipboard-assist').hidden`),true);
     assert.equal(await evaluate('controller.copySnapshot()'),null);pass('disconnect clears pending UI and text');
     console.log(`Clipboard UI smoke: ${passed} passed`);

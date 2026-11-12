@@ -9,6 +9,8 @@ const messages = {
         empty: '远端文本为空，可使用复制快捷键清空本机剪贴板。',
         text: '远端复制的文本',
         copy_insecure: '当前连接不支持自动复制到本机。可手动复制，或使用 HTTPS 访问。',
+        copy_gesture: '自动复制需要一次点击。请点击“复制到本机”，或手动复制。',
+        copy_format: '当前连接或浏览器不支持复制此类内容，请使用支持剪贴板功能的浏览器并通过 HTTPS 访问。',
         copy_unsupported: '当前浏览器不支持自动复制到本机，请手动复制。',
         copy_permission: '网站的剪贴板写入权限已被禁用。可检查网站权限，或手动复制。',
         copy_policy: '页面的嵌入策略限制了剪贴板写入，请手动复制。',
@@ -23,6 +25,8 @@ const messages = {
         empty: 'The remote text is empty. Use the copy shortcut to clear the local clipboard.',
         text: 'Text copied from the remote app',
         copy_insecure: 'This connection cannot copy automatically. Copy manually, or access iVnc over HTTPS.',
+        copy_gesture: 'Click “Copy to device” to copy this content, or copy manually.',
+        copy_format: 'This connection or browser cannot copy this content type. Use a browser with clipboard support over HTTPS.',
         copy_unsupported: 'This browser does not support automatic clipboard writes. Copy manually.',
         copy_permission: 'Clipboard writes are disabled for this site. Check site permissions, or copy manually.',
         copy_policy: 'The embedding page’s policy restricts clipboard writes. Copy manually.',
@@ -95,7 +99,9 @@ export function createClipboardUI({ getController, restoreFocus }) {
     function render() {
         root.hidden = !state || state.status === 'pending';
         title.textContent = text('title'); closeButton.setAttribute('aria-label', text('close'));
-        const notice = state ? text(state.status === 'copied' ? 'copied' : state.reason) : '';
+        let reason = state?.status === 'copied' ? 'copied' : state?.reason;
+        if (state?.canManual === false && ['copy_insecure', 'copy_unsupported'].includes(reason)) reason = 'copy_format';
+        const notice = state ? text(reason) : '';
         if (message.textContent !== notice) message.textContent = notice;
         copyButton.textContent = text(state?.busy ? 'writing' : 'copy');
         copyButton.disabled = !!state?.busy;
