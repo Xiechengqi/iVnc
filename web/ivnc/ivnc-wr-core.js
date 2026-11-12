@@ -36,6 +36,7 @@ import { t, onLangChange, getLang } from "./lib/i18n.js?v=1";
 import { createAppStreams } from "./app-streams.js";
 import { createToolbar } from "./toolbar.js";
 import { createClipboard } from "./clipboard.js";
+import { createClipboardUI } from "./clipboard-ui.js";
 import { createViewport } from "./viewport.js";
 import { createFloatingWindow } from "./floating-window.js";
 import { installOverlayGuard, minimizeOtherOverlays, createConsoleShield, releaseOverlayInput } from "./overlay-manager.js";
@@ -3608,6 +3609,7 @@ export default function webrtc() {
 	}
 
 	let clipboardController = null;
+	let clipboardUI = null;
 	let clipboardNotice = null, clipboardNoticeTimer = null;
 	function reportClipboardError(reason) {
 		const zh = getLang() === 'zh';
@@ -3616,7 +3618,7 @@ export default function webrtc() {
 			text_required: zh ? '此次剪贴板没有可粘贴的文本。' : 'The clipboard does not contain text.',
 			limit: zh ? '剪贴板内容过大或待处理操作过多。' : 'Clipboard size or pending operation limit exceeded.',
 			busy: zh ? '远端正在处理另一次粘贴，请稍后再试。' : 'Another paste is still being delivered. Try again shortly.',
-			copy_unavailable: zh ? '无法写入本机剪贴板，请检查浏览器剪贴板权限。' : 'Cannot write the local clipboard. Check browser clipboard permissions.',
+			remote_copy_timeout: zh ? '未收到远端复制文本，请重新复制。' : 'No remote copied text was received. Copy again.',
 		};
 		const message = messages[reason] || (zh ? '本次粘贴未能确认完成，请检查连接和输入焦点。' : 'Paste could not be confirmed. Check the connection and input focus.');
 		if (!clipboardNotice) {
@@ -3633,7 +3635,7 @@ export default function webrtc() {
 		if (webrtc?._send_channel?.readyState === 'open') webrtc.sendDataChannelMessage('kr');
 	}
 	function handleWindowBlur() {
-		clipboardController?.cancel();
+		clipboardController?.suspend();
 	}
 
 	function setupKeyBoardAssisstant() {
@@ -4259,11 +4261,22 @@ export default function webrtc() {
 			window.addEventListener('blur', handleWindowBlur);
 
 			clipboardController?.destroy();
+			clipboardUI?.destroy();
+			clipboardUI = createClipboardUI({
+				getController: () => clipboardController,
+				restoreFocus: () => {
+					if (window.__ivncViewActive !== false && !appStreams?.activeId() && document.hasFocus()) {
+						(input?._imeModeActive ? input._imeTextarea : overlayInput)?.focus({ preventScroll: true });
+					}
+				},
+			});
 			clipboardController = createClipboard({
 				webrtc, overlay: overlayInput, imeTarget: () => input?._imeTextarea,
 				isActive: () => window.__ivncViewActive !== false && !appStreams?.activeId() && document.visibilityState !== 'hidden',
 				getTarget: () => lastTaskbarData?.windows?.find(w => w.focused)?.id,
 				report: reportClipboardError,
+				onCopyState: state => clipboardUI?.update(state),
+				diagnostic: details => console.debug('[clipboard]', details),
 			});
 			input.clipboard = clipboardController;
 			window.__ivncClipboard = clipboardController;
@@ -4352,6 +4365,7 @@ export default function webrtc() {
 			disableAutoResize();
 			viewportController?.destroy(); viewportController = null;
 			clipboardController?.destroy(); clipboardController = null;
+			clipboardUI?.destroy(); clipboardUI = null;
 			window.__ivncClipboard = null;
 			clipboardNotice?.remove(); clipboardNotice = null;
 			clearTimeout(clipboardNoticeTimer);

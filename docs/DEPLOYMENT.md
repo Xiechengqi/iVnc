@@ -14,6 +14,24 @@
 `pulseaudio pulseaudio-utils`，不需要额外的内核功能或权限。完整边界与用法见
 [远程桌面应用](REMOTE_APPS.md)。
 
+## 浏览器剪贴板
+
+推荐通过浏览器认可的 HTTPS 连接访问。普通 HTTP 域名或 IP 页面通常不提供
+`navigator.clipboard.writeText()`；可信 localhost 是例外。这个限制影响远端复制到本机，
+用户原生粘贴到 iVnc 使用另一条路径，因此可以出现“粘贴正常、自动复制受限”。
+
+自动写入受限时，iVnc 提供“复制到本机”点击重试及“手动复制”文本面板。
+HTTP 页面可在面板中使用 Ctrl/Cmd+C 或右键菜单完成原生复制。修改网站权限不能让
+非安全上下文获得异步 Clipboard API；浏览器要求用户手势时，可使用点击重试。
+
+嵌入其他页面时，检查上层页面及反向代理的 `Permissions-Policy`，以及 iframe 的
+`allow` 属性。iVnc 自带的应用 iframe 已声明 `clipboard-read; clipboard-write`，
+但 iframe 声明不能扩大上层页面禁止的权限。按实际嵌入来源委派写入权限；复制功能
+自身不需要额外授予剪贴板读取权限。浏览器不支持权限查询时，客户端会保留未知状态，
+不会把查询失败认定为用户拒绝。
+
+复制状态、焦点和兼容边界见 [剪贴板与粘贴事务](CLIPBOARD.md)。
+
 ## 依赖安装
 
 ### Ubuntu/Debian

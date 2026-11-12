@@ -57,7 +57,7 @@ async function cdp(port) {
         pending.set(id, {resolve,reject,timer}); socket.send(JSON.stringify({id,method,params}));
     });
     const evaluate = async expression => {
-        const r = await call('Runtime.evaluate', {expression,awaitPromise:true,returnByValue:true,userGesture:true});
+        const r = await call('Runtime.evaluate', {expression,awaitPromise:true,returnByValue:true,userGesture:false});
         if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result.value;
     };
     return {call,evaluate};
@@ -73,9 +73,11 @@ try {
     await remote.call('Page.navigate', {url:'data:text/html,' + encodeURIComponent(html)});
     await waitFor('remote textarea', () => remote.evaluate('!!document.getElementById("text")'));
     launch(process.env.CHROME_BIN || 'google-chrome', ['--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',
-        '--no-first-run','--no-default-browser-check','--disable-background-networking','--autoplay-policy=no-user-gesture-required',
+        '--no-first-run','--no-default-browser-check','--disable-background-networking','--password-store=basic','--autoplay-policy=no-user-gesture-required',
         `--user-data-dir=${path.join(work,'viewer')}`,`--remote-debugging-port=${browserPort}`,'--window-size=1280,800',base], 'viewer');
     local = await cdp(browserPort);
+    // Transport cases inspect the OS clipboard directly. Default/denied write
+    // permissions are exercised separately below and in clipboard_ui_smoke.mjs.
     await local.call('Browser.grantPermissions', {origin:base,permissions:['clipboardReadWrite','clipboardSanitizedWrite']});
     await waitFor('WebRTC', () => local.evaluate('window.__ivncWebRTC?._send_channel?.readyState === "open"'),60000);
     await waitFor('decoded video', () => local.evaluate('document.querySelector("video")?.videoWidth > 0'),60000);
@@ -104,11 +106,11 @@ try {
         if (shift) await local.call('Input.dispatchKeyEvent',{type:'keyUp',key:'Shift',code:'ShiftLeft',windowsVirtualKeyCode:16,modifiers:ctrl?2:0});
         if (ctrl) await local.call('Input.dispatchKeyEvent',{type:'keyUp',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:0});
     };
-    const copy = async () => {
+    const copy = async (key = 'c') => {
         for (const event of [
             {type:'keyDown',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:2},
-            {type:'keyDown',key:'c',code:'KeyC',windowsVirtualKeyCode:67,modifiers:2},
-            {type:'keyUp',key:'c',code:'KeyC',windowsVirtualKeyCode:67,modifiers:2},
+            {type:'keyDown',key,code:'Key'+key.toUpperCase(),windowsVirtualKeyCode:key.toUpperCase().charCodeAt(0),modifiers:2},
+            {type:'keyUp',key,code:'Key'+key.toUpperCase(),windowsVirtualKeyCode:key.toUpperCase().charCodeAt(0),modifiers:2},
             {type:'keyUp',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:0},
         ]) await local.call('Input.dispatchKeyEvent',event);
     };
@@ -149,6 +151,30 @@ try {
     await waitFor('new remote clipboard notification', () => local.evaluate(`window.__clipUpdates.filter(m=>m?.origin==='remote').length>${remoteCopies}`));
     await waitFor('large remote text copied locally', () => local.evaluate(`navigator.clipboard.readText().then(t=>t===${JSON.stringify(large)})`));
     pass('large remote copy round trip decodes all base64 chunks');
+
+    for (const type of ['keyDown','keyUp']) await local.call('Input.dispatchKeyEvent',{
+        type,key:'F',code:'KeyF',windowsVirtualKeyCode:70,modifiers:10});
+    await waitFor('fullscreen pointer lock', () => local.evaluate(`!!document.fullscreenElement&&!!document.pointerLockElement`));
+    await local.call('Browser.grantPermissions', {origin:base,permissions:[]});
+    await remote.evaluate(`(() => {const t=document.getElementById('text');t.value='REMOTE_DENIED_WRITE';t.focus();t.select()})()`);
+    await copy('x');
+    await waitFor('remote cut', async () => await value() === '');
+    await waitFor('manual copy offer', () => local.evaluate(`!document.querySelector('.clipboard-assist')?.hidden`));
+    await waitFor('copy controls release pointer lock', () => local.evaluate('!document.pointerLockElement'));
+    const manualPoint = await local.evaluate(`(() => {const r=document.querySelector('.clipboard-manual').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    for (const type of ['mousePressed','mouseReleased']) await local.call('Input.dispatchMouseEvent',{type,...manualPoint,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1});
+    assert.equal(await local.evaluate(`document.activeElement?.value`), 'REMOTE_DENIED_WRITE');
+    await copy();
+    await local.call('Browser.grantPermissions', {origin:base,permissions:['clipboardReadWrite','clipboardSanitizedWrite']});
+    assert.equal(await local.evaluate('navigator.clipboard.readText()'),'REMOTE_DENIED_WRITE');
+    const closePoint = await local.evaluate(`(() => {const r=document.querySelector('.clipboard-close').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    for (const type of ['mousePressed','mouseReleased']) await local.call('Input.dispatchMouseEvent',{type,...closePoint,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1});
+    assert.equal(await local.evaluate(`document.activeElement?.id`),'overlayInput');
+    assert.equal(await value(),'');
+    await local.evaluate('document.exitFullscreen()');
+    await waitFor('fullscreen exit', () => local.evaluate('!document.fullscreenElement'));
+    pass('real remote cut survives denied local writes in fullscreen; native manual copy restores remote input focus');
+
     await reset(); await writeLocal('once'); await paste();
     await waitFor('once', async () => await value() === 'once');
     await local.evaluate(`(() => { const tx=window.__clipSent.map(m=>JSON.parse(m.slice(6))); const id=tx.filter(m=>m.type==='commit').at(-1).id;

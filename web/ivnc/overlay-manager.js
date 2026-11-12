@@ -35,7 +35,9 @@ export function installOverlayGuard(updateLayout) {
         && !target?.closest?.('#web-console-minimize') && !target?.closest?.('.web-console-frame');
     let gesture = null;
     document.addEventListener('pointerdown', event => {
-        if (window.__IVNC_EMBED__) parent.postMessage({ type: 'ivnc-overlay-app-interaction' }, location.origin);
+        if (window.__IVNC_EMBED__ && !event.target?.closest?.('.clipboard-assist')) {
+            parent.postMessage({ type: 'ivnc-overlay-app-interaction' }, location.origin);
+        }
         const owner = blocking();
         if (outsideChild(owner, event.target)) {
             const state = owner.childState();
@@ -44,7 +46,7 @@ export function installOverlayGuard(updateLayout) {
             consume(event); return;
         }
         gesture = null;
-        if (event.target?.closest?.('.web-terminal-modal, .taskbar-pin, .force-update-modal, .modal, .pwd-overlay, .update-overlay')) return;
+        if (event.target?.closest?.('.web-terminal-modal, .clipboard-assist, .taskbar-pin, .force-update-modal, .modal, .pwd-overlay, .update-overlay')) return;
         for (const controller of controllers()) {
             if (controller.isOpen?.() && !controller.isPinned?.() && !controller.contains?.(event.target)) controller.minimize?.('auto');
         }

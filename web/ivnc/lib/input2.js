@@ -2514,7 +2514,7 @@ export class Input {
     }
 
     _overlayIsOpen() {
-        return !!document.querySelector('.web-terminal-modal:not(.minimized), .pwd-overlay, .update-overlay');
+        return !!document.querySelector('.web-terminal-modal:not(.minimized), .clipboard-assist:not([hidden]), .pwd-overlay, .update-overlay');
     }
 
     _onOverlayInteraction() {
@@ -2677,7 +2677,7 @@ export class Input {
             const root = window.__IVNC_EMBED__ ? this.element.parentElement : document.documentElement;
             root.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
-        } else if (document.fullscreenElement !== null && document.pointerLockElement !== this.element) {
+        } else if (document.fullscreenElement !== null && document.pointerLockElement !== this.element && !this._overlayIsOpen()) {
              this.element.requestPointerLock().catch(()=>{});
         }
     }
