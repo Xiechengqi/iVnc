@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use xxhash_rust::xxh64::xxh64;
 
 /// Connection information for a WebRTC session
 #[derive(Debug)]
@@ -180,9 +179,6 @@ pub struct SharedState {
     pub last_webrtc_stats_video: Arc<Mutex<Option<String>>>,
     pub last_webrtc_stats_audio: Arc<Mutex<Option<String>>>,
 
-    /// Last clipboard hash written by server (to suppress echo)
-    pub last_clipboard_write_hash: Arc<Mutex<Option<u64>>>,
-
     /// Cached keyframe RTP packets for new session replay
     pub keyframe_cache: Arc<Mutex<Vec<Vec<u8>>>>,
 
@@ -264,7 +260,6 @@ impl SharedState {
             runtime_settings,
             last_webrtc_stats_video: Arc::new(Mutex::new(None)),
             last_webrtc_stats_audio: Arc::new(Mutex::new(None)),
-            last_clipboard_write_hash: Arc::new(Mutex::new(None)),
             keyframe_cache: Arc::new(Mutex::new(Vec::new())),
             rtp_subscribers: Arc::new(Mutex::new(Vec::new())),
             audio_subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -410,27 +405,40 @@ impl SharedState {
         ));
     }
 
-    /// Store binary clipboard and broadcast to clients
-    pub fn set_clipboard_binary(&self, mime_type: String, data: Vec<u8>) {
-        if data.len() > 8192 {
-            self.send_text(format!("clipboard_start,{},{}", mime_type, data.len()));
-            for chunk in data.chunks(4096) {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                self.send_text(format!("clipboard_data,{}", encoded));
-            }
-            self.send_text("clipboard_finish".to_string());
+    /// All representations come from one Wayland selection revision. Keep the
+    /// existing text message unchanged when binary/rich data was not requested.
+    pub fn set_clipboard_formats(&self, contents: Vec<(String, Vec<u8>)>, revision: u64) {
+        if contents.is_empty() {
             return;
         }
-
-        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-        self.send_text(format!("clipboard_binary,{},{}", mime_type, encoded));
-    }
-
-    pub fn mark_clipboard_written(&self, mime_type: &str, data: &[u8]) {
-        let mut hash = xxh64(mime_type.as_bytes(), 0);
-        hash = xxh64(data, hash);
-        let mut last = self.last_clipboard_write_hash.lock().unwrap();
-        *last = Some(hash);
+        let plain = contents.iter().find(|(mime, _)| mime == "text/plain");
+        if contents.len() == 1 && plain.is_some() {
+            self.set_clipboard(
+                base64::engine::general_purpose::STANDARD.encode(&plain.unwrap().1),
+                revision,
+                "remote",
+            );
+            return;
+        }
+        *self.clipboard.lock().unwrap() =
+            plain.map(|(_, data)| base64::engine::general_purpose::STANDARD.encode(data));
+        let specs: Vec<_> = contents
+            .iter()
+            .map(|(mime, bytes)| serde_json::json!({"mime": mime, "size": bytes.len()}))
+            .collect();
+        self.send_text(format!(
+            "clipboard_start,{}",
+            serde_json::json!({"formats":specs, "revision":revision, "origin":"remote"})
+        ));
+        // 4095 keeps intermediate base64 chunks unpadded.
+        let bytes: Vec<_> = contents.into_iter().flat_map(|(_, bytes)| bytes).collect();
+        for chunk in bytes.chunks(4095) {
+            self.send_text(format!(
+                "clipboard_data,{}",
+                base64::engine::general_purpose::STANDARD.encode(chunk)
+            ));
+        }
+        self.send_text("clipboard_finish".into());
     }
 
     /// Update display size

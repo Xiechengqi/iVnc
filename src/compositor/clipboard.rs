@@ -1,6 +1,6 @@
 //! Selection snapshots and ordered paste injection on the compositor thread.
 use super::Compositor;
-use crate::clipboard::paste::{PasteCommand, Shortcut};
+use crate::clipboard::paste::{FormatSpec, PasteCommand, Shortcut};
 use smithay::{
     backend::input::KeyState,
     input::keyboard::{FilterResult, Keycode},
@@ -8,7 +8,7 @@ use smithay::{
     wayland::selection::data_device::set_data_device_selection,
 };
 use std::{
-    io::Write,
+    io::{Read, Write},
     os::fd::{AsRawFd, OwnedFd},
     sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
@@ -22,7 +22,7 @@ pub struct PasteGate {
 }
 
 impl PasteGate {
-    fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         self.receipt.upgrade().is_some_and(|receipt| {
             receipt
                 .lock()
@@ -41,10 +41,19 @@ impl PasteGate {
 pub struct Snapshot {
     pub bytes: Arc<[u8]>,
     pub revision: u64,
+    formats: Arc<std::collections::BTreeMap<String, Arc<[u8]>>>,
     receipt: Arc<Mutex<Option<PasteCommand>>>,
 }
 
 impl Snapshot {
+    pub fn for_mime(&self, mime: &str) -> Option<Self> {
+        let bytes = self.formats.get(mime)?.clone();
+        Some(Self {
+            bytes,
+            ..self.clone()
+        })
+    }
+
     fn complete(&self, delivered: bool) {
         if let Some(command) = self
             .receipt
@@ -71,6 +80,143 @@ impl Snapshot {
 }
 
 impl Compositor {
+    /// Prefer the enabled editor protocol. Older clients use the same fenced,
+    /// immutable offer as browser pastes, and subsequent input waits for EOF.
+    pub fn inject_committed_text(
+        &mut self,
+        text: &str,
+        pending: &mut Option<PasteCommand>,
+    ) -> bool {
+        if pending.is_none() && self.text_input.commit_text(text) {
+            return true;
+        }
+        if pending.is_none() {
+            let (reply, _) = tokio::sync::mpsc::unbounded_channel();
+            let command = PasteCommand {
+                id: 0,
+                text: Arc::from(text.as_bytes()),
+                formats: Vec::new(),
+                shortcut: Shortcut::CtrlV,
+                target: None,
+                focus: Arc::new(Mutex::new(None)),
+                valid: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                // An editor that does not accept paste must not hold input for the
+                // full browser upload timeout. There is no upload for IME commits.
+                started: std::time::Instant::now()
+                    - (crate::clipboard::paste::TRANSFER_TIMEOUT - Duration::from_secs(2)),
+                reply,
+            };
+            self.reserve_paste(&command);
+            *pending = Some(command);
+        }
+        match self.paste(pending.as_ref().unwrap()) {
+            Ok(_) => {
+                self.ime_paste_pending = true;
+                true
+            }
+            Err("busy") => false,
+            Err(reason) => {
+                log::debug!("IME paste cancelled: {reason}");
+                true
+            }
+        }
+    }
+
+    /// Read all supported MIME representations from the same source revision.
+    /// Every pipe is nonblocking; stale/oversized/incomplete reads are discarded.
+    pub fn read_clipboard(&mut self) -> Option<(u64, Vec<(String, Vec<u8>)>)> {
+        if !self.clipboard_pending_mimes.is_empty() {
+            use smithay::wayland::selection::data_device::request_data_device_client_selection;
+            use std::os::fd::FromRawFd;
+            let mut pipes = Vec::new();
+            for mime in std::mem::take(&mut self.clipboard_pending_mimes) {
+                let mut fds = [-1; 2];
+                if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+                    continue;
+                }
+                let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+                let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+                let flags = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_GETFL) };
+                if flags < 0
+                    || unsafe {
+                        libc::fcntl(read.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
+                    } < 0
+                {
+                    continue;
+                }
+                if request_data_device_client_selection::<Self>(&self.seat, mime.clone(), write)
+                    .is_ok()
+                {
+                    let mime = if mime.starts_with("text/plain") || mime == "UTF8_STRING" {
+                        "text/plain".into()
+                    } else {
+                        mime
+                    };
+                    pipes.push(ReadPipe {
+                        mime,
+                        file: Some(std::fs::File::from(read)),
+                        bytes: Vec::new(),
+                    });
+                }
+            }
+            if !pipes.is_empty() {
+                self.clipboard_readback = Some(Readback {
+                    revision: self.clipboard_revision,
+                    started: std::time::Instant::now(),
+                    pipes,
+                    total: 0,
+                });
+                self.display_handle.flush_clients().ok();
+            }
+        }
+        let mut readback = self.clipboard_readback.take()?;
+        if readback.revision != self.clipboard_revision
+            || readback.started.elapsed() > Duration::from_secs(10)
+        {
+            return None;
+        }
+        for pipe in &mut readback.pipes {
+            if let Some(file) = &mut pipe.file {
+                let mut buffer = [0u8; 8192];
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => {
+                            pipe.file = None;
+                            break;
+                        }
+                        Ok(n) => {
+                            readback.total += n;
+                            if readback.total > crate::clipboard::MAX_CLIPBOARD_BYTES {
+                                return None;
+                            }
+                            pipe.bytes.extend_from_slice(&buffer[..n]);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => return None,
+                    }
+                }
+            }
+        }
+        if readback.pipes.iter().all(|p| p.file.is_none()) {
+            let contents = readback
+                .pipes
+                .into_iter()
+                .filter(|p| {
+                    if p.mime == "image/png" {
+                        p.bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                    } else {
+                        std::str::from_utf8(&p.bytes).is_ok()
+                    }
+                })
+                .map(|p| (p.mime, p.bytes))
+                .collect();
+            Some((readback.revision, contents))
+        } else {
+            self.clipboard_readback = Some(readback);
+            None
+        }
+    }
+
     /// Reserve the actual surface in input order before transferring the body.
     /// Registry indices can be reused when a window closes; the WlSurface cannot.
     pub fn reserve_paste(&self, command: &PasteCommand) {
@@ -81,19 +227,49 @@ impl Compositor {
             .seat
             .get_keyboard()
             .and_then(|keyboard| keyboard.current_focus());
-        if command
-            .target
-            .is_some_and(|target| self.window_registry.get(target as usize) != focus.as_ref())
-        {
+        if command.target.is_some_and(|target| {
+            self.window_registry.get(target as usize)
+                != focus.as_ref().map(|f| self.root_window_surface(f)).as_ref()
+        }) {
             return;
         }
         *command.focus.lock().unwrap_or_else(|e| e.into_inner()) = focus;
     }
 
     pub fn install_clipboard(&mut self, bytes: Arc<[u8]>, receipt: Option<PasteCommand>) -> u64 {
+        self.install_clipboard_formats(bytes, &[], receipt)
+    }
+
+    pub fn install_clipboard_formats(
+        &mut self,
+        bytes: Arc<[u8]>,
+        formats: &[FormatSpec],
+        receipt: Option<PasteCommand>,
+    ) -> u64 {
+        let mut contents: std::collections::BTreeMap<String, Arc<[u8]>> = Default::default();
+        if formats.is_empty() {
+            contents.insert("text/plain".into(), bytes.clone());
+        } else {
+            let mut offset = 0usize;
+            for f in formats {
+                let Some(end) = offset.checked_add(f.size) else {
+                    return self.clipboard_revision;
+                };
+                let Some(data) = bytes.get(offset..end) else {
+                    return self.clipboard_revision;
+                };
+                contents.insert(f.mime.clone(), Arc::from(data));
+                offset = end;
+            }
+        }
+        if let Some(text) = contents.get("text/plain").cloned() {
+            contents.insert("text/plain;charset=utf-8".into(), text.clone());
+            contents.insert("UTF8_STRING".into(), text);
+        }
+
         self.clipboard_revision += 1;
-        self.clipboard_pending_mime = None;
-        self.clipboard_read_fd = None;
+        self.clipboard_pending_mimes.clear();
+        self.clipboard_readback = None;
         let is_paste = receipt.is_some();
         let receipt = Arc::new(Mutex::new(receipt));
         if is_paste {
@@ -102,13 +278,10 @@ impl Compositor {
         set_data_device_selection(
             &self.display_handle,
             &self.seat,
-            vec![
-                "text/plain;charset=utf-8".into(),
-                "text/plain".into(),
-                "UTF8_STRING".into(),
-            ],
+            contents.keys().cloned().collect(),
             Snapshot {
                 bytes,
+                formats: Arc::new(contents),
                 revision: self.clipboard_revision,
                 receipt,
             },
@@ -136,7 +309,11 @@ impl Compositor {
         if self.clipboard_paste.busy() {
             return Err("busy");
         }
-        let revision = self.install_clipboard(command.text.clone(), Some(command.clone()));
+        let revision = self.install_clipboard_formats(
+            command.text.clone(),
+            &command.formats,
+            Some(command.clone()),
+        );
         log::debug!(
             "Dispatching paste request={} revision={}",
             command.id,
@@ -277,6 +454,7 @@ mod tests {
         let command = PasteCommand {
             id: 1,
             text: Arc::from(&b"A"[..]),
+            formats: Vec::new(),
             shortcut: Shortcut::CtrlV,
             target: None,
             focus: Arc::new(Mutex::new(None)),
@@ -287,6 +465,7 @@ mod tests {
         let snapshot = Snapshot {
             bytes: command.text.clone(),
             revision: 1,
+            formats: Default::default(),
             receipt: Arc::new(Mutex::new(Some(command.clone()))),
         };
         let mut gate = PasteGate::default();
@@ -323,6 +502,7 @@ mod tests {
         let command = PasteCommand {
             id: 1,
             text: old.clone(),
+            formats: Vec::new(),
             shortcut: Shortcut::CtrlV,
             target: None,
             focus: Arc::new(Mutex::new(None)),
@@ -333,6 +513,7 @@ mod tests {
         let snapshot = Snapshot {
             bytes: current.clone(),
             revision: 1,
+            formats: Default::default(),
             receipt: Arc::new(Mutex::new(Some(command))),
         };
         let (returned, result) = std::sync::mpsc::channel();
@@ -364,4 +545,17 @@ mod tests {
         assert!(reply.contains("applied"));
         assert!(replies.try_recv().is_err());
     }
+}
+
+/// Only the compositor thread owns selection readback state.
+pub struct Readback {
+    revision: u64,
+    started: std::time::Instant,
+    pipes: Vec<ReadPipe>,
+    total: usize,
+}
+struct ReadPipe {
+    mime: String,
+    file: Option<std::fs::File>,
+    bytes: Vec<u8>,
 }

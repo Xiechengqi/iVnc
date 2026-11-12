@@ -12,6 +12,22 @@ export function pasteShortcut(event) {
     return event.code === 'Insert' && event.shiftKey && !event.ctrlKey && !event.metaKey ? 'shift-insert' : null;
 }
 
+// A clipboard operation may contain several MIME representations of the same
+// selection. Sizes refer to the concatenated, bounded transfer body.
+function packFormats(records, limit = MAX_BYTES) {
+    const seen = new Set(); let size = 0;
+    for (const r of records) {
+        if (!['text/plain', 'text/html', 'image/png'].includes(r.mime) || seen.has(r.mime) || !(r.data instanceof Uint8Array)) throw Error('invalid_content');
+        seen.add(r.mime); size += r.data.length;
+    }
+    if (!records.length || size > limit) throw Error('limit');
+    const bytes = new Uint8Array(size); let offset = 0;
+    for (const r of records) { bytes.set(r.data, offset); offset += r.data.length; }
+    const plain = records.find(r => r.mime === 'text/plain');
+    return { bytes, records, text: plain ? new TextDecoder('utf-8', { fatal: true }).decode(plain.data) : null,
+        formats: records.length === 1 && plain ? undefined : records.map(r => ({ mime: r.mime, size: r.data.length })) };
+}
+
 export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarget, report,
     onCopyState = () => {}, diagnostic = () => {} }) {
     let disposed = false, epoch = 0, sequence = 0, caps = null;
@@ -43,7 +59,8 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     // Unknown means try the write; it is not evidence of a denied permission.
     function capability(ignorePermission = false) {
         if (globalThis.isSecureContext === false) return 'copy_insecure';
-        if (typeof navigator.clipboard?.writeText !== 'function') return 'copy_unsupported';
+        if (typeof navigator.clipboard?.writeText !== 'function' && !(offer?.formats && navigator.clipboard?.write && globalThis.ClipboardItem)) return 'copy_unsupported';
+        if (offer?.text === null && (!navigator.clipboard?.write || !globalThis.ClipboardItem)) return 'copy_unsupported';
         const policy = document.permissionsPolicy || document.featurePolicy;
         try {
             if (policy?.features?.().includes('clipboard-write') && !policy.allowsFeature('clipboard-write')) return 'copy_policy';
@@ -55,7 +72,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     function publishCopy() {
         if (disposed) return;
         onCopyState(offer ? { id: offer.id, status: offer.status, reason: offer.reason,
-            busy: !!writing, canRetry: !capability(true) } : null);
+            busy: !!writing, canManual: typeof offer.text === 'string', canRetry: !capability(true) } : null);
     }
 
     function diagnose(reason, error, manual = false) {
@@ -130,7 +147,15 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         // Called synchronously by retryCopy: never await a permission query or
         // enqueue the API call after a user clicks the copy button.
         let result;
-        try { result = navigator.clipboard.writeText(snapshot.text); }
+        try {
+            if (snapshot.formats && navigator.clipboard?.write && globalThis.ClipboardItem) {
+                const data = Object.fromEntries(snapshot.records.filter(r => !ClipboardItem.supports || ClipboardItem.supports(r.mime))
+                    .map(r => [r.mime, new Blob([r.data], { type: r.mime })]));
+                if (!Object.keys(data).length) throw Error('unsupported');
+                result = navigator.clipboard.write([new ClipboardItem(data)]);
+            } else if (typeof snapshot.text === 'string') result = navigator.clipboard.writeText(snapshot.text);
+            else throw Error('unsupported');
+        }
         catch (error) { finishWrite(job, error); return; }
         Promise.resolve(result).then(() => finishWrite(job, null), error => finishWrite(job, error));
     }
@@ -155,7 +180,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     }
 
     function copySnapshot() {
-        return offer && offer.status !== 'copied' && live() ? { id: offer.id, text: offer.text } : null;
+        return offer && typeof offer.text === 'string' && offer.status !== 'copied' && live() ? { id: offer.id, text: offer.text } : null;
     }
 
     async function pump() {
@@ -180,14 +205,16 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
                         // Ctrl+C/X was forwarded to the remote application. Its
                         // selection response can arrive after the local paste
                         // event, which still contains the previous local value.
-                        const text = await item.copy.promise;
+                        const snapshot = await item.copy.promise;
                         if (generation !== epoch) throw Error('cancelled');
-                        const bytes = new TextEncoder().encode(text);
+                        const payload = typeof snapshot === 'string' ? packFormats([{ mime: 'text/plain', data: new TextEncoder().encode(snapshot) }]) : snapshot;
+                        const { bytes, formats } = payload;
+                        item.formats = formats;
                         queuedBytes += bytes.length - item.bytes.length;
                         if (queuedBytes > MAX_BYTES) throw Error('limit');
                         item.bytes = bytes;
                     }
-                    command({ type: 'start', id: item.id, size: item.bytes.length, shortcut: item.shortcut, target: item.target });
+                    command({ type: 'start', id: item.id, size: item.bytes.length, shortcut: item.shortcut, target: item.target, ...(item.formats ? { formats: item.formats } : {}) });
                     const chunkSize = Math.min(CHUNK_BYTES, caps.chunk_bytes);
                     for (let offset = 0; offset < item.bytes.length; offset += chunkSize) {
                         while (webrtc._send_channel?.bufferedAmount > 256 * 1024) {
@@ -252,45 +279,62 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         return true; // Leave the browser default action enabled to obtain clipboardData.
     }
 
-    function paste(event) {
+    async function paste(event) {
         if (!remoteTarget(event.target) || !isActive() || event.defaultPrevented || caps?.enabled === false) return;
         event.preventDefault();
         if (!available()) return;
-        const item = capture || newCapture('ctrl-v', event.target);
+        const generation = epoch, item = capture || newCapture('ctrl-v', event.target);
         clearTimeout(item.timer); restore(item); capture = null;
-        const data = event.clipboardData;
-        if ((!data || !Array.from(data.types || []).includes('text/plain')) && !item.copy) {
+        const data = event.clipboardData, records = [];
+        const types = Array.from(data?.types || []), allowed = caps.mime_types || ['text/plain'];
+        // Capture synchronous string data before awaiting a PNG File read.
+        if (types.includes('text/plain')) records.push({ mime: 'text/plain', data: new TextEncoder().encode(data.getData('text/plain')) });
+        if (!item.copy && types.includes('text/html') && allowed.includes('text/html')) records.push({ mime: 'text/html', data: new TextEncoder().encode(data.getData('text/html')) });
+        const png = !item.copy && allowed.includes('image/png') ? Array.from(data?.items || []).find(i => i.kind === 'file' && i.type === 'image/png')?.getAsFile() : null;
+        try {
+            if (png) {
+                if (png.size > Math.min(MAX_BYTES, caps.max_bytes)) throw Error('limit');
+                records.push({ mime: 'image/png', data: new Uint8Array(await png.arrayBuffer()) });
+            }
+            if (generation !== epoch || !queue.includes(item)) return;
+            if (!records.length && item.copy) records.push({ mime: 'text/plain', data: new Uint8Array() });
+            if (!records.length) throw Error('text_required');
+            const payload = packFormats(records, Math.min(MAX_BYTES, caps.max_bytes));
+            if (queuedBytes + payload.bytes.length > MAX_BYTES) throw Error('limit');
+            item.bytes = payload.bytes; item.formats = payload.formats; queuedBytes += item.bytes.length;
+            pump();
+        } catch (error) {
+            if (generation !== epoch) return;
             queue = queue.filter(entry => entry !== item);
-            fail('text_required'); pump(); return;
+            fail(error.message); pump();
         }
-        const bytes = new TextEncoder().encode(data?.getData('text/plain') || '');
-        if (bytes.length > Math.min(MAX_BYTES, caps.max_bytes) || queuedBytes + bytes.length > MAX_BYTES) {
-            queue = queue.filter(entry => entry !== item);
-            fail('limit'); pump(); return;
-        }
-        item.bytes = bytes; queuedBytes += bytes.length;
-        pump();
     }
 
     function receive(content, metadata) {
+        if (typeof content !== 'string') return;
+        receiveFormats([{ mime: 'text/plain', data: new TextEncoder().encode(content) }], metadata);
+    }
+
+    function receiveFormats(records, metadata) {
+        let snapshot;
+        try { snapshot = packFormats(records); } catch (_) { fail('limit'); cancel(); return; }
         if (metadata?.revision) {
             if (metadata.revision <= remoteRevision) return;
             remoteRevision = metadata.revision;
         }
         // Browser writes are acknowledgements/state updates, never a remote copy.
         if (metadata?.origin === 'browser' || caps?.enabled === false || !live() || !focusedRemote()) return;
-        if (typeof content !== 'string' || new TextEncoder().encode(content).length > MAX_BYTES) { fail('limit'); cancel(); return; }
         const ownCopy = [...copies].find(copy => copy.sent);
         if (ownCopy) {
-            clearTimeout(ownCopy.timer); copies.delete(ownCopy); ownCopy.resolve(content);
+            clearTimeout(ownCopy.timer); copies.delete(ownCopy); ownCopy.resolve(snapshot);
         }
         if (!ownCopy && (current || capture || queue.length)) return;
         // Menu copies also remain usable in the current remote input context
         // when local clipboard writes are unavailable. Blur/local input cancels
         // this intent independently of the manual-copy offer.
-        const copy = ownCopy || { promise: Promise.resolve(content) };
+        const copy = ownCopy || { promise: Promise.resolve(snapshot) };
         if (!ownCopy) remoteCopy = copy;
-        offer = { id: ++copySequence, text: content, copy, status: 'pending', reason: null };
+        offer = { ...snapshot, id: ++copySequence, copy, status: 'pending', reason: null };
         scheduledWrite = { offer, generation: ++writeGeneration };
         publishCopy();
         Promise.resolve().then(drainWrite);
@@ -356,7 +400,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     document.addEventListener('focusin', focusChanged);
     document.addEventListener('visibilitychange', visibilityChanged);
     return {
-        beginPaste, sendInput, noteCopy, receive, message, cancel, suspend, retryCopy, copySnapshot, dismissCopy,
+        beginPaste, sendInput, noteCopy, receive, receiveFormats, message, cancel, suspend, retryCopy, copySnapshot, dismissCopy,
         connected() { cancel(); caps = null; remoteRevision = 0; command({ type: 'hello' }); },
         disconnected() { cancel(false); caps = null; },
         destroy() {

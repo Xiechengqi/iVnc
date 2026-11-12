@@ -54,7 +54,7 @@ const I18N = {
         paramAudioBitrate: 'Audio bitrate',
         paramAudioBitrateHelp: 'Audio encoding bitrate. 128000 is a common default.',
         paramBinaryClipboard: 'Binary clipboard',
-        paramBinaryClipboardHelp: 'Allow clipboard sync for binary content such as images or file fragments.',
+        paramBinaryClipboardHelp: 'Sync HTML rich text and PNG images together with plain text.',
         paramKeyframe: 'Keyframe',
         paramKeyframeHelp: 'Request the next video keyframe immediately, useful after visual artifacts or reconnects.',
         paramAgentProvider: 'Default provider',
@@ -134,7 +134,9 @@ const I18N = {
         execHelp: 'Command to run when the app starts',
         nameInputPlaceholder: 'App display name',
         backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
-        desktopCommandPlaceholder: 'Enter launch command, e.g. /usr/bin/code --no-sandbox',
+        desktopCommandPlaceholder: 'Enter launch command, e.g. /usr/bin/code --ozone-platform=wayland',
+        electronTemplate: 'Electron Wayland template',
+        electronTemplateHint: 'Fill an empty command with a template, then replace the program path. Add --no-sandbox only if required when running as root.',
         cwdPlaceholder: 'Enter working directory, e.g. /workspace/app',
         timeoutPlaceholder: 'Enter timeout, e.g. 30',
         accessUrlPlaceholder: 'Enter access address, e.g. http://127.0.0.1:7860',
@@ -229,7 +231,7 @@ const I18N = {
         paramAudioBitrate: '音频码率',
         paramAudioBitrateHelp: '音频编码码率，常用值为 128000。',
         paramBinaryClipboard: '二进制剪贴板',
-        paramBinaryClipboardHelp: '允许剪贴板同步二进制内容，例如图片或文件片段。',
+        paramBinaryClipboardHelp: '允许剪贴板在纯文本之外同步 HTML 富文本和 PNG 图片。',
         paramKeyframe: '关键帧',
         paramKeyframeHelp: '立即请求下一帧关键帧，画面花屏或恢复连接后可手动触发。',
         paramAgentProvider: '默认 Provider',
@@ -309,7 +311,9 @@ const I18N = {
         execHelp: '应用启动时要执行的命令',
         nameInputPlaceholder: '应用显示名称',
         backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
-        desktopCommandPlaceholder: '请输入启动命令，例如： /usr/bin/code --no-sandbox',
+        desktopCommandPlaceholder: '请输入启动命令，例如： /usr/bin/code --ozone-platform=wayland',
+        electronTemplate: 'Electron Wayland 模板',
+        electronTemplateHint: '启动命令为空时可填入模板，再替换程序路径。root 运行时仅按应用需要添加 --no-sandbox。',
         cwdPlaceholder: '请输入工作目录，例如： /workspace/app',
         timeoutPlaceholder: '请输入超时时间，例如： 30',
         accessUrlPlaceholder: '请输入访问地址，例如： http://127.0.0.1:7860',
@@ -579,6 +583,8 @@ function applyTranslations() {
     if (notice?.dataset.key) setText('restart-notice-text', notice.dataset.key);
     setText('modal-cancel', editBuiltin || modalSaved ? 'close' : 'cancel');
     setText('log-close-btn', 'close');
+    setText('electron-template', 'electronTemplate');
+    setText('electron-template-hint', 'electronTemplateHint');
     document.getElementById('modal-close')?.setAttribute('aria-label', t('close'));
     setPlaceholderById('f-name', t('nameInputPlaceholder'));
     setPlaceholderById('f-launch-command', t('backgroundCommandPlaceholder'));
@@ -1804,6 +1810,11 @@ function updateAppTypeVisibility() {
     document.getElementById('modal-save').disabled = editBuiltin || !!appDialog?.saving;
     document.getElementById('modal-cancel').textContent = t(editBuiltin || modalSaved ? 'close' : 'cancel');
     appTypeControl?.sync();
+    updateElectronTemplate();
+}
+
+function updateElectronTemplate() {
+    document.getElementById('electron-template').disabled = editBuiltin || !!appDialog?.saving || !!document.getElementById('f-exec').value.trim();
 }
 
 // Placeholders that depend on the selected type and on add vs. edit.
@@ -1822,6 +1833,15 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.addEventListener('click', () => switchSection(btn.dataset.section));
     });
     document.getElementById('add-app-btn').addEventListener('click', showAdd);
+    document.getElementById('f-exec').addEventListener('input', updateElectronTemplate);
+    document.getElementById('electron-template').addEventListener('click', () => {
+        const command = document.getElementById('f-exec');
+        if (command.value.trim() || editBuiltin || appDialog?.saving) return;
+        command.value = '/path/to/electron-app --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3';
+        command.dispatchEvent(new Event('input', { bubbles: true }));
+        command.focus();
+        command.setSelectionRange(0, '/path/to/electron-app'.length);
+    });
     document.getElementById('lang-toggle').addEventListener('click', () => {
         setLang(currentLang === 'en' ? 'zh' : 'en');
     });

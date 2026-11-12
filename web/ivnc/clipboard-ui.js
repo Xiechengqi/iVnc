@@ -102,7 +102,7 @@ export function createClipboardUI({ getController, restoreFocus }) {
         copyButton.hidden = !state?.canRetry || state?.status === 'copied' || manual;
         manualButton.textContent = text('manual');
         manualButton.disabled = !!state?.busy;
-        manualButton.hidden = manual || state?.status === 'copied';
+        manualButton.hidden = manual || state?.canManual === false || state?.status === 'copied';
         panel.hidden = !manual || state?.status === 'copied';
         help.textContent = text(textarea.value ? 'help' : 'empty');
         textarea.setAttribute('aria-label', text('text'));

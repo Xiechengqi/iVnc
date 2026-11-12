@@ -4281,6 +4281,7 @@ export default function webrtc() {
 			input.clipboard = clipboardController;
 			window.__ivncClipboard = clipboardController;
 			webrtc.onclipboardcontent = clipboardController.receive;
+			webrtc.onclipboardformats = clipboardController.receiveFormats;
 			webrtc.onclipboardmessage = clipboardController.message;
 
 			webrtc.oncursorchange = (cursorData) => {

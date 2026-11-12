@@ -122,6 +122,8 @@ cursor,{"override":"text"}
 cursor,{"override":"none"}
 ```
 
+常规 SHM 位图光标使用 `cursor,{"handle":1,"curdata":"<base64 PNG>","hotx":3,"hoty":4}`。热点是逻辑像素；不支持的格式、变换或超过 128×128 的光标回退为 default。命名光标也可由 cursor-shape 协议产生。
+
 ### 5.2 剪贴板消息 `clipboard`
 
 远端文本回传携带内容、合成器 revision 和来源：
@@ -131,6 +133,8 @@ clipboard,{"content":"SGVsbG8=","revision":12,"origin":"remote"}
 ```
 
 `origin` 为 `remote` 或 `browser`。浏览器写入的回声不再次写本机剪贴板。客户端仍接受旧的 `clipboard,{base64}`。大文本通过 `clipboard_start,{"mime":"text/plain","revision":12,"origin":"remote"}`、`clipboard_data,{base64}` 和 `clipboard_finish` 传输；中间块没有 base64 padding。
+
+开启二进制剪贴板后，同次复制可回传纯文本、HTML 和 PNG 的多种表示。`clipboard_start` 的 JSON 元数据增加 `formats: [{"mime":"text/plain","size":5},{"mime":"text/html","size":12}]`，保留 revision 和 origin。各表示按 formats 顺序拼接为一个不超过 16 MiB 的传输体，沿用 data/finish 分块；所有表示绑定同一次 selection revision。只有纯文本时仍使用原格式。
 
 ### 5.3 任务栏消息 `taskbar`
 
@@ -355,7 +359,7 @@ k,65507,0  # Ctrl 释放
 
 ### 6.5 文本输入 `t`
 
-通过 IME 提交的文本，使用 zwp_text_input_v3 协议注入。
+通过 IME 提交的文本，向当前焦点客户端已启用的 zwp_text_input_v3 实例发送 commit_string，done 使用该实例当前 commit 序号。客户端未启用此协议或单次文本超过 48 KiB 时，使用绑定实际焦点的有序 Ctrl+V 事务回退，后续输入等待交付结束。
 
 **格式:**
 ```
@@ -387,7 +391,7 @@ cw,SGVsbG8gV29ybGQh
 
 ```text
 paste,{"type":"hello"}
-clipboard_caps,{"version":1,"enabled":true,"max_bytes":16777216,"chunk_bytes":12288}
+clipboard_caps,{"version":1,"enabled":true,"max_bytes":16777216,"chunk_bytes":12288,"mime_types":["text/plain"]}
 paste,{"type":"start","id":1,"size":5,"shortcut":"ctrl-v","target":0}
 paste,{"type":"chunk","id":1,"data":"SGVsbG8="}
 paste,{"type":"commit","id":1}
@@ -395,6 +399,8 @@ paste_ack,{"id":1,"status":"applied","revision":12}
 ```
 
 `id` 在同一连接中递增，`size` 为 UTF-8 字节数（允许 0），`target` 是当前窗口 ID 或 null。快捷键可为 `ctrl-v`、`ctrl-shift-v`、`shift-insert`。每块最多 12 KiB 原始字节，完整长度与 UTF-8 校验通过后才允许执行；start 绑定实际 surface，窗口关闭/替换不会把已开始的粘贴转给新窗口。
+
+可选扩展：`mime_types` 在二进制剪贴板开启时声明 `text/plain`、`text/html`、`image/png`；运行时切换开关会向已连接客户端广播更新能力。客户端只向声明支持的服务器发送 start 的 `formats: [{mime, size}, ...]`。此时 size 为所有表示的总字节数，chunk 传送按 formats 顺序拼接的原始内容；最多三种、不得重复，总大小仍为 16 MiB。服务端校验长度、类型、文本 UTF-8 和 PNG 签名，不接纳文件 URI。旧请求省略 formats，仍按纯文本处理；非法或未经开启的类型返回 `invalid_formats`。关闭开关后，正在传输或等待执行的富文本事务也会被拒绝。
 
 `paste,{"type":"cancel","id":1}` 取消尚未执行的操作。重复 ID 被拒绝；操作期限为 30 秒，断线失效。`applied` 在 selection 设置、按键派发、应用请求的数据写入管道并关闭写端后返回，不能当作应用完成插入的确认。其他状态包括 `duplicate`、`disabled`、`limit`、`invalid_request`、`invalid_chunk`、`invalid_content`、`unknown_request`、`expired`、`superseded`、`cancelled`、`unavailable`、`no_focus`、`focus_changed`、`delivery_failed`（管道写入失败或超过 10 秒）、`busy`（同一 seat 的另一次事务尚未完成交付）。客户端不得根据超时自动重放粘贴。
 
@@ -425,6 +431,8 @@ kr
 ### 6.9 窗口焦点 `focus`
 
 切换焦点到指定窗口。
+
+最小化窗口仍保留在 taskbar.windows 中，并携带 `minimized:true`。focus 会恢复整个显式父子窗口组、约束恢复位置到当前桌面，并激活其子窗口；xdg parent / xdg-foreign 子窗口不额外显示工具栏入口。同进程但没有协议父子关系的窗口各自保留入口。
 
 **格式:**
 ```

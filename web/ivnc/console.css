@@ -795,6 +795,8 @@ tr:hover { background-color: #f8f9fa; }
 /* Inline field errors and the modal-level error line */
 .field-error { color: var(--danger); }
 .form-line.command-line > .field-hint { grid-column: 1 / -1; }
+.electron-template-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.electron-template-row > span { flex: 1 1 240px; }
 .form-error { margin-top: 12px; }
 .app-modal input.invalid,
 .app-modal textarea.invalid {

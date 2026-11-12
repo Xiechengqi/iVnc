@@ -31,35 +31,6 @@ use crate::compositor::{
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     Compositor,
 };
-use std::collections::HashSet;
-
-fn is_windowed_chrome(app_id: &str) -> bool {
-    app_id == "ivnc-chrome-windowed"
-}
-
-/// Check if `child` is a descendant process of `ancestor` via /proc ppid chain.
-fn is_descendant_of(child: i32, ancestor: i32) -> bool {
-    let mut pid = child;
-    for _ in 0..32 {
-        if pid <= 1 {
-            return false;
-        }
-        if pid == ancestor {
-            return true;
-        }
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
-            return false;
-        };
-        // Field 4 in /proc/PID/stat is PPID
-        let ppid: i32 = stat
-            .split_whitespace()
-            .nth(3)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        pid = ppid;
-    }
-    false
-}
 
 impl XdgShellHandler for Compositor {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -67,118 +38,38 @@ impl XdgShellHandler for Compositor {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let has_parent = surface.parent().is_some();
-
-        // Detect dialog via multiple heuristics:
-        // 1. Explicit parent set by the toolkit (xdg_toplevel.set_parent)
-        // 2. New window's process is a child of an existing window's process
-        //    (cross-process dialogs like Chrome file choosers)
-        // 3. Same PID already has a window in the space (same-process secondary
-        //    windows like file chooser dialogs in GTK/Qt/Electron apps)
-        let (is_child_process, is_same_pid) = {
-            let new_pid = surface
-                .wl_surface()
-                .client()
-                .and_then(|c| c.get_credentials(&self.display_handle).ok())
-                .map(|c| c.pid);
-            if let Some(new_pid) = new_pid {
-                let mut child = false;
-                let mut same = false;
-                for w in self.space.elements() {
-                    let existing_pid = w
-                        .toplevel()
-                        .unwrap()
-                        .wl_surface()
-                        .client()
-                        .and_then(|c| c.get_credentials(&self.display_handle).ok())
-                        .map(|c| c.pid);
-                    if let Some(ep) = existing_pid {
-                        if new_pid == ep {
-                            same = true;
-                        } else if is_descendant_of(new_pid, ep) {
-                            child = true;
-                        }
-                    }
-                }
-                (child, same)
-            } else {
-                (false, false)
-            }
-        };
-
-        let is_dialog = has_parent || is_child_process || is_same_pid;
-
-        log::info!(
-            "new_toplevel: is_dialog={} (parent={}, child_proc={}, same_pid={})",
-            is_dialog,
-            has_parent,
-            is_child_process,
-            is_same_pid
-        );
-
+        let is_dialog = surface.parent().is_some();
         let window = Window::new_wayland_window(surface.clone());
-
-        // Extract output geometry before mutably borrowing space
-        let output_geo = self
-            .space
-            .outputs()
-            .next()
-            .and_then(|o| self.space.output_geometry(o));
-
         self.space.map_element(window, (0, 0), false);
-
-        let app_id = with_states(surface.wl_surface(), |states| {
-            states
-                .data_map
-                .get::<XdgToplevelSurfaceData>()
-                .and_then(|data| data.lock().ok())
-                .and_then(|data| data.app_id.clone())
-        })
-        .unwrap_or_default();
-
-        // Main window (not dialog): set fullscreen to fill the screen.
-        // Chrome launched with the built-in desktop command stays windowed so
-        // its browser toolbar/address bar remains visible.
-        if !is_dialog {
-            if let Some(output_geo) = output_geo {
-                surface.with_pending_state(|state| {
-                    if is_windowed_chrome(&app_id) {
-                        state.states.unset(xdg_toplevel::State::Fullscreen);
-                    } else {
-                        state.states.set(xdg_toplevel::State::Fullscreen);
-                    }
-                    state.size = Some((output_geo.size.w, output_geo.size.h).into());
-                });
-                surface.send_pending_configure();
-            }
-        }
-
-        // Remember which surfaces are dialogs (for commit handler centering)
         if is_dialog {
-            self.dialog_surfaces
-                .insert(surface.wl_surface().id().protocol_id());
-        }
-
-        // Auto-focus the new window so it receives keyboard input
-        let keyboard = self.seat.get_keyboard().unwrap();
-        let focus_serial = smithay::utils::SERIAL_COUNTER.next_serial();
-        keyboard.set_focus(self, Some(surface.wl_surface().clone()), focus_serial);
-
-        // Register all non-dialog windows in the taskbar
-        if !is_dialog {
-            let wl = surface.wl_surface().clone();
-            if !self.window_registry.iter().any(|w| w.id() == wl.id()) {
-                self.window_registry.push(wl);
-                self.taskbar_dirty = true;
+            self.dialog_surfaces.insert(surface.wl_surface().id());
+        } else {
+            // Fill the desktop without telling Electron it entered fullscreen.
+            if let Some(geometry) = self
+                .space
+                .outputs()
+                .next()
+                .and_then(|o| self.space.output_geometry(o))
+            {
+                surface.with_pending_state(|state| {
+                    state.states.set(xdg_toplevel::State::Maximized);
+                    state.size = Some(geometry.size);
+                });
             }
+            self.window_registry.push(surface.wl_surface().clone());
         }
+        // Initial configure is sent on the first commit, after set_parent,
+        // min/max size and decoration requests have been processed.
+        self.taskbar_dirty = true;
+        self.activate_window(surface.wl_surface());
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
         if surface.parent().is_some() {
-            let proto_id = surface.wl_surface().id().protocol_id();
-            log::info!("parent_changed: dialog detected (sid={})", proto_id);
-            self.dialog_surfaces.insert(proto_id);
+            let proto_id = surface.wl_surface().id();
+            log::info!("parent_changed: dialog detected (sid={:?})", proto_id);
+            self.dialog_surfaces.insert(proto_id.clone());
+            self.placed_dialogs.remove(&proto_id);
 
             // Remove from taskbar if it was previously registered as a main window
             let surf_id = surface.wl_surface().id();
@@ -186,7 +77,7 @@ impl XdgShellHandler for Compositor {
             if was_registered {
                 self.window_registry.retain(|w| w.id() != surf_id);
                 self.taskbar_dirty = true;
-                log::info!("parent_changed: removed sid={} from taskbar", proto_id);
+                log::info!("parent_changed: removed sid={:?} from taskbar", proto_id);
             }
 
             // Undo fullscreen: let the app use its preferred dialog size
@@ -197,7 +88,16 @@ impl XdgShellHandler for Compositor {
                 state.size = None;
                 state.decoration_mode = Some(decoration_mode);
             });
-            surface.send_pending_configure();
+            if surface.is_initial_configure_sent() {
+                surface.send_pending_configure();
+            }
+        } else if self.dialog_surfaces.remove(&surface.wl_surface().id()) {
+            self.placed_dialogs.remove(&surface.wl_surface().id());
+            if !self.window_registry.contains(surface.wl_surface()) {
+                self.window_registry.push(surface.wl_surface().clone());
+            }
+            self.configure_toplevel_decoration(&surface);
+            self.taskbar_dirty = true;
         }
     }
 
@@ -222,17 +122,25 @@ impl XdgShellHandler for Compositor {
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        if surface.with_pending_state(|s| {
+            s.states.contains(xdg_toplevel::State::Maximized)
+                || s.states.contains(xdg_toplevel::State::Fullscreen)
+        }) {
+            return;
+        }
         let seat = Seat::from_resource(&seat).unwrap();
         let wl_surface = surface.wl_surface();
 
         if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
             let pointer = seat.get_pointer().unwrap();
-            let window = self
+            let Some(window) = self
                 .space
                 .elements()
                 .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
-                .unwrap()
-                .clone();
+                .cloned()
+            else {
+                return;
+            };
             let initial_window_location = self.space.element_location(&window).unwrap();
 
             let grab = MoveSurfaceGrab {
@@ -251,24 +159,34 @@ impl XdgShellHandler for Compositor {
         serial: Serial,
         edges: xdg_toplevel::ResizeEdge,
     ) {
+        if surface.with_pending_state(|s| {
+            s.states.contains(xdg_toplevel::State::Maximized)
+                || s.states.contains(xdg_toplevel::State::Fullscreen)
+        }) {
+            return;
+        }
         let seat = Seat::from_resource(&seat).unwrap();
         let wl_surface = surface.wl_surface();
 
         if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
             let pointer = seat.get_pointer().unwrap();
-            let window = self
+            let Some(window) = self
                 .space
                 .elements()
                 .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
-                .unwrap()
-                .clone();
+                .cloned()
+            else {
+                return;
+            };
             let initial_window_location = self.space.element_location(&window).unwrap();
             let initial_window_size = window.geometry().size;
 
             surface.with_pending_state(|state| {
                 state.states.set(xdg_toplevel::State::Resizing);
             });
-            surface.send_pending_configure();
+            if surface.is_initial_configure_sent() {
+                surface.send_pending_configure();
+            }
 
             let grab = ResizeSurfaceGrab::start(
                 start_data,
@@ -281,97 +199,114 @@ impl XdgShellHandler for Compositor {
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
-        // Don't maximize dialogs — they should stay as floating windows
-        let sid = surface.wl_surface().id().protocol_id();
-        if self.dialog_surfaces.contains(&sid) {
+        if self.dialog_surfaces.contains(&surface.wl_surface().id()) {
             return;
         }
-
-        let wl_surface = surface.wl_surface().clone();
-        let output = self.space.outputs().next().unwrap().clone();
-        let output_geo = self.space.output_geometry(&output).unwrap();
-
-        surface.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Fullscreen);
-            state.size = Some((output_geo.size.w, output_geo.size.h).into());
-        });
-        surface.send_pending_configure();
-
-        let window = self
+        self.save_normal_geometry(surface.wl_surface());
+        let output_geometry = self
             .space
-            .elements()
-            .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
-            .cloned();
-        if let Some(window) = window {
-            self.space.map_element(window, (0, 0), true);
+            .outputs()
+            .next()
+            .and_then(|o| self.space.output_geometry(o));
+        if let Some(geometry) = output_geometry {
+            surface.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Maximized);
+                state.size = Some(geometry.size);
+            });
+            if surface.is_initial_configure_sent() {
+                surface.send_pending_configure();
+            }
+            if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+                if self.space.element_location(&window).is_some() {
+                    self.space.map_element(window, geometry.loc, false);
+                }
+            }
         }
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
-        surface.with_pending_state(|state| {
-            state.states.unset(xdg_toplevel::State::Maximized);
-            state.states.unset(xdg_toplevel::State::Fullscreen);
-            state.size = None;
-        });
-        surface.send_pending_configure();
+        self.restore_window_geometry(surface.wl_surface(), false);
     }
 
     fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
-        let sid = surface.wl_surface().id().protocol_id();
-        if self.dialog_surfaces.contains(&sid) {
-            return;
-        }
-
-        let wl_surface = surface.wl_surface().clone();
-        let output = self.space.outputs().next().unwrap().clone();
-        let output_geo = self.space.output_geometry(&output).unwrap();
-
-        surface.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Fullscreen);
-            state.size = Some((output_geo.size.w, output_geo.size.h).into());
-        });
-        surface.send_pending_configure();
-
-        let window = self
+        self.save_normal_geometry(surface.wl_surface());
+        let output_geometry = self
             .space
-            .elements()
-            .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
-            .cloned();
-        if let Some(window) = window {
-            self.space.map_element(window, (0, 0), true);
+            .outputs()
+            .next()
+            .and_then(|o| self.space.output_geometry(o));
+        if let Some(geometry) = output_geometry {
+            surface.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Fullscreen);
+                state.size = Some(geometry.size);
+            });
+            if surface.is_initial_configure_sent() {
+                surface.send_pending_configure();
+            }
+            if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+                if self.space.element_location(&window).is_some() {
+                    self.space.map_element(window, geometry.loc, false);
+                }
+            }
         }
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        surface.with_pending_state(|state| {
-            state.states.unset(xdg_toplevel::State::Fullscreen);
-            state.size = None;
-        });
-        surface.send_pending_configure();
+        self.restore_window_geometry(surface.wl_surface(), true);
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
-        let wl_surface = surface.wl_surface().clone();
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
-            .cloned();
-        if let Some(window) = window {
-            self.space.unmap_elem(&window);
-        }
+        self.minimize_window(surface.wl_surface());
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let id = surface.wl_surface().id();
+        // Direct xdg parents are stored as wl_surface references by Smithay.
+        // Destroying a toplevel does not clear those references automatically.
+        // Per xdg-shell, surviving children inherit the destroyed parent's
+        // parent; an orphaned child must regain its own toolbar entry.
+        let children: Vec<_> = self
+            .space
+            .elements()
+            .chain(self.minimized_windows.values().map(|(w, _)| w))
+            .filter_map(|w| {
+                w.toplevel()
+                    .filter(|t| t.parent().as_ref() == Some(surface.wl_surface()))
+                    .cloned()
+            })
+            .collect();
+        for child in children {
+            with_states(child.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .parent = surface.parent();
+            });
+            self.parent_changed(child);
+        }
+        self.dialog_surfaces.remove(&id);
+        self.placed_dialogs.remove(&id);
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            self.space.unmap_elem(&window);
+        }
+        self.minimized_windows.remove(&id);
+        self.minimized_window_order.retain(|item| item != &id);
+        self.normal_geometry.remove(&id);
+        self.window_registry.retain(|wl| wl.id() != id);
+        let focused = self.seat.get_keyboard().and_then(|kb| kb.current_focus());
+        if focused.as_ref() == Some(surface.wl_surface()) {
+            let next = self.space.elements().rev().find_map(|w| {
+                let surface = w.toplevel()?.wl_surface();
+                (surface.id() != id && surface.is_alive()).then(|| surface.clone())
+            });
+            let keyboard = self.seat.get_keyboard().unwrap();
+            keyboard.set_focus(self, next, smithay::utils::SERIAL_COUNTER.next_serial());
+        }
         self.taskbar_dirty = true;
-
-        let proto_id = surface.wl_surface().id().protocol_id();
-        self.dialog_surfaces.remove(&proto_id);
-        self.chrome_windowed_surfaces.remove(&proto_id);
-
-        // Remove only the destroyed surface from window registry (not siblings)
-        let surf_id = surface.wl_surface().id();
-        self.window_registry.retain(|wl| wl.id() != surf_id);
+        self.needs_redraw = true;
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
@@ -442,36 +377,42 @@ pub fn handle_commit(
     space: &Space<Window>,
     surface: &WlSurface,
     taskbar_dirty: &mut bool,
-    chrome_windowed_surfaces: &mut HashSet<u32>,
 ) {
     if let Some(window) = space
         .elements()
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)
         .cloned()
     {
-        let (initial_configure_sent, identity_available, app_id) = with_states(surface, |states| {
+        let (initial_configure_sent, identity_available) = with_states(surface, |states| {
             let data = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
                 .unwrap()
                 .lock()
                 .unwrap();
-            // Title or app_id changes trigger taskbar update
-            let identity_available = data.title.is_some() || data.app_id.is_some();
-            let app_id = data.app_id.clone().unwrap_or_default();
-            (data.initial_configure_sent, identity_available, app_id)
+            (
+                data.initial_configure_sent,
+                data.title.is_some() || data.app_id.is_some(),
+            )
         });
-
-        let surface_id = surface.id().protocol_id();
-        if is_windowed_chrome(&app_id) && chrome_windowed_surfaces.insert(surface_id) {
-            let toplevel = window.toplevel().unwrap();
-            toplevel.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Fullscreen);
-            });
-            toplevel.send_pending_configure();
-        }
-
         if !initial_configure_sent {
+            // Fixed-size Electron windows (including late set_parent requests)
+            // cannot obey a desktop-sized configure. Read committed limits.
+            let fixed = with_states(surface, |states| {
+                let mut cache = states
+                    .cached_state
+                    .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                let limits = cache.current();
+                limits.min_size.w > 0 && limits.min_size.h > 0 && limits.min_size == limits.max_size
+            });
+            if fixed {
+                window.toplevel().unwrap().with_pending_state(|state| {
+                    if !state.states.contains(xdg_toplevel::State::Fullscreen) {
+                        state.states.unset(xdg_toplevel::State::Maximized);
+                        state.size = None;
+                    }
+                });
+            }
             window.toplevel().unwrap().send_configure();
         }
         // Mark dirty on every commit that has title/app_id — the main loop

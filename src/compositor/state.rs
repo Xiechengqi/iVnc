@@ -1,6 +1,10 @@
 //! Compositor state - ported from smithay's smallvil example
 
-use std::{collections::HashSet, ffi::OsString, os::fd::OwnedFd, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+    sync::Arc,
+};
 
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
@@ -8,7 +12,7 @@ use smithay::{
     reexports::{
         calloop::{generic::Generic, EventLoop, Interest, LoopSignal, Mode, PostAction},
         wayland_server::{
-            backend::{ClientData, ClientId, DisconnectReason},
+            backend::{ClientData, ClientId, DisconnectReason, ObjectId},
             protocol::wl_surface::WlSurface,
             Display, DisplayHandle,
         },
@@ -21,7 +25,6 @@ use smithay::{
         shell::xdg::{decoration::XdgDecorationState, XdgShellState},
         shm::ShmState,
         socket::ListeningSocketSource,
-        text_input::TextInputManagerState,
     },
 };
 
@@ -43,7 +46,16 @@ pub struct Compositor {
     pub data_device_state: DataDeviceState,
     pub xdg_decoration_state: XdgDecorationState,
     pub popups: PopupManager,
-    pub text_input_manager_state: TextInputManagerState,
+    pub text_input: super::text_input::TextInputState,
+    pub cursor_shape: smithay::wayland::cursor_shape::CursorShapeManagerState,
+    pub viewporter: smithay::wayland::viewporter::ViewporterState,
+    pub fractional_scale: smithay::wayland::fractional_scale::FractionalScaleManagerState,
+    pub activation: smithay::wayland::xdg_activation::XdgActivationState,
+    pub xdg_foreign: smithay::wayland::xdg_foreign::XdgForeignState,
+    pub relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    pub pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState,
+    pub last_user_serial: Option<(smithay::utils::Serial, std::time::Instant, WlSurface)>,
+    pub cursor_dirty: bool,
 
     pub seat: Seat<Self>,
 
@@ -58,19 +70,19 @@ pub struct Compositor {
 
     /// Prevent concurrent paste transactions from replacing an unread offer.
     pub clipboard_paste: super::clipboard::PasteGate,
+    pub ime_paste_pending: bool,
+    pub deferred_input: std::collections::VecDeque<crate::input::InputEventData>,
 
-    /// Pipe read fd for reading client clipboard data
-    pub clipboard_read_fd: Option<OwnedFd>,
+    /// Requests are deferred until Smithay has installed the client's source.
+    pub clipboard_pending_mimes: Vec<String>,
+    pub clipboard_readback: Option<super::clipboard::Readback>,
+    pub binary_clipboard_enabled: bool,
 
-    /// Deferred clipboard read: mime type to request after event_loop.dispatch()
-    /// (smithay updates seat selection AFTER new_selection returns, so we must defer)
-    pub clipboard_pending_mime: Option<String>,
-
-    /// Surfaces that have already had their CSD titlebar offset applied
-    pub titlebar_adjusted: HashSet<u32>,
-
-    /// Number of CSD compensation attempts (limit retries)
-    pub csd_retry_count: u32,
+    /// Hidden windows remain addressable by toolbar and activation requests.
+    pub minimized_windows: HashMap<ObjectId, (Window, Point<i32, Logical>)>,
+    pub minimized_window_order: Vec<ObjectId>,
+    pub normal_geometry: HashMap<ObjectId, smithay::utils::Rectangle<i32, Logical>>,
+    pub placed_dialogs: HashSet<ObjectId>,
 
     /// Window list changed — needs broadcast to frontend
     pub taskbar_dirty: bool,
@@ -82,10 +94,7 @@ pub struct Compositor {
     pub window_registry: Vec<WlSurface>,
 
     /// Surface protocol IDs that were identified as dialogs at creation time
-    pub dialog_surfaces: HashSet<u32>,
-
-    /// Chrome browser surfaces that should remain windowed.
-    pub chrome_windowed_surfaces: HashSet<u32>,
+    pub dialog_surfaces: HashSet<ObjectId>,
 
     /// Whether keyboard focus needs to be re-sent after the first pointer enter.
     /// Chromium's Ozone/Wayland layer may ignore keyboard events received before
@@ -105,7 +114,18 @@ impl Compositor {
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
-        let text_input_manager_state = TextInputManagerState::new::<Self>(&dh);
+        let text_input = super::text_input::TextInputState::new(&dh);
+        let cursor_shape =
+            smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Self>(&dh);
+        let viewporter = smithay::wayland::viewporter::ViewporterState::new::<Self>(&dh);
+        let fractional_scale =
+            smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Self>(&dh);
+        let activation = smithay::wayland::xdg_activation::XdgActivationState::new::<Self>(&dh);
+        let xdg_foreign = smithay::wayland::xdg_foreign::XdgForeignState::new::<Self>(&dh);
+        let relative_pointer =
+            smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
+        let pointer_constraints =
+            smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "ivnc");
@@ -115,6 +135,8 @@ impl Compositor {
         let space = Space::default();
         let socket_name = Self::init_wayland_listener(display, event_loop);
         let loop_signal = event_loop.get_signal();
+
+        log::info!("Native Wayland desktop: Pixman/SHM, output scale=1; text-input-v3, cursor-shape, viewporter, fractional-scale, xdg-activation/foreign, relative-pointer/constraints enabled");
 
         Self {
             start_time,
@@ -129,22 +151,35 @@ impl Compositor {
             seat_state,
             data_device_state,
             xdg_decoration_state,
-            text_input_manager_state,
+            text_input,
+            cursor_shape,
+            viewporter,
+            fractional_scale,
+            activation,
+            xdg_foreign,
+            relative_pointer,
+            pointer_constraints,
+            last_user_serial: None,
+            cursor_dirty: true,
             popups,
             seat,
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
             needs_redraw: false,
             clipboard_revision: 0,
             clipboard_paste: Default::default(),
-            clipboard_read_fd: None,
-            clipboard_pending_mime: None,
-            titlebar_adjusted: HashSet::new(),
-            csd_retry_count: 0,
+            ime_paste_pending: false,
+            deferred_input: Default::default(),
+            clipboard_readback: None,
+            clipboard_pending_mimes: Vec::new(),
+            binary_clipboard_enabled: false,
+            minimized_windows: HashMap::new(),
+            minimized_window_order: Vec::new(),
+            normal_geometry: HashMap::new(),
+            placed_dialogs: HashSet::new(),
             taskbar_dirty: false,
             focused_surface_id: None,
             window_registry: Vec::new(),
             dialog_surfaces: HashSet::new(),
-            chrome_windowed_surfaces: HashSet::new(),
             kbd_focus_needs_reenter: true,
         }
     }

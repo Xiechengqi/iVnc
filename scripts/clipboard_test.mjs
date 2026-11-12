@@ -266,6 +266,52 @@ test('reconnect clears clipboard chunks and ignores callbacks from old channels 
     assert.deepEqual(contents, [['NEW', 2]]);
 });
 
+test('asynchronous PNG capture keeps later input and the next paste in gesture order', async () => {
+    const t = setup(); let finish;
+    try {
+        t.controller.message('clipboard_caps', {version:1,enabled:true,max_bytes:16777216,chunk_bytes:12288,mime_types:['text/plain','text/html','image/png']});
+        const png = Uint8Array.from([137,80,78,71,13,10,26,10]);
+        t.controller.beginPaste(t.event(), 'ctrl-v');
+        const capture = t.listeners.get('paste')({...t.event(),clipboardData:{types:['Files'],items:[{kind:'file',type:'image/png',getAsFile:()=>({size:png.length,arrayBuffer:()=>new Promise(resolve=>{finish=resolve})})}]}});
+        t.controller.sendInput('ku,65507'); t.paste('NEXT');
+        assert.equal(t.requests('start').length,0);
+        assert(!t.sent.includes('ku,65507'));
+        finish(png.buffer); await capture; await tick();
+        assert.deepEqual(t.requests('start')[0].formats,[{mime:'image/png',size:8}]);
+        assert.deepEqual([...Buffer.from(t.requests('chunk')[0].data,'base64')],[...png]);
+        t.ack(); await tick();
+        assert.equal(t.requests('start').length,2);
+        assert(t.sent.indexOf('ku,65507')<t.sent.findIndex(m=>m.startsWith('paste,')&&JSON.parse(m.slice(6)).type==='start'&&JSON.parse(m.slice(6)).id===2));
+        assert.equal(Buffer.from(t.requests('chunk')[1].data,'base64').toString(),'NEXT');
+        t.ack(); await tick(); assert.deepEqual(t.errors,[]);
+    } finally { t.controller.destroy(); }
+});
+
+test('MIME clipboard decoding rejects duplicate formats, mismatched lengths and oversized chunk streams', () => {
+    const rtcSource = readFileSync(new URL('../web/ivnc/lib/webrtc.js', import.meta.url), 'utf8')
+        .replace(/^import .*;\s*$/gm, '').replace('export class WebRTCDemo', 'class WebRTCDemo');
+    const ctx = {atob,Uint8Array};
+    vm.createContext(ctx);vm.runInContext(rtcSource+'\nglobalThis.RtcClass=WebRTCDemo;',ctx);
+    const records=[],errors=[];
+    const rtc=Object.assign(Object.create(ctx.RtcClass.prototype),{clipboardcontent:[],_clipboardEncodedLength:0,
+        _setDebug:m=>errors.push(m),onclipboardformats:(r,m)=>records.push({r,m})});
+    const send=data=>rtc._onPeerDataChannelMessage({data});
+    const start=formats=>send('clipboard_start,'+JSON.stringify({formats,revision:1,origin:'remote'}));
+    start([{mime:'text/plain',size:1},{mime:'text/html',size:8}]);
+    send('clipboard_data,'+btoa('A<b>A</b>'));send('clipboard_finish');
+    assert.equal(records.length,1);assert.equal(new TextDecoder().decode(records[0].r[1].data),'<b>A</b>');
+    for(const formats of [[{mime:'text/plain',size:1},{mime:'text/plain',size:0}],[{mime:'text/plain',size:2}],[{mime:'text/uri-list',size:1}]]){
+        start(formats);send('clipboard_data,QQ==');send('clipboard_finish');
+    }
+    start([{mime:'text/plain',size:1}]);
+    send('clipboard_data,'+'A'.repeat(Math.ceil(16777216/3)*4+4));
+    assert.equal(rtc.clipboardcontent.length,0,'overflow must be discarded before joining/decoding');
+    send('clipboard_finish');
+    assert.equal(records.length,1);assert.equal(errors.length,4);
+    start([{mime:'text/plain',size:1}]);send('clipboard_data,QQ==');send('clipboard_finish');
+    assert.equal(records.length,2,'a rejected transfer must not poison the next revision');
+});
+
 const deniedWrite = async () => { throw new DOMException('Write denied', 'NotAllowedError'); };
 const receiveCopy = (t, text = 'REMOTE', revision = 1) => t.controller.receive(text, {revision, origin:'remote'});
 

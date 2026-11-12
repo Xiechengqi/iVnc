@@ -19,12 +19,11 @@ use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
-use smithay::wayland::text_input::TextInputSeat;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shell::xdg::ToplevelSurface;
-use smithay::{delegate_data_device, delegate_output, delegate_seat, delegate_text_input_manager, delegate_xdg_decoration};
+use smithay::{delegate_data_device, delegate_output, delegate_seat, delegate_xdg_decoration};
 
 impl SeatHandler for Compositor {
     type KeyboardFocus = WlSurface;
@@ -41,30 +40,34 @@ impl SeatHandler for Compositor {
         image: smithay::input::pointer::CursorImageStatus,
     ) {
         self.cursor_status = image;
+        self.cursor_dirty = true;
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        if let Some(pointer_surface) = self.seat.get_pointer().and_then(|p| p.current_focus()) {
+            if focused.is_none_or(|f| {
+                self.root_window_surface(f) != self.root_window_surface(&pointer_surface)
+            }) {
+                self.release_pointer_constraint();
+            }
+        }
         self.taskbar_dirty = true;
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client);
 
-        // Update text input focus
-        let text_input = seat.text_input();
-        text_input.leave();
-        if let Some(surface) = focused {
-            text_input.set_focus(Some(surface.clone()));
-            text_input.enter();
-        } else {
-            text_input.set_focus(None);
-        }
+        self.text_input.set_focus(focused);
 
         // Set/unset xdg_toplevel Activated state so clients (e.g. Chromium)
         // know the window has keyboard focus and should process key events.
-        for window in self.space.elements() {
+        for window in self
+            .space
+            .elements()
+            .chain(self.minimized_windows.values().map(|(w, _)| w))
+        {
             let toplevel = window.toplevel().unwrap();
             let is_focused = focused
-                .map(|f| f.id() == toplevel.wl_surface().id())
+                .map(|f| self.toplevel_surface(f) == *toplevel.wl_surface())
                 .unwrap_or(false);
             toplevel.with_pending_state(|state| {
                 if is_focused {
@@ -73,7 +76,9 @@ impl SeatHandler for Compositor {
                     state.states.unset(xdg_toplevel::State::Activated);
                 }
             });
-            toplevel.send_pending_configure();
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_pending_configure();
+            }
         }
     }
 }
@@ -98,8 +103,8 @@ impl SelectionHandler for Compositor {
             return;
         }
         self.clipboard_revision += 1;
-        self.clipboard_pending_mime = None;
-        self.clipboard_read_fd = None;
+        self.clipboard_pending_mimes.clear();
+        self.clipboard_readback = None;
         let source = match source {
             Some(s) => s,
             None => {
@@ -110,23 +115,19 @@ impl SelectionHandler for Compositor {
 
         let mime_types = source.mime_types();
         log::info!("new_selection: mime_types={:?}", mime_types);
-        let text_mime = mime_types
-            .iter()
-            .find(|m| m.contains("text/plain") || m.contains("UTF8_STRING") || m.contains("utf8"));
-        let mime = match text_mime {
-            Some(m) => m.clone(),
-            None => {
-                log::warn!("new_selection: no text mime type found in {:?}", mime_types);
-                return;
+        if let Some(mime) = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"]
+            .into_iter()
+            .find(|m| mime_types.iter().any(|t| t == m))
+        {
+            self.clipboard_pending_mimes.push(mime.to_owned());
+        }
+        if self.binary_clipboard_enabled {
+            for mime in ["text/html", "image/png"] {
+                if mime_types.iter().any(|t| t == mime) {
+                    self.clipboard_pending_mimes.push(mime.into());
+                }
             }
-        };
-
-        // Defer the actual data request to the main loop.
-        // smithay updates seat_data.clipboard_selection AFTER new_selection returns,
-        // so calling request_data_device_client_selection here would fail because
-        // the selection is still the old compositor-owned one.
-        log::info!("new_selection: deferring clipboard read for mime={}", mime);
-        self.clipboard_pending_mime = Some(mime);
+        }
     }
 
     fn send_selection(
@@ -137,11 +138,8 @@ impl SelectionHandler for Compositor {
         _seat: Seat<Self>,
         user_data: &Self::SelectionUserData,
     ) {
-        if matches!(
-            mime_type.as_str(),
-            "text/plain;charset=utf-8" | "text/plain" | "UTF8_STRING"
-        ) {
-            crate::compositor::clipboard::send_snapshot(fd, user_data.clone());
+        if let Some(snapshot) = user_data.for_mime(&mime_type) {
+            crate::compositor::clipboard::send_snapshot(fd, snapshot);
         }
     }
 }
@@ -180,7 +178,6 @@ delegate_data_device!(Compositor);
 
 impl OutputHandler for Compositor {}
 delegate_output!(Compositor);
-delegate_text_input_manager!(Compositor);
 
 // Main surfaces stay borderless; dialogs need CSD for native close controls.
 fn decoration_mode_for_dialog(is_dialog: bool) -> Mode {
@@ -193,7 +190,7 @@ fn decoration_mode_for_dialog(is_dialog: bool) -> Mode {
 
 impl Compositor {
     pub(super) fn decoration_mode_for(&self, toplevel: &ToplevelSurface) -> Mode {
-        let surface_id = toplevel.wl_surface().id().protocol_id();
+        let surface_id = toplevel.wl_surface().id();
         decoration_mode_for_dialog(self.dialog_surfaces.contains(&surface_id))
     }
 

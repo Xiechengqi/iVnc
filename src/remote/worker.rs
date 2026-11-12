@@ -460,11 +460,7 @@ fn worker_failure(data: &[u8]) -> String {
 const STARTUP_FAILED: &[u8] = b"failed: ";
 
 impl Runtime {
-    async fn run(
-        mut self,
-        parent: i32,
-        term: &mut tokio::signal::unix::Signal,
-    ) -> Stop {
+    async fn run(mut self, parent: i32, term: &mut tokio::signal::unix::Signal) -> Stop {
         let stop = tokio::select! {
             r = self.child.wait() => Stop::Ended(match r {
                 Ok(status) if status.success() => Ok(()),

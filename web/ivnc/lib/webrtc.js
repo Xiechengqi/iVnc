@@ -139,6 +139,7 @@ export class WebRTCDemo {
 		 * @type {function}
 		 */
 		this.onclipboardcontent = null;
+		this.onclipboardformats = null;
 		this.onclipboardmessage = null;
 
 		/**
@@ -190,6 +191,7 @@ export class WebRTCDemo {
 		 * @type {Array}
 		 */
 		this.clipboardcontent = [];
+		this._clipboardEncodedLength = 0;
 
 		/**
 		 * @type {function}
@@ -529,20 +531,47 @@ export class WebRTCDemo {
 		} else if (msg.type === 'clipboard_start') {
 			// Start of chunked clipboard transfer
 			this.clipboardcontent.length = 0;
+			this._clipboardEncodedLength = 0;
 			this._clipboardMetadata = typeof msg.data === 'object' ? msg.data : null;
 		} else if (msg.type === 'clipboard_data') {
 			// Chunk of clipboard data (base64)
 			if (msg.data !== null) {
-				this.clipboardcontent.push(typeof msg.data === 'string' ? msg.data : '');
+				const chunk = typeof msg.data === 'string' ? msg.data : '';
+				if (this._clipboardEncodedLength >= 0) {
+					this._clipboardEncodedLength += chunk.length;
+					if (this._clipboardEncodedLength > Math.ceil(16 * 1024 * 1024 / 3) * 4) {
+						this.clipboardcontent.length = 0;
+						this._clipboardEncodedLength = -1;
+					} else this.clipboardcontent.push(chunk);
+				}
 			}
 		} else if (msg.type === 'clipboard_finish') {
 			// End of chunked clipboard transfer
-			var text = base64ToString(this.clipboardcontent.join(''));
-			this._setDebug("received chunked clipboard contents, length: " + text.length);
-			if (this.onclipboardcontent !== null) {
-				this.onclipboardcontent(text, this._clipboardMetadata);
-			}
+			try {
+				if (this._clipboardEncodedLength < 0) throw Error('clipboard limit');
+				if (Array.isArray(this._clipboardMetadata?.formats)) {
+					const specs = this._clipboardMetadata.formats, seen = new Set();
+					if (!specs.length || specs.length > 3) throw Error('invalid clipboard formats');
+					const raw = atob(this.clipboardcontent.join(''));
+					if (raw.length > 16 * 1024 * 1024) throw Error('clipboard limit');
+					const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+					let offset = 0;
+					const records = specs.map(f => {
+						if (!f || !['text/plain', 'text/html', 'image/png'].includes(f.mime) || seen.has(f.mime)
+							|| !Number.isSafeInteger(f.size) || f.size < 0 || offset + f.size > bytes.length) throw Error('invalid clipboard format');
+						seen.add(f.mime);
+						const data = bytes.slice(offset, offset + f.size); offset += f.size;
+						return { mime: f.mime, data };
+					});
+					if (offset !== bytes.length) throw Error('clipboard size mismatch');
+					this.onclipboardformats?.(records, this._clipboardMetadata);
+				} else {
+					const text = base64ToString(this.clipboardcontent.join(''));
+					this.onclipboardcontent?.(text, this._clipboardMetadata);
+				}
+			} catch (e) { this._setDebug('invalid clipboard: ' + e.message); }
 			this.clipboardcontent.length = 0;
+			this._clipboardEncodedLength = 0;
 			this._clipboardMetadata = null;
 		} else if (msg.type === 'clipboard_binary') {
 			// Binary clipboard: clipboard_binary,mime,base64
@@ -1116,6 +1145,7 @@ export class WebRTCDemo {
 		this.ondatachannelclose?.();
 		this._send_channel = null;
 		this.clipboardcontent.length = 0;
+		this._clipboardEncodedLength = 0;
 		this._clipboardMetadata = null;
 		if (channel) channel.close();
 		if (this._aux_channel) { this._aux_channel.close(); this._aux_channel = null; }

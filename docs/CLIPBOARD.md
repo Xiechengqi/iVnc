@@ -5,8 +5,8 @@
 ## 当前流程
 
 1. `input2.js` 识别 Ctrl/Cmd+V、Ctrl+Shift+V 和 Shift+Insert，交给 `clipboard.js` 捕获用户原生 `paste` 事件，不提前发送 V。本地 toolbar、表单和 Web 终端保持原生输入。
-2. 一次手势保存文本、快捷键类型和目标窗口。后续键盘/鼠标输入按顺序排在这次操作后；使用 `event.repeat` 抑制长按，不按时间吞掉独立粘贴。
-3. 同一有序输入 DataChannel 上协商能力，发送 `paste` 的 start/chunk/commit。文本按 UTF-8 字节分块，空文本合法；图片/富文本不转换为旧文本粘贴。
+2. 一次手势保存内容、快捷键类型和目标窗口。后续键盘/鼠标输入按顺序排在这次操作后；使用 `event.repeat` 抑制长按，不按时间吞掉独立粘贴。
+3. 同一有序输入 DataChannel 上协商能力，发送 `paste` 的 start/chunk/commit。文本按 UTF-8 字节分块，空文本合法。默认关闭的二进制开关启用后，同次传输也可保存 HTML 和 PNG。
 4. start 在合成器输入队列中绑定实际 `WlSurface`，commit 只在完整长度、UTF-8、期限和目标校验通过后执行。应用关闭、焦点改变、取消或连接结束后的操作不迁移到别的窗口。
 5. 合成器先建立独立 `Arc<[u8]>` selection，再派发对应快捷键，并恢复之前持有的修饰键。每份 Wayland offer 保留自己的内容，后来的粘贴不能改变旧 offer 的读取结果。
 6. 应用请求读取 offer 后，内容异步写入管道并关闭写端（EOF），才向请求连接返回 `paste_ack`。`applied` 确认 selection、按键派发和管道交付，**不表示 Chrome 的异步文本插入已经完成**。写入失败或超过 10 秒返回 `delivery_failed`；应用始终不读取时由 30 秒操作期限结束。客户端不自动重试。
@@ -47,7 +47,7 @@
 
 文本回传支持原来的裸 base64 以及带元数据的 JSON。分块使用 4095 字节，使中间 base64 块没有 padding，兼容旧客户端先拼接再解码的方式。
 
-原生远端应用的菜单操作继续使用应用自身的剪贴板；本文的跨端内容绑定适用于 Web 捕获到的粘贴手势。图片、文件和富文本保留原有独立协议，不在本次文本事务范围内。
+原生远端应用的菜单操作继续使用应用自身的剪贴板；跨端内容绑定适用于 Web 捕获到的粘贴手势。HTML/PNG 通过下文的可选 MIME 扩展进入同一事务；文件上传保持独立通道，不把文件路径解释为剪贴板内容。
 
 ## 验证
 
@@ -77,3 +77,11 @@ clipboard UI smoke 验证 HTTPS 默认权限、拒绝写入后的原生手动复
 此前 paste v1 验证：Rust 111 项、前端事件/生命周期 13 项、真实 Chrome 剪贴板 11 项、toolbar 28 项、桌面管理 56 项、远程应用共享 64 项全部通过；前端构建和启用 TLS 的服务端构建通过。
 
 此前 paste v1 的 review 已修正提前确认造成的连续粘贴串值、合成器线程缺少 Tokio 运行时导致的管道异常、旧连接回调干扰重连、分块 base64 padding、本地输入框误拦截和同一 seat 并发事务覆盖。确认与取消的边界遵循上文说明，不依赖固定延时重试。
+
+## HTML / PNG 扩展
+
+paste v1 的 `clipboard_caps` 可附带 `mime_types`。二进制开关打开时为 `text/plain`、`text/html`、`image/png`，关闭时只有纯文本；运行时切换会主动广播更新能力，无需重连。新前端只向声明此能力的服务器发送可选的 start `formats: [{mime, size}, ...]`，传输体按这个顺序拼接；旧文本请求不带 formats，保持兼容。服务器校验类型白名单、去重、总长度、文本 UTF-8 和 PNG 签名，所有表示共享一个 selection revision 和送达确认。总大小仍为 16 MiB，不接纳 `text/uri-list` 或任意文件路径。
+
+远端复制会并行读取同一 revision 下的可用表示，所有非阻塞管道结束后一次回传。原有纯文本消息不变；多表示使用带 formats、revision、origin 的 clipboard_start 元数据，后接原有 data/finish 分块。任何新 selection、超时、超限或读取错误都会丢弃该次读取。二进制开关关闭时不回传 HTML/PNG。
+
+本机通过 `ClipboardItem` 一次写入受支持的 MIME；缺少相关 API 时保留可用纯文本回退。纯图片在权限受限时提供用户主动重试入口，不显示文本选择面板。旧 cb/cbs/cbd/cbe 入口同样经过输入队列直接设置合成器 selection，不再依赖 wl-copy；它们只更新 selection，不替代带粘贴意图的事务。

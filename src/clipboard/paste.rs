@@ -16,6 +16,17 @@ use tokio::sync::mpsc;
 pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CHUNK_BYTES: usize = 12 * 1024;
 
+pub fn capabilities_message(enabled: bool, binary: bool) -> String {
+    format!(
+        "clipboard_caps,{}",
+        serde_json::json!({
+            "version": 1, "enabled": enabled, "max_bytes": MAX_CLIPBOARD_BYTES,
+            "chunk_bytes": CHUNK_BYTES,
+            "mime_types": if enabled && binary { vec!["text/plain", "text/html", "image/png"] } else { vec!["text/plain"] }
+        })
+    )
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Shortcut {
@@ -28,6 +39,7 @@ pub enum Shortcut {
 pub struct PasteCommand {
     pub id: u64,
     pub text: Arc<[u8]>,
+    pub formats: Vec<FormatSpec>,
     pub shortcut: Shortcut,
     pub target: Option<u32>,
     pub focus:
@@ -38,6 +50,20 @@ pub struct PasteCommand {
 }
 
 impl PasteCommand {
+    pub fn plain_text(&self) -> Option<&[u8]> {
+        if self.formats.is_empty() {
+            return Some(&self.text);
+        }
+        let mut offset = 0;
+        for format in &self.formats {
+            if format.mime == "text/plain" {
+                return self.text.get(offset..offset + format.size);
+            }
+            offset += format.size;
+        }
+        None
+    }
+
     pub fn is_valid(&self) -> bool {
         self.valid.load(Ordering::Acquire) && self.started.elapsed() < TRANSFER_TIMEOUT
     }
@@ -45,6 +71,59 @@ impl PasteCommand {
     pub fn respond(&self, status: &str, revision: Option<u64>) {
         respond(&self.reply, self.id, status, revision);
     }
+}
+
+/// Optional capability extension to the v1 transfer: ordered MIME payloads,
+/// concatenated in the existing bounded/chunked body. Old text clients omit it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormatSpec {
+    pub mime: String,
+    pub size: usize,
+}
+
+fn valid_formats(formats: &[FormatSpec], size: usize, binary: bool) -> bool {
+    if formats.is_empty() {
+        return true;
+    }
+    if !binary || formats.len() > 3 {
+        return false;
+    }
+    let mut total = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for f in formats {
+        if !matches!(f.mime.as_str(), "text/plain" | "text/html" | "image/png")
+            || !seen.insert(&f.mime)
+        {
+            return false;
+        }
+        let Some(next) = total.checked_add(f.size) else {
+            return false;
+        };
+        total = next;
+    }
+    total == size
+}
+
+fn valid_content(bytes: &[u8], formats: &[FormatSpec]) -> bool {
+    if formats.is_empty() {
+        return std::str::from_utf8(bytes).is_ok();
+    }
+    let mut offset = 0;
+    for f in formats {
+        let Some(data) = bytes.get(offset..offset + f.size) else {
+            return false;
+        };
+        offset += f.size;
+        if f.mime == "image/png" {
+            if !data.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return false;
+            }
+        } else if std::str::from_utf8(data).is_err() {
+            return false;
+        }
+    }
+    offset == bytes.len()
 }
 
 fn respond(reply: &mpsc::UnboundedSender<String>, id: u64, status: &str, revision: Option<u64>) {
@@ -65,6 +144,8 @@ enum Request {
         size: usize,
         shortcut: Shortcut,
         target: Option<u32>,
+        #[serde(default)]
+        formats: Vec<FormatSpec>,
     },
     Chunk {
         id: u64,
@@ -86,6 +167,7 @@ struct Transfer {
 
 pub struct PasteReceiver {
     enabled: bool,
+    binary_enabled: bool,
     input: mpsc::UnboundedSender<InputEventData>,
     reply: mpsc::UnboundedSender<String>,
     highest_id: u64,
@@ -101,12 +183,18 @@ impl PasteReceiver {
     ) -> Self {
         Self {
             enabled,
+            binary_enabled: false,
             input,
             reply,
             highest_id: 0,
             transfer: None,
             queued: HashMap::new(),
         }
+    }
+
+    pub fn allow_binary(&mut self, enabled: bool) -> &mut Self {
+        self.binary_enabled = enabled;
+        self
     }
 
     pub fn handle(&mut self, message: &str) -> bool {
@@ -131,25 +219,26 @@ impl PasteReceiver {
         }
         match request {
             Request::Hello => {
-                let _ = self.reply.send(format!(
-                    "clipboard_caps,{}",
-                    serde_json::json!({
-                        "version": 1, "enabled": self.enabled, "max_bytes": MAX_CLIPBOARD_BYTES,
-                        "chunk_bytes": CHUNK_BYTES
-                    })
-                ));
+                let _ = self
+                    .reply
+                    .send(capabilities_message(self.enabled, self.binary_enabled));
             }
             Request::Start {
                 id,
                 size,
                 shortcut,
                 target,
+                formats,
             } => {
                 if id == 0 || id <= self.highest_id {
                     respond(&self.reply, id, "duplicate", None);
                     return true;
                 }
                 self.highest_id = id; // Never replay an ID, including failed transfers.
+                if !valid_formats(&formats, size, self.binary_enabled) {
+                    respond(&self.reply, id, "invalid_formats", None);
+                    return true;
+                }
                 if !self.enabled || size > MAX_CLIPBOARD_BYTES || self.queued.len() >= 32 {
                     respond(
                         &self.reply,
@@ -164,6 +253,7 @@ impl PasteReceiver {
                     command: PasteCommand {
                         id,
                         text: Arc::from([]),
+                        formats,
                         shortcut,
                         target,
                         focus: Arc::new(Mutex::new(None)),
@@ -203,7 +293,10 @@ impl PasteReceiver {
             Request::Commit { id } => {
                 if self.transfer.as_ref().is_some_and(|t| t.command.id == id) {
                     let mut t = self.transfer.take().unwrap();
-                    if t.bytes.len() != t.size || std::str::from_utf8(&t.bytes).is_err() {
+                    if t.bytes.len() != t.size
+                        || !valid_content(&t.bytes, &t.command.formats)
+                        || (!t.command.formats.is_empty() && !self.binary_enabled)
+                    {
                         t.command.respond("invalid_content", None);
                     } else {
                         t.command.text = Arc::from(t.bytes);
@@ -261,6 +354,82 @@ impl Drop for PasteReceiver {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mime_metadata_is_bounded_unique_and_requires_opt_in() {
+        let formats = vec![
+            FormatSpec {
+                mime: "text/html".into(),
+                size: 3,
+            },
+            FormatSpec {
+                mime: "text/plain".into(),
+                size: 1,
+            },
+        ];
+        assert!(valid_formats(&formats, 4, true));
+        assert!(!valid_formats(&formats, 4, false));
+        assert!(!valid_formats(&formats, 3, true));
+        assert!(!valid_formats(
+            &[formats[0].clone(), formats[0].clone()],
+            6,
+            true
+        ));
+        assert!(!valid_formats(
+            &[FormatSpec {
+                mime: "text/uri-list".into(),
+                size: 1
+            }],
+            1,
+            true
+        ));
+        assert!(!valid_formats(
+            &[
+                FormatSpec {
+                    mime: "text/plain".into(),
+                    size: usize::MAX
+                },
+                formats[1].clone()
+            ],
+            0,
+            true
+        ));
+    }
+
+    #[test]
+    fn mixed_mime_transfer_keeps_binary_and_text_in_one_command() {
+        let (mut r, mut rx, _) = receiver(true);
+        r.allow_binary(true);
+        let body = b"\x89PNG\r\n\x1a\nA<b>A</b>";
+        send(
+            &mut r,
+            json!({"type":"start","id":1,"size":body.len(),"shortcut":"ctrl-v","formats":[
+                {"mime":"image/png","size":8},{"mime":"text/plain","size":1},{"mime":"text/html","size":8}
+            ]}),
+        );
+        send(
+            &mut r,
+            json!({"type":"chunk","id":1,"data":STANDARD.encode(body)}),
+        );
+        send(&mut r, json!({"type":"commit","id":1}));
+        let command = next_paste(&mut rx).unwrap();
+        assert_eq!(command.plain_text(), Some(&b"A"[..]));
+        assert_eq!(command.formats.len(), 3);
+        assert!(!valid_content(
+            b"not a PNG",
+            &[FormatSpec {
+                mime: "image/png".into(),
+                size: 9
+            }]
+        ));
+        assert!(!valid_content(
+            &[255],
+            &[FormatSpec {
+                mime: "text/html".into(),
+                size: 1
+            }]
+        ));
+    }
 
     fn receiver(
         enabled: bool,

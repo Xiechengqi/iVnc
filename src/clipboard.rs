@@ -2,7 +2,6 @@
 
 pub mod paste;
 
-use crate::system_clipboard;
 use crate::web::SharedState;
 use base64::Engine;
 use log::{info, warn};
@@ -108,10 +107,7 @@ impl ClipboardReceiver {
                     warn!("Clipboard payload exceeds limit ({} bytes)", bytes.len());
                     return;
                 }
-                if system_clipboard::write(mime, &bytes) {
-                    self.state.mark_clipboard_written(mime, &bytes);
-                }
-                self.state.set_clipboard_binary(mime.to_string(), bytes);
+                self.enqueue_binary(mime, bytes);
             }
             None => warn!("Failed to decode binary clipboard payload"),
         }
@@ -193,11 +189,7 @@ impl ClipboardReceiver {
         }
 
         if self.is_binary {
-            if system_clipboard::write(&self.mime_type, &buffer) {
-                self.state.mark_clipboard_written(&self.mime_type, &buffer);
-            }
-            self.state
-                .set_clipboard_binary(self.mime_type.clone(), buffer);
+            self.enqueue_binary(&self.mime_type, buffer);
         } else {
             let encoded = base64::engine::general_purpose::STANDARD.encode(buffer);
             self.enqueue_text(encoded);
@@ -211,6 +203,26 @@ impl ClipboardReceiver {
         self.mime_type = "text/plain".to_string();
         self.in_progress = false;
         self.is_binary = false;
+    }
+
+    fn enqueue_binary(&self, mime: &str, bytes: Vec<u8>) {
+        if !matches!(mime, "text/html" | "image/png") {
+            return;
+        }
+        let valid = if mime == "image/png" {
+            bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        } else {
+            std::str::from_utf8(&bytes).is_ok()
+        };
+        if !valid {
+            return;
+        }
+        let _ = self.state.input_sender.send(crate::input::InputEventData {
+            event_type: crate::input::InputEvent::ClipboardBinary,
+            text: base64::engine::general_purpose::STANDARD.encode(bytes),
+            mime_type: mime.to_owned(),
+            ..Default::default()
+        });
     }
 
     fn enqueue_text(&self, encoded: String) {

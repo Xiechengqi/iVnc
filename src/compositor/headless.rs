@@ -83,6 +83,15 @@ impl HeadlessBackend {
                 Some(self.output.clone())
             });
         });
+        if let smithay::input::pointer::CursorImageStatus::Surface(surface) = &state.cursor_status {
+            smithay::desktop::utils::send_frames_surface_tree(
+                surface,
+                &self.output,
+                state.start_time.elapsed(),
+                None,
+                |_, _| Some(self.output.clone()),
+            );
+        }
     }
 
     /// Render the compositor space and return raw pixel data.

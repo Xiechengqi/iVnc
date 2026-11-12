@@ -17,7 +17,6 @@ mod paths;
 mod proxy_panel;
 mod remote;
 mod runtime_settings;
-mod system_clipboard;
 mod terminal;
 mod transport;
 mod web;
@@ -35,7 +34,6 @@ use input::{InputEvent, InputEventData};
 use log::{error, info, warn};
 use smithay::reexports::wayland_server::Resource;
 use std::env;
-use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -523,18 +521,12 @@ fn run(
     let mut prev_button_mask: u32 = 0;
     let (disp_w, disp_h) = shared_state.display_size();
     let mut prev_cursor_pos: (f64, f64) = (disp_w as f64 / 2.0, disp_h as f64 / 2.0);
-    let mut prev_cursor_name: String = "default".to_string();
+    let mut prev_cursor_message: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
     let mut prev_dc_open_count: u64 = 0;
     let mut prev_apps_generation: u64 = 0;
     let mut render_state = RenderState::Active;
     let mut last_visual_activity_at = Instant::now();
-    // Non-blocking clipboard pipe read state
-    let mut clipboard_pipe: Option<std::fs::File> = None;
-    let mut clipboard_pipe_buf: Vec<u8> = Vec::new();
-    let mut clipboard_pipe_revision = 0;
-    let mut clipboard_pipe_started = Instant::now();
-
     info!("Compositor loop starting at {} fps", target_fps);
 
     while running.load(Ordering::Relaxed) {
@@ -544,50 +536,19 @@ fn run(
         } else {
             Duration::from_millis(50)
         };
+        let binary_clipboard_enabled = shared_state.config.input.enable_clipboard
+            && runtime_settings.binary_clipboard_enabled();
+        if comp.binary_clipboard_enabled != binary_clipboard_enabled {
+            comp.binary_clipboard_enabled = binary_clipboard_enabled;
+            shared_state.send_text(clipboard::paste::capabilities_message(
+                shared_state.config.input.enable_clipboard,
+                binary_clipboard_enabled,
+            ));
+        }
         event_loop.dispatch(Some(dispatch_timeout), &mut comp)?;
         comp.space.refresh();
         comp.popups.cleanup();
         comp.display_handle.flush_clients().ok();
-
-        // Deferred clipboard read: new_selection saved the mime type but couldn't
-        // call request_data_device_client_selection because smithay hadn't updated
-        // the seat's selection yet. Now after dispatch() it's safe to request.
-        if let Some(mime) = comp.clipboard_pending_mime.take() {
-            use smithay::wayland::selection::data_device::request_data_device_client_selection;
-            use std::os::fd::{AsRawFd, FromRawFd};
-
-            let mut fds = [0i32; 2];
-            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
-                let read_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
-                let write_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
-                // Set read end to non-blocking
-                let nonblocking = unsafe {
-                    let flags = libc::fcntl(read_fd.as_raw_fd(), libc::F_GETFL);
-                    flags >= 0
-                        && libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
-                            == 0
-                };
-                if !nonblocking {
-                    warn!("Deferred clipboard: cannot make read pipe non-blocking");
-                    continue;
-                }
-                info!(
-                    "Deferred clipboard: requesting client data for mime={}",
-                    mime
-                );
-                if request_data_device_client_selection::<Compositor>(&comp.seat, mime, write_fd)
-                    .is_ok()
-                {
-                    comp.clipboard_read_fd = Some(read_fd);
-                    // Flush immediately so the client receives the fd and can write data
-                    comp.display_handle.flush_clients().ok();
-                } else {
-                    warn!("Deferred clipboard: request_data_device_client_selection failed");
-                }
-            } else {
-                warn!("Deferred clipboard: pipe() failed");
-            }
-        }
 
         if drain_input_events(
             &mut input_rx,
@@ -600,78 +561,24 @@ fn run(
         }
         comp.display_handle.flush_clients().ok(); // flush injected input events immediately
 
-        // Read clipboard from Wayland client (remote → browser).
-        // The pipe read fd is non-blocking so we accumulate data across
-        // loop iterations without deadlocking the compositor.
-        if let Some(fd) = comp.clipboard_read_fd.take() {
-            clipboard_pipe_buf.clear();
-            clipboard_pipe = Some(std::fs::File::from(fd));
-            clipboard_pipe_revision = comp.clipboard_revision;
-            clipboard_pipe_started = Instant::now();
-        }
-        if clipboard_pipe_revision != comp.clipboard_revision
-            || clipboard_pipe_started.elapsed() > Duration::from_secs(10)
-        {
-            clipboard_pipe = None;
-            clipboard_pipe_buf.clear();
-        }
-        if let Some(ref mut file) = clipboard_pipe {
-            let mut tmp = [0u8; 4096];
-            loop {
-                match file.read(&mut tmp) {
-                    Ok(0) => {
-                        // EOF — client closed write end, data is complete
-                        if shared_state.config.input.enable_clipboard {
-                            if let Ok(text) = String::from_utf8(clipboard_pipe_buf.clone()) {
-                                let encoded =
-                                    base64::engine::general_purpose::STANDARD.encode(&text);
-                                info!("Clipboard from remote app: {} bytes", text.len());
-                                shared_state.set_clipboard(
-                                    encoded,
-                                    clipboard_pipe_revision,
-                                    "remote",
-                                );
-                                info!("Clipboard broadcast to remote");
-                            }
-                        }
-                        clipboard_pipe_buf.clear();
-                        clipboard_pipe = None;
-                        break;
-                    }
-                    Ok(n) => {
-                        if clipboard_pipe_buf.len() + n > clipboard::MAX_CLIPBOARD_BYTES {
-                            clipboard_pipe = None;
-                            clipboard_pipe_buf.clear();
-                            break;
-                        }
-                        clipboard_pipe_buf.extend_from_slice(&tmp[..n]);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        // No more data available yet, try again next iteration
-                        break;
-                    }
-                    Err(_) => {
-                        // Pipe error, discard
-                        clipboard_pipe_buf.clear();
-                        clipboard_pipe = None;
-                        break;
-                    }
-                }
+        if let Some((revision, mut contents)) = comp.read_clipboard() {
+            if !runtime_settings.binary_clipboard_enabled() {
+                contents.retain(|(mime, _)| mime == "text/plain");
+            }
+            if shared_state.config.input.enable_clipboard {
+                shared_state.set_clipboard_formats(contents, revision);
             }
         }
 
-        // Broadcast cursor changes to frontend
-        let cursor_name = match &comp.cursor_status {
-            smithay::input::pointer::CursorImageStatus::Hidden => "none".to_string(),
-            smithay::input::pointer::CursorImageStatus::Named(icon) => icon.name().to_string(),
-            _ => "default".to_string(),
-        };
-        if cursor_name != prev_cursor_name {
-            info!("Cursor changed: {} -> {}", prev_cursor_name, cursor_name);
-            let msg = format!("cursor,{{\"override\":\"{}\"}}", cursor_name);
-            shared_state.send_text(msg);
-            prev_cursor_name = cursor_name;
-            last_visual_activity_at = Instant::now();
+        // Named and SHM cursor changes share the browser's cursor protocol.
+        if comp.cursor_dirty {
+            comp.cursor_dirty = false;
+            let message = comp.cursor_message();
+            if message != prev_cursor_message {
+                shared_state.send_text(message.clone());
+                prev_cursor_message = message;
+                last_visual_activity_at = Instant::now();
+            }
         }
 
         // Detect window changes and request keyframe so browsers can decode the new content
@@ -696,6 +603,7 @@ fn run(
         if cur_dc_open > prev_dc_open_count {
             prev_taskbar_json.clear();
             comp.taskbar_dirty = true;
+            shared_state.send_text(prev_cursor_message.clone());
             last_visual_activity_at = Instant::now();
         }
         prev_dc_open_count = cur_dc_open;
@@ -716,18 +624,12 @@ fn run(
             let snapshot = shared_state.taskbar_apps();
             let mut window_pids = std::collections::HashSet::new();
             for (idx, wl_surface) in comp.window_registry.iter().enumerate() {
-                // Skip if window not in space anymore (being destroyed)
-                if comp
-                    .space
-                    .elements()
-                    .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
-                    .is_none()
-                {
+                if comp.window_for_surface(wl_surface).is_none() {
                     continue;
-                };
+                }
                 let is_focused = focused_wl
                     .as_ref()
-                    .map(|f| f.id() == wl_surface.id())
+                    .map(|f| comp.root_window_surface(f) == *wl_surface)
                     .unwrap_or(false);
                 let (title, app_id) =
                     smithay::wayland::compositor::with_states(wl_surface, |states| {
@@ -758,6 +660,7 @@ fn run(
                     "app_id": app_id,
                     "display_name": resolve_display_name(&app_id),
                     "focused": is_focused,
+                    "minimized": comp.minimized_windows.contains_key(&wl_surface.id()),
                     "managed_app_id": managed_app_id,
                     "managed_app_name": name.map(|n| &n.name),
                     "name_revision": name.map(|n| n.name_revision),
@@ -784,20 +687,7 @@ fn run(
             } else {
                 shared_state.set_display_size(w, h);
 
-                // Re-configure all non-dialog toplevel windows to the new output size
-                let new_size: smithay::utils::Size<i32, smithay::utils::Logical> =
-                    (w as i32, h as i32).into();
-                for window in comp.space.elements() {
-                    let toplevel = window.toplevel().unwrap();
-                    let surface_id = toplevel.wl_surface().id().protocol_id();
-                    if comp.dialog_surfaces.contains(&surface_id) {
-                        continue;
-                    }
-                    toplevel.with_pending_state(|state| {
-                        state.size = Some(new_size);
-                    });
-                    toplevel.send_pending_configure();
-                }
+                comp.resize_windows(w, h);
 
                 // Rebuild pipeline with new dimensions
                 info!("Rebuilding GStreamer pipeline for {}x{}", w, h);
@@ -956,7 +846,7 @@ fn run(
             }
             shared_state.send_text(format!("stats,{}", shared_state.stats_json()));
             // Re-broadcast cursor state so newly connected sessions get it
-            shared_state.send_text(format!("cursor,{{\"override\":\"{}\"}}", prev_cursor_name));
+            shared_state.send_text(prev_cursor_message.clone());
             render_frames = 0;
             frame_count = 0;
             byte_count = 0;
@@ -995,7 +885,16 @@ fn drain_input_events(
     use smithay::utils::SERIAL_COUNTER;
 
     let mut had_input = false;
-    while let Ok(ev) = input_rx.try_recv() {
+    while let Some(mut ev) = {
+        if state.ime_paste_pending && state.clipboard_paste.busy() {
+            return had_input;
+        }
+        state.ime_paste_pending = false;
+        state
+            .deferred_input
+            .pop_front()
+            .or_else(|| input_rx.try_recv().ok())
+    } {
         had_input = true;
         let serial = SERIAL_COUNTER.next_serial();
         // Use monotonic clock for Wayland event timestamps (milliseconds).
@@ -1016,20 +915,41 @@ fn drain_input_events(
                 let (disp_w, disp_h) = shared.display_size();
                 x = x.clamp(0.0, disp_w.saturating_sub(1) as f64);
                 y = y.clamp(0.0, disp_h.saturating_sub(1) as f64);
-                *prev_cursor_pos = (x, y);
-                let pos = (x, y).into();
-                let under = state.surface_under(pos);
                 let ptr = state.seat.get_pointer().unwrap();
-                ptr.motion(
+                let old = ptr.current_location();
+                let delta = if ev.text == "relative" {
+                    (ev.mouse_x as f64, ev.mouse_y as f64).into()
+                } else {
+                    smithay::utils::Point::from((x, y)) - old
+                };
+                let pos = state.constrained_pointer_position((x, y).into());
+                *prev_cursor_pos = (pos.x, pos.y);
+                let under = state.surface_under(pos);
+                ptr.relative_motion(
                     state,
                     under.clone(),
-                    &smithay::input::pointer::MotionEvent {
-                        location: pos,
-                        serial,
-                        time,
+                    &smithay::input::pointer::RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: delta,
+                        utime: state.start_time.elapsed().as_micros() as u64,
                     },
                 );
+                // The lock protocol forbids wl_pointer.motion while locked.
+                // Sending unchanged absolute coordinates resets Chromium's
+                // relative motion accumulator and discards the raw deltas.
+                if !state.pointer_locked() {
+                    ptr.motion(
+                        state,
+                        under.clone(),
+                        &smithay::input::pointer::MotionEvent {
+                            location: pos,
+                            serial,
+                            time,
+                        },
+                    );
+                }
                 ptr.frame(state);
+                state.activate_pointer_constraint();
 
                 // Re-send keyboard focus after the first pointer enter.
                 // Chromium's Ozone/Wayland layer ignores keyboard events received
@@ -1085,6 +1005,7 @@ fn drain_input_events(
                 inject_key(state, &ev, serial, time);
             }
             InputEvent::KeyboardReset => {
+                state.release_pointer_constraint();
                 // Release every pressed key and pointer button to clear stuck state.
                 let keyboard = state.seat.get_keyboard().unwrap();
                 let pressed = keyboard.pressed_keys();
@@ -1119,12 +1040,34 @@ fn drain_input_events(
             InputEvent::Ping => {
                 shared.send_text("pong".to_string());
             }
-            InputEvent::Clipboard => {
+            InputEvent::Clipboard | InputEvent::ClipboardBinary => {
                 if shared.config.input.enable_clipboard {
+                    if state.clipboard_paste.busy() {
+                        state.deferred_input.push_front(ev);
+                        break;
+                    }
+                    let binary = ev.event_type == InputEvent::ClipboardBinary;
+                    if binary && !shared.runtime_settings.binary_clipboard_enabled() {
+                        continue;
+                    }
                     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&ev.text) {
-                        if bytes.len() <= clipboard::MAX_CLIPBOARD_BYTES
-                            && std::str::from_utf8(&bytes).is_ok()
-                        {
+                        if bytes.len() > clipboard::MAX_CLIPBOARD_BYTES {
+                            continue;
+                        }
+                        if binary {
+                            let valid = match ev.mime_type.as_str() {
+                                "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                                "text/html" => std::str::from_utf8(&bytes).is_ok(),
+                                _ => false,
+                            };
+                            if valid {
+                                let formats = [clipboard::paste::FormatSpec {
+                                    mime: ev.mime_type,
+                                    size: bytes.len(),
+                                }];
+                                state.install_clipboard_formats(Arc::from(bytes), &formats, None);
+                            }
+                        } else if std::str::from_utf8(&bytes).is_ok() {
                             let revision = state.install_clipboard(Arc::from(bytes), None);
                             shared.set_clipboard(ev.text, revision, "browser");
                         }
@@ -1138,76 +1081,50 @@ fn drain_input_events(
             }
             InputEvent::Paste => {
                 if let Some(command) = ev.paste {
+                    if !command.formats.is_empty()
+                        && !shared.runtime_settings.binary_clipboard_enabled()
+                    {
+                        command.respond("disabled", None);
+                        continue;
+                    }
                     match state.paste(&command) {
                         Ok(revision) => {
-                            shared.set_clipboard(
-                                base64::engine::general_purpose::STANDARD.encode(&command.text),
-                                revision,
-                                "browser",
-                            );
+                            if let Some(text) = command.plain_text() {
+                                shared.set_clipboard(
+                                    base64::engine::general_purpose::STANDARD.encode(text),
+                                    revision,
+                                    "browser",
+                                );
+                            }
                         }
                         Err(reason) => command.respond(reason, None),
                     }
                 }
             }
             InputEvent::TextInput => {
-                inject_text(state, &ev);
+                if !ev.text.is_empty() && ev.paste.is_none() {
+                    if let Some(surface) =
+                        state.seat.get_keyboard().and_then(|kb| kb.current_focus())
+                    {
+                        state.last_user_serial = Some((serial, Instant::now(), surface));
+                    }
+                }
+                if !ev.text.is_empty() && !state.inject_committed_text(&ev.text, &mut ev.paste) {
+                    state.deferred_input.push_front(ev);
+                    break;
+                }
             }
             InputEvent::WindowFocus => {
-                let target_idx = ev.window_id as usize;
-                let wl_surface = state.window_registry.get(target_idx).cloned();
-                if let Some(wl_surface) = wl_surface {
-                    let window = state
-                        .space
-                        .elements()
-                        .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
-                        .cloned();
-                    if let Some(window) = window {
-                        state.space.raise_element(&window, true);
-                        let keyboard = state.seat.get_keyboard().unwrap();
-                        keyboard.set_focus(state, Some(wl_surface), serial);
-                        state.focused_surface_id = Some(ev.window_id);
-                        state.taskbar_dirty = true;
-                        state.needs_redraw = true;
-                        info!("WindowFocus: switched to window index {}", target_idx);
-                    }
+                if let Some(surface) = state.window_registry.get(ev.window_id as usize).cloned() {
+                    state.activate_window(&surface);
                 }
             }
             InputEvent::WindowClose => {
-                let target_idx = ev.window_id as usize;
-                let wl_surface = state.window_registry.get(target_idx).cloned();
-                if let Some(wl_surface) = wl_surface {
-                    let window = state
-                        .space
-                        .elements()
-                        .find(|w| w.toplevel().unwrap().wl_surface() == &wl_surface)
-                        .cloned();
-                    if let Some(window) = window {
+                if let Some(surface) = state.window_registry.get(ev.window_id as usize) {
+                    if let Some(window) = state.window_for_surface(surface) {
+                        // Focus moves only when the client actually destroys the
+                        // window: Electron may cancel close to ask about changes.
                         window.toplevel().unwrap().send_close();
-                        info!("WindowClose: sent close to window index {}", target_idx);
-                        // After close, focus the last window in registry
-                        // (the most recently created one that isn't being closed)
-                        let last_surface = state
-                            .window_registry
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find(|(i, _)| *i != target_idx)
-                            .map(|(i, s)| (i, s.clone()));
-                        if let Some((idx, wl_s)) = last_surface {
-                            let next_win = state
-                                .space
-                                .elements()
-                                .find(|w| w.toplevel().unwrap().wl_surface() == &wl_s)
-                                .cloned();
-                            if let Some(next_win) = next_win {
-                                state.space.raise_element(&next_win, true);
-                                let keyboard = state.seat.get_keyboard().unwrap();
-                                keyboard.set_focus(state, Some(wl_s), serial);
-                                state.focused_surface_id = Some(idx as u32);
-                                state.needs_redraw = true;
-                            }
-                        }
                     }
                 }
             }
@@ -1239,13 +1156,16 @@ fn inject_button(
     // because Chromium routes keyboard events based on which wl_surface has keyboard focus.
     // Using a subsurface would cause Chromium to ignore key events entirely.
     if ev.button_pressed {
-        let pos: smithay::utils::Point<f64, smithay::utils::Logical> =
-            (ev.mouse_x as f64, ev.mouse_y as f64).into();
+        let pos = state.seat.get_pointer().unwrap().current_location();
         if let Some((window, _)) = state.space.element_under(pos) {
             if let Some(toplevel) = window.toplevel() {
                 let wl_surface = toplevel.wl_surface().clone();
                 let keyboard = state.seat.get_keyboard().unwrap();
-                keyboard.set_focus(state, Some(wl_surface), serial);
+                if let Some(window) = state.window_for_surface(&wl_surface) {
+                    state.space.raise_element(&window, true);
+                }
+                keyboard.set_focus(state, Some(wl_surface.clone()), serial);
+                state.last_user_serial = Some((serial, Instant::now(), wl_surface));
             }
         }
     }
@@ -1301,6 +1221,11 @@ fn inject_key(
             return;
         }
     };
+    if ev.key_pressed {
+        if let Some(surface) = keyboard.current_focus() {
+            state.last_user_serial = Some((serial, Instant::now(), surface));
+        }
+    }
     let has_focus = keyboard.current_focus().is_some();
     info!(
         "inject_key: keysym=0x{:x} keycode={} pressed={} has_focus={}",
@@ -1314,40 +1239,6 @@ fn inject_key(
         time,
         |_, _, _| FilterResult::Forward,
     );
-}
-
-/// Inject committed text from IME into the focused Wayland client.
-/// Uses zwp_text_input_v3 commit_string if the client supports it.
-fn inject_text(state: &mut Compositor, ev: &InputEventData) {
-    use smithay::wayland::text_input::TextInputSeat;
-
-    if ev.text.is_empty() {
-        return;
-    }
-
-    let text_input = state.seat.text_input().clone();
-    let mut sent = false;
-
-    text_input.with_focused_text_input(|ti, _surface| {
-        ti.commit_string(Some(ev.text.clone()));
-        ti.done(0);
-        sent = true;
-    });
-
-    if sent {
-        info!(
-            "Injected text via text_input protocol: {} bytes",
-            ev.text.len()
-        );
-    } else {
-        // Fallback: set compositor-side clipboard selection, then simulate Ctrl+Shift+V
-        info!(
-            "No text_input client, using clipboard paste: {} bytes",
-            ev.text.len()
-        );
-        state.install_clipboard(Arc::from(ev.text.as_bytes()), None);
-        state.paste_shortcut(clipboard::paste::Shortcut::CtrlShiftV);
-    }
 }
 
 /// Convert X11 keysym to xkb keycode (evdev keycode + 8).

@@ -45,6 +45,9 @@ pub fn app_environment(
         }
     }
     env.insert("HOME".into(), home.into());
+    // Electron 38+ selects Ozone's native backend from the session type. Do not
+    // inherit an X11 login session from the host running this compositor.
+    env.insert("XDG_SESSION_TYPE".into(), "wayland".into());
     // Applications are Wayland clients; their own setting wins.
     for key in ["GDK_BACKEND", "QT_QPA_PLATFORM"] {
         env.entry(key.into()).or_insert_with(|| "wayland".into());
@@ -193,6 +196,7 @@ mod tests {
             ("XDG_DATA_HOME", "/root/.local/share"),
             ("WAYLAND_DISPLAY", "wayland-0"),
             ("XDG_RUNTIME_DIR", "/run/user/0"),
+            ("XDG_SESSION_TYPE", "x11"),
         ]
         .map(|(k, v)| (OsString::from(k), OsString::from(v)));
         let home = Path::new("/data/ivnc/apps/app/home");
@@ -228,6 +232,7 @@ mod tests {
         // The application's own settings win over defaults and the manager.
         assert_eq!(get("GDK_BACKEND"), Some("x11"));
         assert_eq!(get("QT_QPA_PLATFORM"), Some("wayland"));
+        assert_eq!(get("XDG_SESSION_TYPE"), Some("wayland"));
         assert_eq!(get("IVNC_PROXY_PANEL_ENABLED"), Some("0"));
         for key in [
             "IVNC_HOME",

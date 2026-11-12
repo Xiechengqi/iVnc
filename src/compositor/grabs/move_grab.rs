@@ -32,6 +32,7 @@ impl PointerGrab<Compositor> for MoveSurfaceGrab {
         let new_location = self.initial_window_location.to_f64() + delta;
         data.space
             .map_element(self.window.clone(), new_location.to_i32_round(), true);
+        data.needs_redraw = true;
     }
 
     fn relative_motion(

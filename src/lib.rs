@@ -16,7 +16,6 @@ pub mod paths;
 pub mod proxy_panel;
 pub mod remote;
 pub mod runtime_settings;
-pub mod system_clipboard;
 pub mod terminal;
 pub mod transport;
 pub mod web;

@@ -115,7 +115,7 @@
                                     <span id="label-binary-clipboard">Binary clipboard</span>
                                     <span class="info-tip">
                                         <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-binary-clipboard">允许剪贴板同步二进制内容，例如图片或文件片段。</span>
+                                        <span class="default-text" id="help-binary-clipboard">允许剪贴板在纯文本之外同步 HTML 富文本和 PNG 图片。</span>
                                     </span>
                                 </label>
                                 <label class="checkbox-row settings-checkbox"><input id="set-binary-clipboard" type="checkbox" data-dirty-group="settings"><span id="toggle-binary-clipboard">启用</span></label>
@@ -305,7 +305,11 @@
                         <div class="command-options">
                         <div id="desktop-autostart-slot"></div>
                         </div>
-                        <input type="text" id="f-exec" placeholder="请输入启动命令，例如： /usr/bin/code --no-sandbox">
+                        <input type="text" id="f-exec" placeholder="请输入启动命令，例如： /usr/bin/code --ozone-platform=wayland">
+                    </div>
+                    <div class="field-hint electron-template-row">
+                        <button type="button" class="btn btn-sm btn-cancel" id="electron-template">Electron Wayland 模板</button>
+                        <span id="electron-template-hint">启动命令为空时可填入模板，填入后请替换程序路径。</span>
                     </div>
                     <div class="field-hint field-error" id="err-f-exec"></div>
                 </div>

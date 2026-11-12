@@ -150,6 +150,16 @@ try {
     assert(await con(`!document.querySelector('#remote-config').hidden`));
     await click('.console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
     assert.equal(await con(`document.querySelector('#f-app-type').value`),'desktop');
+    await con(`document.querySelector('#f-env').value='EXAMPLE=keep'`);
+    await click('#electron-template',true);
+    const electronCommand=await con(`document.querySelector('#f-exec').value`);
+    assert(electronCommand.includes('--ozone-platform=wayland')&&electronCommand.includes('--enable-wayland-ime')&&!electronCommand.includes('--no-sandbox'));
+    assert.equal(await con(`document.querySelector('#f-env').value`),'EXAMPLE=keep');
+    assert.equal(await con(`(()=>{const c=document.querySelector('#f-exec');return c.value.slice(c.selectionStart,c.selectionEnd)})()`),'/path/to/electron-app');
+    assert(await con(`document.querySelector('#electron-template').disabled`));
+    await con(`document.querySelector('#f-exec').value='/custom/app --custom';document.querySelector('#f-exec').dispatchEvent(new Event('input'));document.querySelector('#electron-template').click()`);
+    assert.equal(await con(`document.querySelector('#f-exec').value`),'/custom/app --custom');
+    pass('Electron template selects its program path, preserves environment and never overwrites an existing command');
     await click('.console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
     assert.equal(await con(`document.querySelector('#f-app-type').value`),'cli');
     assert(await con(`getComputedStyle(document.querySelector('#cli-config')).display!=='none'`));

@@ -652,6 +652,7 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         .paste
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .allow_binary(ctx.shared_state.runtime_settings.binary_clipboard_enabled())
         .handle(text)
     {
         ctx.shared_state

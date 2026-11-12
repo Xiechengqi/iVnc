@@ -75,6 +75,7 @@ RUN set -eu; \
     bash \
     curl \
     openssh-client \
+    dbus \
     pulseaudio \
     pulseaudio-utils \
     libpulse0 \
