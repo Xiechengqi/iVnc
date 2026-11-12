@@ -326,6 +326,7 @@ mod tests {
             launch_wait_timeout_secs: None,
             exec_command: None,
             env_vars: None,
+            desktop_launch: Default::default(),
             cli_binary_path: Some("/tmp/twitter-cli".to_string()),
             cli_env_vars: None,
             created_at: "now".to_string(),

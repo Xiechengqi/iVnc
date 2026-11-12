@@ -560,6 +560,7 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
                 launch_wait_timeout_secs: None,
                 exec_command: None,
                 env_vars: None,
+                desktop_launch: Default::default(),
                 cli_binary_path: None,
                 cli_env_vars: None,
                 created_at: chrono_now(),
@@ -624,6 +625,7 @@ fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), S
                 launch_wait_timeout_secs: None,
                 exec_command: Some(chrome_command.to_string()),
                 env_vars: None,
+                desktop_launch: Default::default(),
                 cli_binary_path: None,
                 cli_env_vars: None,
                 created_at: chrono_now(),
@@ -691,6 +693,7 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 launch_wait_timeout_secs: None,
                 exec_command: None,
                 env_vars: None,
+                desktop_launch: Default::default(),
                 cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
                 cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
                 created_at: chrono_now(),
@@ -789,7 +792,40 @@ pub fn router(state: Arc<AppsState>) -> Router {
         .route("/api/apps/{id}/data-size", get(data_size))
         .route("/api/apps/{id}/clear-data", post(clear_data))
         .route("/api/apps/{id}/logs", get(get_logs))
+        .route("/api/apps/{id}/launch-info", get(get_launch_info))
         .with_state(state)
+}
+
+fn parse_desktop_launch(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<super::compat::LaunchOptions>, ApiError> {
+    value
+        .map(|v| {
+            serde_json::from_value(v.clone()).map_err(|_| {
+                ApiError::new(
+                    "desktop_launch_invalid",
+                    "Invalid Electron compatibility or sandbox setting",
+                )
+            })
+        })
+        .transpose()
+}
+
+async fn get_launch_info(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    match state.store.get(&id) {
+        Ok(app) if app.app_type == AppType::DesktopApp => {
+            let report = tokio::task::spawn_blocking(move || super::compat::read_report(&id))
+                .await
+                .ok()
+                .flatten();
+            json_response(StatusCode::OK, json!({"launch_info": report}))
+        }
+        Ok(_) => err_response(
+            StatusCode::BAD_REQUEST,
+            "Only desktop apps have launch details",
+        ),
+        Err(error) => err_response(StatusCode::NOT_FOUND, error),
+    }
 }
 
 async fn launch_context() -> axum::Json<serde_json::Value> {
@@ -991,6 +1027,7 @@ fn app_json(
         AppType::DesktopApp => {
             obj["exec_command"] = json!(app.exec_command);
             obj["env_vars"] = json!(app.env_vars);
+            obj["desktop_launch"] = json!(app.desktop_launch);
             obj["launch_error"] = json!(state.process.failure(&app.id).map(|e| e.body()));
             // A running process is not proof of a mapped application window.
             // Worker status describes its session; it has a different compositor.
@@ -1282,6 +1319,14 @@ async fn add_app(
         .unwrap_or(false)
         && app_type != AppType::CliApp;
 
+    let desktop_launch = if app_type == AppType::DesktopApp {
+        match parse_desktop_launch(body.get("desktop_launch")) {
+            Ok(options) => options.unwrap_or_default(),
+            Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+        }
+    } else {
+        Default::default()
+    };
     let app = ManagedApp {
         id: uuid::Uuid::new_v4().to_string(),
         name,
@@ -1294,6 +1339,7 @@ async fn add_app(
         launch_wait_timeout_secs,
         exec_command,
         env_vars,
+        desktop_launch,
         cli_binary_path,
         cli_env_vars,
         created_at: chrono_now(),
@@ -1486,6 +1532,11 @@ async fn update_app(
                 app.exec_command = Some(exec.to_string());
             }
             app.env_vars = parse_env_vars(body.get("env_vars"));
+            match parse_desktop_launch(body.get("desktop_launch")) {
+                Ok(Some(options)) => app.desktop_launch = options,
+                Ok(None) => {}
+                Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+            }
         }
         AppType::CliApp => {
             if let Some(path) = body.get("cli_binary_path").and_then(|v| v.as_str()) {
@@ -1757,6 +1808,55 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn desktop_options_validate_and_legacy_updates_preserve_them() {
+        let state = state(None, None);
+        let app = ManagedApp::for_test("launch-options", AppType::DesktopApp);
+        state.store.add(&app).unwrap();
+        let update =
+            |body| update_app(State(state.clone()), Path(app.id.clone()), axum::Json(body));
+        assert_eq!(
+            update(json!({"desktop_launch":{"compatibility":"raw","sandbox":"preserve"}}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            update(json!({"exec_command":"new-command","autostart":true}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let current = state.store.get(&app.id).unwrap();
+        assert_eq!(
+            current.desktop_launch.compatibility,
+            super::super::compat::Compatibility::Raw
+        );
+        assert_eq!(
+            current.desktop_launch.sandbox,
+            super::super::compat::Sandbox::Preserve
+        );
+        for options in [
+            json!({"compatibility":"typo"}),
+            json!({"sandbox":false}),
+            json!({"unknown":true}),
+            json!(null),
+        ] {
+            assert_eq!(
+                update(json!({"desktop_launch":options,"exec_command":"must-not-save"}))
+                    .await
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                state.store.get(&app.id).unwrap().exec_command.as_deref(),
+                Some("new-command")
+            );
+        }
+        let response = get_launch_info(State(state), Path("missing".into())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 
     fn state(
         proxy_ip: Option<std::net::IpAddr>,

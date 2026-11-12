@@ -39,6 +39,9 @@ app.whenReady().then(async () => {
                 case 'state': result=state(); break;
                 case 'identity': result={uid:process.geteuid(),home:process.env.HOME,cwd:process.cwd(),
                     sandboxDisabled:app.commandLine.hasSwitch('no-sandbox'),
+                    ozonePlatform:app.commandLine.getSwitchValue('ozone-platform'),
+                    waylandIme:app.commandLine.hasSwitch('enable-wayland-ime'),
+                    textInputVersion:app.commandLine.getSwitchValue('wayland-text-input-version'),
                     rendererSandboxPreferred:w.webContents.getLastWebPreferences().sandbox,
                     rendererPid:w.webContents.getOSProcessId()}; break;
                 case 'second': await create('Electron Second'); result=state(); break;

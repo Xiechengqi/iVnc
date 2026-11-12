@@ -103,7 +103,7 @@ try {
     await waitFor('server',()=>api('/api/apps'));
     const quote=s=>"'"+s.replaceAll("'", "'\\''")+"'";
     const created=await api('/api/apps','POST',{name:'Electron Wayland smoke',app_type:'desktop',autostart:false,
-        exec_command:[electron,path.join(root,'scripts/fixtures/electron-wayland/main.cjs')].map(quote).join(' ')+' --no-sandbox --enable-wayland-ime --wayland-text-input-version=3',
+        exec_command:[electron,path.join(root,'scripts/fixtures/electron-wayland/main.cjs')].map(quote).join(' '),
         env_vars:{ELECTRON_CONTROL_PORT:String(remotePort),WAYLAND_DEBUG:'1'}});
     appId=created.app?.id||created.id;
     assert(appId,JSON.stringify(created));

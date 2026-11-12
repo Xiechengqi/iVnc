@@ -5,7 +5,7 @@ import { createConsoleDialogs } from './console-dialogs.js';
 import { enhanceSelect } from './select-control.js';
 
 const API = '/api/apps';
-let launchContext = null;
+let launchContext = null, launchInfo = null;
 const CONSOLE_API = '/api/console';
 const CAP_API = '/api/capabilities';
 let editId = null;
@@ -16,7 +16,7 @@ let appSignature = '';     // launch settings as last saved; a change on a runni
 let modalSaved = false;    // the open dialog has saved at least once
 const dialogs = createConsoleDialogs();
 const pendingAppWrites = new Map();
-let appDialog = null, appTypeControl = null;
+let appDialog = null, appTypeControl = null, launchModeControl = null, sandboxControl = null;
 let lastDataHash = '';
 let appsLoadGeneration = 0;
 let latestOrderRevision = -1;
@@ -132,16 +132,39 @@ const I18N = {
         env: 'Environment Variables',
         envDefault: '(Optional, default: none)',
         launchCommandHelp: 'Command to run when the app starts',
-        execHelp: 'Command to run when the app starts',
+        execHelp: 'Enter a program name or path. Recognized Electron apps automatically adapt to the desktop session.',
         nameInputPlaceholder: 'App display name',
         backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
-        desktopCommandPlaceholder: 'Enter launch command, e.g. /usr/bin/code --ozone-platform=wayland',
-        electronTemplate: 'Electron Wayland template',
-        electronTemplateHint: 'Fill an empty command, then replace the program path. Sandbox is preserved unless you explicitly disable it for this template. Existing commands are never changed.',
-        electronSandbox: 'Disable this app’s sandbox in the template',
-        launchIdentity: (i) => `Runs as ${i.user} (UID ${i.uid}). Apps share iVnc’s user and display session; su/sudo login wrappers can break this connection.`,
-        launchRootHint: ' Electron requires --no-sandbox as root. To keep its sandbox, run iVnc and the app as the same non-root user.',
-        launchContextUnavailable: 'Runtime identity is unavailable. Check the server user before choosing a sandbox policy.',
+        desktopCommandPlaceholder: 'e.g. amp-desktop or /path/to/app',
+        launchAdvanced: 'Advanced launch settings',
+        launchCompatibility: 'Launch compatibility',
+        launchAuto: 'Detect automatically (recommended)',
+        launchElectron: 'Treat as Electron',
+        launchRaw: 'Run as entered',
+        launchSandbox: 'Electron sandbox',
+        sandboxAuto: 'Automatic (root compatibility)',
+        sandboxPreserve: 'Preserve sandbox',
+        sandboxDisabled: 'Disable for this app',
+        sandboxHelp: 'Automatic mode disables the sandbox only for Electron running as root. Non-root launches retain the app’s sandbox policy.',
+        launchIdentity: (i) => `Runs as ${i.user} (UID ${i.uid}).`,
+        launchContextUnavailable: 'Runtime identity unavailable.',
+        launchDetails: 'Last launch details',
+        launchNoDetails: 'No launch details available. Details appear after the app is started.',
+        launchDetailsUnavailable: 'Could not load launch details.',
+        launchOriginal: 'Saved command',
+        launchEffective: 'Executed command',
+        launchAdded: 'Added arguments',
+        launchProgram: 'Program',
+        launchReason: 'Compatibility',
+        launchReasons: {
+            electron: 'Electron detected',
+            electron_forced: 'Electron selected',
+            electron_retry: 'Electron detected from startup failure; retried once',
+            raw: 'Run as entered',
+            opaque_command: 'Shell command or program could not be inspected; unchanged',
+            node_mode: 'Electron Node mode; unchanged',
+            unrecognized: 'Electron not confirmed; unchanged',
+        },
         desktopWindowReady: 'Window available',
         desktopWaitingWindow: 'Process running · waiting for window',
         cwdPlaceholder: 'Enter working directory, e.g. /workspace/app',
@@ -315,16 +338,39 @@ const I18N = {
         env: '环境变量',
         envDefault: '（可选，默认值：无）',
         launchCommandHelp: '应用启动时要执行的命令',
-        execHelp: '应用启动时要执行的命令',
+        execHelp: '输入程序名或路径，可识别的 Electron 应用会自动适配桌面环境。',
         nameInputPlaceholder: '应用显示名称',
         backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
-        desktopCommandPlaceholder: '请输入启动命令，例如： /usr/bin/code --ozone-platform=wayland',
-        electronTemplate: 'Electron Wayland 模板',
-        electronTemplateHint: '启动命令为空时可填入模板，再替换程序路径。默认保留沙箱，只有勾选后才在模板中禁用。已有命令不会被改写。',
-        electronSandbox: '模板中禁用此应用的沙箱',
-        launchIdentity: (i) => `运行用户：${i.user}（UID ${i.uid}）。应用与 iVnc 共用运行用户和显示会话，su/sudo 登录切换可能导致连接失败。`,
-        launchRootHint: ' root 运行 Electron 需要 --no-sandbox；如需保留沙箱，应让 iVnc 和应用以同一普通用户运行。',
-        launchContextUnavailable: '暂时无法获取运行用户，请先核对服务端身份，再选择沙箱策略。',
+        desktopCommandPlaceholder: '例如：amp-desktop 或 /path/to/app',
+        launchAdvanced: '高级启动设置',
+        launchCompatibility: '启动兼容',
+        launchAuto: '自动识别（推荐）',
+        launchElectron: '指定为 Electron',
+        launchRaw: '原样执行',
+        launchSandbox: 'Electron 沙箱',
+        sandboxAuto: '自动（root 兼容）',
+        sandboxPreserve: '保留沙箱',
+        sandboxDisabled: '对此应用禁用',
+        sandboxHelp: '自动模式仅在 root 运行 Electron 时禁用该应用的沙箱；普通用户保留应用原有沙箱策略。',
+        launchIdentity: (i) => `运行用户：${i.user}（UID ${i.uid}）。`,
+        launchContextUnavailable: '暂时无法获取运行用户。',
+        launchDetails: '上次启动详情',
+        launchNoDetails: '暂无启动详情，启动应用后可查看。',
+        launchDetailsUnavailable: '无法获取启动详情。',
+        launchOriginal: '保存的命令',
+        launchEffective: '执行的命令',
+        launchAdded: '补充参数',
+        launchProgram: '程序',
+        launchReason: '兼容处理',
+        launchReasons: {
+            electron: '已识别 Electron',
+            electron_forced: '已指定 Electron',
+            electron_retry: '根据启动错误识别 Electron，已修正并重试一次',
+            raw: '原样执行',
+            opaque_command: '无法解析命令或检查程序，原样执行',
+            node_mode: 'Electron Node 模式，原样执行',
+            unrecognized: '未确认是 Electron，原样执行',
+        },
         desktopWindowReady: '窗口已出现',
         desktopWaitingWindow: '进程运行中 · 等待窗口',
         cwdPlaceholder: '请输入工作目录，例如： /workspace/app',
@@ -431,6 +477,8 @@ function getHash(data) {
         launch: a.launch_command,
         autostart: a.autostart,
         ready: a.ready,
+        windowReady: a.window_ready,
+        launchError: a.launch_error,
         enabled: a.enabled,
         error: a.error,
         cli: a.cli_binary_path,
@@ -596,9 +644,20 @@ function applyTranslations() {
     if (notice?.dataset.key) setText('restart-notice-text', notice.dataset.key);
     setText('modal-cancel', editBuiltin || modalSaved ? 'close' : 'cancel');
     setText('log-close-btn', 'close');
-    setText('electron-template', 'electronTemplate');
-    setText('electron-template-hint', 'electronTemplateHint');
-    setText('electron-sandbox-label', 'electronSandbox');
+    [
+        ['desktop-launch-advanced-label', 'launchAdvanced'],
+        ['label-desktop-compat', 'launchCompatibility'],
+        ['label-desktop-sandbox', 'launchSandbox'],
+        ['desktop-sandbox-help', 'sandboxHelp'],
+        ['desktop-launch-details-label', 'launchDetails'],
+    ].forEach(([id, key]) => setText(id, key));
+    [
+        ['f-desktop-compat', ['launchAuto', 'launchElectron', 'launchRaw']],
+        ['f-desktop-sandbox', ['sandboxAuto', 'sandboxPreserve', 'sandboxDisabled']],
+    ].forEach(([id, keys]) => {
+        [...document.getElementById(id).options].forEach((option, i) => option.textContent = t(keys[i]));
+    });
+    launchModeControl?.sync(); sandboxControl?.sync(); renderLaunchInfo();
     renderLaunchContext();
     document.getElementById('modal-close')?.setAttribute('aria-label', t('close'));
     setPlaceholderById('f-name', t('nameInputPlaceholder'));
@@ -1186,7 +1245,11 @@ const APP_FIELDS = ['f-name', 'f-url', 'f-launch-command', 'f-launch-cwd', 'f-la
 // Clears per-open state so nothing leaks between apps.
 function resetModal() {
     launchContext = null;
-    document.getElementById('electron-no-sandbox').checked = false;
+    launchInfo = null;
+    document.getElementById('desktop-launch-advanced').open = false;
+    document.getElementById('desktop-launch-details').open = false;
+    setValue('f-desktop-compat', 'auto'); setValue('f-desktop-sandbox', 'auto');
+    updateDesktopLaunchControls(); renderLaunchInfo();
     renderLaunchContext();
     editId = null;
     editBuiltin = false;
@@ -1216,7 +1279,7 @@ function openAppDialog() {
     resetModal();
     const modal = document.getElementById('modal');
     appDialog = dialogs.open(modal, () => {
-        appTypeControl?.close();
+        appTypeControl?.close(); launchModeControl?.close(); sandboxControl?.close();
         appDialog = null;
         modal.classList.remove('loading');
         modal.removeAttribute('aria-busy');
@@ -1241,8 +1304,33 @@ async function loadLaunchContext(session) {
 function renderLaunchContext() {
     const identity = launchContext?.identity;
     setTextById('desktop-launch-context', identity
-        ? t('launchIdentity')(identity) + (identity.uid === 0 ? t('launchRootHint') : '')
+        ? t('launchIdentity')(identity)
         : t('launchContextUnavailable'));
+}
+
+function renderLaunchInfo() {
+    const info = launchInfo;
+    setTextById('desktop-launch-info', info ? [
+        `${t('launchReason')}: ${t('launchReasons')[info.reason] || info.reason}`,
+        `UID: ${info.uid}`,
+        info.executable && `${t('launchProgram')}: ${info.executable}`,
+        info.electron?.version && `Electron: ${info.electron.version}`,
+        `${t('launchOriginal')}: ${info.original_command}`,
+        `${t('launchAdded')}: ${info.added_args.join(' ') || '—'}`,
+        `${t('launchEffective')}: ${info.effective_command}`,
+    ].filter(Boolean).join('\n') : t('launchNoDetails'));
+}
+
+async function loadLaunchInfo() {
+    const session = appDialog, id = editId;
+    if (!id || !session?.isCurrent()) { renderLaunchInfo(); return; }
+    try {
+        const data = await fetchJson(`${API}/${id}/launch-info`, { signal: session.abort.signal });
+        if (!session.isCurrent() || editId !== id) return;
+        launchInfo = data.launch_info; renderLaunchInfo();
+    } catch (_) {
+        if (session.isCurrent()) setText('desktop-launch-info', 'launchDetailsUnavailable');
+    }
 }
 
 function showAdd() {
@@ -1289,6 +1377,8 @@ async function showEdit(id) {
         } else if (appType === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
             document.getElementById('f-env').value = envToText(a.env_vars);
+            setValue('f-desktop-compat', a.desktop_launch?.compatibility || 'auto');
+            setValue('f-desktop-sandbox', a.desktop_launch?.sandbox || 'auto');
         } else if (appType === 'cli') {
             document.getElementById('f-cli-binary').value = a.cli_binary_path || '';
             document.getElementById('f-cli-env').value = envToText(a.cli_env_vars);
@@ -1598,6 +1688,10 @@ function readAppBody(appType) {
     } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
+        body.desktop_launch = {
+            compatibility: document.getElementById('f-desktop-compat').value,
+            sandbox: document.getElementById('f-desktop-sandbox').value,
+        };
     } else if (appType === 'cli') {
         body.cli_binary_path = document.getElementById('f-cli-binary').value.trim();
         body.cli_env_vars = parseEnvText(document.getElementById('f-cli-env').value);
@@ -1852,13 +1946,14 @@ function updateAppTypeVisibility() {
     document.getElementById('modal-save').disabled = editBuiltin || !!appDialog?.saving;
     document.getElementById('modal-cancel').textContent = t(editBuiltin || modalSaved ? 'close' : 'cancel');
     appTypeControl?.sync();
-    updateElectronTemplate();
+    updateDesktopLaunchControls();
 }
 
-function updateElectronTemplate() {
-    const disabled = editBuiltin || !!appDialog?.saving || !!document.getElementById('f-exec').value.trim();
-    document.getElementById('electron-template').disabled = disabled;
-    document.getElementById('electron-no-sandbox').disabled = disabled;
+function updateDesktopLaunchControls() {
+    const disabled = editBuiltin || !!appDialog?.saving;
+    document.getElementById('f-desktop-compat').disabled = disabled;
+    document.getElementById('f-desktop-sandbox').disabled = disabled || document.getElementById('f-desktop-compat').value === 'raw';
+    launchModeControl?.sync(); sandboxControl?.sync();
 }
 
 // Placeholders that depend on the selected type and on add vs. edit.
@@ -1872,20 +1967,19 @@ function updateTypePlaceholders() {
 document.addEventListener('DOMContentLoaded', () => {
     document.body.dataset.section = activeSection;
     appTypeControl = enhanceSelect(document.getElementById('f-app-type'), document.getElementById('label-app-type'));
+    launchModeControl = enhanceSelect(document.getElementById('f-desktop-compat'), document.getElementById('label-desktop-compat'));
+    sandboxControl = enhanceSelect(document.getElementById('f-desktop-sandbox'), document.getElementById('label-desktop-sandbox'));
     document.getElementById('nav-overview').setAttribute('aria-current', 'page');
     document.querySelectorAll('.nav-item').forEach(btn => {
         btn.addEventListener('click', () => switchSection(btn.dataset.section));
     });
     document.getElementById('add-app-btn').addEventListener('click', showAdd);
-    document.getElementById('f-exec').addEventListener('input', updateElectronTemplate);
-    document.getElementById('electron-template').addEventListener('click', () => {
-        const command = document.getElementById('f-exec');
-        if (command.value.trim() || editBuiltin || appDialog?.saving) return;
-        command.value = '/path/to/electron-app --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3';
-        if (document.getElementById('electron-no-sandbox').checked) command.value += ' --no-sandbox';
-        command.dispatchEvent(new Event('input', { bubbles: true }));
-        command.focus();
-        command.setSelectionRange(0, '/path/to/electron-app'.length);
+    document.getElementById('f-desktop-compat').addEventListener('change', updateDesktopLaunchControls);
+    document.getElementById('desktop-launch-details').addEventListener('toggle', event => {
+        if (event.target.open) loadLaunchInfo();
+    });
+    document.getElementById('desktop-launch-advanced').addEventListener('toggle', event => {
+        if (!event.target.open) { launchModeControl.close(); sandboxControl.close(); }
     });
     document.getElementById('lang-toggle').addEventListener('click', () => {
         setLang(currentLang === 'en' ? 'zh' : 'en');

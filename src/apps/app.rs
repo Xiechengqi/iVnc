@@ -66,6 +66,8 @@ pub struct ManagedApp {
     pub exec_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_vars: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub desktop_launch: super::compat::LaunchOptions,
 
     // CliApp fields
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +98,7 @@ impl ManagedApp {
             launch_wait_timeout_secs: None,
             exec_command: (app_type == AppType::DesktopApp).then(|| "true".into()),
             env_vars: None,
+            desktop_launch: Default::default(),
             cli_binary_path: None,
             cli_env_vars: None,
             created_at: String::new(),

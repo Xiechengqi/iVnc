@@ -67,21 +67,30 @@ pub fn session_environment() -> Vec<(OsString, OsString)> {
 /// process tree: a launcher that forks and exits does not look like a crash,
 /// and the application ends only when the last of its processes exits.
 pub fn application_command(
-    exec_command: &str,
+    app: &ManagedApp,
     env: impl IntoIterator<Item = (OsString, OsString)>,
     session: impl IntoIterator<Item = (OsString, OsString)>,
-) -> Command {
+) -> Result<Command, super::error::ApiError> {
     let env: BTreeMap<OsString, OsString> = env.into_iter().collect();
+    let mut plan = super::compat::plan(app, &env, unsafe { libc::geteuid() })?;
+    // A worker has its own IVNC_HOME. The app's HOME is the common durable
+    // directory supplied by the manager; logs/reports live beside that HOME.
+    let log_dir = env
+        .get(std::ffi::OsStr::new("HOME"))
+        .and_then(|p| Path::new(p).parent())
+        .ok_or("Missing application HOME")?;
+    plan.diagnostic_log = Some(log_dir.join("app.log"));
+    plan.report_path = Some(log_dir.join("launch-info.json"));
     let mut cmd = Command::new("/proc/self/exe");
     if let Some(home) = env.get(std::ffi::OsStr::new("HOME")) {
         cmd.current_dir(home);
     }
-    cmd.args(["--app-reaper", "sh", "-c"])
-        .arg(exec_command)
+    cmd.args(["--app-reaper", "--ivnc-launch-plan"])
+        .arg(serde_json::to_string(&plan).map_err(|e| e.to_string())?)
         .env_clear()
         .envs(env)
         .envs(session);
-    cmd
+    Ok(cmd)
 }
 
 /// Log file path for a managed app.
@@ -141,10 +150,10 @@ fn build_desktop_command(app: &ManagedApp) -> Result<Command, super::error::ApiE
     let session = session_environment();
     super::launch::validate_session(&home, &session)?;
     let mut cmd = application_command(
-        exec_cmd,
+        app,
         app_environment(app, &home, std::env::vars_os()),
         session,
-    );
+    )?;
 
     let log_file = log_path(&app.id);
     info!("  Log file: {}", log_file.display());
@@ -227,9 +236,21 @@ mod tests {
                 .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
                 .collect()
         };
-        let main = application_command("app", env.clone(), session("wayland-0", "/run/user/0"));
+        let main =
+            application_command(&app, env.clone(), session("wayland-0", "/run/user/0")).unwrap();
         assert_eq!(main.get_current_dir(), Some(home));
-        let runtime = application_command("app", launch, session("wayland-1", "/tmp/ivnc-1"));
+        let plan: super::super::compat::Plan =
+            serde_json::from_str(main.get_args().nth(2).unwrap().to_str().unwrap()).unwrap();
+        assert_eq!(
+            plan.diagnostic_log,
+            Some(home.parent().unwrap().join("app.log"))
+        );
+        assert_eq!(
+            plan.report_path,
+            Some(home.parent().unwrap().join("launch-info.json"))
+        );
+        let runtime =
+            application_command(&app, launch, session("wayland-1", "/tmp/ivnc-1")).unwrap();
         assert_eq!(main.get_envs().count(), runtime.get_envs().count());
         assert_eq!(envs(main), envs(runtime));
 

@@ -676,6 +676,9 @@ fn run(
                 }));
             }
             // Runtimes have no apps manager, so their list of tabs stays empty.
+            if !window_pids.is_empty() {
+                remote::worker::window_seen();
+            }
             shared_state.set_window_pids(window_pids);
             let json = web::shared::taskbar_json(windows_json, &snapshot);
             if json != prev_taskbar_json {

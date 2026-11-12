@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod app;
+pub mod compat;
 pub mod datadir;
 pub mod desktop_entry;
 pub mod error;

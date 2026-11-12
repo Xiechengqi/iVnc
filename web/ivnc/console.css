@@ -795,10 +795,11 @@ tr:hover { background-color: #f8f9fa; }
 /* Inline field errors and the modal-level error line */
 .field-error { color: var(--danger); }
 .form-line.command-line > .field-hint { grid-column: 1 / -1; }
-.electron-template-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.electron-template-row > span { flex: 1 1 240px; }
-.electron-sandbox-option { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-.electron-sandbox-option input[type="checkbox"] { width: auto; margin: 0; }
+.launch-advanced { margin: 0 0 18px; color: var(--text-muted); }
+.launch-advanced summary { cursor: pointer; font-size: 12px; padding: 6px 0; }
+.launch-advanced[open] > summary { margin-bottom: 10px; }
+.launch-advanced .form-line { margin-bottom: 14px; }
+.launch-info { max-height: 210px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; user-select: text; }
 .launch-error { color: var(--danger); max-width: 360px; white-space: normal; overflow-wrap: anywhere; font-size: 12px; margin-top: 4px; }
 .form-error { margin-top: 12px; }
 .app-modal input.invalid,

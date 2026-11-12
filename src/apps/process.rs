@@ -430,6 +430,9 @@ impl ProcessManager {
             // The process may have restarted while /proc was being inspected.
             // A snapshot of its previous generation cannot make it ready.
             if roots.get(&(running.pid as i32)) == Some(id) {
+                if !running.window_ready && visible.contains(id) {
+                    super::compat::mark_window_seen(id);
+                }
                 running.window_ready = visible.contains(id);
             }
         }

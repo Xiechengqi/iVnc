@@ -96,6 +96,7 @@ impl AppStore {
         Self::ensure_column(&conn, "cli_binary_path", "TEXT")?;
         Self::ensure_column(&conn, "cli_env_vars", "TEXT")?;
         Self::ensure_column(&conn, "name_revision", "INTEGER NOT NULL DEFAULT 0")?;
+        Self::ensure_column(&conn, "desktop_launch", "TEXT NOT NULL DEFAULT '{}'")?;
 
         // Adding the column and backfilling are one migration. Later opens must
         // never reset positions saved by the user (including timestamp ties).
@@ -182,14 +183,14 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, (SELECT COALESCE(MAX(sort_order), -1)+1 FROM apps))",
+            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, desktop_launch, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, (SELECT COALESCE(MAX(sort_order), -1)+1 FROM apps))",
             params![
                 app.id, app.name, app.app_type.as_str(), url,
                 app.autostart as i32, exec_command, env_vars_json, app.created_at,
                 app.launch_command.as_deref(), launch_env_vars_json,
                 app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64),
-                app.cli_binary_path.as_deref(), cli_env_vars_json,
+                app.cli_binary_path.as_deref(), cli_env_vars_json, serde_json::to_string(&app.desktop_launch).unwrap(),
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -243,8 +244,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = tx.execute(
-            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11 WHERE id=?12",
-            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id],
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11, desktop_launch=?13 WHERE id=?12",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, serde_json::to_string(&app.desktop_launch).unwrap()],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(ApiError::new(
@@ -340,7 +341,7 @@ impl AppStore {
     pub fn get_optional(&self, id: &str) -> Result<Option<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).optional().map_err(|e| format!("Failed to read app: {}", e))
@@ -353,7 +354,7 @@ impl AppStore {
 
     fn read_apps(conn: &Connection, order: &str) -> Result<Vec<ManagedApp>, String> {
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision FROM apps ORDER BY {order}"
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch FROM apps ORDER BY {order}"
         )).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -492,6 +493,11 @@ impl AppStore {
             launch_wait_timeout_secs,
             exec_command,
             env_vars,
+            desktop_launch: row
+                .get::<_, String>(16)
+                .ok()
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_default(),
             cli_binary_path,
             cli_env_vars,
             created_at: row.get(7).unwrap_or_default(),
@@ -503,6 +509,32 @@ impl AppStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_options_migrate_and_survive_configuration_edits_and_reopening() {
+        let store = AppStore::in_memory();
+        let mut app = ManagedApp::for_test("legacy", AppType::DesktopApp);
+        app.exec_command = Some("amp-desktop --custom".into());
+        store.add(&app).unwrap();
+        let conn = store.conn.into_inner().unwrap();
+        conn.execute_batch("ALTER TABLE apps DROP COLUMN desktop_launch")
+            .unwrap();
+        let store = AppStore::from_connection(conn).unwrap();
+        let mut app = store.get("legacy").unwrap();
+        assert_eq!(app.exec_command.as_deref(), Some("amp-desktop --custom"));
+        assert_eq!(app.desktop_launch, Default::default());
+        app.desktop_launch.compatibility = super::super::compat::Compatibility::Raw;
+        app.desktop_launch.sandbox = super::super::compat::Sandbox::Preserve;
+        store.update(&app).unwrap();
+        store.rename("legacy", "Renamed", 0).unwrap();
+        let store = AppStore::from_connection(store.conn.into_inner().unwrap()).unwrap();
+        assert_eq!(
+            store.get("legacy").unwrap().desktop_launch,
+            app.desktop_launch
+        );
+        assert_eq!(store.list().unwrap()[0].desktop_launch, app.desktop_launch);
+        assert_eq!(store.get("legacy").unwrap().exec_command, app.exec_command);
+    }
 
     fn seed(store: &AppStore, ids: &[&str]) {
         for id in ids {

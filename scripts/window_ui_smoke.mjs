@@ -122,6 +122,11 @@ try {
     await waitFor('server',()=>api('/api/apps'),30000);
     const a=(await api('/api/apps','POST',{name:'Window A',app_type:'desktop',exec_command:'sleep 600'})).app;
     const b=(await api('/api/apps','POST',{name:'Window B',app_type:'desktop',exec_command:'sleep 600'})).app;
+    const detailApp=(await api('/api/apps','POST',{name:'Launch details',app_type:'desktop',exec_command:'sleep 599',desktop_launch:{compatibility:'auto',sandbox:'preserve'}})).app;
+    await api(`/api/apps/${detailApp.id}/start`,'POST');
+    await waitFor('launch details recorded',async()=>(await api(`/api/apps/${detailApp.id}/launch-info`)).launch_info);
+    await api(`/api/apps/${detailApp.id}/stop`,'POST');
+
     launch(process.env.CHROME_BIN||'google-chrome',['--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--disable-background-networking',
         `--user-data-dir=${path.join(work,'browser')}`,`--remote-debugging-port=${debugPort}`,'--window-size=1280,800',base],'browser');
     const target=await waitFor('browser',async()=>(await(await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).find(t=>t.type==='page'));
@@ -150,23 +155,30 @@ try {
     assert(await con(`!document.querySelector('#remote-config').hidden`));
     await click('.console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
     assert.equal(await con(`document.querySelector('#f-app-type').value`),'desktop');
+    assert.equal(await con(`document.querySelector('#desktop-launch-advanced').open`),false);
+    assert.equal(await con(`document.querySelector('#electron-template')`),null);
+    assert.equal(await con(`document.querySelector('#f-desktop-compat').value`),'auto');
+    assert.equal(await con(`document.querySelector('#f-desktop-sandbox').value`),'auto');
+    await con(`document.querySelector('#f-exec').value='amp-desktop';document.querySelector('#f-env').value='EXAMPLE=keep'`);
+    await screenshot('desktop-launch-simple.png');
+    pass('desktop command stays simple with automatic defaults and advanced launch settings collapsed');
+    await click('#desktop-launch-advanced > summary',true);
     await waitFor('launch identity',()=>con(`document.querySelector('#desktop-launch-context').textContent.includes('UID')`));
-    assert.equal(await con(`document.querySelector('#electron-no-sandbox').checked`),false);
-    await con(`document.querySelector('#f-env').value='EXAMPLE=keep'`);
-    await click('#electron-template',true);
-    const electronCommand=await con(`document.querySelector('#f-exec').value`);
-    assert(electronCommand.includes('--ozone-platform=wayland')&&electronCommand.includes('--enable-wayland-ime')&&!electronCommand.includes('--no-sandbox'));
+    await click('[aria-controls="f-desktop-compat-listbox"]',true);
+    await key('End','End',35);await key('Enter','Enter',13);
+    assert.equal(await con(`document.querySelector('#f-desktop-compat').value`),'raw');
+    assert(await con(`document.querySelector('#f-desktop-sandbox').disabled`));
+    await click('[aria-controls="f-desktop-compat-listbox"]',true);
+    await key('Home','Home',36);await key('Enter','Enter',13);
+    await click('[aria-controls="f-desktop-sandbox-listbox"]',true);
+    await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
+    assert.equal(await con(`document.querySelector('#f-desktop-sandbox').value`),'preserve');
+    assert.equal(await con(`document.querySelector('#f-exec').value`),'amp-desktop');
     assert.equal(await con(`document.querySelector('#f-env').value`),'EXAMPLE=keep');
-    assert.equal(await con(`(()=>{const c=document.querySelector('#f-exec');return c.value.slice(c.selectionStart,c.selectionEnd)})()`),'/path/to/electron-app');
-    assert(await con(`document.querySelector('#electron-template').disabled`));
-    await con(`document.querySelector('#f-exec').value='/custom/app --custom';document.querySelector('#f-exec').dispatchEvent(new Event('input'));document.querySelector('#electron-template').click()`);
-    assert.equal(await con(`document.querySelector('#f-exec').value`),'/custom/app --custom');
-    pass('Electron template selects its program path, preserves environment and never overwrites an existing command');
-    await con(`document.querySelector('#f-exec').value='';document.querySelector('#f-exec').dispatchEvent(new Event('input'))`);
-    await click('#electron-no-sandbox',true);await click('#electron-template',true);
-    assert((await con(`document.querySelector('#f-exec').value`)).endsWith(' --no-sandbox'));
-    assert.equal(await con(`document.querySelector('#f-env').value`),'EXAMPLE=keep');
-    pass('runtime identity is visible and only an explicit template choice disables the app sandbox');
+    await click('#desktop-launch-details > summary',true);
+    assert((await con(`document.querySelector('#desktop-launch-info').textContent`)).length>0);
+    await screenshot('desktop-launch-advanced.png');
+    pass('advanced launch policies use styled controls, preserve command and environment, and expose details on demand');
     await click('.console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
     assert.equal(await con(`document.querySelector('#f-app-type').value`),'cli');
     assert(await con(`getComputedStyle(document.querySelector('#cli-config')).display!=='none'`));
@@ -174,6 +186,16 @@ try {
     assert(await childOpen()); assert(await con(`document.querySelector('.console-select-popup').hidden`));
     await key('Escape','Escape',27);assert(!await childOpen());assert(await consoleOpen());
     pass('styled type selector updates native values and dependent fields; Escape closes one level at a time');
+    await edit(detailApp.id);
+    assert.equal(await con(`document.querySelector('#desktop-launch-advanced').open`),false);
+    await click('#desktop-launch-advanced > summary',true);
+    assert.equal(await con(`document.querySelector('#f-desktop-sandbox').value`),'preserve');
+    await click('#desktop-launch-details > summary',true);
+    await waitFor('actual launch report in editor',()=>con(`document.querySelector('#desktop-launch-info').textContent.includes('sleep 599')`));
+    assert((await con(`document.querySelector('#desktop-launch-info').textContent`)).includes('UID:'));
+    await screenshot('desktop-launch-details.png');await closeChild();
+    pass('editing retains saved launch policies and displays the actual server launch report on demand');
+
 
     await openAdd();await screenshot('console-add.png');
     const beforeInput=await evaluate('__desktopInput.length');
@@ -426,6 +448,15 @@ try {
     await call('Emulation.setDeviceMetricsOverride',{width:375,height:600,deviceScaleFactor:2,mobile:false});await delay(100);
     assert(await evaluate(`document.documentElement.scrollWidth<=innerWidth&&document.querySelector('#lang-toggle').getBoundingClientRect().right<=innerWidth`));
     await screenshot('console-narrow.png');
+    await click('#add-app-btn');await click('.console-select');
+    await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
+    await click('#desktop-launch-advanced > summary');
+    await click('[aria-controls="f-desktop-compat-listbox"]');
+    const launchPopup=await evaluate(rectCode(`document.querySelector('#f-desktop-compat-listbox')`));
+    assert(launchPopup.left>=0&&launchPopup.right<=375&&launchPopup.top>=0&&launchPopup.bottom<=600);
+    assert(await evaluate(`document.documentElement.scrollWidth<=innerWidth`));
+    await screenshot('desktop-launch-narrow.png');
+
     pass('standalone console shares the styled selector, backdrop behavior and narrow horizontal navigation');
     console.log(`Window UI smoke: ${passed} passed`);
 } catch(error) {

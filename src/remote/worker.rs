@@ -22,6 +22,23 @@ use std::{
 static PARENT_CONFIG: OnceLock<Config> = OnceLock::new();
 static WORKER: OnceLock<Launch> = OnceLock::new();
 static READY_FD: OnceLock<RawFd> = OnceLock::new();
+static WINDOW_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn window_seen() {
+    if let Some(launch) = launch() {
+        if !WINDOW_SEEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(path) = launch
+                .env
+                .iter()
+                .find(|(k, _)| k == "HOME")
+                .and_then(|(_, home)| Path::new(home).parent())
+                .map(|dir| dir.join("launch-info.json"))
+            {
+                std::thread::spawn(move || crate::apps::compat::mark_window_seen_at(&path));
+            }
+        }
+    }
+}
 
 const LOG_LIMIT: u64 = 8 * 1024 * 1024;
 /// Why the last start of a runtime failed before it became ready.
@@ -604,15 +621,9 @@ fn start_application_inner() -> Result<(), String> {
         .ok_or("Missing application HOME")?;
     crate::apps::launch::validate_session(home, &session).map_err(String::from)?;
     // The worker's own helpers are not part of the application's process tree.
-    let mut command = crate::apps::native::application_command(
-        launch
-            .app
-            .exec_command
-            .as_deref()
-            .ok_or("Desktop application has no command")?,
-        launch.env.iter().cloned(),
-        session,
-    );
+    let mut command =
+        crate::apps::native::application_command(&launch.app, launch.env.iter().cloned(), session)
+            .map_err(String::from)?;
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot launch application: {e}"))?;
@@ -641,12 +652,56 @@ const REAP_GRACE: Duration = Duration::from_secs(2);
 /// request on only to descendants outside that group: some applications, like
 /// Chrome, give up a graceful exit on a second request.
 pub fn reap(command: Vec<std::ffi::OsString>) -> i32 {
+    use std::os::unix::process::CommandExt;
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
         eprintln!("Cannot track application processes");
         return 1;
     }
     let Some((program, args)) = command.split_first() else {
         return 2;
+    };
+    let mut plan: Option<crate::apps::compat::Plan> = if program == "--ivnc-launch-plan" {
+        match args
+            .first()
+            .and_then(|s| s.to_str())
+            .and_then(|s| serde_json::from_str(s).ok())
+        {
+            Some(plan) if args.len() == 1 => Some(plan),
+            _ => {
+                eprintln!("Invalid application launch plan");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(plan) = &plan {
+        plan.write_report();
+    }
+    let cursor = plan
+        .as_ref()
+        .and_then(|p| p.diagnostic_log.clone())
+        .map(crate::apps::launch::LogCursor::new);
+    let spawn = |plan: &Option<crate::apps::compat::Plan>| -> std::io::Result<_> {
+        let mut command = match plan {
+            Some(plan) => plan.command(),
+            None => {
+                let mut c = Command::new(program);
+                c.args(args);
+                c
+            }
+        };
+        unsafe {
+            command.pre_exec(|| {
+                let mut empty: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut empty);
+                if libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
     };
     // Taken synchronously below; the application starts with an empty mask.
     let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -657,19 +712,45 @@ pub fn reap(command: Vec<std::ffi::OsString>) -> i32 {
         }
         libc::sigprocmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut());
     }
-    if let Err(e) = Command::new(program).args(args).spawn() {
+    if let Err(e) = spawn(&plan) {
         eprintln!("Cannot launch application: {e}");
         return 1;
     }
     let group = unsafe { libc::getpgrp() };
+    let termination_pending = || unsafe {
+        let mut pending: libc::sigset_t = std::mem::zeroed();
+        libc::sigpending(&mut pending);
+        [libc::SIGTERM, libc::SIGINT, libc::SIGHUP]
+            .iter()
+            .any(|s| libc::sigismember(&pending, *s) == 1)
+    };
     let mut deadline: Option<Instant> = None;
     let mut terminating = false;
-    loop {
+    let started = Instant::now();
+    'running: loop {
         loop {
             match unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } {
                 0 => break,
                 -1 if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) => {}
-                -1 => return 0,
+                -1 => {
+                    if !terminating && !termination_pending() {
+                        if let (Some(plan), Some(cursor)) = (&mut plan, &cursor) {
+                            if plan.retry(&cursor.read().unwrap_or_default(), started.elapsed()) {
+                                if termination_pending() {
+                                    return 0;
+                                }
+                                eprintln!("{}", crate::apps::compat::RETRY_MARKER);
+                                plan.write_report();
+                                if let Err(error) = spawn(&Some(plan.clone())) {
+                                    eprintln!("Cannot launch application: {error}");
+                                    return 1;
+                                }
+                                continue 'running;
+                            }
+                        }
+                    }
+                    return 0;
+                }
                 _ => {}
             }
         }

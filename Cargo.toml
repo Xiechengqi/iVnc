@@ -57,6 +57,7 @@ uuid = { version = "1.0", features = ["v4"] }
 # Memory management
 mimalloc = "0.1"
 libc = "0.2"
+memchr = "2"
 
 # Audio capture/encoding (optional)
 cpal = { version = "0.15", optional = true }

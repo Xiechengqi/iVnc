@@ -33,8 +33,10 @@ systemctl enable --now ivnc-user.service
 
 普通用户身份只是前提。Electron 还需要可用的 user namespace 沙箱，或应用发行包正确安装的 sandbox helper；Ubuntu 的 AppArmor 可能对未授权程序的 user namespace 施加限制。应检查该应用的安装说明与宿主机策略，不能全局关闭 AppArmor、添加 SYS_ADMIN 或批量修改 helper 的 setuid 位来掩盖问题。
 
-验证时不传 `--no-sandbox`，检查进程的实际 UID、应用是否出图以及日志；通过该应用的进程沙箱状态验证隔离。若发行包自身主动关闭沙箱，启动成功也不能作为“沙箱已启用”的证据。
+自动识别在普通用户下不会添加 `--no-sandbox`；高级设置可显式选择“保留沙箱”。验证时不传 `--no-sandbox`，检查进程的实际 UID、应用是否出图以及日志；通过该应用的进程沙箱状态验证隔离。若发行包自身主动关闭沙箱，启动成功也不能作为“沙箱已启用”的证据。
 
 ## 启动排障
 
 认证后的 `GET /api/apps/launch-context` 提供实际身份；应用详情的 `launch_error` 包含错误码和说明。日志分类只针对当前启动尝试，旧错误不会覆盖成功启动。主桌面应用的 `window_ready` 区分进程存在与窗口出现；独立应用返回 null，使用其运行环境状态判断会话就绪。
+
+运行身份和上次启动详情位于编辑器默认折叠的“高级启动设置”。启动命令通常只需填程序名，参数按需由后端补齐；root 自动兼容会仅对确认的 Electron 添加 `--no-sandbox`，具体策略见 [ELECTRON.md](ELECTRON.md)。

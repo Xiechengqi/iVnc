@@ -1,5 +1,5 @@
 //! Checks for the session an application joins, and bounded diagnostics for
-//! one launch attempt. Never rewrite shell commands or disable an app's sandbox.
+//! one launch attempt. Argument adaptation lives in `compat`.
 use super::error::ApiError;
 use serde::Serialize;
 use std::ffi::{CStr, CString, OsString};
@@ -45,7 +45,7 @@ fn path_error(code: &'static str, message: &str, path: &Path) -> ApiError {
         .param("path", path.to_string_lossy().into_owned())
 }
 
-fn accessible(path: &Path, mode: i32) -> bool {
+pub(super) fn accessible(path: &Path, mode: i32) -> bool {
     CString::new(path.as_os_str().as_bytes()).is_ok_and(|p| unsafe {
         libc::faccessat(libc::AT_FDCWD, p.as_ptr(), mode, libc::AT_EACCESS) == 0
     })
@@ -136,6 +136,16 @@ impl LogCursor {
     }
 
     pub fn failure(&self) -> Option<ApiError> {
+        let log = self.read()?;
+        // A corrected attempt has its own diagnostics, even though both runs
+        // are supervised by the same reaper and append to the same log.
+        let log = log
+            .rsplit_once(super::compat::RETRY_MARKER)
+            .map_or(log.as_str(), |(_, tail)| tail);
+        diagnose(log)
+    }
+
+    pub fn read(&self) -> Option<String> {
         // The app can change its log path. Never follow a symlink or block on a FIFO.
         let mut file = OpenOptions::new()
             .read(true)
@@ -157,7 +167,7 @@ impl LogCursor {
         file.seek(SeekFrom::Start(start)).ok()?;
         let mut bytes = Vec::new();
         file.take(64 * 1024).read_to_end(&mut bytes).ok()?;
-        diagnose(&String::from_utf8_lossy(&bytes))
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -191,6 +201,9 @@ pub fn permanent(error: &ApiError) -> bool {
             | "desktop_runtime_invalid"
             | "desktop_runtime_missing"
             | "desktop_home_unavailable"
+            | "desktop_backend_conflict"
+            | "desktop_sandbox_conflict"
+            | "desktop_command_unsupported"
     )
 }
 

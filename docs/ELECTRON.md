@@ -4,23 +4,31 @@ iVnc 可以运行使用 Ozone/Wayland 的 Electron 应用。Electron 38 起可�
 
 ## 启动
 
-在控制台添加“桌面应用”。启动命令为空时可使用 **Electron Wayland 模板**，替换其中的程序路径：
+在控制台添加“桌面应用”，通常只需填写程序名或路径：
 
 ```sh
-/path/to/electron-app --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3
+amp-desktop
+# 或
+t3code
 ```
 
-参数需要传到 Electron 进程；有些发行版启动脚本使用 `--` 分隔参数，应按该应用的规则填写。模板不覆盖现有命令或环境变量。iVnc 对主桌面和独立应用运行环境统一设置 `XDG_SESSION_TYPE=wayland`，并分配当前会话的 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR`。主机的 `DISPLAY`、D-Bus 地址和预加载库不传入应用。
+默认采用自动识别。iVnc 按应用实际的 PATH、HOME 和静态环境赋值找到程序，解析软链接，并检查 Electron 二进制标记、内嵌版本和运行资源布局。检查不执行程序的 `--version`。确认是 Electron 后，按二进制中可识别的能力补齐缺失的 `--ozone-platform=wayland`、`--enable-wayland-ime` 和 `--wayland-text-input-version=3`。实际启动时生成参数，保存的命令不被改写。
 
-默认保留应用自己的 sandbox 策略。root 运行的 Chromium/Electron 通常会以 `Running as root without --no-sandbox is not supported` 退出；这种部署可以显式在该应用的命令中添加 `--no-sandbox`。iVnc 不会给所有桌面应用自动关闭 sandbox。AppImage 的 FUSE/解包需求、应用二进制及依赖仍由部署者提供。
+自动沙箱策略：**有效 UID 为 0 时，仅对已识别或明确指定为 Electron 的应用补充 `--no-sandbox`，关闭该应用的 Chromium 沙箱；普通用户不自动关闭沙箱。** 显式已有的 `--no-sandbox` 继续保留。普通用户遇到沙箱安装、AppArmor 或 user namespace 错误时不会自动降级；保留沙箱的部署见 [NONROOT.md](NONROOT.md)。
 
-应用编辑器显示 iVnc 实际的运行用户和 UID。Electron 模板默认保留沙箱；勾选“模板中禁用此应用的沙箱”后生成的命令才包含 `--no-sandbox`，已有命令不会被自动修改。该选项只控制模板，不是系统或所有应用的全局开关。
+编辑器默认折叠“高级启动设置”。启动兼容可选“自动识别 / 指定为 Electron / 原样执行”，沙箱可选“自动 / 保留 / 对此应用禁用”。“原样执行”不做参数适配，包括不执行沙箱策略；“保留沙箱”与命令中的 `--no-sandbox` 冲突时明确报错。显式 X11 后端不被覆盖，自动适配会提示移除冲突参数。已有长命令无需迁移，也不会重复追加参数。未知程序、Electron Node 模式、复杂 shell 语法保持原样。
 
-以 root 部署的 t3code 原生 Linux 二进制可使用：
+高级设置中的“上次启动详情”提供实际 UID、程序、Electron 版本、保存命令、补充参数和执行命令。认证后的 `GET /api/apps/<id>/launch-info` 返回同一记录；记录位于应用数据中的 `launch-info.json`，权限 0600，不包含完整环境。应用新增/编辑 API 的可选配置如下；旧客户端不传该字段时保留已有配置：
 
-```sh
-t3code --no-sandbox --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3
+```json
+{"desktop_launch":{"compatibility":"auto","sandbox":"auto"}}
 ```
+
+识别支持直接 ELF、软链接、简单静态环境赋值、标准 `env`/`dbus-run-session --`，以及整个有效脚本体仅为 `exec /path/to/app "$@"` 的透明 shell 包装器。引号和用户参数保持原样，补充参数放在目标程序后、用户参数和 `--` 分隔符前。带 shell 展开、重定向、管道、条件执行、身份切换、复杂包装脚本的命令不自动改写；需要时使用程序本身的启动规则或“原样执行”。AppImage 的 FUSE/解包需求、Flatpak/Snap 的会话和封装依赖仍由部署提供。
+
+静态识别不足时，只有精确的 Electron 初始化失败日志，结合目标本身的 Electron 特征或 AppImage 标记，才可能在 10 秒内进行一次兼容修正重试。整个第一轮进程树必须已经退出，且当前启动代次未记录窗口就绪；用户停止、原样执行、普通 X11 错误及不透明启动器不触发这条路径。修正后的错误独立诊断，不被第一轮日志覆盖。后续仍沿用有上限的 watchdog 策略，明确的配置错误不循环重试。
+
+iVnc 对主桌面和独立应用运行环境使用相同适配逻辑，并统一设置 `XDG_SESSION_TYPE=wayland`，分配当前会话的 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR`。主机的 `DISPLAY`、D-Bus 地址和预加载库不传入应用。Electron 38 已移除 `ELECTRON_OZONE_PLATFORM_HINT` 环境变量，自动适配不依赖该变量。
 
 不要用 `su - ubuntu -c t3code` 切换身份来加入 root 的桌面：登录切换会清空显示环境，普通用户也不能访问 `/run/user/0` 和 `/root/.ivnc`。仅保留环境变量或改用 `su -m` 不能解决目录、socket、音频与 HOME 权限。需要沙箱时，参见 [普通用户部署](NONROOT.md)，让 iVnc 与应用从启动时就使用同一用户。
 
@@ -65,7 +73,7 @@ Electron 自身也有平台限制。以实测 Electron 45.3.1 为例，`BrowserW
 需要独立 D-Bus session 的应用可以使用：
 
 ```sh
-dbus-run-session -- /path/to/electron-app --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3
+dbus-run-session -- /path/to/electron-app
 ```
 
 Docker 运行镜像提供 `dbus-run-session`。它只创建应用自己的 session bus，不自动安装或启动 Secret Service、通知服务或 xdg-desktop-portal。依赖这些服务的应用需要单独部署；iVnc 不借用主机的桌面 bus。
@@ -81,7 +89,9 @@ Docker 运行镜像提供 `dbus-run-session`。它只创建应用自己的 sessi
 ```sh
 npm --prefix web/ivnc run build
 CARGO_INCREMENTAL=0 cargo build --features tls --bin ivnc
+ELECTRON_BIN=/path/to/unpacked-electron/electron IVNC_BIN=target/debug/ivnc node scripts/launch_smoke.mjs
 ELECTRON_BIN=/path/to/unpacked-electron/electron IVNC_BIN=target/debug/ivnc node scripts/electron_smoke.mjs
+IVNC_BIN=target/debug/ivnc node scripts/launch_compat_smoke.mjs
 ```
 
 需要 Chromium、Node、C 编译器、wayland-client 开发文件、wayland-scanner 和 xdg-shell XML。脚本使用实际 Electron 和 WebRTC 浏览器验证窗口、IME、剪贴板、光标及相对输入；配套原生协议客户端验证 Electron 未发送的 parent 请求、拖动重绘和不同客户端复用相同 wire ID 的边界。`XDG_SHELL_XML` 可覆盖 XML 路径，`KEEP_TMP=1` 保留成功测试的临时目录。
@@ -89,3 +99,5 @@ ELECTRON_BIN=/path/to/unpacked-electron/electron IVNC_BIN=target/debug/ivnc node
 本轮完整验证记录、审查修正和已确认的上游限制见 [ELECTRON_REVIEW.md](ELECTRON_REVIEW.md)。
 
 启动身份、沙箱诊断、普通用户部署和远程 t3code 修复记录见 [ELECTRON_LAUNCH_REVIEW.md](ELECTRON_LAUNCH_REVIEW.md)。
+
+自动识别、简化启动设置及本轮验证见 [ELECTRON_AUTO_LAUNCH_REVIEW.md](ELECTRON_AUTO_LAUNCH_REVIEW.md)。

@@ -298,23 +298,42 @@
                         <span id="label-exec">启动命令</span>
                         <span class="info-tip">
                             <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                            <span class="default-text" id="label-exec-help">应用启动时要执行的命令</span>
+                            <span class="default-text" id="label-exec-help">输入程序名或路径，可识别的 Electron 应用会自动适配桌面环境。</span>
                         </span>
                     </label>
                     <div class="command-control">
                         <div class="command-options">
                         <div id="desktop-autostart-slot"></div>
                         </div>
-                        <input type="text" id="f-exec" placeholder="请输入启动命令，例如： /usr/bin/code --ozone-platform=wayland">
+                        <input type="text" id="f-exec" placeholder="例如：amp-desktop 或 /path/to/app">
                     </div>
-                    <div class="field-hint electron-template-row">
-                        <button type="button" class="btn btn-sm btn-cancel" id="electron-template">Electron Wayland 模板</button>
-                        <label class="electron-sandbox-option"><input type="checkbox" id="electron-no-sandbox"><span id="electron-sandbox-label">模板中禁用此应用的沙箱</span></label>
-                        <span id="electron-template-hint">启动命令为空时可填入模板，填入后请替换程序路径。</span>
-                    </div>
-                    <div class="field-hint" id="desktop-launch-context" aria-live="polite"></div>
                     <div class="field-hint field-error" id="err-f-exec"></div>
                 </div>
+                <details id="desktop-launch-advanced" class="launch-advanced">
+                    <summary id="desktop-launch-advanced-label">高级启动设置</summary>
+                    <div class="form-line">
+                        <label class="form-label" id="label-desktop-compat" for="f-desktop-compat">启动兼容</label>
+                        <select id="f-desktop-compat">
+                            <option value="auto">自动识别（推荐）</option>
+                            <option value="electron">指定为 Electron</option>
+                            <option value="raw">原样执行</option>
+                        </select>
+                    </div>
+                    <div class="form-line">
+                        <label class="form-label" id="label-desktop-sandbox" for="f-desktop-sandbox">Electron 沙箱</label>
+                        <select id="f-desktop-sandbox">
+                            <option value="auto">自动（root 兼容）</option>
+                            <option value="preserve">保留沙箱</option>
+                            <option value="disabled">对此应用禁用</option>
+                        </select>
+                        <div class="field-hint" id="desktop-sandbox-help">自动模式仅在 root 运行 Electron 时禁用该应用的沙箱；普通用户保留沙箱。</div>
+                    </div>
+                    <div class="field-hint" id="desktop-launch-context" aria-live="polite"></div>
+                    <details id="desktop-launch-details">
+                        <summary id="desktop-launch-details-label">上次启动详情</summary>
+                        <pre id="desktop-launch-info" class="launch-info" aria-live="polite"></pre>
+                    </details>
+                </details>
                 <div class="form-line">
                     <label class="form-label info-label">
                         <span id="label-env">环境变量</span>

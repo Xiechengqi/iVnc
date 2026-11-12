@@ -1,5 +1,7 @@
 # Electron 启动身份与会话 Review
 
+本文记录启动会话修复时的行为；后续 Electron 自动识别与沙箱默认策略见 [ELECTRON_AUTO_LAUNCH_REVIEW.md](ELECTRON_AUTO_LAUNCH_REVIEW.md)。
+
 日期：2026-11-12。针对 root 直接启动 t3code 被 Electron 沙箱拒绝、改用 `su - ubuntu` 后无法连接 root Wayland 会话的问题。此前已实现的原生 Wayland 协议支持保持不变。
 
 ## 最终行为
