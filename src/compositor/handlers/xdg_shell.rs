@@ -38,6 +38,8 @@ impl XdgShellHandler for Compositor {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        self.window_keys
+            .insert(surface.wl_surface().id(), uuid::Uuid::new_v4());
         let is_dialog = surface.parent().is_some();
         let window = Window::new_wayland_window(surface.clone());
         self.space.map_element(window, (0, 0), false);
@@ -296,6 +298,7 @@ impl XdgShellHandler for Compositor {
         self.minimized_window_order.retain(|item| item != &id);
         self.normal_geometry.remove(&id);
         self.window_registry.retain(|wl| wl.id() != id);
+        self.window_keys.remove(&id);
         let focused = self.seat.get_keyboard().and_then(|kb| kb.current_focus());
         if focused.as_ref() == Some(surface.wl_surface()) {
             let next = self.space.elements().rev().find_map(|w| {

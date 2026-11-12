@@ -35,6 +35,7 @@ import terminalStyles from "@xterm/xterm/css/xterm.css?inline";
 import { t, onLangChange, getLang } from "./lib/i18n.js?v=1";
 import { createAppStreams } from "./app-streams.js";
 import { createToolbar } from "./toolbar.js";
+import { createGestureNavigation } from "./gesture-navigation.mjs";
 import { createClipboard } from "./clipboard.js";
 import { createClipboardUI } from "./clipboard-ui.js";
 import { createViewport } from "./viewport.js";
@@ -56,6 +57,9 @@ const MAIN_I18N = {
 		proxyTooltip: '代理',
 		terminalTooltip: '终端',
 		consoleTooltip: '控制台',
+		gestureNavigation: '横滑切换应用',
+		gestureNavigationHint: '开启后，横向滑动切换应用；纵向滑动滚动内容',
+		gestureReverse: '反转横滑方向',
 		// floating windows
 		minimize: '最小化',
 		terminalBackgroundTranslucent: '半透明',
@@ -154,6 +158,9 @@ const MAIN_I18N = {
 		proxyTooltip: 'Proxy',
 		terminalTooltip: 'Terminal',
 		consoleTooltip: 'Console',
+		gestureNavigation: 'Swipe to switch apps',
+		gestureNavigationHint: 'Horizontal swipes switch apps; vertical swipes scroll content',
+		gestureReverse: 'Reverse swipe direction',
 		minimize: 'Minimize',
 		terminalBackgroundTranslucent: 'Translucent',
 		terminalBackgroundOpaque: 'Opaque',
@@ -276,6 +283,8 @@ function InitUI() {
 		background-color: #000;
 		color: #fff;
 	}
+	html.ivnc-gesture-navigation,
+	html.ivnc-gesture-navigation body { overscroll-behavior-x: none; }
 
 	#app {
 		display: flex;
@@ -318,6 +327,7 @@ function InitUI() {
 	.video-container #overlayInput {
 		opacity: 0;
 		z-index: 3;
+		touch-action: none;
 		caret-color: transparent;
 		background-color: transparent;
 		color: transparent;
@@ -2310,6 +2320,7 @@ export default function webrtc() {
 	var audioElement = null;
 	let appStreams = null;
 	let toolbarController = null;
+	let gestureController = null;
 	let viewportController = null;
 	// An active stream tab covers the main desktop.
 	let mainCovered = false;
@@ -3734,12 +3745,67 @@ export default function webrtc() {
 				element: taskbar,
 				canReorder: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
 				canRename: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
-				activateWindow: (id) => {
+				activateWindow: (id, key) => {
 					if (appStreams?.activeId()) appStreams.activate(null);
-					webrtc.sendDataChannelMessage(`focus,${id}`);
+					webrtc.sendDataChannelMessage(key ? `focus-key,${key}` : `focus,${id}`);
 				},
 				onInteraction: (active) => active ? showTaskbar() : hideTaskbar(),
 			});
+			if (!window.__IVNC_EMBED__) {
+				gestureController = createGestureNavigation({
+					navigate: direction => toolbarController?.navigate(direction),
+					canHandle: source => {
+						if (document.hidden || toolbarController?.interacting() || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return false;
+						if (source === window) return !appStreams?.activeId();
+						return !!appStreams?.isActiveFrame(source);
+					},
+				});
+				gestureController.setEnabled(getBoolParam('gesture_navigation', false));
+				gestureController.setReversed(getBoolParam('gesture_navigation_reverse', false));
+				window.__ivncGestureNavigation = gestureController;
+				const syncGestureStyle = doc => doc?.documentElement?.classList.toggle('ivnc-gesture-navigation', gestureController.enabled());
+				const syncGestureStyles = () => {
+					syncGestureStyle(document);
+					for (const frame of appStreams?.frames() || []) {
+						try { syncGestureStyle(frame.contentDocument); } catch (_) {}
+					}
+				};
+				const releaseGesturePointerLock = doc => {
+					if (doc?.pointerLockElement?.id === 'overlayInput') doc.exitPointerLock();
+				};
+				const gestureButton = document.createElement('button');
+				gestureButton.type = 'button'; gestureButton.className = 'toolbar-gesture-action';
+				setLiveText(gestureButton, 'gestureNavigation');
+				setLiveTitle(gestureButton, 'gestureNavigationHint');
+				const reverseButton = document.createElement('button');
+				reverseButton.type = 'button'; reverseButton.className = 'toolbar-gesture-action';
+				setLiveText(reverseButton, 'gestureReverse');
+				const syncButtons = () => {
+					gestureButton.setAttribute('aria-pressed', String(gestureController.enabled()));
+					reverseButton.setAttribute('aria-pressed', String(gestureController.reversed()));
+					reverseButton.hidden = !gestureController.enabled();
+					syncGestureStyles();
+				};
+				gestureButton.addEventListener('click', () => {
+					gestureController.setEnabled(!gestureController.enabled());
+					if (gestureController.enabled()) {
+						releaseGesturePointerLock(document);
+						for (const frame of appStreams?.frames() || []) {
+							try { releaseGesturePointerLock(frame.contentDocument); } catch (_) {}
+						}
+					}
+					setBoolParam('gesture_navigation', gestureController.enabled());
+					syncButtons();
+				});
+				reverseButton.addEventListener('click', () => {
+					gestureController.setReversed(!gestureController.reversed());
+					setBoolParam('gesture_navigation_reverse', gestureController.reversed());
+					syncButtons();
+				});
+				toolbarController.addMenuAction(gestureButton);
+				toolbarController.addMenuAction(reverseButton);
+				syncButtons();
+			}
 
 			// Pin button (first element in taskbar)
 			let taskbarPinned = getBoolParam('taskbar_pinned', true);
@@ -3947,6 +4013,7 @@ export default function webrtc() {
 			if (!window.__IVNC_APP_VIEW__) {
 				appStreams = createAppStreams({
 					viewport: videoContainer,
+					onFrameReady: doc => doc?.documentElement?.classList.toggle('ivnc-gesture-navigation', !!gestureController?.enabled()),
 					onChange: () => {
 						renderTaskbar();
 						syncImeButton();
@@ -4079,6 +4146,10 @@ export default function webrtc() {
 				else webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, false, useCssScaling=useCssScaling);
+			input.gestureNavigation = () => {
+				if (!window.__IVNC_EMBED__) return gestureController;
+				try { return window.parent.__ivncGestureNavigation || null; } catch (_) { return null; }
+			};
 
 			setupKeyBoardAssisstant();
 
@@ -4430,6 +4501,9 @@ export default function webrtc() {
 			resetNetworkQuality('unknown');
 			networkQualityBadge = null;
 			appStreams?.destroy(); appStreams = null;
+			gestureController?.reset(); gestureController = null;
+			if (!window.__IVNC_EMBED__) window.__ivncGestureNavigation = null;
+			document.documentElement.classList.remove('ivnc-gesture-navigation');
 			toolbarController?.destroy(); toolbarController = null;
 			window._ipv4Element = null;
 			terminalController.destroy();

@@ -143,6 +143,7 @@ The client communicates with the iVnc server through a WebRTC DataChannel. See [
 | `cw,{base64}` | Clipboard content (browser → remote) |
 | `r,{width}x{height}` | Resolution change request |
 | `focus,{id}` | Switch window focus |
+| `focus-key,{window_key}` | Switch focus using the stable `taskbar.windows[].window_key` UUID |
 | `close,{id}` | Close window |
 | `kr` | Keyboard reset (release all modifiers) |
 | `pong` | Keepalive response |

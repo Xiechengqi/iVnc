@@ -749,6 +749,17 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
             .update_webrtc_stats("audio", text.trim_start_matches("_stats_audio,"));
         return;
     }
+    if let Some(value) = text.strip_prefix("focus-key,") {
+        if let Ok(window_key) = uuid::Uuid::parse_str(value) {
+            let event = InputEventData {
+                event_type: InputEvent::WindowFocusStable,
+                window_key: Some(window_key),
+                ..Default::default()
+            };
+            let _ = ctx.input_tx.send(event);
+        }
+        return;
+    }
     if text.starts_with("focus,") {
         if let Ok(window_id) = text.trim_start_matches("focus,").parse::<u32>() {
             let mut event = InputEventData::default();

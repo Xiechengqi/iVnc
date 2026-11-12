@@ -31,7 +31,7 @@ const closeView = (url) => fetch(`${url}close`, { method: 'POST', keepalive: tru
 const fromConsole = (source) => Array.from(document.querySelectorAll('iframe.web-console-frame'))
 	.some((frame) => frame.contentWindow === source);
 
-export function createAppStreams({ viewport, onChange, onEdgeHover }) {
+export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady = () => {} }) {
 	const streams = new Map();
 	let order = [];
 	let activeId = null;
@@ -120,6 +120,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover }) {
 			end(s, 'expired');
 			return;
 		}
+		onFrameReady(s.frame.contentDocument);
 		sync(s);
 	}
 
@@ -248,6 +249,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover }) {
 				label: s.app.name || s.id, title: `${s.app.name} · ${text}`,
 				appName: s.app.name, nameRevision: s.app.name_revision, canRename: s.app.can_rename,
 				statusText: text,
+				available: ready(s) && !s.withdrawn,
 				active: s.id === activeId, activate: () => activate(s.id),
 			};
 		});
@@ -320,6 +322,8 @@ export function createAppStreams({ viewport, onChange, onEdgeHover }) {
 		activate,
 		layout,
 		activeId: () => activeId,
+		isActiveFrame: (frame) => !!activeId && streams.get(activeId)?.frame?.contentWindow === frame,
+		frames: () => Array.from(streams.values()).map(s => s.frame).filter(Boolean),
 		// null when the main desktop has the keyboard.
 		imeState: () => active()?.ime ?? null,
 		toggleIme() {

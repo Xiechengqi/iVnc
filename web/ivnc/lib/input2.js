@@ -1195,6 +1195,10 @@ export class Input {
         this._trackpadTapTimeout = null;
         this._trackpadLastScrollCentroid = null;
         this._touchScrollLastCentroid = null;
+        this.gestureNavigation = null;
+        this._touchScrollStartSeparation = null;
+        this._trackpadScrollStartSeparation = null;
+        this._gestureTouchPinching = false;
         this.inputAttached = false;
     }
 
@@ -1925,6 +1929,8 @@ export class Input {
                     x: (touches[0].lastX + touches[1].lastX) / 2,
                     y: (touches[0].lastY + touches[1].lastY) / 2
                 };
+                this._trackpadScrollStartSeparation = Math.hypot(touches[0].lastX - touches[1].lastX, touches[0].lastY - touches[1].lastY);
+                this._gestureTouchPinching = false;
             }
         }
         else if (type === 'touchmove') {
@@ -1972,12 +1978,14 @@ export class Input {
                     }
                     const curr_avg_x = (touches[0].lastX + touches[1].lastX) / 2;
                     const curr_avg_y = (touches[0].lastY + touches[1].lastY) / 2;
+                    if (this._trackpadScrollStartSeparation !== null &&
+                        Math.abs(Math.hypot(touches[0].lastX - touches[1].lastX, touches[0].lastY - touches[1].lastY) - this._trackpadScrollStartSeparation) > 12) {
+                        this._gestureTouchPinching = true;
+                    }
                     if (this._trackpadLastScrollCentroid) {
                         const deltaX = curr_avg_x - this._trackpadLastScrollCentroid.x;
                         const deltaY = curr_avg_y - this._trackpadLastScrollCentroid.y;
-                        const SCROLL_THRESHOLD = 2;
-                        if (Math.abs(deltaY) > SCROLL_THRESHOLD) this._triggerMouseWheel(deltaY < 0 ? 'down' : 'up', 1);
-                        if (Math.abs(deltaX) > SCROLL_THRESHOLD) this._triggerHorizontalMouseWheel(deltaX < 0 ? 'left' : 'right', 1);
+                        this._handleTwoFingerScroll(deltaX, deltaY);
                     }
                     this._trackpadLastScrollCentroid = { x: curr_avg_x, y: curr_avg_y };
                 }
@@ -2004,6 +2012,7 @@ export class Input {
             for (const touch of changedTouches) {
                 this._trackpadTouches.delete(touch.identifier);
             }
+            if (this._trackpadTouches.size < 2) this._gestureNav()?.endTouch();
 
             if (this._trackpadTouches.size === 0) {
                 if (this._trackpadGestureMode === 'dragging') {
@@ -2012,6 +2021,7 @@ export class Input {
                 }
                 this._trackpadGestureMode = null;
                 this._trackpadLastScrollCentroid = null;
+                this._trackpadScrollStartSeparation = null;
             }
         }
     }
@@ -2143,6 +2153,10 @@ export class Input {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
         const type = event.type;
+        if ((type === 'touchend' || type === 'touchcancel') && event.touches.length < 2) {
+            this._gestureNav()?.endTouch();
+            this._touchScrollStartSeparation = null;
+        }
         const now = Date.now();
         let preventDefault = false;
         const LONG_PRESS_DURATION = 750;
@@ -2218,6 +2232,8 @@ export class Input {
                         x: (touches[0].currentX + touches[1].currentX) / 2,
                         y: (touches[0].currentY + touches[1].currentY) / 2
                     };
+                    this._touchScrollStartSeparation = Math.hypot(touches[0].currentX - touches[1].currentX, touches[0].currentY - touches[1].currentY);
+                    this._gestureTouchPinching = false;
                     if ((this.buttonMask & 1) === 1) this.buttonMask &= ~1;
                     preventDefault = true;
                 } else if (touchCount > 2) {
@@ -2250,12 +2266,14 @@ export class Input {
             const touches = Array.from(this._activeTouches.values());
             const curr_avg_x = (touches[0].currentX + touches[1].currentX) / 2;
             const curr_avg_y = (touches[0].currentY + touches[1].currentY) / 2;
+            if (this._touchScrollStartSeparation !== null &&
+                Math.abs(Math.hypot(touches[0].currentX - touches[1].currentX, touches[0].currentY - touches[1].currentY) - this._touchScrollStartSeparation) > 12) {
+                this._gestureTouchPinching = true;
+            }
             if (this._touchScrollLastCentroid) {
                 const deltaX = curr_avg_x - this._touchScrollLastCentroid.x;
                 const deltaY = curr_avg_y - this._touchScrollLastCentroid.y;
-                const SCROLL_THRESHOLD = 2;
-                if (Math.abs(deltaY) > SCROLL_THRESHOLD) this._triggerMouseWheel(deltaY < 0 ? 'down' : 'up', 1);
-                if (Math.abs(deltaX) > SCROLL_THRESHOLD) this._triggerHorizontalMouseWheel(deltaX < 0 ? 'left' : 'right', 1);
+                this._handleTwoFingerScroll(deltaX, deltaY);
             }
             this._touchScrollLastCentroid = { x: curr_avg_x, y: curr_avg_y };
         } else if (this._activeTouches.size === 1) {
@@ -2378,6 +2396,23 @@ export class Input {
         this.send(`w,0,${dy}`);
     }
 
+    _gestureNav() {
+        try { return this.gestureNavigation?.() || null; } catch (_) { return null; }
+    }
+
+    _gestureBlocked() {
+        return this.isComposing || this.buttonMask !== 0 || this.mouseRelative ||
+            !!document.pointerLockElement || this._gestureTouchPinching;
+    }
+
+    _handleTwoFingerScroll(deltaX, deltaY) {
+        const navigation = this._gestureNav();
+        if (navigation?.touch(deltaX, deltaY, window, this._gestureBlocked())) return;
+        const threshold = 2;
+        if (Math.abs(deltaY) > threshold) this._triggerMouseWheel(deltaY < 0 ? 'down' : 'up', 1);
+        if (Math.abs(deltaX) > threshold) this._triggerHorizontalMouseWheel(deltaX < 0 ? 'left' : 'right', 1);
+    }
+
     _triggerHorizontalMouseWheel(direction, magnitude) {
         const steps = Math.max(1, Math.round(magnitude));
         const dx = direction === 'left' ? -steps : steps;
@@ -2396,6 +2431,11 @@ export class Input {
     }
 
     _mouseWheelWrapper(event) {
+        if (this._gestureNav()?.wheel(event, window, this._gestureBlocked())) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
         var deltaY = Math.trunc(Math.abs(event.deltaY));
         if (this._queue.size() < 4) { this._queue.enqueue(deltaY); }
         if (this._queue.size() == 4) {
@@ -2496,7 +2536,7 @@ export class Input {
 
     _onFullscreenChange() {
         if (this._ownsFullscreen()) {
-            if (document.pointerLockElement !== this.element && !this._overlayIsOpen()) {
+            if (document.pointerLockElement !== this.element && !this._overlayIsOpen() && !this._gestureNav()?.enabled()) {
                 this.element.requestPointerLock().catch(err => console.warn("Pointer lock failed on fullscreen:", err));
             }
             if (!this._overlayIsOpen()) this.requestKeyboardLock();
@@ -2612,18 +2652,18 @@ export class Input {
         this.listeners_context.push(addListener(this.element, 'pointerup', this._handlePointerUp, this));
         this.listeners_context.push(addListener(this.element, 'pointercancel', this._handlePointerUp, this)); 
 
-        if ('ontouchstart' in window) {
-            this.listeners_context.push(addListener(this.element, 'touchstart', this._handleTouchEvent, this, false));
-            this.listeners_context.push(addListener(this.element, 'touchend', this._handleTouchEvent, this, false));
-            this.listeners_context.push(addListener(this.element, 'touchmove', this._handleTouchEvent, this, false));
-            this.listeners_context.push(addListener(this.element, 'touchcancel', this._handleTouchEvent, this, false));
-        }
+        // Touch support may be enabled after initial load (for example by a
+        // convertible device or browser emulation), so attach unconditionally.
+        this.listeners_context.push(addListener(this.element, 'touchstart', this._handleTouchEvent, this, false));
+        this.listeners_context.push(addListener(this.element, 'touchend', this._handleTouchEvent, this, false));
+        this.listeners_context.push(addListener(this.element, 'touchmove', this._handleTouchEvent, this, false));
+        this.listeners_context.push(addListener(this.element, 'touchcancel', this._handleTouchEvent, this, false));
         this.listeners_context.push(addListener(this.element, 'mousedown', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
 
         if (this._ownsFullscreen()) {
-             if (document.pointerLockElement !== this.element && !this._overlayIsOpen()) {
+             if (document.pointerLockElement !== this.element && !this._overlayIsOpen() && !this._gestureNav()?.enabled()) {
                 this.element.requestPointerLock().catch(()=>{});
              }
              if (!this._overlayIsOpen()) this.requestKeyboardLock();
@@ -2677,7 +2717,7 @@ export class Input {
             const root = window.__IVNC_EMBED__ ? this.element.parentElement : document.documentElement;
             root.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
-        } else if (document.fullscreenElement !== null && document.pointerLockElement !== this.element && !this._overlayIsOpen()) {
+        } else if (document.fullscreenElement !== null && document.pointerLockElement !== this.element && !this._overlayIsOpen() && !this._gestureNav()?.enabled()) {
              this.element.requestPointerLock().catch(()=>{});
         }
     }

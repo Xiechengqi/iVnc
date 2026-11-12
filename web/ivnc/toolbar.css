@@ -129,6 +129,22 @@
     margin: 2px 0;
 }
 .ivnc-toolbar .toolbar-more-menu .toolbar-tool-label { display: inline; }
+.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action {
+    display: block;
+    width: 100%;
+    margin: 2px 0;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #eee;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action:hover,
+.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action[aria-pressed="true"] { background: #355d8e; }
+.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action[hidden] { display: none; }
 .ivnc-toolbar .toolbar-info { right: 0; width: max-content; }
 .ivnc-toolbar .toolbar-notice { right: 8px; max-width: min(420px, calc(100vw - 16px)); }
 .ivnc-toolbar .toolbar-rename { width: 320px; z-index: 3; white-space: normal; }

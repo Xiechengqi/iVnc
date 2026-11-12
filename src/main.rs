@@ -664,6 +664,7 @@ fn run(
                 let name = managed_app_id.and_then(|id| snapshot.names.get(id));
                 windows_json.push(serde_json::json!({
                     "id": idx,
+                    "window_key": comp.window_keys.get(&wl_surface.id()).map(uuid::Uuid::to_string),
                     "title": title,
                     "app_id": app_id,
                     "display_name": resolve_display_name(&app_id),
@@ -1128,6 +1129,18 @@ fn drain_input_events(
             InputEvent::WindowFocus => {
                 if let Some(surface) = state.window_registry.get(ev.window_id as usize).cloned() {
                     state.activate_window(&surface);
+                }
+            }
+            InputEvent::WindowFocusStable => {
+                if let Some(key) = ev.window_key {
+                    if let Some(surface) = state
+                        .window_registry
+                        .iter()
+                        .find(|surface| state.window_keys.get(&surface.id()) == Some(&key))
+                        .cloned()
+                    {
+                        state.activate_window(&surface);
+                    }
                 }
             }
             InputEvent::WindowClose => {

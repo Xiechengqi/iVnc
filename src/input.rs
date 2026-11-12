@@ -18,6 +18,7 @@ pub enum InputEvent {
     Paste,
     Ping,
     WindowFocus,
+    WindowFocusStable,
     WindowClose,
 }
 
@@ -38,6 +39,7 @@ pub struct InputEventData {
     pub mime_type: String,
     pub timestamp: u64,
     pub window_id: u32,
+    pub window_key: Option<uuid::Uuid>,
     pub paste: Option<crate::clipboard::paste::PasteCommand>,
 }
 
@@ -58,6 +60,7 @@ impl Default for InputEventData {
             mime_type: String::new(),
             timestamp: 0,
             window_id: 0,
+            window_key: None,
             paste: None,
         }
     }

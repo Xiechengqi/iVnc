@@ -323,12 +323,12 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
 
     function layout() {
         const compact = element.clientWidth <= 700;
-        more.hidden = !compact || !toolEntries.some(t => !t.primary);
         for (const tool of toolEntries) {
             const parent = compact && !tool.primary ? menu : tools;
             if (tool.node.parentNode !== parent) parent.insertBefore(tool.node, parent === tools ? more : null);
             tool.label.textContent = tool.node.title;
         }
+        more.hidden = !menu.children.length;
         if (!compact) closeMenu();
         updateOverflow();
         positionEditor();
@@ -485,7 +485,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         menu.hidden = !menu.hidden; more.setAttribute('aria-expanded', String(!menu.hidden)); onInteraction(!menu.hidden);
     });
     // Tool handlers stop propagation; close before they open their own panels.
-    listen(menu, 'click', (event) => { if (event.target.closest('.taskbar-pin')) closeMenu(); }, { capture: true });
+    listen(menu, 'click', (event) => { if (event.target.closest('.taskbar-pin, .toolbar-gesture-action')) closeMenu(); }, { capture: true });
     listen(document, 'pointerdown', (event) => {
         if (!renamePanel.contains(event.target)) closeEditor();
         if (!tools.contains(event.target)) closeMenu();
@@ -528,18 +528,41 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             });
             layout();
         },
+        addMenuAction(node) {
+            menu.appendChild(node);
+            layout();
+        },
+        navigate(direction) {
+            if (destroyed || saving || drag?.started || editor) return null;
+            const sorted = orderedEntries();
+            const focused = sorted.findIndex(entry => entry.active);
+            const current = focused < 0 ? (direction > 0 ? -1 : sorted.length) : focused;
+            for (let index = current + direction; index >= 0 && index < sorted.length; index += direction) {
+                const entry = sorted[index];
+                if (entry.available === false || entry.stable === false) continue;
+                entry.activate();
+                const label = entry.label;
+                clearTimeout(noticeTimer);
+                notice.textContent = label;
+                notice.hidden = false;
+                noticeTimer = setTimeout(() => { notice.hidden = true; }, 1300);
+                return entry.key;
+            }
+            return null;
+        },
         update(data, streams = [], streamActive = false) {
             acceptOrder(data);
             for (const w of data.windows || []) acceptName({ id: w.managed_app_id, name: w.managed_app_name, name_revision: w.name_revision });
             for (const s of streams) acceptName({ id: s.appId, name: s.appName, name_revision: s.nameRevision });
             entries = (data.windows || []).map(w => ({
-                key: `window:${w.id}`, appId: w.managed_app_id,
+                key: `window:${w.window_key || w.id}`, appId: w.managed_app_id,
                 canRename: w.can_rename === true,
                 windowTitle: w.title || '', windowClass: w.app_id,
                 label: w.title || w.display_name || w.app_id || `Window ${w.id}`,
                 title: `${w.title || w.display_name || w.app_id || ''} (${w.app_id || ''})`,
                 active: w.focused && !streamActive,
-                activate: () => activateWindow(w.id)
+                stable: typeof w.window_key === 'string' && w.window_key.length > 0,
+                activate: () => activateWindow(w.id, w.window_key)
             })).concat(streams);
             if (editor && !entries.some(e => e.key === editor.key && e.appId === editor.id && e.canRename)) closeEditor();
             for (const id of names.keys()) if (!entries.some(e => e.appId === id)) names.delete(id);

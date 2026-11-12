@@ -151,6 +151,7 @@ taskbar,{json_data}
     "windows": [
         {
             "id": 0,
+            "window_key": "8cbe9f16-bacf-4bf2-9c7b-2ee67e3b0efa",
             "title": "Terminal",
             "app_id": "org.gnome.Terminal",
             "display_name": "Terminal",
@@ -162,6 +163,7 @@ taskbar,{json_data}
         },
         {
             "id": 1,
+            "window_key": "558cd650-995d-46ba-a1e2-330b2bd4ae91",
             "title": "Files",
             "app_id": "org.gnome.Nautilus",
             "display_name": "Files",
@@ -206,7 +208,7 @@ taskbar,{json_data}
 | `kind` | `shared`：本实例开启远程访问、在独立运行环境中运行的桌面应用；`remote`：本实例已启动的远程应用 |
 | `status` | `shared` 为 `starting` 或 `running`；`remote` 为 `/api/apps` 的 `remote_state`（`connecting`、`connected`、`starting`、`stopped`、`not_ready`、`auth_required`、`incompatible`、`unreachable`） |
 
-任务栏消息另含 `ordered_ids`（本实例完整应用展示顺序）和 `order_revision`（持久化排序版本）。`windows` 中的 `managed_app_id` 为关联的应用 ID，无法关联时为 `null`；它与 Wayland `app_id` 的桌面类名不同。客户端将普通窗口与 `apps` 按同一应用顺序合并，保留窗口 ID 用于聚焦。同一应用的多个窗口保留组内顺序。排序 API 和合并规则见 [工具栏与排序](TOOLBAR.md)。
+任务栏消息另含 `ordered_ids`（本实例完整应用展示顺序）和 `order_revision`（持久化排序版本）。`windows` 中的 `managed_app_id` 为关联的应用 ID，无法关联时为 `null`；它与 Wayland `app_id` 的桌面类名不同。客户端将普通窗口与 `apps` 按同一应用顺序合并。同一应用的多个窗口保留组内顺序。`id` 是当前窗口列表下标，其他窗口关闭后可能变化；`window_key` 是窗口生命周期内不变的 UUID，窗口关闭后失效。新客户端应使用 `focus-key` 聚焦，旧客户端仍可使用 `focus`。排序 API 和合并规则见 [工具栏与排序](TOOLBAR.md)。
 
 关联的普通窗口还包含 `managed_app_name`、`name_revision`、`can_rename`；未关联时前两项为 `null`，`can_rename` 为 `false`。原始 `title` 保持窗口自己的标题。名称元数据由后台应用监视器缓存，主合成循环不读取数据库。
 
@@ -437,6 +439,12 @@ kr
 **格式:**
 ```
 focus,{window_id}
+```
+
+稳定窗口标识支持按 `taskbar.windows[].window_key` 聚焦，避免窗口列表下标在关闭或重排后指向其他窗口。无效或已关闭的标识不会改变焦点；旧 `focus,{window_id}` 保持兼容。
+
+```text
+focus-key,{window_key}
 ```
 
 ### 6.10 窗口关闭 `close`

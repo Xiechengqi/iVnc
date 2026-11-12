@@ -92,6 +92,8 @@ pub struct Compositor {
 
     /// Registry of active window surfaces (stable order for taskbar)
     pub window_registry: Vec<WlSurface>,
+    /// Stable for the lifetime of a toplevel, including taskbar reordering.
+    pub window_keys: HashMap<ObjectId, uuid::Uuid>,
 
     /// Surface protocol IDs that were identified as dialogs at creation time
     pub dialog_surfaces: HashSet<ObjectId>,
@@ -179,6 +181,7 @@ impl Compositor {
             taskbar_dirty: false,
             focused_surface_id: None,
             window_registry: Vec::new(),
+            window_keys: HashMap::new(),
             dialog_surfaces: HashSet::new(),
             kbd_focus_needs_reenter: true,
         }

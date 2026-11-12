@@ -10,6 +10,7 @@
 - 窄屏下“更多工具”保留其余工具入口。网络状态缩为带状态色的图标，可点击或用键盘打开完整说明。
 - 普通状态刷新保留滚动位置；切换应用时把新选中的标签滚动到可见范围。拖动不会重建应用视图或更换当前应用。
 - 右键点击托管应用标签，直接打开改名浮层；键盘聚焦标签后按 F2 或 Shift+F10 也可打开。名称自动选中，Enter 保存，Esc、取消或点击浮层外取消；输入法确认不会提交。保存失败保留输入，名称冲突显示当前名称，核对后再次保存才覆盖。
+- 在“更多工具”中开启“横滑切换应用”后，可在桌面画面或共享／远程应用画面上用 Mac 触控板双指左右滑动切换标签。触摸屏双指横滑也可使用；关闭时保留原有横向滚动。开关和“反转横滑方向”按当前页面地址保存在浏览器中，默认关闭。纵向滑动仍滚动应用内容，斜向、捏合、拖动、输入法组合以及弹窗交互不会触发切换。每次手势最多切换一个标签，到两端停止；切换时会显示目标应用名。
 
 改名更新应用表中的真实名称，所有窗口和连接到本实例的桌面同步显示。普通窗口以应用名为主，多窗口附带窗口标题，提示保留完整原标题。远程应用在 A 上改名只改变 A 保存的别名。改名保留顺序、PID、启动设置、当前选择、视图令牌及连接。未关联应用记录的窗口没有改名入口；Miao 保持只读，内置 Chrome 可改名。隐藏或禁用控制台以及应用内嵌视图中的权限限制与排序一致。
 
@@ -68,9 +69,9 @@ SQLite `apps.name_revision` 保存各应用的名称版本，旧记录迁移为 
 
 ## 窗口关联与渲染
 
-普通窗口使用 Wayland 客户端 PID 与活着的托管进程组／祖先进程链关联应用 ID，不使用窗口标题或桌面类名猜测。后台监视器完成 `/proc` 解析与数据库读取，再发布统一内存快照。主合成循环仅读取快照，窗口注册顺序和 `focus,<id>` 保持原有语义。
+普通窗口使用 Wayland 客户端 PID 与活着的托管进程组／祖先进程链关联应用 ID，不使用窗口标题或桌面类名猜测。后台监视器完成 `/proc` 解析与数据库读取，再发布统一内存快照。主合成循环仅读取快照。窗口注册顺序和 `focus,<id>` 保持原有语义；每个窗口另有生命周期内固定的 `window_key`，手势与工具栏通过 `focus-key,<window_key>` 聚焦，避免其他窗口关闭后下标变化导致误选。旧客户端仍能使用下标协议。
 
-`toolbar.js` 负责工具栏 DOM、滚动及排序手势；按标签键复用节点。`app-streams.js` 继续持有应用 iframe、连接和激活状态。排序版本和窗口归属变化均触发广播，包括没有共享或远程应用时。
+`toolbar.js` 负责工具栏 DOM、滚动、排序和切换目标；按标签键复用节点。`gesture-navigation.mjs` 在主桌面和同源应用 iframe 间统一识别手势，按工具栏顺序切换，消费切换后的惯性尾部，避免再次切换或误传给远程应用。`app-streams.js` 继续持有应用 iframe、连接和激活状态。排序版本和窗口归属变化均触发广播，包括没有共享或远程应用时。
 
 ## 验证
 
@@ -78,14 +79,18 @@ SQLite `apps.name_revision` 保存各应用的名称版本，旧记录迁移为 
 
 ```bash
 cd web/ivnc && npm run build && cd ../..
-cargo test --features tls --lib
+node scripts/gesture_navigation_smoke.mjs
+cargo test --features tls --bin ivnc
 cargo build --features tls
 IVNC_BIN=target/debug/ivnc node scripts/toolbar_smoke.mjs
+ELECTRON_BIN=/path/to/electron IVNC_BIN=target/debug/ivnc node scripts/electron_smoke.mjs
 IVNC_BIN=target/debug/ivnc SKIP_BUILD=1 SKIP_UNIT=1 bash scripts/desktop_smoke.sh
 IVNC_BIN=target/debug/ivnc bash scripts/remote_app_smoke.sh
 ```
 
 工具栏 smoke 使用独立数据目录、端口和 Chromium 用户目录，验证 0／1／10／30 个标签、320／375／768／1280／1920 像素宽度、中英双语与 HiDPI、鼠标／触屏／键盘排序、触屏原生滚动、控制台即时通知、失败与版本冲突恢复、保存互斥、拖动自动滚动与取消、真实 GTK 多窗口归属、共享应用连接保持及重启持久化。改名覆盖右键与键盘入口、IME、本地输入隔离、原生菜单、UTF-8 字节限制、重复名称、并发冲突、丢失响应恢复、旧快照、防止自动隐藏、多桌面同步及只读边界。远程回归还验证 A 的别名与 B 的名称独立，改名保留进程和原有视图令牌。需要 `google-chrome`、`gtk3-demo` 和前端依赖中的 `ws`。`KEEP_TMP=1` 保留截图和日志。
+
+横滑回归验证开关关闭时保留原有滚动、开启后按当前顺序单次切换、跨 iframe 惯性不重触发、双指触摸切换、纵向滚动与捏合隔离、全屏指针锁定释放，以及窗口列表下标变化后的稳定聚焦。浏览器自动化覆盖 Chromium；Mac 实体触控板和 Safari 仍需设备实测。
 
 ## 排序与布局 review（2026-11-10）
 
