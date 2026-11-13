@@ -246,10 +246,11 @@ const cases = [
     }],
     ['shared, remote and local tabs switch focus while retaining their iframes', async page => {
         await click(page, 'shared');
-        await page.waitForFunction(() => document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement.dataset.active === 'true');
+        // Navigation can expose a Document before its root element is parsed.
+        await page.waitForFunction(() => document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement?.dataset.active === 'true');
         await page.evaluate(() => window.sharedFrame = document.querySelector('.app-stream.active iframe'));
         await click(page, 'remote');
-        await page.waitForFunction(() => fixture.streams.activeId() === 'remote' && document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement.dataset.active === 'true');
+        await page.waitForFunction(() => fixture.streams.activeId() === 'remote' && document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement?.dataset.active === 'true');
         await page.evaluate(() => window.remoteFrame = document.querySelector('.app-stream.active iframe'));
         await press(page, 'shared');
         await page.evaluate(() => { fixture.data.ordered_ids.reverse(); fixture.data.order_revision++; fixture.render(); });
@@ -264,7 +265,7 @@ const cases = [
     }],
     ['a non-sortable press released inside an iframe cannot hold the toolbar', async page => {
         await click(page,'shared');
-        await page.waitForFunction(() => document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement.dataset.active === 'true');
+        await page.waitForFunction(() => document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement?.dataset.active === 'true');
         await press(page);
         await page.mouse.move(200,200); await page.mouse.up();
         assert.equal(await page.evaluate(() => fixture.toolbar.interacting()), false);
