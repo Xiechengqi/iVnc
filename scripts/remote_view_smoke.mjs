@@ -5,7 +5,8 @@
 //   --audio     also require application audio
 //   --embed     open the view as a stream tab does: a same-origin iframe with
 //               ?embed=1 inside a parent page, and assert that the view hides
-//               its own taskbar, connection indicator and status bar and
+//               its own taskbar and connection indicator, hides playback UI
+//               after the first frame, and
 //               reports readiness and its state to the parent over postMessage
 // REMOTE_VIEW_EXPECT_REVOKE=1 waits until the server ends the view.
 import assert from 'node:assert/strict';
@@ -186,15 +187,15 @@ try {
         console.log('PASS application-audio-received');
     }
 
-    // 3. Embedded views leave the toolbar, connection indicator and status bar
-    //    to the parent page and report their state to it.
+    // 3. Embedded views leave navigation to the parent. Their playback UI is
+    //    hidden only after a real frame, so autoplay/codec errors stay actionable.
     if (embed) {
         assert.equal(await evaluate(`window.__IVNC_EMBED__`), true);
         const hidden = await evaluate(`({
             taskbar: !document.getElementById('taskbar')?.isConnected,
             trigger: !document.querySelector('.taskbar-trigger'),
             connIndicator: !document.getElementById('conn-indicator')?.isConnected,
-            statusDisplay: !document.getElementById('status-display')?.isConnected,
+            statusDisplay: document.getElementById('status-display')?.classList.contains('hidden'),
             noWindowOverlay: !document.querySelector('.no-window-overlay'),
         })`);
         assert.deepEqual(hidden, { taskbar: true, trigger: true, connIndicator: true, statusDisplay: true, noWindowOverlay: true });

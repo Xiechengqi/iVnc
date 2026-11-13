@@ -25,7 +25,7 @@
  *   limitations under the License.
  */
 
-import { WebRTCDemo } from "./lib/webrtc.js?v=25";
+import { WebRTCDemo } from "./lib/webrtc.js?v=26";
 import { WebRTCDemoSignaling } from "./lib/signaling.js?v=1";
 import { stringToBase64 } from "./lib/util.js?v=1";
 import { Input } from "./lib/input2.js?v=21";
@@ -44,6 +44,16 @@ import { installOverlayGuard, minimizeOtherOverlays, createConsoleShield, releas
 
 const MAIN_I18N = {
 	zh: {
+		videoConnecting: '正在连接画面…',
+		videoWaiting: '已连接，正在等待画面…',
+		videoBlocked: '浏览器暂停了画面，请点击播放。',
+		videoNoData: '已连接，但尚未收到画面，请检查服务端或重新连接。',
+		videoDecodeError: '画面解码失败，请重新连接；若持续出现，请检查视频编码兼容性。',
+		videoPlaybackError: '画面播放失败，请点击重试。',
+		videoConnectionError: '画面连接失败，请检查网络或重新连接。',
+		videoUnsupported: '当前浏览器无法接收此视频格式或不支持画面连接。',
+		videoPlay: '播放画面',
+		videoRetry: '重试',
 		// toolbar tooltips
 		connectionsCount: n => `连接数: ${n}`,
 		connectionMode: '连接模式',
@@ -146,6 +156,16 @@ const MAIN_I18N = {
 		unknownError: '未知错误',
 	},
 	en: {
+		videoConnecting: 'Connecting video…',
+		videoWaiting: 'Connected. Waiting for video…',
+		videoBlocked: 'The browser paused video. Click to play.',
+		videoNoData: 'Connected, but no video has arrived. Check the server or reconnect.',
+		videoDecodeError: 'Video decoding failed. Reconnect, or check video codec compatibility if it persists.',
+		videoPlaybackError: 'Video playback failed. Click to retry.',
+		videoConnectionError: 'Video connection failed. Check the network or reconnect.',
+		videoUnsupported: 'This browser cannot receive the video format or establish a video connection.',
+		videoPlay: 'Play video',
+		videoRetry: 'Retry',
 		connectionsCount: n => `Connections: ${n}`,
 		connectionMode: 'Connection mode',
 		unpinTaskbar: 'Unpin taskbar',
@@ -344,7 +364,7 @@ function InitUI() {
 		top: 50%;
 		left: 50%;
 		transform: translate(-50%, -50%);
-		z-index: 10;
+		z-index: 1002;
 	}
 
 	.video-container .status-bar {
@@ -356,7 +376,7 @@ function InitUI() {
 		background-color: rgba(0, 0, 0, 0.7);
 		color: #fff;
 		text-align: center;
-		z-index: 5;
+		z-index: 1001;
 	}
 
 	.loading-text {
@@ -2283,6 +2303,7 @@ export default function webrtc() {
 	let videoFramerate = 60;
 	let audioBitRate = 96000;
 	let showStart = false;
+	let videoPlaybackState = 'connecting';
 	let showDrawer = false;
 	// TODO: how do we want to handle the log and debug entries
 	let logEntries = [];
@@ -2702,22 +2723,25 @@ export default function webrtc() {
 	function playStream() {
 		showStart = false;
 		if (playButtonElement) playButtonElement.classList.add('hidden');
-		webrtc.playStream();
+		if (['no-data', 'decode-error', 'connection-error'].includes(videoPlaybackState)) webrtc.reset();
+		else webrtc.playStream();
 		webrtc.unmuteAudio();
 	}
 
 	function updateStatusDisplay() {
+		const key = { connecting: 'videoConnecting', waiting: 'videoWaiting', blocked: 'videoBlocked',
+			'no-data': 'videoNoData', 'decode-error': 'videoDecodeError', 'playback-error': 'videoPlaybackError',
+			'connection-error': 'videoConnectionError', unsupported: 'videoUnsupported' }[videoPlaybackState];
 		if (statusDisplayElement) {
-			statusDisplayElement.textContent = status;
-			if (status == 'connected') {
-				// clear the status and show the play button
-				statusDisplayElement.classList.add("hidden");
-				if (playButtonElement && showStart) {
-					playButtonElement.classList.remove('hidden');
-				}
-			}
+			statusDisplayElement.textContent = key ? tt(key) : '';
+			statusDisplayElement.classList.toggle('hidden', mainCovered || videoPlaybackState === 'playing');
+		}
+		if (playButtonElement) {
+			playButtonElement.classList.toggle('hidden', mainCovered || !showStart);
+			playButtonElement.textContent = tt(videoPlaybackState === 'blocked' ? 'videoPlay' : 'videoRetry');
 		}
 	}
+	const stopPlaybackLanguageUpdates = onLangChange(updateStatusDisplay);
 
 	function updateVideoImageRendering(){
 		if (!videoElement) return;
@@ -3689,14 +3713,16 @@ export default function webrtc() {
 
 			playButtonElement = document.createElement('button');
 			playButtonElement.id = 'playButton';
-			playButtonElement.textContent = 'Play Stream';
+			playButtonElement.type = 'button';
+			playButtonElement.textContent = tt('videoPlay');
 			playButtonElement.classList.add('hidden');
 			playButtonElement.addEventListener("click", playStream);
 
 			statusDisplayElement = document.createElement('div');
 			statusDisplayElement.id = 'status-display';
 			statusDisplayElement.className = 'status-bar';
-			statusDisplayElement.textContent = 'Connecting...';
+			statusDisplayElement.setAttribute('role', 'status');
+			statusDisplayElement.textContent = tt('videoConnecting');
 
 			let overlayInput = document.createElement('input');
 			overlayInput.type = 'text';
@@ -4021,6 +4047,8 @@ export default function webrtc() {
 						const streamActive = !!appStreams?.activeId();
 						if (streamActive !== mainCovered) {
 							mainCovered = streamActive;
+							updateStatusDisplay();
+							webrtc?.playback?.setActive(!streamActive);
 							clipboardController?.cancel();
 							sendClientActivity('view-switch');
 						}
@@ -4033,7 +4061,7 @@ export default function webrtc() {
 				});
 			}
 
-			if (!window.__IVNC_EMBED__) videoContainer.appendChild(statusDisplayElement);
+			videoContainer.appendChild(statusDisplayElement);
 			videoContainer.appendChild(overlayInput);
 			appDiv.appendChild(videoContainer);
 			viewportController?.destroy();
@@ -4116,6 +4144,12 @@ export default function webrtc() {
 			const postToParent = (message) => {
 				if (window.__IVNC_EMBED__) window.parent.postMessage({ ...message, view: window.location.pathname }, window.location.origin);
 			};
+			webrtc.onplaybackstatechange = ({ state }) => {
+				videoPlaybackState = state;
+				showStart = ['blocked', 'no-data', 'decode-error', 'playback-error', 'connection-error'].includes(state);
+				updateStatusDisplay();
+				postToParent({ type: 'ivnc-view-state', state: state === 'playing' ? 'connected' : 'connecting', playback: state });
+			};
 			if (window.__IVNC_EMBED__) {
 				window.addEventListener('ivnc-view-ended', (event) => {
 					postToParent({ type: 'ivnc-view-state', state: 'ended', reason: event.detail });
@@ -4126,6 +4160,7 @@ export default function webrtc() {
 					const open = webrtc._send_channel?.readyState === 'open';
 					if (message.type === 'ivnc-view-active') {
 						window.__ivncViewActive = !!message.active;
+						webrtc.playback.setActive(!!message.active);
 						// Release held keys when the tab is switched away.
 						if (!message.active) clipboardController?.cancel();
 						sendClientActivity('view-switch');
@@ -4162,6 +4197,8 @@ export default function webrtc() {
 			signaling.onerror = (message) => {
 				logEntries.push(applyTimestamp("[signaling] [ERROR] " + message))
 				console.log("[signaling ERROR] " + message);
+				if (message.includes('IVNC_VIDEO_UNSUPPORTED')) webrtc.playback.fail('unsupported', message);
+				else if (message.includes('SESSION_ERROR')) webrtc.playback.fail('connection-error', message);
 			};
 
 			signaling.ondisconnect = (reconnect) => {
@@ -4223,7 +4260,6 @@ export default function webrtc() {
 						}, 15);
 					});
 					status = state;
-					postToParent({ type: 'ivnc-view-state', state: 'connected' });
 					if (!statWatchEnabled) {
 						enableStatWatch();
 					}
@@ -4299,20 +4335,8 @@ export default function webrtc() {
 			};
 
 			webrtc.onplaystreamrequired = () => {
-				// Auto-retry with muted to bypass autoplay policy
-				if (videoElement && videoElement.paused) {
-					videoElement.muted = true;
-					videoElement.setAttribute('muted', '');
-					videoElement.play().then(() => {
-						showStart = false;
-						if (playButtonElement) playButtonElement.classList.add('hidden');
-						webrtc.unmuteAudio();
-					}).catch(() => {
-						showStart = true;
-					});
-				} else {
-					showStart = true;
-				}
+				showStart = true;
+				updateStatusDisplay();
 			}
 
 			// Unmute audio on first user interaction (registered once)
@@ -4434,6 +4458,8 @@ export default function webrtc() {
 			webrtc.connect();
 		},
 		cleanup() {
+			stopPlaybackLanguageUpdates();
+			webrtc?.destroy();
 			disableAutoResize();
 			viewportController?.destroy(); viewportController = null;
 			clipboardController?.destroy(); clipboardController = null;
@@ -4459,6 +4485,7 @@ export default function webrtc() {
 			videoFramerate = 60;
 			audioBitRate = 128000;
 			showStart = false;
+			videoPlaybackState = 'connecting';
 			showDrawer = false;
 			logEntries = [];
 			debugEntries = [];

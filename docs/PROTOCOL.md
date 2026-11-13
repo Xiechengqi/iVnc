@@ -46,6 +46,8 @@ Client                                          Server
 5. DTLS/SRTP 握手完成后，开始接收视频和音频 RTP 流
 6. DataChannel 打开后，用于双向输入事件和控制消息
 
+视频格式只从本次 SDP 实际接受的 media payload 中选择，不能使用全局 codec 能力列表猜测 PT。H.264 要求 Constrained Baseline、packetization-mode=1，输出为 8-bit 4:2:0；实际尺寸、帧率和码率不得超过接收 level。公共流按当前接收者共同能力适配，不兼容的 offer 返回 `SESSION_ERROR`（详情包含 `IVNC_VIDEO_UNSUPPORTED`）。前端将连接建立和首帧播放分开报告，详细行为见 [视频兼容与 Review](SAFARI_VIDEO_REVIEW.md)。
+
 ### 2.3 同端口复用
 
 HTTP、WebSocket 信令和 ICE-TCP 共享同一端口（默认 8008）。服务端通过 TCP 连接的首字节自动区分协议类型：

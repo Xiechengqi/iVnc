@@ -223,7 +223,9 @@ test('reconnect clears clipboard chunks and ignores callbacks from old channels 
         createDataChannel(label) { return { label, readyState: 'open', close() { this.readyState = 'closed'; } }; }
         close() { this.connectionState = 'closed'; }
     }
-    const ctx = { RTCPeerConnection: Peer, setTimeout, base64ToString: text => Buffer.from(text, 'base64').toString() };
+    const ctx = { RTCPeerConnection: Peer, setTimeout, clearTimeout,
+        createVideoPlayback: () => ({reset() {}, connection() {}}),
+        base64ToString: text => Buffer.from(text, 'base64').toString() };
     vm.createContext(ctx); vm.runInContext(rtcSource + '\nglobalThis.RtcClass = WebRTCDemo;', ctx);
     const rtc = new ctx.RtcClass({ connect() {} }, {}, 1);
     let opens = 0, closes = 0;

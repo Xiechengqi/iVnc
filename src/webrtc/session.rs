@@ -117,7 +117,7 @@ impl SessionManager {
         let session_id = uuid::Uuid::new_v4().to_string();
 
         // Create str0m Rtc instance
-        let mut session = RtcSession::new(session_id.clone());
+        let mut session = RtcSession::new(session_id.clone(), self.config.video_codec, offer_sdp);
 
         // Determine the ICE candidate address.
         // If the browser connected via a tunnel/proxy, use the Host header
@@ -154,6 +154,7 @@ impl SessionManager {
                 "Maximum sessions reached".to_string(),
             ));
         }
+        session.register_video_limit(self.shared_state.clone());
         pending.insert(
             session_id.clone(),
             PendingSession {

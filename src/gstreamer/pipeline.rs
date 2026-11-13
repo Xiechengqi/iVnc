@@ -9,6 +9,7 @@
 
 use super::{encoder::EncoderSelection, GstError};
 use crate::config::{HardwareEncoder, VideoCodec, WebRTCConfig};
+use crate::webrtc::video_format::required_h264_level;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -95,6 +96,7 @@ pub struct VideoPipeline {
     state: Arc<AtomicBool>,
     frame_count: Arc<AtomicU64>,
     encoder_element: String,
+    reported_caps: AtomicBool,
 }
 
 impl VideoPipeline {
@@ -129,8 +131,40 @@ impl VideoPipeline {
             })?;
 
         let encoder_selection = EncoderSelection::select(config.codec, config.hardware_encoder);
-        let (encoder, encoder_name) =
+        let (mut encoder, mut encoder_name) =
             encoder_selection.create_encoder(config.bitrate, config.keyframe_interval)?;
+        let h264_caps = if config.codec == VideoCodec::H264 {
+            let level = required_h264_level(
+                config.width,
+                config.height,
+                config.framerate,
+                config.bitrate,
+            )
+            .ok_or_else(|| {
+                GstError::PipelineFailed(
+                    "H.264 output exceeds the supported level 5.2 envelope".into(),
+                )
+            })?;
+            let caps = gst::Caps::builder("video/x-h264")
+                .field("profile", "constrained-baseline")
+                .field("level", level.name)
+                .build();
+            if encoder
+                .static_pad("src")
+                .is_none_or(|pad| pad.query_caps(Some(&caps)).is_empty())
+            {
+                warn!(
+                    "Encoder {} cannot produce compatible H.264; using software encoding",
+                    encoder_name
+                );
+                (encoder, encoder_name) =
+                    EncoderSelection::select(VideoCodec::H264, HardwareEncoder::Software)
+                        .create_encoder(config.bitrate, config.keyframe_interval)?;
+            }
+            Some(caps)
+        } else {
+            None
+        };
         info!(
             "Using encoder: {} for codec {:?}",
             encoder_name, config.codec
@@ -160,12 +194,19 @@ impl VideoPipeline {
             .upcast_ref::<gst::Element>()
             .link(&convert)
             .map_err(|e| GstError::LinkFailed(format!("appsrc->convert: {}", e)))?;
+        // An unconstrained videoconvert can select Y444, causing x264 to emit
+        // High 4:4:4 even when SDP negotiated Constrained Baseline. Hardware
+        // encoders may prefer NV12; both choices here are 8-bit 4:2:0.
+        let raw_caps: gst::Caps = "video/x-raw,format=(string){I420,NV12}".parse().unwrap();
         convert
-            .link(&encoder)
+            .link_filtered(&encoder, &raw_caps)
             .map_err(|e| GstError::LinkFailed(format!("convert->encoder: {}", e)))?;
-        encoder
-            .link(&payloader)
-            .map_err(|e| GstError::LinkFailed(format!("encoder->payloader: {}", e)))?;
+        let linked = if let Some(caps) = h264_caps.as_ref() {
+            encoder.link_filtered(&payloader, caps)
+        } else {
+            encoder.link(&payloader)
+        };
+        linked.map_err(|e| GstError::LinkFailed(format!("encoder->payloader: {}", e)))?;
         payloader
             .link(appsink.upcast_ref::<gst::Element>())
             .map_err(|e| GstError::LinkFailed(format!("payloader->appsink: {}", e)))?;
@@ -180,6 +221,7 @@ impl VideoPipeline {
             state: Arc::new(AtomicBool::new(false)),
             frame_count: Arc::new(AtomicU64::new(0)),
             encoder_element: encoder_name,
+            reported_caps: AtomicBool::new(false),
         })
     }
 
@@ -196,10 +238,16 @@ impl VideoPipeline {
 
         // For H264, ensure SPS/PPS are sent regularly for browser decoders.
         if matches!(codec, VideoCodec::H264) {
-            builder = builder.property("config-interval", 1i32);
+            // New and resumed Safari decoders need the parameter sets with
+            // every IDR, including after pipeline rebuilds and keyframe requests.
+            builder = builder.property("config-interval", -1i32);
         }
 
-        // Note: aggregate-mode requires enum type, skip for now
+        if matches!(codec, VideoCodec::H264) {
+            // Keep SPS/PPS as individual NAL units, including for the session's
+            // compatibility gate before it starts forwarding a new source.
+            builder = builder.property_from_str("aggregate-mode", "none");
+        }
         builder.build().map_err(|e| {
             GstError::PipelineFailed(format!("Failed to create {}: {}", element_name, e))
         })
@@ -296,7 +344,15 @@ impl VideoPipeline {
 
     /// Pull a sample (non-blocking)
     pub fn try_pull_sample(&self) -> Option<gst::Sample> {
-        self.appsink.try_pull_sample(gst::ClockTime::ZERO)
+        let sample = self.appsink.try_pull_sample(gst::ClockTime::ZERO)?;
+        if !self.reported_caps.swap(true, Ordering::Relaxed) {
+            info!(
+                "Encoded video caps ({}): {:?}",
+                self.encoder_element,
+                sample.caps()
+            );
+        }
+        Some(sample)
     }
 
     /// Pull a sample with timeout (blocks up to timeout_ms)
@@ -391,5 +447,59 @@ mod tests {
         assert_eq!(config.framerate, 30);
         assert_eq!(config.bitrate, 4000);
         assert_eq!(config.codec, VideoCodec::H264);
+    }
+
+    #[test]
+    fn software_h264_emits_420_constrained_baseline_with_parameter_sets() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("x264enc").is_none() {
+            eprintln!("x264enc unavailable; skipping encoder integration check");
+            return;
+        }
+        let pipeline = VideoPipeline::new(PipelineConfig {
+            width: 320,
+            height: 240,
+            framerate: 30,
+            bitrate: 1000,
+            hardware_encoder: HardwareEncoder::Software,
+            keyframe_interval: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        pipeline.start().unwrap();
+        let frame = vec![128; 320 * 240 * 4];
+        for _ in 0..2 {
+            let (mut sps, mut pps, mut idr) = (false, false, false);
+            pipeline.push_frame(&frame).unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut marker = false;
+            while std::time::Instant::now() < until && !marker {
+                if let Some(sample) = pipeline.try_pull_sample_timeout(100) {
+                    let caps = sample.caps().unwrap().structure(0).unwrap();
+                    assert_eq!(caps.get::<&str>("encoding-name").unwrap(), "H264");
+                    let data = sample.buffer().unwrap().map_readable().unwrap();
+                    let payload = crate::webrtc::media_track::rtp_util::get_payload(&data).unwrap();
+                    if payload[0] & 31 == 7 {
+                        assert!(crate::webrtc::video_format::constrained_baseline(
+                            u32::from_be_bytes([0, payload[1], payload[2], payload[3]])
+                        ));
+                        assert!(payload[3] <= 30, "SPS must respect the selected level");
+                        sps = true;
+                    }
+                    pps |= payload[0] & 31 == 8;
+                    idr |= payload[0] & 31 == 5
+                        || (payload[0] & 31 == 28 && payload.len() > 1 && payload[1] & 31 == 5);
+                    marker = crate::webrtc::media_track::rtp_util::is_marker_set(&data);
+                }
+            }
+            assert!(marker, "encoder did not produce a complete frame");
+            assert!(sps && pps && idr, "every IDR frame must carry SPS/PPS");
+        }
+        let encoder = pipeline.pipeline.by_name("encoder").unwrap();
+        let caps = encoder.static_pad("sink").unwrap().current_caps().unwrap();
+        assert!(matches!(
+            caps.structure(0).unwrap().get::<&str>("format").unwrap(),
+            "I420" | "NV12"
+        ));
     }
 }

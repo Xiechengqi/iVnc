@@ -79,6 +79,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		s.minting = true;
 		s.state = 'connecting';
 		s.error = null;
+		s.playback = null;
 		refresh();
 		try {
 			const response = await fetch(`/api/apps/${encodeURIComponent(s.id)}/view`, { method: 'POST' });
@@ -137,6 +138,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		if (disposed || streams.get(s.id) !== s) return;
 		s.state = 'ended';
 		s.error = error;
+		s.playback = null;
 		// Withdrawn access is not retried until the user clicks the tab or the app recovers.
 		if (reason === 'revoked') s.withdrawn = true;
 		if (!s.withdrawn && !s.timer && !s.minting && ready(s)) {
@@ -168,7 +170,8 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 	function paint() {
 		for (const s of streams.values()) {
 			s.status.textContent = describe(s).text;
-			s.status.classList.toggle('hidden', s.state === 'connected');
+			// The embedded client owns playback/codec error UI once loaded.
+			s.status.classList.toggle('hidden', s.state === 'connected' || !!s.playback);
 		}
 	}
 
@@ -272,6 +275,8 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 				sync(s);
 				break;
 			case 'ivnc-view-state':
+				if (s.state === 'ended') break;
+				s.playback = message.playback || null;
 				if (message.state === 'ended') {
 					end(s, String(message.reason || 'closed'));
 				} else if (message.state === 'connected') {

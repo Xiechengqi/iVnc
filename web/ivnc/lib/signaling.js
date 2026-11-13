@@ -211,7 +211,7 @@ export class WebRTCDemoSignaling {
         this._setStatus("Connection error, retry in 3 seconds.");
         this.retry_count++;
         if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
-            setTimeout(() => {
+            this._retryTimer = setTimeout(() => {
                 if (this.retry_count > 3 && window.__IVNC_EMBED__) {
                     // The view token is gone; the parent page mints a new one.
                     window.parent.postMessage({ type: "ivnc-reopen", view: window.location.pathname }, window.location.origin);
@@ -259,10 +259,10 @@ export class WebRTCDemoSignaling {
         }
 
         if (event.data.startsWith("ERROR")) {
-            if (window.__IVNC_APP_VIEW__) this._setError(event.data.slice(6));
+            this._setError(event.data.slice(6));
             if (event.data === "ERROR peer '0' not found") {
                 this._setDebug("Peer not found. Retrying...");
-                setTimeout(() => {
+                this._sessionTimer = setTimeout(() => {
                     this._setupCall();
                 }, 1000);
             }
@@ -338,16 +338,27 @@ export class WebRTCDemoSignaling {
      * server and the server (peer) to negotiate ICE candidates and media capabilities.
      */
     connect() {
+        if (this._destroyed) return;
+        clearTimeout(this._retryTimer);
+        clearTimeout(this._sessionTimer);
+        this._stopKeepalive();
+        // Late events from the previous socket must not renegotiate a new peer.
+        const previous = this._ws_conn;
+        this._ws_conn = null;
+        previous?.close();
         this.state = 'connecting';
         this._setStatus("Connecting to server.");
 
-        this._ws_conn = new WebSocket(this._server);
+        const socket = new WebSocket(this._server);
+        this._ws_conn = socket;
 
         // Bind event handlers.
-        this._ws_conn.addEventListener('open', this._onServerOpen.bind(this));
-        this._ws_conn.addEventListener('error', this._onServerError.bind(this));
-        this._ws_conn.addEventListener('message', this._onServerMessage.bind(this));
-        this._ws_conn.addEventListener('close', this._onServerClose.bind(this));
+        for (const [name, handler] of [['open', this._onServerOpen], ['error', this._onServerError],
+            ['message', this._onServerMessage], ['close', this._onServerClose]]) {
+            socket.addEventListener(name, event => {
+                if (!this._destroyed && this._ws_conn === socket) handler.call(this, event);
+            });
+        }
     }
 
     /**
@@ -356,7 +367,17 @@ export class WebRTCDemoSignaling {
      */
     disconnect() {
         this._stopKeepalive();
-        this._ws_conn.close();
+        this._ws_conn?.close();
+    }
+
+    destroy() {
+        this._destroyed = true;
+        clearTimeout(this._retryTimer);
+        clearTimeout(this._sessionTimer);
+        this._stopKeepalive();
+        const socket = this._ws_conn;
+        this._ws_conn = null;
+        socket?.close();
     }
 
     /**

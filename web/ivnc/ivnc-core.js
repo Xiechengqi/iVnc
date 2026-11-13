@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import webrtc from "./ivnc-wr-core.js?v=50";
+import webrtc from "./ivnc-wr-core.js?v=51";
 
 const STATUS_UPDATE_INTERVAL_MS = 10000;
 const DEFAULT_TITLE = "iVNC";

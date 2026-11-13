@@ -5,6 +5,42 @@
 
 #![allow(dead_code)]
 
+/// GStreamer chooses a new SSRC and timestamp origin on pipeline rebuilds,
+/// whereas str0m keeps the negotiated outbound SSRC. Preserve that outbound
+/// timeline across resolution/FPS changes (and cached keyframe replay).
+#[derive(Default)]
+pub(crate) struct VideoRtpClock {
+    pub source: Option<u32>,
+    source_timestamp: u32,
+    timestamp: u32,
+    frame_at: Option<std::time::Instant>,
+}
+
+impl VideoRtpClock {
+    pub fn map(&mut self, source: u32, timestamp: u32, now: std::time::Instant) -> u32 {
+        let delta = timestamp.wrapping_sub(self.source_timestamp);
+        let step = if self.source.is_none() {
+            0
+        } else if self.source != Some(source) || delta >= (1 << 31) {
+            // New encoder or an older cached frame: advance by wall time,
+            // rather than exposing a backwards/random timestamp to the peer.
+            self.frame_at.map_or(1, |at| {
+                (now.saturating_duration_since(at).as_micros() * 90 / 1000)
+                    .clamp(1, u128::from(u32::MAX / 2)) as u32
+            })
+        } else {
+            delta
+        };
+        if self.source != Some(source) || delta != 0 {
+            self.frame_at = Some(now);
+        }
+        self.timestamp = self.timestamp.wrapping_add(step);
+        self.source = Some(source);
+        self.source_timestamp = timestamp;
+        self.timestamp
+    }
+}
+
 /// RTP packet parser utilities
 pub mod rtp_util {
     /// Extract sequence number from RTP packet
@@ -86,6 +122,34 @@ pub mod rtp_util {
 #[cfg(test)]
 mod tests {
     use super::rtp_util::*;
+
+    #[test]
+    fn video_timeline_survives_rebuild_replay_and_timestamp_wrap() {
+        use std::time::{Duration, Instant};
+        let mut clock = super::VideoRtpClock::default();
+        let now = Instant::now();
+        assert_eq!(clock.map(1, u32::MAX - 1499, now), 0);
+        assert_eq!(clock.map(1, 1500, now + Duration::from_millis(33)), 3000);
+        assert_eq!(clock.map(1, 1500, now + Duration::from_millis(34)), 3000);
+        // A rebuilt pipeline picks an unrelated timestamp base.
+        assert_eq!(
+            clock.map(2, 900_000_000, now + Duration::from_millis(66)),
+            5970
+        );
+        assert_eq!(
+            clock.map(2, 900_003_000, now + Duration::from_millis(99)),
+            8970
+        );
+        // An older keyframe is still sent on a forward-moving timeline.
+        assert_eq!(
+            clock.map(2, 900_000_000, now + Duration::from_millis(100)),
+            9060
+        );
+        assert_eq!(
+            clock.map(2, 900_000_000, now + Duration::from_millis(101)),
+            9060
+        );
+    }
 
     #[test]
     fn test_rtp_parsing() {

@@ -26,6 +26,8 @@
 
 import { Input } from "./input2.js?v=20";
 import { base64ToString, Queue } from "./util.js?v=1";
+import { prepareVideoOffer } from "../video-capabilities.mjs";
+import { createVideoPlayback } from "../video-playback.mjs";
 /**
  * @typedef {Object} WebRTCDemo
  * @property {function} ondebug - Callback fired when new debug message is set.
@@ -202,8 +204,17 @@ export class WebRTCDemo {
 		 * @type {function}
 		 */
 		this.ontaskbarupdate = null;
-
-
+		this.onplaybackstatechange = null;
+		this.playback = createVideoPlayback({
+			video: element,
+			onChange: state => {
+				this.onplaybackstatechange?.(state);
+				if (state.state === 'blocked') this.onplaystreamrequired?.();
+			},
+			getStats: () => this.getConnectionStats(),
+			requestKeyframe: () => this.sendDataChannelMessage('_k'),
+			diagnostic: details => console.debug('[video]', details),
+		});
 	}
 
 	/**
@@ -259,7 +270,10 @@ export class WebRTCDemo {
 	 */
 	_onSignalingICE(icecandidate) {
 		this._setDebug("received ice candidate from signaling server: " + JSON.stringify(icecandidate));
-		this.peerConnection.addIceCandidate(icecandidate).catch((e) => this._setError(e.message || e));
+		const peer = this.peerConnection;
+		peer?.addIceCandidate(icecandidate).catch((e) => {
+			if (peer === this.peerConnection) this._setError(e.message || e);
+		});
 	}
 
 	/**
@@ -270,6 +284,7 @@ export class WebRTCDemo {
 	 * @param {RTCPeerConnectionIceEvent} event - The event: https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnectionIceEvent
 	 */
 	_onPeerICE(event) {
+		if (event.target && event.target !== this.peerConnection) return;
 		if (event.candidate === null) {
 			this._setStatus("Completed ICE candidates from peer connection");
 			return;
@@ -284,17 +299,10 @@ export class WebRTCDemo {
 	 */
 	_onReady() {
 		this._setDebug("Server ready, creating SDP offer");
-		this.peerConnection.createOffer()
-			.then((offer) => {
-				// Set sps-pps-idr-in-keyframe=1
-				if (!(/[^-]sps-pps-idr-in-keyframe=1[^\d]/gm.test(offer.sdp)) && (/[^-]packetization-mode=/gm.test(offer.sdp))) {
-					console.log("Overriding WebRTC SDP to include sps-pps-idr-in-keyframe=1");
-					if (/[^-]sps-pps-idr-in-keyframe=\d+/gm.test(offer.sdp)) {
-						offer.sdp = offer.sdp.replace(/sps-pps-idr-in-keyframe=\d+/gm, 'sps-pps-idr-in-keyframe=1');
-					} else {
-						offer.sdp = offer.sdp.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=');
-					}
-				}
+		const peer = this.peerConnection;
+		if (!peer || this._destroyed) return;
+		peer.createOffer()
+			.then(async (offer) => {
 				if (offer.sdp.indexOf('multiopus') === -1) {
 					if (!(/[^-]stereo=1[^\d]/gm.test(offer.sdp)) && (/[^-]useinbandfec=/gm.test(offer.sdp))) {
 						console.log("Overriding WebRTC SDP to allow stereo audio");
@@ -313,14 +321,25 @@ export class WebRTCDemo {
 						}
 					}
 				}
-				console.log("Created local SDP offer", offer);
-				return this.peerConnection.setLocalDescription(offer);
+				const prepared = await prepareVideoOffer(offer);
+				if (peer !== this.peerConnection) return;
+				try {
+					await peer.setLocalDescription(prepared);
+				} catch (error) {
+					// Some engines forbid changing a codec's native fmtp even
+					// after a positive capability probe. Retain their native offer.
+					if (prepared.sdp === offer.sdp) throw error;
+					await peer.setLocalDescription(offer);
+				}
 			})
 			.then(() => {
+				if (peer !== this.peerConnection) return;
 				this._setDebug("Sending SDP offer to server");
-				this.signaling.sendSDP(this.peerConnection.localDescription);
+				this.signaling.sendSDP(peer.localDescription);
 			})
 			.catch((e) => {
+				if (peer !== this.peerConnection) return;
+				this.playback.fail('connection-error', e.message);
 				this._setError("Error creating SDP offer: " + e.message);
 			});
 	}
@@ -332,6 +351,8 @@ export class WebRTCDemo {
 	 * @param {RTCSessionDescription} sdp
 	 */
 	_onSDP(sdp) {
+		const peer = this.peerConnection;
+		if (!peer || this._destroyed) return;
 		if (sdp.type === "answer") {
 			// Rewrite ICE candidate IPs in the SDP answer to match the host
 			// the browser actually connected to. This is needed when the server
@@ -339,11 +360,13 @@ export class WebRTCDemo {
 			var rewrittenSdp = this._rewriteCandidateHost(sdp.sdp);
 			var answer = new RTCSessionDescription({ type: "answer", sdp: rewrittenSdp });
 			console.log("Received SDP answer from server (candidates rewritten)", answer);
-			this.peerConnection.setRemoteDescription(answer)
+			peer.setRemoteDescription(answer)
 				.then(() => {
 					this._setDebug("Remote SDP answer set successfully");
 				})
 				.catch((e) => {
+					if (peer !== this.peerConnection) return;
+					this.playback.fail('connection-error', e.message);
 					this._setError("Error setting remote SDP answer: " + e.message);
 				});
 		} else if (sdp.type === "offer") {
@@ -399,12 +422,14 @@ export class WebRTCDemo {
 	 * @param {Event} event - Track event: https://developer.mozilla.org/en-US/docs/Web/API/RTCTrackEvent
 	 */
 	_ontrack(event) {
+		if (event.target && event.target !== this.peerConnection) return;
 		this._setStatus("Received incoming " + event.track.kind + " stream from peer");
 		if (!this.streams) this.streams = [];
 		this.streams.push([event.track.kind, event.streams]);
 		if (event.track.kind === "video") {
-			this.element.srcObject = event.streams[0];
-			this.playStream();
+			// A stream-less track event is valid. Keep the video element free
+			// of audio tracks so its autoplay permission is independent.
+			this.playback.attach(new MediaStream([event.track]));
 		} else if (event.track.kind === "audio") {
 			this._setDebug("Audio track received, attaching to audio element");
 			if (!this._audioElement) {
@@ -414,7 +439,7 @@ export class WebRTCDemo {
 				this._audioElement.muted = !this._audioUnlocked;
 				document.body.appendChild(this._audioElement);
 			}
-			this._audioElement.srcObject = event.streams[0];
+			this._audioElement.srcObject = new MediaStream([event.track]);
 		}
 	}
 
@@ -664,15 +689,14 @@ export class WebRTCDemo {
 
 			case "disconnected":
 				this._setError("Peer connection disconnected");
-				if (this._send_channel !== null && this._send_channel.readyState === 'open') {
-						this._send_channel.close();
-				}
-				this.element.load();
+				this._connected = false;
+				// A transient ICE disconnect can recover with the existing
+				// stream and DataChannel. A failed peer is reset by the owner.
 				break;
 
 			case "failed":
 				this._setError("Peer connection failed");
-				this.element.load();
+				this._connected = false;
 				break;
 			default:
 		}
@@ -861,6 +885,11 @@ export class WebRTCDemo {
 			video: {
 				bytesReceived: 0, //from incoming-rtp
 				decoder: "NA", // from incoming-rtp
+				framesReceived: null,
+				framesDecoded: null,
+				keyFramesDecoded: null,
+				codecParameters: '',
+				payloadType: null,
 				frameHeight: 0, // from incoming-rtp
 				frameWidth: 0, // from incoming-rtp
 				framesPerSecond: 0, // from incoming-rtp
@@ -899,7 +928,7 @@ export class WebRTCDemo {
 					candidatePairs: {},
 					selectedCandidatePairId: null,
 					remoteCandidates: {},
-				localCandidates: {},
+					localCandidates: {},
 					codecs: {},
 					videoRTP: null,
 					videoTrack: null,
@@ -955,6 +984,9 @@ export class WebRTCDemo {
 					connectionDetails.video.frameHeight = videoRTP.frameHeight;
 					connectionDetails.video.frameWidth = videoRTP.frameWidth;
 					connectionDetails.video.framesPerSecond = videoRTP.framesPerSecond;
+					connectionDetails.video.framesReceived = videoRTP.framesReceived ?? null;
+					connectionDetails.video.framesDecoded = videoRTP.framesDecoded ?? null;
+					connectionDetails.video.keyFramesDecoded = videoRTP.keyFramesDecoded ?? null;
 					connectionDetails.video.packetsReceived = videoRTP.packetsReceived;
 					connectionDetails.video.packetsLost = videoRTP.packetsLost;
 
@@ -962,6 +994,8 @@ export class WebRTCDemo {
 					var codec = reports.codecs[videoRTP.codecId];
 					if (codec !== undefined) {
 						connectionDetails.video.codecName = codec.mimeType.split("/")[1].toUpperCase();
+						connectionDetails.video.codecParameters = codec.sdpFmtpLine || '';
+						connectionDetails.video.payloadType = codec.payloadType;
 					}
 				}
 
@@ -1050,29 +1084,7 @@ export class WebRTCDemo {
 	 */
 	// [START playStream]
 	playStream() {
-		// Ensure muted for autoplay policy compliance
-		this.element.muted = true;
-		// NOTE: element.load() can reset srcObject on some browsers, skip it for MediaStream
-		if (!this.element.srcObject) {
-			this.element.load();
-		}
-		var playPromise = this.element.play();
-		if (playPromise !== undefined) {
-			playPromise.then(() => {
-				this._setDebug("Stream is playing.");
-				// Sync audio playback after video succeeds
-				if (this._audioElement) {
-					this._audioElement.play().catch(() => {});
-				}
-			}).catch((e) => {
-				console.error("play() rejected:", e.message);
-				if (this.onplaystreamrequired !== null) {
-					this.onplaystreamrequired();
-				} else {
-					this._setDebug("Stream play failed and no onplaystreamrequired was bound.");
-				}
-			});
-		}
+		return this.playback.play();
 	}
 	// [END playStream]
 
@@ -1080,8 +1092,19 @@ export class WebRTCDemo {
 	 * Initiate connection to signaling server.
 	 */
 	connect() {
+		if (this._destroyed) return;
+		if (typeof RTCPeerConnection !== 'function') {
+			this.playback.fail('unsupported', 'RTCPeerConnection unavailable');
+			this._setError('WebRTC is unavailable in this browser or context');
+			return;
+		}
 		// Create the peer connection object and bind callbacks.
-		this.peerConnection = new RTCPeerConnection(this.rtcPeerConfig);
+		try { this.peerConnection = new RTCPeerConnection(this.rtcPeerConfig); }
+		catch (error) {
+			this.playback.fail('unsupported', error.message);
+			this._setError(error.message);
+			return;
+		}
 
 		// Add transceivers so the browser offer includes m-lines.
 		// Server is send-only for media; browser is receive-only.
@@ -1118,6 +1141,7 @@ export class WebRTCDemo {
 		const peer = this.peerConnection;
 		this.peerConnection.onconnectionstatechange = () => {
 			if (this.peerConnection !== peer) return;
+			this.playback.connection(peer.connectionState);
 			// Local event handling.
 			this._handleConnectionStateChange(this.peerConnection.connectionState);
 
@@ -1136,6 +1160,9 @@ export class WebRTCDemo {
 	 *   3. Reconnecting to the signaling server.
 	 */
 	reset() {
+		if (this._destroyed) return;
+		clearTimeout(this._reconnectTimer);
+		this.playback.reset();
 		// Clear cursor cache.
 		this.cursor_cache = new Map();
 
@@ -1151,12 +1178,30 @@ export class WebRTCDemo {
 		if (this._aux_channel) { this._aux_channel.close(); this._aux_channel = null; }
 		this.peerConnection = null;
 		if (peer) peer.close();
+		if (this._audioElement) this._audioElement.srcObject = null;
 		if (signalState !== "stable") {
-			setTimeout(() => {
-					this.connect();
+			this._reconnectTimer = setTimeout(() => {
+				this.connect();
 			}, 3000);
 		} else {
 			this.connect();
 		}
+	}
+
+	destroy() {
+		this._destroyed = true;
+		clearTimeout(this._reconnectTimer);
+		this.playback.destroy();
+		const peer = this.peerConnection;
+		const channel = this._send_channel, auxiliary = this._aux_channel;
+		this.peerConnection = null;
+		this._send_channel = null; this._aux_channel = null;
+		channel?.close(); auxiliary?.close();
+		peer?.close();
+		if (this._audioElement) this._audioElement.srcObject = null;
+		this._audioElement?.remove(); this._audioElement = null;
+		this.signaling.ondisconnect = null;
+		if (this.signaling.destroy) this.signaling.destroy();
+		else this.signaling.disconnect();
 	}
 }

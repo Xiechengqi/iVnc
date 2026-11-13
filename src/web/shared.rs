@@ -145,6 +145,14 @@ pub struct SharedState {
     /// Display dimensions
     pub display_size: Arc<Mutex<(u32, u32)>>,
 
+    /// Preserve the user's requested size while a receiver temporarily needs
+    /// a smaller common stream. Restore it when that receiver leaves.
+    requested_display_size: Arc<Mutex<(u32, u32)>>,
+
+    /// H.264 receive levels of pending and connected sessions. A shared stream
+    /// must respect the least capable receiver until that session is dropped.
+    video_receive_levels: Arc<Mutex<BTreeMap<String, u8>>>,
+
     /// Clipboard content (base64 text)
     pub clipboard: Arc<Mutex<Option<String>>>,
 
@@ -232,7 +240,8 @@ impl SharedState {
         proxy_ip: Option<std::net::IpAddr>,
         proxy_autostart: Option<bool>,
     ) -> Self {
-        let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
+        let initial_size = (config.display.width, config.display.height);
+        let display_size = Arc::new(Mutex::new(initial_size));
         let proxy_panel = Arc::new(ProxyPanelManager::new(
             config.ui_features.proxy_enabled,
             proxy_ip,
@@ -248,7 +257,9 @@ impl SharedState {
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
             input_sender,
+            requested_display_size: Arc::new(Mutex::new(initial_size)),
             display_size,
+            video_receive_levels: Arc::new(Mutex::new(BTreeMap::new())),
             clipboard: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
             pending_resize: Arc::new(Mutex::new(None)),
@@ -452,8 +463,46 @@ impl SharedState {
         *self.display_size.lock().unwrap()
     }
 
+    pub fn video_receive_level(&self) -> crate::webrtc::video_format::H264Level {
+        use crate::webrtc::video_format::{h264_level, MAX_H264_LEVEL};
+        let id = self
+            .video_receive_levels
+            .lock()
+            .unwrap()
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(MAX_H264_LEVEL);
+        h264_level(id).expect("validated H.264 level")
+    }
+
+    pub fn set_video_receive_level(&self, id: &str, level: u8) {
+        self.video_receive_levels
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), level);
+    }
+
+    pub fn remove_video_receive_level(&self, id: &str) {
+        self.video_receive_levels.lock().unwrap().remove(id);
+    }
+
+    pub fn video_parameters(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let fps = self.runtime_settings.target_fps();
+        let kbps = self.runtime_settings.video_bitrate_kbps();
+        if self.config.webrtc.video_codec == crate::config::VideoCodec::H264 {
+            let level = self.video_receive_level();
+            let (w, h, fps) = level.fit(width, height, fps);
+            (w, h, fps, kbps.min(level.max_kbps))
+        } else {
+            (width, height, fps, kbps)
+        }
+    }
+
     /// Request display resize
     pub fn resize_display(&self, width: u32, height: u32) {
+        *self.requested_display_size.lock().unwrap() = (width, height);
+        let (width, height, _, _) = self.video_parameters(width, height);
         let current = self.display_size();
         if current == (width, height) {
             return;
@@ -465,6 +514,10 @@ impl SharedState {
     /// Take pending resize request (called by compositor thread)
     pub fn take_pending_resize(&self) -> Option<(u32, u32)> {
         self.pending_resize.lock().unwrap().take()
+    }
+
+    pub fn requested_display_size(&self) -> (u32, u32) {
+        *self.requested_display_size.lock().unwrap()
     }
 
     /// Update client-reported latency metric (ms)

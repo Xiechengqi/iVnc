@@ -12,6 +12,7 @@ pub mod rtc_session;
 pub mod session;
 pub mod signaling;
 pub mod tcp_framing;
+pub mod video_format;
 
 pub use session::SessionManager;
 pub use signaling::SignalingMessage;

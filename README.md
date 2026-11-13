@@ -484,6 +484,10 @@ apt-get install gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
 2. 检查浏览器控制台是否有 ICE/DTLS 错误
 3. 如果通过反向代理，确保 WebSocket 和 TCP 连接能正确转发
 
+### 浏览器已连接但画面黑屏
+
+H.264 使用 8-bit 4:2:0 Constrained Baseline，实际分辨率、帧率与码率按当前接收能力调整。浏览器阻止播放时点击“播放画面”；无数据、解码或连接失败会显示对应提示及重试入口。排查协商参数、Safari 验证范围及公共流适配策略见 [视频兼容与 Review](docs/SAFARI_VIDEO_REVIEW.md)。
+
 ### 无音频
 
 1. 确认 PulseAudio 正在运行：`pactl info`

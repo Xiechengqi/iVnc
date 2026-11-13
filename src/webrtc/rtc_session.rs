@@ -5,10 +5,12 @@
 //! text forwarding through a single event loop.
 
 use super::data_channel::InputDataChannel;
-use super::media_track::rtp_util;
+use super::media_track::{rtp_util, VideoRtpClock};
 use super::tcp_framing::{frame_packet, TcpFrameDecoder};
+use super::video_format::{constrained_baseline, offered_h264_level, rtc_codec};
 use super::WebRTCError;
 use crate::clipboard::ClipboardReceiver;
+use crate::config::VideoCodec;
 use crate::file_upload::FileUploadHandler;
 use crate::input::{InputEvent, InputEventData};
 use crate::runtime_settings::RuntimeSettings;
@@ -46,22 +48,41 @@ pub struct RtcSession {
     video_pt: Option<Pt>,
     /// Negotiated audio payload type (discovered from SDP)
     audio_pt: Option<Pt>,
+    video_codec: VideoCodec,
+    h264_level: Option<u8>,
+    h264_ready: bool,
+    video_limit_owner: Option<Arc<SharedState>>,
     /// Whether the session is connected
     pub connected: bool,
     /// RTP sequence counter for video (str0m RTP mode needs us to supply seq)
     video_seq: u64,
+    video_clock: VideoRtpClock,
     /// RTP sequence counter for audio
     audio_seq: u64,
 }
 
 impl RtcSession {
     /// Create a new RtcSession with str0m configured for ICE-lite + RTP mode.
-    pub fn new(id: String) -> Self {
+    pub fn new(id: String, video_codec: VideoCodec, offer_sdp: &str) -> Self {
         let now = Instant::now();
-        let rtc = Rtc::builder()
+        let h264_level = offered_h264_level(offer_sdp);
+        let mut builder = Rtc::builder()
             .set_ice_lite(true)
             .set_rtp_mode(true)
-            .build(now);
+            .clear_codecs()
+            .enable_opus(true);
+        match video_codec {
+            VideoCodec::H264 => builder.codec_config().add_h264(
+                96.into(),
+                Some(97.into()),
+                true,
+                0x42e000 | u32::from(h264_level.unwrap_or(31)),
+            ),
+            VideoCodec::VP8 => builder = builder.enable_vp8(true),
+            VideoCodec::VP9 => builder = builder.enable_vp9(true),
+            VideoCodec::AV1 => builder = builder.enable_av1(true),
+        }
+        let rtc = builder.build(now);
 
         Self {
             id,
@@ -71,8 +92,13 @@ impl RtcSession {
             dc_id: None,
             video_pt: None,
             audio_pt: None,
+            video_codec,
+            h264_level,
+            h264_ready: false,
+            video_limit_owner: None,
             connected: false,
             video_seq: 0,
+            video_clock: VideoRtpClock::default(),
             audio_seq: 0,
         }
     }
@@ -92,6 +118,9 @@ impl RtcSession {
 
     /// Accept an SDP offer and return the SDP answer string.
     pub fn accept_offer(&mut self, offer_sdp: &str) -> Result<String, WebRTCError> {
+        if self.video_codec == VideoCodec::H264 && self.h264_level.is_none() {
+            return Err(WebRTCError::MediaError("IVNC_VIDEO_UNSUPPORTED: H.264 Constrained Baseline with packetization-mode=1 is required".into()));
+        }
         let offer = SdpOffer::from_sdp_string(offer_sdp)
             .map_err(|e| WebRTCError::SdpError(format!("Failed to parse SDP offer: {}", e)))?;
 
@@ -101,8 +130,28 @@ impl RtcSession {
             .accept_offer(offer)
             .map_err(|e| WebRTCError::SdpError(format!("Failed to accept offer: {}", e)))?;
 
-        // Discover media line IDs from the SDP negotiation
-        Ok(answer.to_sdp_string())
+        let answer = answer.to_sdp_string();
+        // A rejected video m-line can coexist with a working DataChannel.
+        // Do not report that as a usable desktop connection.
+        if !answer
+            .lines()
+            .any(|line| line.starts_with("m=video ") && !line.starts_with("m=video 0 "))
+        {
+            return Err(WebRTCError::MediaError(format!(
+                "IVNC_VIDEO_UNSUPPORTED: no compatible {} video format",
+                self.video_codec.as_str()
+            )));
+        }
+        Ok(answer)
+    }
+
+    pub fn register_video_limit(&mut self, state: Arc<SharedState>) {
+        if self.video_codec == VideoCodec::H264 {
+            if let Some(level) = self.h264_level {
+                state.set_video_receive_level(&self.id, level);
+                self.video_limit_owner = Some(state);
+            }
+        }
     }
 
     /// Write a video RTP packet from GStreamer into str0m.
@@ -121,10 +170,11 @@ impl RtcSession {
         // mapped PT 96 to VP8 — we must use the actual H.264 PT from SDP.
         let pt = match self.video_pt {
             Some(pt) => pt,
-            None => Pt::new_with_value(rtp_util::get_payload_type(rtp_data).unwrap_or(96)),
+            None => return Ok(()),
         };
         let marker = rtp_util::is_marker_set(rtp_data);
-        let timestamp = rtp_util::get_timestamp(rtp_data).unwrap_or(0);
+        let source_timestamp = rtp_util::get_timestamp(rtp_data).unwrap_or(0);
+        let source = rtp_util::get_ssrc(rtp_data).unwrap_or(0);
         let header_len = rtp_util::header_length(rtp_data).unwrap_or(12);
         let payload = if rtp_data.len() > header_len {
             rtp_data[header_len..].to_vec()
@@ -132,6 +182,31 @@ impl RtcSession {
             return Ok(());
         };
 
+        if self.video_codec == VideoCodec::H264 {
+            if self.video_clock.source != Some(source) {
+                self.h264_ready = false;
+            }
+            // New sessions may subscribe while the common pipeline is being
+            // resized for their receive limit. Wait for a compatible SPS instead
+            // of feeding old, higher-level frames into the browser decoder.
+            if payload[0] & 0x1f == 7 {
+                self.h264_ready = payload.len() >= 4
+                    && constrained_baseline(u32::from_be_bytes([
+                        0, payload[1], payload[2], payload[3],
+                    ]))
+                    && self.h264_level.is_some_and(|level| payload[3] <= level);
+                if !self.h264_ready {
+                    warn!("Session {} waiting for compatible H.264 SPS", self.id);
+                }
+            }
+            if !self.h264_ready {
+                return Ok(());
+            }
+        }
+
+        let timestamp = self
+            .video_clock
+            .map(source, source_timestamp, Instant::now());
         let seq = SeqNo::from(self.video_seq);
         self.video_seq += 1;
 
@@ -154,6 +229,7 @@ impl RtcSession {
                     result.is_ok()
                 );
             }
+            result.map_err(|error| WebRTCError::MediaError(error.to_string()))?;
         } else if self.video_seq == 1 {
             warn!(
                 "Session {} stream_tx_by_mid({:?}) returned None",
@@ -170,13 +246,16 @@ impl RtcSession {
             Some(mid) => mid,
             None => return Ok(()),
         };
+        let Some(pt) = self.audio_pt else {
+            return Ok(());
+        };
 
         let seq_no = SeqNo::from(self.audio_seq);
         self.audio_seq += 1;
 
         if let Some(stream_tx) = self.rtc.direct_api().stream_tx_by_mid(mid, None) {
             let _ = stream_tx.write_rtp(
-                self.audio_pt.unwrap_or(Pt::new_with_value(111)),
+                pt,
                 seq_no,
                 timestamp,
                 Instant::now(),
@@ -208,6 +287,128 @@ impl RtcSession {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for RtcSession {
+    fn drop(&mut self) {
+        if let Some(state) = self.video_limit_owner.take() {
+            state.remove_video_receive_level(&self.id);
+        }
+    }
+}
+
+fn negotiated_payload(rtc: &Rtc, mid: Mid, codec: str0m::format::Codec) -> Option<Pt> {
+    let media = rtc.media(mid)?;
+    media.remote_pts().iter().copied().find(|pt| {
+        rtc.codec_config()
+            .params()
+            .iter()
+            .any(|p| p.pt() == *pt && p.spec().codec == codec)
+    })
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+    use str0m::media::Direction;
+
+    fn offer_at_pt(profile: u32, packetization: bool, pt: u8) -> (String, Mid) {
+        let mut builder = Rtc::builder().clear_codecs().enable_opus(true);
+        builder
+            .codec_config()
+            .add_h264(pt.into(), Some((pt + 1).into()), packetization, profile);
+        let mut rtc = builder.build(Instant::now());
+        let mut changes = rtc.sdp_api();
+        let mid = changes.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        changes.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
+        let (offer, _) = changes.apply().unwrap();
+        (offer.to_sdp_string(), mid)
+    }
+
+    fn offer(profile: u32, packetization: bool) -> (String, Mid) {
+        offer_at_pt(profile, packetization, 96)
+    }
+
+    #[test]
+    fn constrained_baseline_only_uses_the_offered_pt_and_level() {
+        for (profile, pt) in [(0x42e01f, 96), (0x42e02a, 102), (0x42e034, 108)] {
+            let (sdp, mid) = offer_at_pt(profile, true, pt);
+            let mut session = RtcSession::new("video-test".into(), VideoCodec::H264, &sdp);
+            session
+                .add_local_tcp_candidate("127.0.0.1:9999".parse().unwrap())
+                .unwrap();
+            let answer = session.accept_offer(&sdp).unwrap();
+            assert!(answer.contains("m=video 9 "));
+            assert_eq!(
+                negotiated_payload(&session.rtc, mid, str0m::format::Codec::H264),
+                Some(pt.into())
+            );
+            assert_eq!(
+                negotiated_payload(&session.rtc, mid, str0m::format::Codec::Vp8),
+                None
+            );
+            assert!(answer.contains(&format!("profile-level-id={profile:06x}")));
+            assert!(!answer.contains("VP8/90000"));
+            assert!(!answer.contains("H265/90000"));
+        }
+    }
+
+    #[test]
+    fn incompatible_profile_packetization_and_codec_are_explicit_errors() {
+        for (profile, mode, codec) in [
+            (0x64001f, true, VideoCodec::H264),
+            (0x42e01f, false, VideoCodec::H264),
+            (0x42e01f, true, VideoCodec::VP8),
+        ] {
+            let (sdp, _) = offer(profile, mode);
+            let mut session = RtcSession::new("rejected-video".into(), codec, &sdp);
+            session
+                .add_local_tcp_candidate("127.0.0.1:9999".parse().unwrap())
+                .unwrap();
+            assert!(session
+                .accept_offer(&sdp)
+                .unwrap_err()
+                .to_string()
+                .contains("IVNC_VIDEO_UNSUPPORTED"));
+        }
+    }
+
+    #[test]
+    fn common_output_restores_requested_size_when_a_limited_session_drops() {
+        use crate::config::{ui::UiConfig, Config};
+        let mut config = Config::default();
+        config.display.width = 1920;
+        config.display.height = 1080;
+        config.encoding.target_fps = 60;
+        config.webrtc.video_bitrate = 8000;
+        let (input, _) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(SharedState::new(
+            config.clone(),
+            UiConfig::from_env(&config),
+            input,
+            Arc::new(RuntimeSettings::new(&config)),
+            None,
+            None,
+        ));
+        let (sdp, _) = offer(0x42e034, true);
+        let mut high = RtcSession::new("high".into(), VideoCodec::H264, &sdp);
+        high.register_video_limit(state.clone());
+        assert_eq!(state.video_parameters(1920, 1080), (1920, 1080, 60, 8000));
+        let (sdp, _) = offer(0x42e01f, true);
+        let mut low = RtcSession::new("pending-low".into(), VideoCodec::H264, &sdp);
+        low.register_video_limit(state.clone());
+        let (w, h, fps, _) = state.video_parameters(1920, 1080);
+        assert!(super::super::video_format::h264_level(31)
+            .unwrap()
+            .fits(w, h, fps));
+        assert!(w < 1920 && h < 1080);
+        state.resize_display(1600, 900);
+        assert_eq!(state.requested_display_size(), (1600, 900));
+        drop(low); // Includes pending sessions that never finish connecting.
+        assert_eq!(state.video_parameters(1600, 900), (1600, 900, 60, 8000));
+        drop(high);
+        assert_eq!(state.video_receive_level().id, 52);
     }
 }
 
@@ -542,34 +743,24 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
             info!("Session {} WebRTC connected", session.id);
         }
 
-        Event::MediaAdded(media) => {
-            match media.kind {
-                MediaKind::Video => {
-                    session.video_mid = Some(media.mid);
-                    // Discover negotiated H.264 PT from codec config
-                    for p in session.rtc.codec_config().params() {
-                        if p.spec().codec == str0m::format::Codec::H264 {
-                            session.video_pt = Some(p.pt());
-                            info!("Session {} video PT: {:?} (H264)", session.id, p.pt());
-                            break;
-                        }
-                    }
-                    info!("Session {} video mid: {:?}", session.id, media.mid);
-                }
-                MediaKind::Audio => {
-                    session.audio_mid = Some(media.mid);
-                    // Discover negotiated Opus PT from codec config
-                    for p in session.rtc.codec_config().params() {
-                        if p.spec().codec == str0m::format::Codec::Opus {
-                            session.audio_pt = Some(p.pt());
-                            info!("Session {} audio PT: {:?}", session.id, p.pt());
-                            break;
-                        }
-                    }
-                    info!("Session {} audio mid: {:?}", session.id, media.mid);
-                }
+        Event::MediaAdded(media) => match media.kind {
+            MediaKind::Video => {
+                session.video_mid = Some(media.mid);
+                session.video_pt =
+                    negotiated_payload(&session.rtc, media.mid, rtc_codec(session.video_codec));
+                info!(
+                    "Session {} video PT: {:?} ({:?}), receive level {:?}",
+                    session.id, session.video_pt, session.video_codec, session.h264_level
+                );
+                info!("Session {} video mid: {:?}", session.id, media.mid);
             }
-        }
+            MediaKind::Audio => {
+                session.audio_mid = Some(media.mid);
+                session.audio_pt =
+                    negotiated_payload(&session.rtc, media.mid, str0m::format::Codec::Opus);
+                info!("Session {} audio mid: {:?}", session.id, media.mid);
+            }
+        },
 
         Event::IceConnectionStateChange(state) => {
             info!("Session {} ICE state: {:?}", session.id, state);

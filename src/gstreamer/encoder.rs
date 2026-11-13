@@ -248,8 +248,10 @@ impl EncoderSelection {
                 .name("encoder")
                 .property_from_str("tune", "zerolatency")
                 .property_from_str("speed-preset", "veryfast")
-                .property_from_str("pass", "quant")
-                .property("quantizer", 22u32)
+                // Respect the negotiated level's bitrate limit as well as its
+                // dimensions/FPS; unconstrained CQP can exceed that envelope.
+                .property_from_str("pass", "cbr")
+                .property("bitrate", bitrate_kbps)
                 .property("key-int-max", keyframe_interval)
                 .property("threads", 4u32)
                 .property("b-adapt", false)

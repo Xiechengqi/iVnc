@@ -292,6 +292,9 @@ fn run(
     width: u32,
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (width, height, initial_fps, initial_bitrate) =
+        shared_state.video_parameters(width, height);
+    shared_state.set_display_size(width, height);
     let running = Arc::new(AtomicBool::new(true));
     shared_state.set_shutdown_flag(running.clone());
 
@@ -415,9 +418,9 @@ fn run(
     let pipeline_config = PipelineConfig {
         width,
         height,
-        framerate: config.encoding.target_fps,
+        framerate: initial_fps,
         codec: config.webrtc.video_codec,
-        bitrate: config.webrtc.video_bitrate,
+        bitrate: initial_bitrate,
         hardware_encoder: config.webrtc.hardware_encoder,
         keyframe_interval: config.webrtc.keyframe_interval,
         latency_ms: config.webrtc.pipeline_latency_ms,
@@ -510,7 +513,6 @@ fn run(
 
     // Main compositor loop
     let target_fps = shared_state.config.encoding.target_fps.max(1);
-    let frame_duration = Duration::from_micros(1_000_000 / target_fps as u64);
     let mut last_frame = Instant::now();
     let mut last_stats = Instant::now();
     let mut last_process_cpu_sample = read_process_cpu_ticks().map(|ticks| (Instant::now(), ticks));
@@ -535,6 +537,7 @@ fn run(
     let mut prev_apps_generation: u64 = 0;
     let mut render_state = RenderState::Active;
     let mut last_visual_activity_at = Instant::now();
+    let mut video_update_retry_at = Instant::now();
     info!("Compositor loop starting at {} fps", target_fps);
 
     while running.load(Ordering::Relaxed) {
@@ -693,40 +696,83 @@ fn run(
             }
         }
 
-        if let Some((w, h)) = shared_state.take_pending_resize() {
-            if let Err(e) = backend.resize(w, h) {
-                warn!("Resize failed: {}", e);
-            } else {
-                shared_state.set_display_size(w, h);
-
-                comp.resize_windows(w, h);
-
-                // Rebuild pipeline with new dimensions
-                info!("Rebuilding GStreamer pipeline for {}x{}", w, h);
-                let _ = pipeline.stop();
-                let new_config = PipelineConfig {
-                    width: w,
-                    height: h,
-                    framerate: config.encoding.target_fps,
-                    codec: config.webrtc.video_codec,
-                    bitrate: config.webrtc.video_bitrate,
-                    hardware_encoder: config.webrtc.hardware_encoder,
-                    keyframe_interval: config.webrtc.keyframe_interval,
-                    latency_ms: config.webrtc.pipeline_latency_ms,
-                };
-                match gstreamer::VideoPipeline::new(new_config) {
-                    Ok(new_pipeline) => {
-                        if let Err(e) = new_pipeline.start() {
-                            error!("Failed to start new pipeline: {}", e);
-                        } else {
+        if shared_state.take_pending_resize().is_some() {
+            video_update_retry_at = Instant::now();
+        }
+        let requested = shared_state.requested_display_size();
+        let (w, h, fps, bitrate) = shared_state.video_parameters(requested.0, requested.1);
+        let current = pipeline.config();
+        if (w, h, fps, bitrate)
+            != (
+                current.width,
+                current.height,
+                current.framerate,
+                current.bitrate,
+            )
+            && Instant::now() >= video_update_retry_at
+        {
+            video_update_retry_at = Instant::now() + Duration::from_secs(3);
+            let size_changed = (w, h) != (current.width, current.height);
+            let new_config = PipelineConfig {
+                width: w,
+                height: h,
+                framerate: fps,
+                bitrate,
+                codec: config.webrtc.video_codec,
+                hardware_encoder: config.webrtc.hardware_encoder,
+                keyframe_interval: runtime_settings.keyframe_interval(),
+                latency_ms: config.webrtc.pipeline_latency_ms,
+            };
+            match gstreamer::VideoPipeline::new(new_config) {
+                Ok(new_pipeline) => {
+                    let _ = pipeline.stop();
+                    match new_pipeline
+                        .start()
+                        .map_err(|e| e.to_string())
+                        .and_then(|_| {
+                            if size_changed {
+                                backend.resize(w, h).map_err(|e| e.to_string())
+                            } else {
+                                Ok(())
+                            }
+                        }) {
+                        Ok(()) => {
+                            video_update_retry_at = Instant::now();
                             pipeline = new_pipeline;
-                            info!("Pipeline rebuilt for {}x{}", w, h);
+                            if size_changed {
+                                shared_state.set_display_size(w, h);
+                                comp.resize_windows(w, h);
+                            }
+                            comp.needs_redraw = true;
+                            comp.taskbar_dirty = true;
+                            // Never replay or flush packets from the old encoder
+                            // after rebuilding its resolution/level.
+                            rtp_frame_buf.clear();
+                            keyframe_buf.clear();
+                            prev_rtp_ts = None;
+                            last_rtp_sample = None;
+                            in_keyframe = false;
+                            shared_state.set_keyframe_cache(Vec::new());
+                            pipeline.request_keyframe();
+                            info!(
+                                "Video output: {}x{} at {} fps, {} kbps (receive level {})",
+                                w,
+                                h,
+                                fps,
+                                bitrate,
+                                shared_state.video_receive_level().name
+                            );
+                        }
+                        Err(e) => {
+                            let _ = new_pipeline.stop();
+                            let _ = pipeline.start();
+                            error!("Video pipeline update failed: {}", e);
                         }
                     }
-                    Err(e) => error!("Failed to create new pipeline: {}", e),
                 }
-                last_visual_activity_at = Instant::now();
+                Err(e) => error!("Failed to create new pipeline: {}", e),
             }
+            last_visual_activity_at = Instant::now();
         }
 
         if comp.needs_redraw {
@@ -755,6 +801,8 @@ fn run(
         }
 
         if render_state == RenderState::Active {
+            let frame_duration =
+                Duration::from_micros(1_000_000 / u64::from(pipeline.config().framerate.max(1)));
             // Send frame callbacks BEFORE sleep so clients have the full
             // frame period to prepare and commit their next buffer.
             backend.send_frame_callbacks(&comp);
@@ -1488,10 +1536,8 @@ fn apply_runtime_settings(
     if rs.take_keyframe_request() {
         pipeline.request_keyframe();
     }
-    let new_bitrate = rs.video_bitrate_kbps();
-    if new_bitrate != pipeline.config().bitrate {
-        pipeline.set_bitrate(new_bitrate);
-    }
+    // Bitrate/FPS changes rebuild the pipeline above so its H.264 level and
+    // negotiated receive envelope stay consistent with the actual stream.
     let new_ki = rs.keyframe_interval();
     if new_ki != pipeline.config().keyframe_interval {
         pipeline.set_keyframe_interval(new_ki);
