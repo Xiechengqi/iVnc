@@ -9,7 +9,9 @@
   "scripts": {
     "serve": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:toolbar": "node ../../scripts/toolbar_interaction_test.mjs",
+    "test:viewport": "node ../../scripts/viewport_interaction_test.mjs"
   },
   "author": "Selkies",
   "license": "GPL-3",
@@ -22,6 +24,7 @@
     "vite-plugin-restart": "^0.4.2"
   },
   "devDependencies": {
+    "playwright": "1.62.1",
     "ws": "^8.22.0"
   }
 }

@@ -1,6 +1,6 @@
 // One work area for the desktop, input surface and embedded application views.
 export function createViewport({ root, container, video, overlay, toolbar, isPinned, embedded, onChange }) {
-    let disposed = false, frame = 0, manual = null, previousSize = '', pixelRatioQuery;
+    let disposed = false, frame = 0, mode = 'fit', previousSize = '', pixelRatioQuery;
     const set = (element, property, value) => {
         if (element.style[property] !== value) element.style[property] = value;
     };
@@ -12,21 +12,19 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
             && (!fullscreen || fullscreen.contains(toolbar));
         const reserved = reservesToolbar ? toolbar.getBoundingClientRect().height : 0;
         root.style.setProperty('--ivnc-toolbar-height', `${reserved}px`);
-        container.classList.toggle('manual-exact', !!manual && !manual.fit);
+        container.classList.toggle('manual-exact', mode === 'native');
         const width = container.clientWidth, height = container.clientHeight;
         let left = 0, top = 0, videoWidth = width, videoHeight = height;
-        if (manual) {
-            const scale = manual.fit ? Math.min(width / manual.width, height / manual.height) : 1;
-            videoWidth = manual.width * scale;
-            videoHeight = manual.height * scale;
-            if (manual.fit) { left = (width - videoWidth) / 2; top = (height - videoHeight) / 2; }
-        }
+        const frameWidth = video.videoWidth || width, frameHeight = video.videoHeight || height;
+        const scale = mode === 'fit' ? Math.min(width / frameWidth, height / frameHeight) : 1;
+        videoWidth = frameWidth * scale; videoHeight = frameHeight * scale;
+        if (mode === 'fit') { left = (width - videoWidth) / 2; top = (height - videoHeight) / 2; }
         for (const element of [video, overlay]) {
             set(element, 'left', `${left}px`); set(element, 'top', `${top}px`);
             set(element, 'width', `${videoWidth}px`); set(element, 'height', `${videoHeight}px`);
         }
-        set(video, 'objectFit', manual ? 'contain' : 'fill');
-        const size = `${width}x${height}@${window.devicePixelRatio}`;
+        set(video, 'objectFit', 'contain');
+        const size = `${width}x${height}@${window.devicePixelRatio}/${frameWidth}x${frameHeight}/${mode}`;
         const changed = size !== previousSize;
         previousSize = size;
         onChange({ width, height, changed });
@@ -42,6 +40,8 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
     function pixelRatioChanged() { watchPixelRatio(); schedule(); }
     const observer = new ResizeObserver(schedule);
     observer.observe(container); observer.observe(toolbar);
+    video.addEventListener('resize', schedule);
+    video.addEventListener('loadedmetadata', schedule);
     window.addEventListener('resize', schedule);
     document.addEventListener('fullscreenchange', schedule);
     container.addEventListener('scroll', schedule, { passive: true });
@@ -49,10 +49,17 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
     layout();
     return {
         layout,
-        automatic() { manual = null; container.scrollLeft = container.scrollTop = 0; layout(); },
-        manual(width, height, fit) { manual = { width, height, fit }; layout(); },
+        mode(value) {
+            mode = value === 'native' ? 'native' : 'fit';
+            container.scrollLeft = container.scrollTop = 0;
+            layout();
+        },
+        automatic() { this.mode('fit'); },
+        manual(width, height, fit) { this.mode(fit ? 'fit' : 'native'); },
         destroy() {
             disposed = true; cancelAnimationFrame(frame); observer.disconnect();
+            video.removeEventListener('resize', schedule);
+            video.removeEventListener('loadedmetadata', schedule);
             window.removeEventListener('resize', schedule);
             document.removeEventListener('fullscreenchange', schedule);
             container.removeEventListener('scroll', schedule);

@@ -164,7 +164,8 @@ try {
 
     const before = (await high.evaluate(inspect)).frames;
     for (const [width, height] of [[1600, 900], [1280, 720], [1920, 1080]]) {
-        await high.evaluate(`window.postMessage({type:'setManualResolution',width:${width},height:${height}},location.origin)`);
+        const state = await api('/api/console/display');
+        await api('/api/console/display', 'PUT', {width, height, revision:state.revision});
         await playing(high, width, height); await playing(blocked, width, height);
     }
     assert((await high.evaluate(inspect)).frames > before);

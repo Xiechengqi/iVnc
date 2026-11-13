@@ -2067,6 +2067,7 @@ mod tests {
         assert!(data_path("ui-config"));
         assert!(!data_path("api/apps"));
         assert!(!data_path("app/files"));
+        assert!(!data_path("api/console/display"));
     }
 
     fn gateway(apps: Arc<AppsState>) -> Arc<Gateway> {

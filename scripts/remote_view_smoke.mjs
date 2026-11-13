@@ -216,6 +216,15 @@ try {
     // 4. Every connection may control: upload and click through the relay.
     await waitFor('data channel', () => evaluate(`window.__ivncWebRTC._send_channel?.readyState === 'open'`));
     console.log('PASS datachannel-open');
+    await waitFor('authoritative source display',()=>evaluate('window.__ivncDisplayState?.protocol===1'));
+    const desktop=await evaluate('JSON.stringify(window.__ivncDisplayState.desktop)');
+    await call('Emulation.setDeviceMetricsOverride',{width:720,height:1100,deviceScaleFactor:2,mobile:false});
+    await waitFor('portrait local fit',()=>evaluate(`(() => {const v=document.querySelector('video').getBoundingClientRect(),a=document.querySelector('.video-container').getBoundingClientRect();return a.width===innerWidth && v.width<=a.width+1 && v.height<=a.height+1 && Math.abs(v.width/v.height-document.querySelector('video').videoWidth/document.querySelector('video').videoHeight)<.01})()`));
+    assert.equal(await evaluate('JSON.stringify(window.__ivncDisplayState.desktop)'),desktop);
+    await evaluate(`window.__ivncWebRTC.sendDataChannelMessage('r,3840x2160')`);
+    await delay(300);
+    assert.equal(await evaluate('JSON.stringify(window.__ivncDisplayState.desktop)'),desktop);
+    console.log('PASS remote-source-geometry-stable-on-portrait-dpr-and-legacy-resize');
     if (!flags.includes('--no-input')) {
         // The calling script checks that the file arrived in the app's Downloads.
         const uploadName = process.env.REMOTE_VIEW_UPLOAD_NAME || 'smoke-upload.txt';

@@ -36,7 +36,10 @@ pub enum PipelineState {
 /// Pipeline configuration
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
-    /// Frame width
+    /// Compositor input dimensions, independent of encoded output.
+    pub source_width: u32,
+    pub source_height: u32,
+    /// Encoded frame width
     pub width: u32,
     /// Frame height
     pub height: u32,
@@ -57,6 +60,8 @@ pub struct PipelineConfig {
 impl From<&WebRTCConfig> for PipelineConfig {
     fn from(config: &WebRTCConfig) -> Self {
         Self {
+            source_width: 1920,
+            source_height: 1080,
             width: 1920,
             height: 1080,
             framerate: 30,
@@ -72,6 +77,8 @@ impl From<&WebRTCConfig> for PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
+            source_width: 1920,
+            source_height: 1080,
             width: 1920,
             height: 1080,
             framerate: 30,
@@ -109,7 +116,7 @@ impl VideoPipeline {
         // Create appsrc for receiving raw frames from compositor
         let caps_str = format!(
             "video/x-raw,format=BGRx,width={},height={},framerate={}/1",
-            config.width, config.height, config.framerate
+            config.source_width, config.source_height, config.framerate
         );
         let caps = caps_str
             .parse::<gst::Caps>()
@@ -130,6 +137,10 @@ impl VideoPipeline {
                 GstError::PipelineFailed(format!("Failed to create videoconvert: {}", e))
             })?;
 
+        let scale = gst::ElementFactory::make("videoscale")
+            .property("add-borders", false)
+            .build()
+            .map_err(|e| GstError::PipelineFailed(format!("Failed to create videoscale: {e}")))?;
         let encoder_selection = EncoderSelection::select(config.codec, config.hardware_encoder);
         let (mut encoder, mut encoder_name) =
             encoder_selection.create_encoder(config.bitrate, config.keyframe_interval)?;
@@ -183,6 +194,7 @@ impl VideoPipeline {
             .add_many([
                 appsrc.upcast_ref(),
                 &convert,
+                &scale,
                 &encoder,
                 &payloader,
                 appsink.upcast_ref(),
@@ -197,8 +209,16 @@ impl VideoPipeline {
         // An unconstrained videoconvert can select Y444, causing x264 to emit
         // High 4:4:4 even when SDP negotiated Constrained Baseline. Hardware
         // encoders may prefer NV12; both choices here are 8-bit 4:2:0.
-        let raw_caps: gst::Caps = "video/x-raw,format=(string){I420,NV12}".parse().unwrap();
+        let raw_caps: gst::Caps = format!(
+            "video/x-raw,format=(string){{I420,NV12}},width={},height={}",
+            config.width, config.height
+        )
+        .parse()
+        .unwrap();
         convert
+            .link(&scale)
+            .map_err(|e| GstError::LinkFailed(format!("convert->scale: {e}")))?;
+        scale
             .link_filtered(&encoder, &raw_caps)
             .map_err(|e| GstError::LinkFailed(format!("convert->encoder: {}", e)))?;
         let linked = if let Some(caps) = h264_caps.as_ref() {
@@ -457,6 +477,8 @@ mod tests {
             return;
         }
         let pipeline = VideoPipeline::new(PipelineConfig {
+            source_width: 640,
+            source_height: 480,
             width: 320,
             height: 240,
             framerate: 30,
@@ -467,7 +489,7 @@ mod tests {
         })
         .unwrap();
         pipeline.start().unwrap();
-        let frame = vec![128; 320 * 240 * 4];
+        let frame = vec![128; 640 * 480 * 4];
         for _ in 0..2 {
             let (mut sps, mut pps, mut idr) = (false, false, false);
             pipeline.push_frame(&frame).unwrap();
@@ -497,6 +519,11 @@ mod tests {
         }
         let encoder = pipeline.pipeline.by_name("encoder").unwrap();
         let caps = encoder.static_pad("sink").unwrap().current_caps().unwrap();
+        assert_eq!(caps.structure(0).unwrap().get::<i32>("width").unwrap(), 320);
+        assert_eq!(
+            caps.structure(0).unwrap().get::<i32>("height").unwrap(),
+            240
+        );
         assert!(matches!(
             caps.structure(0).unwrap().get::<&str>("format").unwrap(),
             "I420" | "NV12"

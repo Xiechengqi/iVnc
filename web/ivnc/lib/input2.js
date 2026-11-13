@@ -1112,7 +1112,17 @@ export class Input {
     constructor(element, send, isSharedMode = false, playerIndex = 0,  useCssScaling = false, initialSlot = null) {
         this.element = element;
         this.cursorElement = element;
-        this.send = send;
+        this.displayState = null;
+        this._geometryFrameReady = true;
+        this._geometryMetadataPending = false;
+        this._relativeRemainder = { x: 0, y: 0 };
+        this.send = message => {
+            if (/^(m|m2|b|w),/.test(message) && this.displayState) {
+                if (!this._geometryReady()) return;
+                message = `i,${this.displayState.revision},${message}`;
+            }
+            send(message);
+        };
         this._isSidebarOpen = false;
         this.isSharedMode = isSharedMode;
         this.controllerSlot = initialSlot;
@@ -1752,6 +1762,7 @@ export class Input {
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
         }
+        if (!document.pointerLockElement && !this._insideContent(event.clientX, event.clientY) && !this.buttonMask) return;
         // Update IME textarea position on click.
         if (this._imeTextarea && (event.type === 'mousedown' || event.type === 'pointerdown')) {
             let imeX = event.clientX;
@@ -1791,11 +1802,8 @@ export class Input {
         this._latestMouseX = visualClientX;
         this._latestMouseY = visualClientY;
         if (this._trackpadMode) return;
-        const client_dpr = window.devicePixelRatio || 1;
-        const dpr_for_input_coords = this.useCssScaling ? 1 : client_dpr;
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         var mtype = "m";
-        let canvas = document.getElementById('videoCanvas');
         if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
             if (event.button === 1) { 
                 event.preventDefault(); 
@@ -1813,42 +1821,21 @@ export class Input {
             event.preventDefault();
             return;
         }
-        if ((this.element != null && document.pointerLockElement === this.element) || (canvas !== null && document.pointerLockElement === canvas)) {
+        if (document.pointerLockElement === this.element) {
             mtype = "m2";
             let movementX_logical = event.movementX || 0;
             let movementY_logical = event.movementY || 0;
-            this.x = Math.round(movementX_logical * dpr_for_input_coords);
-            this.y = Math.round(movementY_logical * dpr_for_input_coords);
+            [this.x, this.y] = this._relativeDelta(movementX_logical, movementY_logical);
 
         } else {
-             if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
-                const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
-                if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
-                    const mouseX_on_canvas_logical_css = event.clientX - canvasRect.left;
-                    const mouseY_on_canvas_logical_css = event.clientY - canvasRect.top;
-                    const scaleX = canvas.width / canvasRect.width;
-                    const scaleY = canvas.height / canvasRect.height;
-                    let coordX = mouseX_on_canvas_logical_css * scaleX;
-                    let coordY = mouseY_on_canvas_logical_css * scaleY;
-                    this.x = Math.max(0, Math.min(canvas.width, Math.round(coordX)));
-                    this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
-                } else {
-                    this.x = 0; this.y = 0;
-                }
-            } else {
-                this._windowMath();
-                if (this.m) {
-                    let logicalX_on_element = this._clientToServerX(event.clientX);
-                    let logicalY_on_element = this._clientToServerY(event.clientY);
-                    this.x = Math.round(logicalX_on_element);
-                    this.y = Math.round(logicalY_on_element);
-                } else {
-                    this.x = 0; this.y = 0;
-                }
-            }
+            this._windowMath();
+            if (!this.m) return;
+            this.x = this._clientToServerX(event.clientX);
+            this.y = this._clientToServerY(event.clientY);
         }
-        if (event.type === 'mousedown' || event.type === 'mouseup') {
-            var mask = 1 << event.button;
+        if (['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'pointercancel'].includes(event.type)) {
+            if (event.type === 'pointercancel') this.buttonMask = 0;
+            var mask = 1 << Math.max(0, event.button);
             if (down) {
                 this.buttonMask |= mask;
             } else {
@@ -1865,6 +1852,7 @@ export class Input {
         }
         event.preventDefault();
         this._mouseButtonMovement(event);
+        if (this.buttonMask) { try { this.element.setPointerCapture(event.pointerId); } catch (_) {} }
     }
 
     _handlePointerMove(event) {
@@ -1888,13 +1876,13 @@ export class Input {
         event.stopPropagation();
 
         const now = Date.now();
-        const dpr = this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
         const TAP_AND_HOLD_THRESHOLD = 300;
 
         const type = event.type;
         const changedTouches = event.changedTouches;
 
         if (type === 'touchstart') {
+            if (Array.from(changedTouches).some(t => !this._insideContent(t.clientX,t.clientY))) return;
             if (this._trackpadTapTimeout) {
                 clearTimeout(this._trackpadTapTimeout);
                 this._trackpadTapTimeout = null;
@@ -1960,10 +1948,9 @@ export class Input {
                 if (touchData) {
                     const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id);
                     if (changedTouch) {
-                        const deltaX = (changedTouch.clientX - touchData.lastX) * dpr;
-                        const deltaY = (changedTouch.clientY - touchData.lastY) * dpr;
-                        if (Math.abs(deltaX) >= 0.5 || Math.abs(deltaY) >= 0.5) {
-                            this.send(`m2,${Math.round(deltaX)},${Math.round(deltaY)},${this.buttonMask},0`);
+                        const [deltaX, deltaY] = this._relativeDelta(changedTouch.clientX - touchData.lastX, changedTouch.clientY - touchData.lastY);
+                        if (deltaX || deltaY) {
+                            this.send(`m2,${deltaX},${deltaY},${this.buttonMask},0`);
                         }
                         touchData.lastX = changedTouch.clientX;
                         touchData.lastY = changedTouch.clientY;
@@ -2030,36 +2017,10 @@ export class Input {
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
-        let canvas = document.getElementById('videoCanvas');
-
-        if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
-            const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
-            if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
-                const touchX_on_canvas_logical_css = touchPoint.clientX - canvasRect.left;
-                const touchY_on_canvas_logical_css = touchPoint.clientY - canvasRect.top;
-
-                const scaleX = canvas.width / canvasRect.width; // buffer / CSS
-                const scaleY = canvas.height / canvasRect.height; // buffer / CSS
-
-                let coordX = touchX_on_canvas_logical_css * scaleX;
-                let coordY = touchY_on_canvas_logical_css * scaleY;
-
-                this.x = Math.max(0, Math.min(canvas.width, Math.round(coordX)));
-                this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
-            } else {
-                this.x = 0; this.y = 0;
-            }
-        } else {
-            this._windowMath();
-            if (this.m) {
-                let logicalX_on_element = this._clientToServerX(touchPoint.clientX);
-                let logicalY_on_element = this._clientToServerY(touchPoint.clientY);
-                this.x = logicalX_on_element;
-                this.y = logicalY_on_element;
-            } else {
-                this.x = 0;
-                this.y = 0;
-            }
+        this._windowMath();
+        if (this.m) {
+            this.x = this._clientToServerX(touchPoint.clientX);
+            this.y = this._clientToServerY(touchPoint.clientY);
         }
     }
 
@@ -2165,6 +2126,7 @@ export class Input {
         const TAP_THRESHOLD_DISTANCE_SQ_LOGICAL = this._TAP_THRESHOLD_DISTANCE_SQ;
 
         if (type === 'touchstart') {
+            if (Array.from(event.changedTouches).some(t => !this._insideContent(t.clientX, t.clientY))) return;
             if (!this.use_browser_cursors && !this._useDefaultCursor) {
                 this.cursorDiv.style.display = this._cursorImageBitmap ? 'block' : 'none';
             }
@@ -2431,6 +2393,7 @@ export class Input {
     }
 
     _mouseWheelWrapper(event) {
+        if (!document.pointerLockElement && !this._insideContent(event.clientX, event.clientY)) return;
         if (this._gestureNav()?.wheel(event, window, this._gestureBlocked())) {
             event.preventDefault();
             event.stopPropagation();
@@ -2492,13 +2455,78 @@ export class Input {
         }
     }
 
+    setDisplayState(state) {
+        const changed = this.displayState && state && this.displayState.revision !== state.revision;
+        const first = !this.displayState && state;
+        this.displayState = state;
+        if (!state) { this._geometryFrameReady = true; this._geometryMetadataPending = false; this._relativeRemainder = {x:0,y:0}; }
+        if (first) this._geometryMetadataPending = true;
+        if (changed) {
+            this.send('kr');
+            this.buttonMask = 0;
+            this._activeTouches?.clear(); this._trackpadTouches?.clear();
+            this._activeTouchIdentifier = null;
+            this._isTwoFingerGesture = false; this._trackpadGestureMode = null;
+            this._touchScrollLastCentroid = null; this._trackpadLastTapTime = 0;
+            this._gestureNav()?.endTouch();
+            clearTimeout(this._longPressTimer); clearTimeout(this._trackpadTapTimeout);
+            this._relativeRemainder = { x: 0, y: 0 };
+            this._geometryFrameReady = false;
+            this._geometryMetadataPending = true;
+            const video = document.getElementById('stream');
+            // Do not apply coordinates from the old displayed frame to a new layout.
+            const ready = () => {
+                if (this.displayState?.revision !== state.revision) return;
+                if (video.videoWidth === this.displayState.encoded.width && video.videoHeight === this.displayState.encoded.height) {
+                    this._geometryFrameReady = true;
+                    this._geometryMetadataPending = false;
+                }
+                else video.requestVideoFrameCallback?.(ready);
+            };
+            if (video?.requestVideoFrameCallback) video.requestVideoFrameCallback(ready);
+            else this._geometryFrameReady = true; // Metadata check below still gates old-sized frames.
+        }
+        this._windowMath();
+    }
+
+    _geometryReady() {
+        if (!this.displayState) return true;
+        const video = document.getElementById('stream');
+        if (!this._geometryFrameReady || !video?.videoWidth || !video.videoHeight) return false;
+        if (this._geometryMetadataPending) {
+            if (video.videoWidth !== this.displayState.encoded.width || video.videoHeight !== this.displayState.encoded.height) return false;
+            this._geometryMetadataPending = false;
+        }
+        // Encoder-only changes keep desktop coordinates valid for the frame
+        // currently displayed. In particular, never drop a drag's release.
+        return true;
+    }
+
+    _insideContent(x, y) {
+        this._windowMath();
+        if (!this.m) return false;
+        const left = this.m.elementClientX + this.m.mouseOffsetX, top = this.m.elementClientY + this.m.mouseOffsetY;
+        return x >= left && y >= top && x < left + this.m.contentW && y < top + this.m.contentH;
+    }
+
+    _relativeDelta(x, y) {
+        this._windowMath();
+        this._relativeRemainder ||= { x: 0, y: 0 };
+        const rx = x * (this.m?.mouseMultiX || 1) + this._relativeRemainder.x;
+        const ry = y * (this.m?.mouseMultiY || 1) + this._relativeRemainder.y;
+        const dx = Math.trunc(rx + Math.sign(rx) * 1e-9), dy = Math.trunc(ry + Math.sign(ry) * 1e-9);
+        this._relativeRemainder = { x: rx - dx, y: ry - dy };
+        return [dx, dy];
+    }
+
     _windowMath() {
         const videoEle = document.getElementById("stream");
         const elementRect = (videoEle || this.element).getBoundingClientRect();
         const windowW = elementRect.width; const windowH = elementRect.height;
         if (windowW <= 0 || windowH <= 0) { this.m = null; return; }
 
-        // Use the video element's native resolution as the server coordinate space
+        // Decode dimensions describe the image; negotiated desktop dimensions
+        // describe input coordinates (legacy servers use decoded pixels).
         const frameW = (videoEle && videoEle.videoWidth > 0) ? videoEle.videoWidth : 0;
         const frameH = (videoEle && videoEle.videoHeight > 0) ? videoEle.videoHeight : 0;
         if (frameW <= 0 || frameH <= 0) { this.m = null; return; }
@@ -2509,12 +2537,13 @@ export class Input {
         const contain = videoEle?.style.objectFit === 'contain';
         const contentW = contain ? frameW * scale : windowW;
         const contentH = contain ? frameH * scale : windowH;
-        const mouseMultiX = frameW / contentW;
-        const mouseMultiY = frameH / contentH;
+        const desktopW = this.displayState?.desktop.width || frameW, desktopH = this.displayState?.desktop.height || frameH;
+        const mouseMultiX = desktopW / contentW;
+        const mouseMultiY = desktopH / contentH;
         this.m = {
             mouseMultiX, mouseMultiY, mouseOffsetX: (windowW - contentW) / 2, mouseOffsetY: (windowH - contentH) / 2,
             elementClientX: elementRect.left, elementClientY: elementRect.top,
-            frameW, frameH,
+            frameW: desktopW, frameH: desktopH, contentW, contentH,
         };
     }
 

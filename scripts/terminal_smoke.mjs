@@ -278,13 +278,21 @@ try {
         await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:dpr,mobile:false});
         await delay(250); await assertLayout();
     }
-    await evaluate(`window.postMessage({type:'setScaleLocally',value:true},location.origin);window.postMessage({type:'setManualResolution',width:1920,height:1080},location.origin)`);
-    await waitFor('scaled modal',()=>evaluate(`Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale'))<0.9`));
+    const display=await (await fetch(base+'/api/console/display')).json();
+    const normalScale=await evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale')`);
+    const changeDisplay=async (width,height,revision)=>{
+        const response=await fetch(base+'/api/console/display',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({width,height,revision})});
+        const state=await response.json();assert(response.ok,JSON.stringify(state));return state;
+    };
+    const scaledDisplay=await changeDisplay(1920,1080,display.revision);
+    await evaluate(`window.postMessage({type:'setDisplayMode',value:'fit'},location.origin)`);
+    await waitFor('resized desktop frame',()=>evaluate(`document.querySelector('#stream').videoWidth===1920`));
+    assert.equal(await evaluate(`Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale'))`),1);
     await assertLayout();
-    await evaluate(`window.postMessage({type:'resetResolutionToWindow'},location.origin)`);
-    await waitFor('normal modal scale',()=>evaluate(`Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale'))===1`));
+    await changeDisplay(display.desktop.width,display.desktop.height,scaledDisplay.revision);
+    await waitFor('normal modal scale',()=>evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale')===${JSON.stringify(normalScale)}`));
     await assertLayout();
-    pass('narrow, HiDPI and manually scaled desktops keep the terminal inside its body');
+    pass('narrow/HiDPI viewports and remote desktop resizing keep terminal CSS pixels independent of video scaling');
 
     await clickBackground(); assert.equal(await backgroundMode(),'translucent');
     await command('read -r answer; printf "IME:%s\\n" "$answer"');

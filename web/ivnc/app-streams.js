@@ -31,7 +31,7 @@ const closeView = (url) => fetch(`${url}close`, { method: 'POST', keepalive: tru
 const fromConsole = (source) => Array.from(document.querySelectorAll('iframe.web-console-frame'))
 	.some((frame) => frame.contentWindow === source);
 
-export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady = () => {} }) {
+export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady = () => {}, displayMode = () => 'fit' }) {
 	const streams = new Map();
 	let order = [];
 	let activeId = null;
@@ -128,6 +128,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 	// Sends the view its current state. Runs on load and again on
 	// ivnc-view-ready, since the view's listener may not exist at load yet.
 	function sync(s) {
+		post(s, { type: 'setDisplayMode', value: displayMode() });
 		post(s, { type: 'ivnc-view-active', active: s.id === activeId });
 		// unlocked: the user has activated this tab, so audio may play.
 		if (s.unlocked) post(s, { type: 'ivnc-unmute' });

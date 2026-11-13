@@ -26,6 +26,7 @@ pub enum InputEvent {
 #[derive(Debug, Clone)]
 pub struct InputEventData {
     pub event_type: InputEvent,
+    pub geometry_revision: Option<u64>,
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub mouse_button: u8,
@@ -47,6 +48,7 @@ impl Default for InputEventData {
     fn default() -> Self {
         Self {
             event_type: InputEvent::MouseMove,
+            geometry_revision: None,
             mouse_x: 0,
             mouse_y: 0,
             mouse_button: 0,

@@ -26,6 +26,12 @@ pub struct HeadlessBackend {
     height: u32,
 }
 
+pub struct PreparedResize {
+    buffer: Image<'static, 'static>,
+    width: u32,
+    height: u32,
+}
+
 impl HeadlessBackend {
     /// Create a new headless backend with the given dimensions
     pub fn new(width: u32, height: u32) -> Result<Self, Box<dyn std::error::Error>> {
@@ -152,24 +158,37 @@ impl HeadlessBackend {
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
-        let size = Size::from((width as i32, height as i32));
-        self.buffer = self
+    /// Allocate before changing the output. Applying/rolling back never allocates.
+    pub fn prepare_resize(&mut self, width: u32, height: u32) -> Result<PreparedResize, String> {
+        let buffer = self
             .renderer
-            .create_buffer(DrmFourcc::Xrgb8888, size)
-            .map_err(|e| format!("Failed to create buffer: {:?}", e))?;
+            .create_buffer(DrmFourcc::Xrgb8888, (width as i32, height as i32).into())
+            .map_err(|e| format!("Failed to create buffer: {e:?}"))?;
+        Ok(PreparedResize {
+            buffer,
+            width,
+            height,
+        })
+    }
 
+    pub fn apply_resize(&mut self, prepared: PreparedResize) -> PreparedResize {
+        let previous = PreparedResize {
+            buffer: std::mem::replace(&mut self.buffer, prepared.buffer),
+            width: self.width,
+            height: self.height,
+        };
+        self.width = prepared.width;
+        self.height = prepared.height;
         let mode = Mode {
-            size: (width as i32, height as i32).into(),
+            size: (self.width as i32, self.height as i32).into(),
             refresh: 60_000,
         };
         self.output
             .change_current_state(Some(mode), None, None, None);
+        self.output.set_preferred(mode);
         self.damage_tracker = OutputDamageTracker::from_output(&self.output);
-        self.width = width;
-        self.height = height;
-        info!("Headless backend resized to {}x{}", width, height);
-        Ok(())
+        info!("Headless backend resized to {}x{}", self.width, self.height);
+        previous
     }
 
     pub fn reset_damage(&mut self) {

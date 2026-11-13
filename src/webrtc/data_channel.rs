@@ -16,6 +16,47 @@ use crate::input::{InputEvent, InputEventData};
 pub struct InputDataChannel;
 
 impl InputDataChannel {
+    /// v1 pointer messages use desktop coordinates and carry a geometry revision.
+    /// Legacy clients use encoded pixels; convert only at this boundary.
+    pub fn parse_display_input(
+        text: &str,
+        state: &crate::display::DisplayState,
+    ) -> Result<InputEventData, WebRTCError> {
+        let (text, modern) = if let Some(wrapped) = text.strip_prefix("i,") {
+            let (revision, text) = wrapped
+                .split_once(',')
+                .ok_or_else(|| WebRTCError::DataChannelError("Invalid geometry input".into()))?;
+            if revision.parse::<u64>().ok() != Some(state.revision) {
+                return Err(WebRTCError::DataChannelError("Stale geometry input".into()));
+            }
+            (text, true)
+        } else {
+            (text, false)
+        };
+        let mut event = Self::parse_input_text(text)?;
+        let pointer = matches!(
+            event.event_type,
+            InputEvent::MouseMove | InputEvent::MouseButton | InputEvent::MouseWheel
+        );
+        if modern && !pointer {
+            return Err(WebRTCError::DataChannelError(
+                "Geometry wrapper requires pointer input".into(),
+            ));
+        }
+        if pointer {
+            event.geometry_revision = Some(state.revision);
+        }
+        if !modern && event.event_type == InputEvent::MouseMove {
+            event.mouse_x = (f64::from(event.mouse_x) * f64::from(state.desktop.width)
+                / f64::from(state.encoded.width.max(1)))
+            .round() as i32;
+            event.mouse_y = (f64::from(event.mouse_y) * f64::from(state.desktop.height)
+                / f64::from(state.encoded.height.max(1)))
+            .round() as i32;
+        }
+        Ok(event)
+    }
+
     /// Parse input text message
     ///
     /// Supports the same protocol as WebSocket:
@@ -213,6 +254,29 @@ pub fn format_output_message(msg_type: &str, data: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_input_separates_desktop_pixels_from_legacy_encoded_pixels() {
+        let controller =
+            crate::display::DisplayController::new(crate::display::Size::new(1920, 1080), false);
+        controller.set_encoded(crate::display::Size::new(1280, 720));
+        let s = controller.snapshot();
+        let old = InputDataChannel::parse_display_input("m,640,360,1", &s).unwrap();
+        let new = InputDataChannel::parse_display_input("i,1,m,960,540,1", &s).unwrap();
+        assert_eq!((old.mouse_x, old.mouse_y), (new.mouse_x, new.mouse_y));
+        assert_eq!((new.mouse_x, new.mouse_y), (960, 540));
+        assert_eq!(new.geometry_revision, Some(1));
+        assert!(InputDataChannel::parse_display_input("i,0,m,960,540,1", &s).is_err());
+        assert!(InputDataChannel::parse_display_input("i,1,k,65,1", &s).is_err());
+        let relative = InputDataChannel::parse_display_input("m2,20,-10,0", &s).unwrap();
+        assert_eq!((relative.mouse_x, relative.mouse_y), (30, -15));
+        assert_eq!(
+            InputDataChannel::parse_display_input("i,1,w,0,1", &s)
+                .unwrap()
+                .geometry_revision,
+            Some(1)
+        );
+    }
 
     #[test]
     fn test_parse_mouse_move() {

@@ -33,11 +33,18 @@ const orderNotifications = createOrderNotifications((revision) => {
 window.addEventListener('pagehide', () => orderNotifications.destroy(), { once: true });
 let currentLang = getLang();
 let activeSection = 'overview';
+let displaySnapshot = null, displayScopeControl = null, displayLoading = 0;
+let displayPollTimer = null;
 let overviewCache = null;
 let lastOverviewAt = 0;
 
 const I18N = {
     en: {
+        displayTitle: 'Desktop resolution', displayHint: 'Changes affect every connection to the selected desktop. Fit window and original size affect only this browser.',
+        displayScope: 'Desktop', displayMain: 'Main desktop', displayWidth: 'Width', displayHeight: 'Height', displayApply: 'Apply to selected desktop',
+        displayLocked: 'Locked by server configuration', displayBusy: 'Applying…', displaySaved: 'Desktop resolution applied and saved',
+        displayDimensions: (s) => `Desktop ${s.desktop.width}×${s.desktop.height} · Video ${s.encoded.width}×${s.encoded.height}`,
+
         pageTitle: 'Management Console',
         subtitle: 'Manage apps and runtime settings',
         navOverview: 'Overview',
@@ -244,6 +251,11 @@ const I18N = {
         // runs
     },
     zh: {
+        displayTitle: '桌面分辨率', displayHint: '修改会影响所选桌面的所有连接。适应窗口和原始大小仅影响当前浏览器。',
+        displayScope: '桌面', displayMain: '主桌面', displayWidth: '宽度', displayHeight: '高度', displayApply: '应用到所选桌面',
+        displayLocked: '服务器配置已锁定', displayBusy: '正在应用…', displaySaved: '桌面分辨率已应用并保存',
+        displayDimensions: (s) => `桌面 ${s.desktop.width}×${s.desktop.height} · 视频 ${s.encoded.width}×${s.encoded.height}`,
+
         pageTitle: '管理控制台',
         subtitle: '管理应用与运行参数',
         navOverview: '概览',
@@ -521,6 +533,11 @@ function applyTranslations() {
     setText('nav-settings', 'navSettings');
     setText('overview-meta-auto', 'metaAutoRefresh');
 
+    for (const [id,key] of [['display-title','displayTitle'],['display-hint','displayHint'],['display-scope-label','displayScope'],['display-width-label','displayWidth'],['display-height-label','displayHeight'],['display-apply','displayApply']]) setText(id,key);
+    const mainOption = document.querySelector('#display-scope option[value=""]');
+    if (mainOption) mainOption.textContent = t('displayMain');
+    displayScopeControl?.sync();
+    if (displaySnapshot) paintDisplayState(false);
     setText('settings-stream-title', 'settingsStreamTitle');
     setText('settings-actions-title', 'settingsActionsTitle');
     setText('settings-actions-hint', 'settingsActionsHint');
@@ -710,6 +727,7 @@ function updateSectionHeader() {
 }
 
 function switchSection(section) {
+    if (section !== 'settings') clearTimeout(displayPollTimer);
     activeSection = section;
     document.body.dataset.section = section;
     document.querySelectorAll('.nav-item').forEach(btn => {
@@ -944,7 +962,7 @@ function renderOverviewTiles(d) {
         {
             label: t('tileDisplay'),
             value: `${d.display?.width || 0}×${d.display?.height || 0}`,
-            help: t('tileFpsTarget')(d.runtime?.target_fps ?? 0),
+            help: d.display?.state ? t('displayDimensions')(d.display.state) : t('tileFpsTarget')(d.runtime?.target_fps ?? 0),
             tone: 'tone-muted',
         },
         {
@@ -1045,6 +1063,8 @@ function formatOffset(ms) {
 // ---------- Settings ----------
 
 async function loadSettings() {
+    await loadDisplayScopes();
+    await loadDisplay();
     try {
         const d = await fetchJson(`${CONSOLE_API}/settings`);
         const current = d.saved || d.current || {};
@@ -1057,6 +1077,69 @@ async function loadSettings() {
         markDirty('settings', false);
     } catch (e) {
         toast(t('fetchFailed') + e, 'err');
+    }
+}
+
+async function loadDisplayScopes() {
+    try {
+        const d = await fetchJson(API);
+        const select = document.getElementById('display-scope'), previous = select.value;
+        const options = [new Option(t('displayMain'), '')];
+        for (const app of d.apps || []) {
+            if (app.app_type === 'desktop' && app.sharing?.enabled && app.status === 'running') options.push(new Option(app.name, app.id));
+        }
+        select.replaceChildren(...options);
+        if (options.some(o => o.value === previous)) select.value = previous;
+        displayScopeControl?.sync();
+    } catch (e) { toast(t('fetchFailed') + e, 'err'); }
+}
+
+function displayUrl() {
+    const scope = document.getElementById('display-scope').value;
+    return `${CONSOLE_API}/display${scope ? '?app_id=' + encodeURIComponent(scope) : ''}`;
+}
+
+function paintDisplayState(resetInputs = true) {
+    const s = displaySnapshot;
+    for (const axis of ['width','height']) {
+        const input = document.getElementById(`display-${axis}`);
+        if (resetInputs) input.value = s.desktop[axis];
+        input.disabled = s.locked || !!s.pending;
+    }
+    document.getElementById('display-apply').disabled = s.locked || !!s.pending;
+    setTextById('display-status', s.locked ? t('displayLocked') : s.pending ? t('displayBusy') : t('displayDimensions')(s));
+    clearTimeout(displayPollTimer);
+    if (s.pending && activeSection === 'settings') displayPollTimer = setTimeout(() => loadDisplay(), 300);
+}
+
+async function loadDisplay(resetInputs = true) {
+    clearTimeout(displayPollTimer);
+    const generation = ++displayLoading;
+    displaySnapshot = null;
+    document.getElementById('display-apply').disabled = true;
+    try {
+        const s = await fetchJson(displayUrl());
+        if (generation !== displayLoading) return;
+        displaySnapshot = s; paintDisplayState(resetInputs);
+    } catch(e) { if (generation === displayLoading) setTextById('display-status', t('fetchFailed') + e); }
+}
+
+async function saveDisplay() {
+    if (!displaySnapshot) return;
+    clearTimeout(displayPollTimer);
+    const url = displayUrl(), generation = ++displayLoading;
+    const button = document.getElementById('display-apply');
+    button.disabled = true;
+    setTextById('display-status', t('displayBusy'));
+    try {
+        const s = await putJson(url, {width:numberValue('display-width'), height:numberValue('display-height'), revision:displaySnapshot.revision});
+        if (generation !== displayLoading) return;
+        displaySnapshot = s; paintDisplayState();
+        toast(t('displaySaved'), 'ok'); loadOverview();
+    } catch(e) {
+        if (generation !== displayLoading) return;
+        await loadDisplay(false);
+        toast(t('actionFailed') + e, 'err');
     }
 }
 
@@ -1966,6 +2049,9 @@ function updateTypePlaceholders() {
 
 document.addEventListener('DOMContentLoaded', () => {
     document.body.dataset.section = activeSection;
+    displayScopeControl = enhanceSelect(document.getElementById('display-scope'), document.getElementById('display-scope-label'));
+    document.getElementById('display-scope').addEventListener('change', () => loadDisplay());
+    document.getElementById('display-apply').addEventListener('click', () => saveDisplay());
     appTypeControl = enhanceSelect(document.getElementById('f-app-type'), document.getElementById('label-app-type'));
     launchModeControl = enhanceSelect(document.getElementById('f-desktop-compat'), document.getElementById('label-desktop-compat'));
     sandboxControl = enhanceSelect(document.getElementById('f-desktop-sandbox'), document.getElementById('label-desktop-sandbox'));

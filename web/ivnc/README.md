@@ -32,10 +32,14 @@ All messages sent to the client should be JavaScript objects with a `type` prope
 **Type:** `setScaleLocally`
 
 *   **Payload:** `{ type: 'setScaleLocally', value: <boolean> }`
-*   **Description:** Sets the client-side preference for how video is scaled when using manual resolution.
-    *   `true`: Scales the video canvas locally to fit within the container while maintaining the aspect ratio.
-    *   `false`: Renders the canvas at the exact manual resolution.
-    *   Persisted in `localStorage`.
+*   **Description:** Compatibility alias for local display mode: `true` selects `fit`, `false` selects `native`. Persisted locally; never changes the server desktop.
+
+---
+
+**Type:** `setDisplayMode`
+
+*   **Payload:** `{ type: 'setDisplayMode', value: 'fit' | 'native' }`
+*   **Description:** Fits the complete video proportionally into this browser's work area, or shows the original video pixels with scrolling. Defaults to `fit`, persists locally, and does not resize remote applications or other clients.
 
 ---
 
@@ -49,14 +53,14 @@ All messages sent to the client should be JavaScript objects with a `type` prope
 **Type:** `setManualResolution`
 
 *   **Payload:** `{ type: 'setManualResolution', width: <number>, height: <number> }`
-*   **Description:** Switches to manual resolution mode. Sends `r,WIDTHxHEIGHT` to the server via DataChannel. The server rebuilds the GStreamer pipeline and reconfigures all non-dialog Wayland windows to the new size.
+*   **Description:** Legacy compatibility message. Width and height are ignored; selects the current local `setScaleLocally` preference. Change actual desktop dimensions through the authenticated console's `GET/PUT /api/console/display` API with a current revision, as described in [Display adaptation](../../docs/DISPLAY_ADAPTATION.md).
 
 ---
 
 **Type:** `resetResolutionToWindow`
 
 *   **Payload:** `{ type: 'resetResolutionToWindow' }`
-*   **Description:** Reverts to automatic resizing based on the browser window size.
+*   **Description:** Compatibility alias for `setDisplayMode` with `value: 'fit'`. Browser resize remains local.
 
 ---
 
@@ -137,6 +141,9 @@ The client communicates with the iVnc server through a WebRTC DataChannel. See [
 
 | Message | Description |
 |---------|-------------|
+| `_display,1` | Request authoritative desktop/encoded dimensions and geometry revision |
+| `_viewport,{json}` | Report this client's work area; never resizes the desktop |
+| `i,{revision},{pointer_message}` | Versioned pointer input using desktop coordinates |
 | `m,{x},{y},{buttonMask},{0}` | Mouse move with button state |
 | `k,{keysym},{pressed}` | Keyboard event (X11 keysym) |
 | `w,{dx},{dy}` | Mouse wheel scroll |
@@ -156,6 +163,7 @@ The client communicates with the iVnc server through a WebRTC DataChannel. See [
 | `cursor,{json}` | Cursor style change |
 | `clipboard,{base64}` | Clipboard content (remote → browser) |
 | `taskbar,{json}` | Window list update |
+| `display,{json}` | Authoritative desktop/encoded dimensions and geometry revision |
 | `stats,{json}` | Server performance statistics |
 | `ping` | Keepalive request |
 
@@ -164,7 +172,7 @@ The client communicates with the iVnc server through a WebRTC DataChannel. See [
 An external dashboard needs to implement:
 
 1.  **Settings Controls:** Use the `settings` message type for bitrate, framerate, etc.
-2.  **Resolution Control:** Use `setManualResolution` / `resetResolutionToWindow`.
+2.  **Display Mode:** Use `setDisplayMode` for local fit/original size. Manage actual desktop dimensions through the console; this affects every connection to that desktop.
 3.  **Fullscreen:** Send `requestFullscreen` message.
 4.  **Stats Display:** Read `connectionStat`, `window.fps` global variables.
 5.  **Clipboard:** Display content from `clipboardContentUpdate`, send changes via `clipboardUpdateFromUI`.

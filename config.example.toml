@@ -11,6 +11,9 @@ foreground = false
 # pidfile = "/root/.ivnc/ivnc.pid"
 
 [display]
+# Browser sizes are local; true locks the shared desktop to these dimensions.
+# Otherwise the console's last saved desktop size takes precedence on startup.
+locked = false
 # Display width in pixels
 width = 1920
 # Display height in pixels

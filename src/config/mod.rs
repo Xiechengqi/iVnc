@@ -114,6 +114,9 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayConfig {
+    /// Prevent runtime desktop-resolution changes.
+    #[serde(default)]
+    pub locked: bool,
     /// Screen width in pixels
     #[serde(default = "default_display_width")]
     pub width: u32,
@@ -130,6 +133,7 @@ pub struct DisplayConfig {
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
+            locked: false,
             width: default_display_width(),
             height: default_display_height(),
             refresh_rate: default_refresh_rate(),

@@ -134,6 +134,13 @@ pub fn command(app: &ManagedApp) -> Result<Command, crate::apps::error::ApiError
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(root.join(FAILURE_FILE));
     let mut config = PARENT_CONFIG.get().cloned().unwrap_or_default();
+    // Preserve explicit display locks across the worker's clean environment.
+    let ui = crate::config::ui::UiConfig::from_env(&config);
+    if let Ok((size, true)) = crate::display::initial_size(&config, &ui) {
+        config.display.width = size.width;
+        config.display.height = size.height;
+        config.display.locked = true;
+    }
     // The supervisor assigns a free loopback port; only it and the gateway connect.
     config.http.port = 0;
     config.http.host = "127.0.0.1".into();

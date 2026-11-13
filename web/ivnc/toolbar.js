@@ -6,12 +6,12 @@ import { createOrderNotifications } from './app-order.js';
 
 const STRINGS = {
     zh: { apps: '应用', previous: '向左滚动应用', next: '向右滚动应用', more: '更多工具',
-        move: '拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态',
+        move: '按住标签左右拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态',
         rename: '修改应用名', save: '保存', cancel: '取消', pending: '保存中…', nameFailed: '无法保存应用名',
         latest: '当前名称：', changed: '应用名已发生变化。请核对当前名称，再次保存以使用你的输入。',
         invalid: '名称不能为空、不能包含换行或控制字符，且不能超过 256 个 UTF-8 字节。' },
     en: { apps: 'Applications', previous: 'Scroll apps left', next: 'Scroll apps right', more: 'More tools',
-        move: 'Drag to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
+        move: 'Hold and drag the tab left or right to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
         rename: 'Rename application', save: 'Save', cancel: 'Cancel', pending: 'Saving…', nameFailed: 'Could not save application name',
         latest: 'Current name: ', changed: 'The application name changed. Review the current name, then save again to use your draft.',
         invalid: 'Enter a name without line breaks or control characters, up to 256 UTF-8 bytes.' }
@@ -80,7 +80,25 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const toolEntries = [], nodes = new Map();
     let entries = [], confirmed = { ordered_ids: [], order_revision: -1 }, pendingIds = null;
     let drag = null, saving = false, destroyed = false, ghost = null, frame = 0, noticeTimer;
-    let lastActive = null, suppressClickUntil = 0, editor = null, renameBusy = false;
+    let lastActive = null, editor = null, renameBusy = false;
+    let press = null, pressTimer, paintPending = false, suppressedPointer = null;
+
+    function finishPress(repaint = true) {
+        clearTimeout(pressTimer);
+        press = null;
+        if (repaint && paintPending && !destroyed) paint();
+    }
+
+    function cancelInteraction() {
+        if (press) suppressedPointer = press.pointerId;
+        cancelDrag();
+        finishPress();
+    }
+
+    function activateNode(node) {
+        if (destroyed || (press?.cancelled && press.key === node._entry.key)) return;
+        entries.find(e => e.key === node._entry.key && e.appId === node._entry.appId)?.activate();
+    }
 
     function acceptName(app) {
         if (!app || typeof app.id !== 'string' || typeof app.name !== 'string' || !Number.isSafeInteger(app.name_revision) || app.name_revision < 0) return;
@@ -232,6 +250,13 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const visibleIds = () => [...new Set(orderedEntries().map(e => e.appId).filter(id => confirmed.ordered_ids.includes(id)))];
 
     function paint() {
+        // WebKit cancels a native click if its hit-tested node is removed
+        // between press and release. Keep both the row and its position until
+        // that click is dispatched, including for non-sortable and touch tabs.
+        if (press) { paintPending = true; return; }
+        paintPending = false;
+        list.setAttribute('aria-busy', String(saving));
+        viewport.classList.toggle('sorting', !!drag?.started);
         const sorted = orderedEntries();
         const live = new Set(sorted.map(e => e.key));
         for (const [key, node] of nodes) {
@@ -248,27 +273,33 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
                 node.tabIndex = 0; node.setAttribute('role', 'button');
                 const dot = make('span', 'taskbar-app-dot', node);
                 const label = make('span', 'toolbar-label', node);
-                const grip = make('button', 'toolbar-grip', node);
-                grip.type = 'button'; grip.textContent = '⠿';
-                node._parts = { dot, label, grip };
+                const text = document.createTextNode('');
+                label.appendChild(text);
+                node._parts = { dot, label, text };
                 node.onclick = (event) => {
                     event.stopPropagation();
-                    if (event.target.closest('.toolbar-grip') || performance.now() < suppressClickUntil) return;
-                    node._entry.activate();
+                    try {
+                        // State may have changed while the DOM was held still.
+                        activateNode(node);
+                    } finally { finishPress(); }
                 };
                 node.onkeydown = (event) => {
-                    if (event.target !== node || !['Enter', ' '].includes(event.key)) return;
-                    event.preventDefault(); event.stopPropagation(); node._entry.activate();
-                };
-                grip.onkeydown = (event) => {
-                    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+                    if (event.target !== node) return;
+                    if (['Enter', ' '].includes(event.key)) {
+                        event.preventDefault(); event.stopPropagation(); activateNode(node);
+                        return;
+                    }
+                    if (!canReorder || !confirmed.ordered_ids.includes(node._entry.appId) || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
                     event.preventDefault(); event.stopPropagation();
-                    if (saving || drag) return;
+                    if (saving || press || drag) return;
                     const ids = visibleIds(), from = ids.indexOf(node._entry.appId);
                     const to = from + (event.key === 'ArrowLeft' ? -1 : 1);
                     if (from < 0 || to < 0 || to >= ids.length) return;
                     [ids[from], ids[to]] = [ids[to], ids[from]];
                     persist(ids, confirmed.order_revision);
+                    // Moving the focused row can blur it in WebKit. Keep the
+                    // keyboard on this application for consecutive moves.
+                    node.focus({ preventScroll: true }); reveal(node);
                 };
                 nodes.set(entry.key, node);
             }
@@ -281,18 +312,20 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             node.classList.toggle('dragging', dragged);
             node.classList.toggle('drop-target', dragged && firstDragged);
             if (dragged) firstDragged = false;
-            node.title = entry.title;
+            const sortable = canReorder && confirmed.ordered_ids.includes(entry.appId);
+            node.classList.toggle('sortable', sortable && !saving);
+            node.title = sortable ? `${entry.title}\n${tr('move')}` : entry.title;
             node.setAttribute('aria-label', entry.title);
             node.setAttribute('aria-pressed', String(!!entry.active));
-            if (canRename && entry.canRename) node.setAttribute('aria-keyshortcuts', 'F2 Shift+F10');
-            else node.removeAttribute('aria-keyshortcuts');
-            node._parts.label.textContent = entry.label;
+            const shortcuts = ['Enter', 'Space'];
+            if (sortable) shortcuts.push('ArrowLeft', 'ArrowRight');
+            if (canRename && entry.canRename) shortcuts.push('F2', 'Shift+F10');
+            node.setAttribute('aria-keyshortcuts', shortcuts.join(' '));
+            if (sortable) node.setAttribute('aria-description', tr('move'));
+            else node.removeAttribute('aria-description');
+            if (node._parts.text.data !== entry.label) node._parts.text.data = entry.label;
             node._parts.dot.hidden = !entry.dot;
             node._parts.dot.className = `taskbar-app-dot ${entry.dot || ''}`;
-            node._parts.grip.hidden = !canReorder || !confirmed.ordered_ids.includes(entry.appId);
-            node._parts.grip.disabled = saving;
-            node._parts.grip.title = tr('move');
-            node._parts.grip.setAttribute('aria-label', `${tr('move')}: ${entry.label}`);
             if (node !== cursor) list.insertBefore(node, cursor);
             cursor = node.nextElementSibling;
         }
@@ -393,8 +426,11 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (viewport.hasPointerCapture(pointerId)) viewport.releasePointerCapture(pointerId);
         cancelAnimationFrame(frame); frame = 0;
         ghost?.remove(); ghost = null;
-        if (started) { suppressClickUntil = performance.now() + 400; onInteraction(false); }
-        if (!destroyed) paint();
+        if (started) {
+            suppressedPointer = pointerId;
+            onInteraction(false);
+            if (!destroyed) paint();
+        }
     }
 
     function previewAt(x) {
@@ -426,20 +462,42 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         frame = requestAnimationFrame(autoScroll);
     }
 
+    listen(document, 'pointerdown', (event) => {
+        if (event.isPrimary === false || event.button !== 0) return;
+        cancelInteraction();
+        // A new press always starts a new click, even immediately after a drag.
+        suppressedPointer = null;
+    }, { capture: true });
+    listen(document, 'click', (event) => {
+        if (suppressedPointer === null || event.detail === 0) return;
+        if (event.pointerId !== undefined && event.pointerId !== suppressedPointer) return;
+        suppressedPointer = null;
+        event.preventDefault(); event.stopImmediatePropagation();
+        finishPress();
+    }, { capture: true });
+    listen(document, 'click', () => finishPress());
     listen(list, 'pointerdown', (event) => {
         const node = event.target.closest('.taskbar-item');
-        if (!canReorder || saving || drag || event.button !== 0 || !node || !confirmed.ordered_ids.includes(node._entry.appId)) return;
-        if (event.pointerType !== 'mouse' && !event.target.closest('.toolbar-grip')) return;
+        if (event.isPrimary === false || event.button !== 0 || !node) return;
+        press = { key: node._entry.key, appId: node._entry.appId, pointerId: event.pointerId, cancelled: false, released: false };
+        if (!canReorder || saving || drag || !confirmed.ordered_ids.includes(node._entry.appId)) return;
+        // Fingers keep native horizontal scrolling. Mouse/trackpad presses
+        // and pen input can start sorting from anywhere on the tab.
+        if (event.pointerType === 'touch') return;
         drag = { id: node._entry.appId, pointerId: event.pointerId, x: event.clientX, y: event.clientY,
             startX: event.clientX, startY: event.clientY, started: false, ids: visibleIds(), revision: confirmed.order_revision };
     });
     listen(document, 'pointermove', (event) => {
         if (!drag || drag.pointerId !== event.pointerId) return;
         drag.x = event.clientX; drag.y = event.clientY;
-        if (!drag.started && Math.hypot(drag.x - drag.startX, drag.y - drag.startY) < 5) return;
+        if (!drag.started) {
+            const dx = Math.abs(drag.x - drag.startX), dy = Math.abs(drag.y - drag.startY);
+            if (dx < 5 || dx <= dy) return;
+        }
         event.preventDefault();
         if (!drag.started) {
             drag.started = true;
+            finishPress(false);
             viewport.focus({ preventScroll: true });
             viewport.setPointerCapture(event.pointerId);
             ghost = make('div', 'toolbar-drag-ghost', document.body);
@@ -449,28 +507,47 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         previewAt(drag.x);
     }, { passive: false });
     listen(document, 'pointerup', (event) => {
-        if (!drag || event.pointerId !== drag.pointerId) return;
-        const state = drag, rect = apps.getBoundingClientRect();
-        const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top - 20 && event.clientY <= rect.bottom + 20;
-        const changed = state.ids.join('\0') !== visibleIdsFromConfirmed().join('\0');
-        cancelDrag();
-        if (state.started && inside && changed) persist(state.ids, state.revision);
+        if (drag && event.pointerId === drag.pointerId) {
+            const state = drag, rect = apps.getBoundingClientRect();
+            const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top - 20 && event.clientY <= rect.bottom + 20;
+            const changed = state.ids.join('\0') !== visibleIdsFromConfirmed().join('\0');
+            cancelDrag();
+            if (state.started && inside && changed) persist(state.ids, state.revision);
+        }
+        if (!press || event.pointerId !== press.pointerId) return;
+        press.released = true;
+        if (press.cancelled || event.target.closest('.taskbar-item')?.dataset.key !== press.key) {
+            suppressedPointer = press.pointerId;
+            finishPress();
+        } else {
+            // Native click normally finishes synchronously after pointerup.
+            // Also allow delayed touch clicks, with a fallback if none arrives.
+            pressTimer = setTimeout(finishPress, 500);
+        }
     });
     const visibleIdsFromConfirmed = () => [...new Set(orderedEntries(confirmed.ordered_ids).map(e => e.appId).filter(id => confirmed.ordered_ids.includes(id)))];
-    listen(document, 'pointercancel', cancelDrag);
-    // Touch starts with implicit capture on the handle. Transferring capture
-    // to the viewport also emits a bubbling lostpointercapture on that handle.
+    listen(document, 'pointercancel', (event) => {
+        if (event.pointerId === press?.pointerId || event.pointerId === drag?.pointerId) cancelInteraction();
+    });
+    listen(element, 'pointerleave', (event) => {
+        // A release inside an iframe never reaches this document. A pending
+        // click that leaves the toolbar must not hold subsequent updates.
+        // Touch also leaves after pointerup, before its compatibility click.
+        if (event.pointerId === press?.pointerId && !press.released) cancelInteraction();
+    });
+    // Pen input can start with implicit capture on the tab; its transfer to
+    // the viewport must not be mistaken for the drag losing capture.
     listen(viewport, 'lostpointercapture', (event) => {
         if (event.target === viewport && drag?.started) cancelDrag();
     });
-    listen(window, 'blur', cancelDrag);
-    listen(document, 'visibilitychange', () => { if (document.hidden) cancelDrag(); });
+    listen(window, 'blur', cancelInteraction);
+    listen(document, 'visibilitychange', () => { if (document.hidden) cancelInteraction(); });
     listen(document, 'keydown', (event) => {
         if (event.key !== 'Escape') return;
         if (event.isComposing || event.keyCode === 229) return;
         if (editor) { event.preventDefault(); event.stopPropagation(); closeEditor(true); }
         if (drag?.started) { event.preventDefault(); event.stopPropagation(); }
-        cancelDrag(); closeMenu(); closeInfo();
+        cancelInteraction(); closeMenu(); closeInfo();
     }, { capture: true });
     listen(list, 'dragstart', event => event.preventDefault());
     listen(viewport, 'wheel', (event) => {
@@ -533,7 +610,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             layout();
         },
         navigate(direction) {
-            if (destroyed || saving || drag?.started || editor) return null;
+            if (destroyed || saving || press || drag?.started || editor) return null;
             const sorted = orderedEntries();
             const focused = sorted.findIndex(entry => entry.active);
             const current = focused < 0 ? (direction > 0 ? -1 : sorted.length) : focused;
@@ -566,13 +643,14 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             })).concat(streams);
             if (editor && !entries.some(e => e.key === editor.key && e.appId === editor.id && e.canRename)) closeEditor();
             for (const id of names.keys()) if (!entries.some(e => e.appId === id)) names.delete(id);
+            if (press && !entries.some(e => e.key === press.key && e.appId === press.appId)) press.cancelled = true;
             if (drag && (drag.revision !== confirmed.order_revision || drag.ids.length !== visibleIdsFromConfirmed().length || !drag.ids.every(id => entries.some(e => e.appId === id)))) cancelDrag();
             paint();
         },
-        interacting: () => !!editor || !!drag?.started || !menu.hidden || !info.hidden,
+        interacting: () => !!editor || !!press || !!drag?.started || !menu.hidden || !info.hidden,
         destroy() {
             destroyed = true;
-            closeEditor(); cancelDrag(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
+            closeEditor(); cancelInteraction(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
             clearTimeout(noticeTimer); untranslate(); notifications.destroy();
             element.remove(); nodes.clear();
         }

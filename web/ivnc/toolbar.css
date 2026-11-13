@@ -69,20 +69,12 @@
     white-space: nowrap;
     text-overflow: ellipsis;
 }
+.ivnc-toolbar .toolbar-label,
+.ivnc-toolbar .taskbar-app-dot { pointer-events: none; }
 .ivnc-toolbar .taskbar-app-dot { margin-right: 0; }
-.ivnc-toolbar .toolbar-grip {
-    border: 0;
-    padding: 0;
-    width: 14px;
-    flex: 0 0 14px;
-    height: 24px;
-    background: transparent;
-    color: #aaa;
-    cursor: grab;
-    touch-action: none;
-    font-size: 13px;
-}
-.ivnc-toolbar .toolbar-grip:disabled { cursor: default; opacity: .35; }
+.ivnc-toolbar .taskbar-item.sortable { cursor: grab; }
+.ivnc-toolbar .toolbar-viewport.sorting,
+.ivnc-toolbar .toolbar-viewport.sorting .taskbar-item { cursor: grabbing; }
 .ivnc-toolbar .taskbar-item.dragging { opacity: .45; }
 .ivnc-toolbar .taskbar-item.drop-target { border-left: 3px solid #7cb3ff; }
 .ivnc-toolbar button.toolbar-scroll,

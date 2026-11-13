@@ -12,7 +12,7 @@ export function enhanceSelect(select, label) {
     select.insertAdjacentElement('afterend', button);
     // Keep the portal inside its owning modal for focus and backdrop handling,
     // but position it against the viewport to escape the scrolling form.
-    select.closest('.modal-bg').appendChild(popup);
+    (select.closest('.modal-bg') || document.body).appendChild(popup);
     select.hidden = true; select.tabIndex = -1;
     let index = 0, prefix = '', prefixTimer;
     const events = new AbortController();
@@ -22,7 +22,7 @@ export function enhanceSelect(select, label) {
     function position() {
         if (popup.hidden) return;
         const rect = button.getBoundingClientRect();
-        const form = select.closest('.modal').getBoundingClientRect();
+        const form = select.closest('.modal')?.getBoundingClientRect() || { top: 0, bottom: innerHeight };
         if (!rect.width || !rect.height || rect.bottom <= form.top || rect.top >= form.bottom) { close(); return; }
         const below = innerHeight - rect.bottom - 8, above = rect.top - 8;
         const height = Math.min(popup.scrollHeight, Math.max(40, below >= 160 || below >= above ? below : above));
@@ -100,8 +100,9 @@ export function enhanceSelect(select, label) {
     listen(document, 'scroll', position, { capture: true, passive: true });
     const observer = new MutationObserver(sync);
     observer.observe(select, { attributes: true, childList: true, subtree: true, characterData: true });
-    const modalObserver = new MutationObserver(() => { if (!select.closest('.modal-bg').classList.contains('show')) close(); });
-    modalObserver.observe(select.closest('.modal-bg'), { attributes: true, attributeFilter: ['class'] });
+    const modal = select.closest('.modal-bg');
+    const modalObserver = new MutationObserver(() => { if (!modal?.classList.contains('show')) close(); });
+    if (modal) modalObserver.observe(modal, { attributes: true, attributeFilter: ['class'] });
     listen(window, 'pagehide', event => {
         if (event.persisted) { close(); return; }
         events.abort(); observer.disconnect(); modalObserver.disconnect(); clearTimeout(prefixTimer);

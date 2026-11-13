@@ -403,10 +403,9 @@ mod video_tests {
             .unwrap()
             .fits(w, h, fps));
         assert!(w < 1920 && h < 1080);
-        state.resize_display(1600, 900);
-        assert_eq!(state.requested_display_size(), (1600, 900));
+        assert_eq!(state.display_size(), (1920, 1080));
         drop(low); // Includes pending sessions that never finish connecting.
-        assert_eq!(state.video_parameters(1600, 900), (1600, 900, 60, 8000));
+        assert_eq!(state.video_parameters(1920, 1080), (1920, 1080, 60, 8000));
         drop(high);
         assert_eq!(state.video_receive_level().id, 52);
     }
@@ -901,15 +900,17 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
     if text.starts_with("s,") || text.starts_with("SET_NATIVE_CURSOR_RENDERING,") {
         return;
     }
+    if text == "_display,1" {
+        let _ = session.send_datachannel_text(&ctx.shared_state.display_message());
+        return;
+    }
+    if let Some(viewport) = text.strip_prefix("_viewport,") {
+        ctx.shared_state.report_viewport(&session.id, viewport);
+        return;
+    }
     if text.starts_with("r,") {
-        let payload = text.trim_start_matches("r,");
-        if let Some((w, h)) = payload.split_once('x') {
-            if let (Ok(width), Ok(height)) = (w.parse::<u32>(), h.parse::<u32>()) {
-                if width > 0 && height > 0 && width <= 7680 && height <= 4320 {
-                    ctx.shared_state.resize_display(width, height);
-                }
-            }
-        }
+        // Both old resize messages and new viewport reports are hints only.
+        // An untrusted viewer can never resize the shared compositor.
         return;
     }
     if text.starts_with("_arg_fps,") {
@@ -971,7 +972,7 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
     }
 
     // Fall through to input event parsing (mouse, keyboard, etc.)
-    match InputDataChannel::parse_input_text(text) {
+    match InputDataChannel::parse_display_input(text, &ctx.shared_state.display.snapshot()) {
         Ok(event) => {
             ctx.shared_state
                 .record_connection_input_activity(&session.id);

@@ -1481,18 +1481,9 @@ function clampNumber(value, min, max) {
 }
 
 function updateOverlayModalScale() {
-	const stream = document.getElementById('stream');
-	let scale = 1;
-	if (stream && stream.width > 0 && stream.height > 0) {
-		const rect = stream.getBoundingClientRect();
-		const scaleX = rect.width / stream.width;
-		const scaleY = rect.height / stream.height;
-		const nextScale = Math.min(scaleX, scaleY);
-		if (Number.isFinite(nextScale) && nextScale > 0) {
-			scale = clampNumber(nextScale, 0.45, 1.5);
-		}
-	}
-
+	// Browser controls use CSS pixels, independently of the remote video. CSS
+	// transforms also break xterm's cell-based pointer/selection coordinates.
+	const scale = 1;
 	const horizontalMargin = 48 * scale;
 	const verticalMargin = 96 * scale;
 	const terminalWidth = Math.min(920, Math.max(320, (window.innerWidth - horizontalMargin) / scale));
@@ -2314,7 +2305,6 @@ export default function webrtc() {
 	const terminalController = createWebTerminalController();
 	const proxyController = createProxyModalController();
 	const consoleController = createConsoleModalController();
-	let windowResolution = "";
 	let encoderLabel = "";
 	let encoder = ""
 
@@ -2343,20 +2333,17 @@ export default function webrtc() {
 	let toolbarController = null;
 	let gestureController = null;
 	let viewportController = null;
+	let displayMode = 'fit', displayModeButton = null;
 	// An active stream tab covers the main desktop.
 	let mainCovered = false;
 	let lastTaskbarData = {};
 	let serverLatency = 0;
-	let resizeRemote = false;
 	let scaleLocal = false;
 	let debug = false;
 	let playButtonElement = null;
 	let statusDisplayElement = null;
-	let rdelta = 500; // time in milliseconds
 	let resizeTimer = null;
-	let autoResizeEnabled = false;
 	let lastSentResolution = null;
-	let manualWidth = 0, manualHeight = 0;
 	window.isManualResolutionMode = false;
 	window.fps = 0;
 
@@ -2729,6 +2716,7 @@ export default function webrtc() {
 	}
 
 	function updateStatusDisplay() {
+        syncDisplayModeButton();
 		const key = { connecting: 'videoConnecting', waiting: 'videoWaiting', blocked: 'videoBlocked',
 			'no-data': 'videoNoData', 'decode-error': 'videoDecodeError', 'playback-error': 'videoPlaybackError',
 			'connection-error': 'videoConnectionError', unsupported: 'videoUnsupported' }[videoPlaybackState];
@@ -2743,31 +2731,19 @@ export default function webrtc() {
 	}
 	const stopPlaybackLanguageUpdates = onLangChange(updateStatusDisplay);
 
-	function updateVideoImageRendering(){
-		if (!videoElement) return;
-
-		const dpr = window.devicePixelRatio || 1;
-		const isOneToOne = !useCssScaling || (useCssScaling && dpr <= 1);
-		if (isOneToOne) {
-			// Use 'pixelated' for a sharp, 1:1 pixel look
-			if (videoElement.style.imageRendering !== 'pixelated') {
-				console.log("Setting video rendering to 'pixelated' for sharp display.");
-				videoElement.style.imageRendering = 'pixelated';
-			}
-		} else {
-			// Use 'auto' to let the browser smooth the upscaled video
-			if (videoElement.style.imageRendering !== 'auto') {
-				console.log("Setting video rendering to 'auto' for smooth upscaling.");
-				videoElement.style.imageRendering = 'auto';
-			}
-		}
-	};
+	function updateVideoImageRendering() {
+        if (!videoElement?.videoWidth) return;
+        const rect = videoElement.getBoundingClientRect();
+        const scale = rect.width * (window.devicePixelRatio || 1) / videoElement.videoWidth;
+        videoElement.style.imageRendering = scale >= 1 && Math.abs(scale - Math.round(scale)) < 0.01 ? 'pixelated' : 'auto';
+    }
 
 	function sanitizeAndStoreSettings(serverSettings) {
 		console.log("Sanitizing and storing settings based on server payload.");
 		const changes = {};
 
 		for (const key in serverSettings) {
+            if (["is_manual_resolution_mode", "manual_width", "manual_height"].includes(key)) continue;
 			if (!serverSettings.hasOwnProperty(key)) continue;
 			const setting = serverSettings[key];
 			let sanitizedValue;
@@ -2843,11 +2819,11 @@ export default function webrtc() {
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 
 		const knownSettings = [
-			'framerate', 'encoder_rtc', 'is_manual_resolution_mode',
+			'framerate', 'encoder_rtc',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard'
 		];
 		const booleanSettingKeys = [
-			'is_manual_resolution_mode', 'enable_binary_clipboard'
+			'enable_binary_clipboard'
 		];
 		const integerSettingKeys = [
 			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_bitrate'
@@ -2870,13 +2846,6 @@ export default function webrtc() {
 			}
 		}
 
-		if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
-			settingsToSend['is_manual_resolution_mode'] = true;
-			settingsToSend['manual_width'] = roundDownToEven(manualWidth * dpr);
-			settingsToSend['manual_height'] = roundDownToEven(manualHeight * dpr);
-		}
-		settingsToSend['useCssScaling'] = useCssScaling;
-
 		try {
 			const settingsJson = JSON.stringify(settingsToSend);
 			webrtc.sendDataChannelMessage(`SETTINGS,${settingsJson}`);
@@ -2887,95 +2856,38 @@ export default function webrtc() {
 		}
 	}
 
-	function applyManualStyle(targetWidth, targetHeight, scaleToFit) {
-		if (targetWidth <=0 || targetHeight <=0) {
-			console.log("Invalid target height or width")
-			return;
-		}
+    function setDisplayMode(value, persist = true) {
+        displayMode = value === 'native' ? 'native' : 'fit';
+        window.isManualResolutionMode = displayMode === 'native';
+        viewportController?.mode(displayMode);
+        if (persist) setStringParam('display_mode', displayMode);
+        syncDisplayModeButton();
+    }
 
-		const dpr = (window.isManualResolutionMode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
-		const logicalWidth = roundDownToEven(targetWidth * dpr);
-		const logicalHeight = roundDownToEven(targetHeight * dpr);
-		console.log(`applyManualStyle logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
-		if (videoElement.width !== logicalWidth || videoElement.height !== logicalHeight) {
-			videoElement.width = logicalWidth;
-			videoElement.height = logicalHeight;
-			console.log(`Video Element set to: ${targetWidth}x${targetHeight}`);
-		}
-		viewportController?.manual(targetWidth, targetHeight, scaleToFit);
-		updateVideoImageRendering();
-		updateOverlayModalScale();
-	}
+    function syncDisplayModeButton() {
+        if (!displayModeButton) return;
+        displayModeButton.title = getLang() === 'en' ? (displayMode === 'fit' ? 'Fit window' : 'Original size') : (displayMode === 'fit' ? '适应窗口' : '原始大小');
+        displayModeButton.setAttribute('aria-label', displayModeButton.title);
+        const label = displayModeButton.querySelector('.toolbar-tool-label');
+        if (label) label.textContent = displayModeButton.title;
+        displayModeButton.classList.toggle('active', displayMode === 'native');
+        displayModeButton.setAttribute('aria-pressed', String(displayMode === 'native'));
+    }
 
-	function resetToWindowResolution(targetWidth, targetHeight) {
-		if (!videoElement) return;
-
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-		const logicalWidth = roundDownToEven(targetWidth * dpr);
-		const logicalHeight = roundDownToEven(targetHeight * dpr);
-		console.log(`resetToWinRes logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
-		if (videoElement.width !== logicalWidth || videoElement.height !== logicalHeight) {
-			videoElement.width = logicalWidth;
-			videoElement.height = logicalHeight;
-			console.log(`Video Element set to: ${logicalWidth}x${logicalHeight}`);
-		}
-
-		viewportController?.automatic();
-		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight}`);
-		updateOverlayModalScale();
-	}
-
-	function sendResolutionToServer(width, height) {
-		if (width < 2 || height < 2 || webrtc?._send_channel?.readyState !== 'open') return;
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-		const realWidth = roundDownToEven(width * dpr);
-		const realHeight = roundDownToEven(height * dpr);
-		const resString = `${realWidth}x${realHeight}`;
-		if (resString === lastSentResolution) return;
-		console.log(`Sending resolution to server: ${resString}, Pixel Ratio Used: ${dpr}, useCssScaling: ${useCssScaling}`);
-		webrtc.sendDataChannelMessage(`r,${resString}`);
-		lastSentResolution = resString;
-	}
-
-	function enableAutoResize() {
-		autoResizeEnabled = true;
-	}
-
-	function disableAutoResize() {
-		autoResizeEnabled = false;
-		clearTimeout(resizeTimer); resizeTimer = null;
-	}
-
-	function resizeStart() {
-		if (!autoResizeEnabled || window.isManualResolutionMode) return;
-		clearTimeout(resizeTimer);
-		resizeTimer = setTimeout(resizeEnd, rdelta);
-	}
-
-	function resizeEnd() {
-		resizeTimer = null;
-		if (!autoResizeEnabled || window.isManualResolutionMode || !input) return;
-		windowResolution = input.getWindowResolution();
-		sendResolutionToServer(...windowResolution);
-		resetToWindowResolution(...windowResolution);
-	}
-
-	function loadLastSessionSettings() {
-		// Preset the video element to last session resolution
-		if (window.isManualResolutionMode && manualWidth && manualHeight) {
-			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
-			disableAutoResize();
-			applyManualStyle(manualWidth, manualHeight, scaleLocal);
-			sendResolutionToServer(manualWidth, manualHeight);
-		} else {
-			console.log("Applying window resolution");
-			// If manual resolution is not set, reset to window resolution
-			const currentWindowRes = input.getWindowResolution();
-			resetToWindowResolution(...currentWindowRes);
-			sendResolutionToServer(currentWindowRes[0], currentWindowRes[1]);
-			enableAutoResize();
-		}
-	}
+    function reportViewport() {
+        if (!input || webrtc?._send_channel?.readyState !== 'open') return;
+        const [width, height] = input.getWindowResolution();
+        if (width < 1 || height < 1) return;
+        const report = JSON.stringify({ width, height, dpr: window.devicePixelRatio || 1, mode: displayMode });
+        if (report === lastSentResolution) return;
+        webrtc.sendDataChannelMessage(`_viewport,${report}`);
+        lastSentResolution = report;
+    }
+    function resizeStart() {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(reportViewport, 150);
+    }
+    function loadLastSessionSettings() { setDisplayMode(displayMode, false); reportViewport(); }
 
 	// callback invoked when "message" event is triggerd
 	function handleMessage(event) {
@@ -2983,51 +2895,23 @@ export default function webrtc() {
 		let message = event.data;
 		if (!message) return;
 		switch(message.type) {
-			case "setScaleLocally":
-				if (typeof message.value === 'boolean') {
-					console.log("Scaling the stream locally: ", message.value);
-					// setScaleLocally returns true or false; false, to turn off the scaling
-					if (message.value === true) disableAutoResize();
-					scaleLocal = message.value;
-					if (manualWidth && manualHeight) {
-						applyManualStyle(manualWidth, manualHeight, scaleLocal);
-						setBoolParam("scaleLocallyManual", scaleLocal);
-					}
-				} else {
-					console.warn("Invalid value received for setScaleLocally:", message.value);
-				}
-				break;
-			case "resetResolutionToWindow":
-				console.log("Resetting to window size");
-				manualHeight = manualWidth = 0; // clear manual W&H
-				window.isManualResolutionMode = false;
-				viewportController?.automatic();
-				let currentWindowRes = input.getWindowResolution();
-				resetToWindowResolution(...currentWindowRes);
-				sendResolutionToServer(...currentWindowRes);
-				enableAutoResize();
-				setIntParam('manual_width', null);
-				setIntParam('manual_height', null);
-				setBoolParam('is_manual_resolution_mode', false);
-				break;
-			case "setManualResolution":
-				const width = parseInt(message.width, 10);
-				const height = parseInt(message.height, 10);
-				if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
-					console.error('Received invalid width/height for setManualResolution:', message);
-					break;
-				}
-				console.log(`Setting manual resolution: ${width}x${height}`);
-				disableAutoResize();
-				manualWidth = width;
-				manualHeight = height;
-				window.isManualResolutionMode = true;
-				applyManualStyle(manualWidth, manualHeight, scaleLocal);
-				sendResolutionToServer(manualWidth, manualHeight);
-				setIntParam('manual_width', manualWidth);
-				setIntParam('manual_height', manualHeight);
-				setBoolParam('is_manual_resolution_mode', true);
-				break;
+            case "setDisplayMode":
+                setDisplayMode(message.value);
+                break;
+            case "setScaleLocally":
+                if (typeof message.value === 'boolean') {
+                    scaleLocal = message.value;
+                    setDisplayMode(scaleLocal ? 'fit' : 'native');
+                }
+                break;
+            case "resetResolutionToWindow":
+                setDisplayMode('fit');
+                break;
+            case "setManualResolution":
+                // Older dashboards can still select fit/original locally, but
+                // only the authenticated console can change desktop dimensions.
+                setDisplayMode(scaleLocal ? 'fit' : 'native');
+                break;
 			case "setUseCssScaling":
 				console.warn("Skipping cssScaling since hidpi needs to be implemented")
 				break;
@@ -3857,6 +3741,16 @@ export default function webrtc() {
 				viewportController?.layout();
 			});
 			toolbarController.addTool(pinBtn, true);
+            displayModeButton = document.createElement('button');
+            displayModeButton.type = 'button'; displayModeButton.className = 'taskbar-pin toolbar-display-mode';
+            displayModeButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 11V7h4m6 6v4h-4"/></svg>';
+            displayModeButton.addEventListener('click', () => {
+                setDisplayMode(displayMode === 'fit' ? 'native' : 'fit');
+                document.querySelector('.app-stream.active iframe')?.contentWindow?.postMessage({type:'setDisplayMode', value:displayMode}, location.origin);
+            });
+            syncDisplayModeButton();
+            toolbarController.addTool(displayModeButton);
+
 
 			// IME toggle button
 			let imeModeActive = getBoolParam('ime_mode', false);
@@ -4039,6 +3933,7 @@ export default function webrtc() {
 			if (!window.__IVNC_APP_VIEW__) {
 				appStreams = createAppStreams({
 					viewport: videoContainer,
+                    displayMode: () => displayMode,
 					onFrameReady: doc => doc?.documentElement?.classList.toggle('ivnc-gesture-navigation', !!gestureController?.enabled()),
 					onChange: () => {
 						renderTaskbar();
@@ -4103,22 +3998,19 @@ export default function webrtc() {
 			debug = getBoolParam('debug', false);
 			setBoolParam('debug', debug);
 			// TCP-only: ignore legacy relay switch setting entirely.
-			resizeRemote = getBoolParam('resize_remote', resizeRemote);
-			setBoolParam('resize_remote', resizeRemote)
-			scaleLocal = getBoolParam('scaleLocallyManual', !resizeRemote);
-			setBoolParam('scaleLocallyManual', scaleLocal);
+            scaleLocal = getBoolParam('scaleLocallyManual', true);
 			videoBitRate = getIntParam('video_bitrate', videoBitRate);
 			setIntParam('video_bitrate', videoBitRate);
 			videoFramerate = getIntParam('framerate', videoFramerate);
 			setIntParam('framerate', videoFramerate);
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
 			setIntParam('audio_bitrate', audioBitRate);
-			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);
-			setBoolParam('is_manual_resolution_mode', window.isManualResolutionMode);
-			manualWidth = getIntParam('manual_width', null);
-			setIntParam('manual_width', manualWidth);
-			manualHeight = getIntParam('manual_height', null);
-			setIntParam('manual_height', manualHeight);
+            // Migrate only the local fit/original preference; discard old global dimensions.
+            const legacyNative = getBoolParam('is_manual_resolution_mode', false) && !getBoolParam('scaleLocallyManual', true);
+            displayMode = getStringParam('display_mode', legacyNative ? 'native' : 'fit');
+            setIntParam('manual_width', null); setIntParam('manual_height', null);
+            setBoolParam('is_manual_resolution_mode', false);
+            setDisplayMode(displayMode);
 			encoder = getStringParam('encoder_rtc', 'x264enc');
 			setStringParam('encoder_rtc', encoder)
 			useCssScaling = getBoolParam('useCssScaling', true);  // TODO: need to handle hiDPI
@@ -4282,6 +4174,8 @@ export default function webrtc() {
 				// Bind input handlers.
 				input.attach();
 				clipboardController?.connected();
+				input.setDisplayState(null);
+				webrtc.sendDataChannelMessage("_display,1");
 				loadLastSessionSettings();
 				fetchInitialIPv4();
 				sendClientPersistedSettings();
@@ -4422,7 +4316,13 @@ export default function webrtc() {
 				window.system_stats = stats;
 			}
 
-			webrtc.onserversettings = (obj) => {
+            webrtc.ondisplaystate = state => {
+                if (state?.protocol !== 1) return;
+                window.__ivncDisplayState = state;
+                input?.setDisplayState(state);
+                viewportController?.layout();
+            };
+            webrtc.onserversettings = (obj) => {
 				console.log("Received server settings payload:", obj.settings);
 				const changes = sanitizeAndStoreSettings(obj.settings);
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
@@ -4431,36 +4331,19 @@ export default function webrtc() {
 						// console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
 						handleSettingsMessage(changes);
 				}
-				if (obj.settings && obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true) {
-					console.log("Server settings payload confirms manual mode. Switching to manual resize handlers.");
-					const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value, 10) : 0;
-					const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
-					if (serverWidth > 0 && serverHeight > 0) {
-							console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
-							window.isManualResolutionMode = true;
-							manualWidth = serverWidth;
-							manualHeight = serverHeight;
-							applyManualStyle(manualWidth, manualHeight, scaleLocal);
-					} else {
-							console.warn("Server dictated manual mode but did not provide valid dimensions.");
-					}
-					disableAutoResize();
-				} else {
-						console.log("Server settings payload confirms auto mode. Switching to auto resize handlers.");
-						enableAutoResize();
-				}
+
 			}
 
 
 			// TCP-only: directly connect using the SDP answer's TCP candidate.
-			windowResolution = input.getWindowResolution();
+			const windowResolution = input.getWindowResolution();
 			signaling.currRes = windowResolution;
 			webrtc.connect();
 		},
 		cleanup() {
 			stopPlaybackLanguageUpdates();
 			webrtc?.destroy();
-			disableAutoResize();
+			clearTimeout(resizeTimer); resizeTimer = null;
 			viewportController?.destroy(); viewportController = null;
 			clipboardController?.destroy(); clipboardController = null;
 			clipboardUI?.destroy(); clipboardUI = null;
@@ -4490,7 +4373,6 @@ export default function webrtc() {
 			logEntries = [];
 			debugEntries = [];
 			status = 'connecting';
-			windowResolution = "";
 			encoderLabel = "";
 			encoder = ""
 			connectionStat = {
@@ -4512,14 +4394,13 @@ export default function webrtc() {
 					connectionAvailableBandwidth: 0
 			};
 			serverLatency = 0;
-			resizeRemote = false;
 			scaleLocal = false;
 			debug = false;
 			playButtonElement = null;
 			statusDisplayElement = null;
-			rdelta = 500;
+			displayModeButton = null;
+			window.__ivncDisplayState = null;
 			lastSentResolution = null;
-			manualWidth = manualHeight = 0;
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;

@@ -410,18 +410,15 @@ paste_ack,{"id":1,"status":"applied","revision":12}
 
 旧 `cw` 等文本协议保留，应用后广播；新前端连接旧服务器时提示升级，不降级为有竞态的跨端粘贴。详细语义与测试见 [CLIPBOARD.md](CLIPBOARD.md)。
 
-### 6.7 分辨率调整 `r`
+### 6.7 显示状态与客户端工作区
 
-**格式:**
-```
-r,{width}x{height}
-```
+客户端发送 `_display,1` 请求协议 1 的权威状态，服务端返回 `display,{json}`，尺寸变化时广播。JSON 包含 `protocol`、`revision`、`desktop:{width,height}`、`encoded:{width,height}`、`locked`、`pending`、`last_error`。`revision` 只在实际桌面坐标尺寸改变时递增；编码降级只改变 `encoded`，不改变合成器或应用窗口。
 
-**示例:**
-```
-r,1920x1080
-r,1280x720
-```
+协商后，指针消息采用 `i,<revision>,<原 m/m2/b/w 消息>`，坐标及相对位移均使用桌面像素。入队和消费时均拒绝过期版本。无包装的旧指针消息仍按当前视频像素换算为桌面坐标。客户端在桌面变化时释放输入，并等待新视频帧后恢复指针操作。
+
+客户端发送 `_viewport,{"width":1280,"height":764,"dpr":2,"mode":"fit"}` 仅报告本地工作区。客户端按实际视频尺寸等比显示，并独立选择 `fit` 或 `native`；旧 `r,1920x1080` 等消息被忽略，不再改变共享桌面。
+
+实际桌面尺寸只能通过受控制台认证及访问策略保护的 `GET/PUT /api/console/display` 管理；共享应用视图不提供此权限。完整参数、管理范围、启动优先级、事务及兼容行为见 [显示适配](DISPLAY_ADAPTATION.md)。
 
 ### 6.8 键盘重置 `kr`
 
@@ -666,7 +663,7 @@ debug!("Session {} DC parse error: {}", session.id, e);
 
 ### 应用视图信令
 
-应用视图沿用 SDP 信令协议，所有连接都可以发送输入、剪贴板、上传和分辨率调整，没有控制权消息。结束消息 `{"ivnc_revoked":true,"reason":"revoked|stopped|closed"}` 要求客户端停止自动重连：`revoked` 为共享关闭或密码修改，`stopped` 为应用停止（包括 A 停止远程应用），`closed` 为视图被关闭或连接配置被替换。
+应用视图沿用 SDP 信令协议，所有连接都可以发送输入、剪贴板、上传和本地工作区报告，没有控制权消息。实际桌面尺寸由来源实例管理员管理，视图连接不能通过 DataChannel 修改。结束消息 `{"ivnc_revoked":true,"reason":"revoked|stopped|closed"}` 要求客户端停止自动重连：`revoked` 为共享关闭或密码修改，`stopped` 为应用停止（包括 A 停止远程应用），`closed` 为视图被关闭或连接配置被替换。
 
 ICE-TCP 通过已授权 SDP 中的 ICE ufrag 路由，仍需完成运行环境的 ICE/DTLS 握手。信令与媒体均绑定同一应用和运行代次，应用重启不复用旧媒体会话。
 

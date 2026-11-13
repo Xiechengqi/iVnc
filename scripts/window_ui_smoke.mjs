@@ -77,7 +77,7 @@ async function point(selector, inside = false) {
         const f=${inside ? `document.querySelector('iframe[title="iVnc Console"], iframe[title="iVnc 控制台"]')` : 'null'};
         const d=f?f.contentDocument:document,n=d.querySelector(${JSON.stringify(selector)});
         if(!n) throw Error('Missing target '+${JSON.stringify(selector)});
-        n.scrollIntoView({block:'nearest',inline:'nearest'});
+        n.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
         const r=n.getBoundingClientRect(),fr=f?.getBoundingClientRect(),sx=f?fr.width/f.clientWidth:1,sy=f?fr.height/f.clientHeight:1;
         return {x:(fr?.left||0)+(r.left+r.width/2)*sx,y:(fr?.top||0)+(r.top+r.height/2)*sy};
     })()`);
@@ -141,19 +141,19 @@ try {
     })()`;
     await call('Page.addScriptToEvaluateOnNewDocument',{source:capture});await evaluate(capture);
     await waitFor('desktop',()=>evaluate(`!!document.querySelector('#console-btn')&&window.__ivncWebRTC?._send_channel?.readyState==='open'`),60000);
-    await evaluate(`window.__desktopInput=[];const rtc=window.__ivncWebRTC,send=rtc.sendDataChannelMessage.bind(rtc);rtc.sendDataChannelMessage=m=>{if(/^(m2?|kd|ku|u),/.test(m))__desktopInput.push(m);return send(m)};`);
+    await evaluate(`window.__desktopInput=[];const rtc=window.__ivncWebRTC,send=rtc.sendDataChannelMessage.bind(rtc);rtc.sendDataChannelMessage=m=>{if(/^(i,[0-9]+,)?(m2?|kd|ku|u),/.test(m))__desktopInput.push(m);return send(m)};`);
     await click('#console-btn');
-    await waitFor('console frame',()=>evaluate(`!!${consoleWindow}?.document.querySelector('.console-select')`));
+    await waitFor('console frame',()=>evaluate(`!!${consoleWindow}?.document.querySelector('#f-app-type + .console-select')`));
     assert(await con(`(() => {const n=document.querySelector('.nav-list').getBoundingClientRect(),l=document.querySelector('#lang-toggle').getBoundingClientRect(),tabs=[...document.querySelectorAll('.nav-item')].map(n=>n.getBoundingClientRect());return Math.abs(tabs[0].top-tabs[2].top)<1&&l.left>n.right&&document.querySelector('.console-main').offsetLeft<40})()`));
     await click('#nav-apps',true); await waitFor('apps',()=>con(`document.querySelectorAll('#app-list tr[data-app-id]').length>=2`));
     pass('embedded console has horizontal navigation and an independent language button');
 
-    await openAdd(); await click('.console-select',true);
-    assert(await con(`document.querySelector('.console-select').getAttribute('aria-expanded')==='true'`));
+    await openAdd(); await click('#f-app-type + .console-select',true);
+    assert(await con(`document.querySelector('#f-app-type + .console-select').getAttribute('aria-expanded')==='true'`));
     await key('End','End',35);await key('Enter','Enter',13);
     assert.equal(await con(`document.querySelector('#f-app-type').value`),'remote');
     assert(await con(`!document.querySelector('#remote-config').hidden`));
-    await click('.console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
+    await click('#f-app-type + .console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
     assert.equal(await con(`document.querySelector('#f-app-type').value`),'desktop');
     assert.equal(await con(`document.querySelector('#desktop-launch-advanced').open`),false);
     assert.equal(await con(`document.querySelector('#electron-template')`),null);
@@ -179,11 +179,11 @@ try {
     assert((await con(`document.querySelector('#desktop-launch-info').textContent`)).length>0);
     await screenshot('desktop-launch-advanced.png');
     pass('advanced launch policies use styled controls, preserve command and environment, and expose details on demand');
-    await click('.console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
+    await click('#f-app-type + .console-select',true);await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
     assert.equal(await con(`document.querySelector('#f-app-type').value`),'cli');
     assert(await con(`getComputedStyle(document.querySelector('#cli-config')).display!=='none'`));
-    await click('.console-select',true);await key('Escape','Escape',27);
-    assert(await childOpen()); assert(await con(`document.querySelector('.console-select-popup').hidden`));
+    await click('#f-app-type + .console-select',true);await key('Escape','Escape',27);
+    assert(await childOpen()); assert(await con(`document.querySelector('#f-app-type-listbox').hidden`));
     await key('Escape','Escape',27);assert(!await childOpen());assert(await consoleOpen());
     pass('styled type selector updates native values and dependent fields; Escape closes one level at a time');
     await edit(detailApp.id);
@@ -221,7 +221,7 @@ try {
     await waitFor('held editor',()=>con('__held.length===1'));await closeChild();await edit(b.id);
     await con('__held.shift()();__holdReads.clear()');await delay(200);
     assert.equal(await con(`document.querySelector('#f-name').value`),b.name);
-    assert(await con(`document.querySelector('.console-select').disabled`));
+    assert(await con(`document.querySelector('#f-app-type + .console-select').disabled`));
     await closeChild();
     await con(`__holdReads.add('/api/apps/${a.id}/logs')`);
     await click(`#app-list tr[data-app-id="${a.id}"] .btn-log`,true);await waitFor('held logs',()=>con('__held.length===1'));
@@ -262,12 +262,12 @@ try {
     await con(`document.querySelector('#f-name').value='New draft';__held.shift()();window.fetch=__realFetch`);await delay(150);
     assert.equal(await con(`document.querySelector('#f-name').value`),'New draft');await closeChild();
     await click('#lang-toggle',true);await waitFor('English labels',()=>con(`document.querySelector('#nav-overview').textContent==='Overview'`));
-    await openAdd();assert.equal(await con(`document.querySelector('.console-select').textContent`),'Background App');await closeChild();
+    await openAdd();assert.equal(await con(`document.querySelector('#f-app-type + .console-select').textContent`),'Background App');await closeChild();
     pass('remote probes are scoped to their dialog; translated selectors retain their value and disabled state');
 
     await openAdd();const oldDialogId=await con('__ivncConsoleDialogState.id');
     await con('window.__consoleReloading=true;location.reload()');
-    await waitFor('console reloaded',()=>con(`!window.__consoleReloading&&!!document.querySelector('.console-select')`));
+    await waitFor('console reloaded',()=>con(`!window.__consoleReloading&&!!document.querySelector('#f-app-type + .console-select')`));
     assert(await evaluate(`document.querySelector('.console-dialog-shield').hidden&&!document.documentElement.hasAttribute('data-ivnc-modal-blocked')`));
     await click('#nav-apps',true);await waitFor('reloaded app rows',()=>con(`document.querySelectorAll('#app-list tr[data-app-id]').length>=2`));
     await openAdd();await con(`__ivncConsoleDialogState.dismiss(${JSON.stringify(oldDialogId)})`);
@@ -277,8 +277,11 @@ try {
     await click('#web-console-minimize');await click('#terminal-btn');
     await waitFor('terminal dimensions',()=>evaluate(`window.__terminalSent.some(m=>m.type==='resize')`));
     await assertBounds();const initial=await terminalRect();
-    await drag('.web-terminal-floating .web-terminal-title',80,-35);
-    const moved=await terminalRect();assert(Math.abs(moved.left-initial.left-80)<2&&Math.abs(moved.top-initial.top+35)<2);
+    const initialArea=await evaluate(rectCode(`document.querySelector('.video-container')`));
+    const moveX=Math.min(80,(initialArea.right-8-initial.right)/2),moveY=-Math.min(35,(initial.top-initialArea.top-8)/2);
+    assert(moveX>1 && moveY<-1);
+    await drag('.web-terminal-floating .web-terminal-title',moveX,moveY);
+    const moved=await terminalRect();assert(Math.abs(moved.left-initial.left-moveX)<2&&Math.abs(moved.top-initial.top-moveY)<2);
     await drag('.resize-se',-180,-100);const resized=await terminalRect();
     assert(Math.abs(resized.width-moved.width+180)<2&&Math.abs(resized.height-moved.height+100)<2);
     await evaluate(`document.querySelector('.xterm-helper-textarea').focus()`);
@@ -387,18 +390,22 @@ try {
     await drag('.resize-ne',3500,-1600);await assertBounds();
     assert((await evaluate(`__terminalSent.filter(m=>m.type==='resize').at(-1)`)).cols<=400);
     await call('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});await delay(200);
-    await evaluate(`postMessage({type:'setScaleLocally',value:true},location.origin);postMessage({type:'setManualResolution',width:1920,height:1080},location.origin)`);
-    await waitFor('desktop scaled',()=>evaluate(`Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale'))<.9`));
-    // The desktop scale is published before floating-window paints its next
-    // frame; wait for that frame before taking a real pointer target.
-    await waitFor('scaled floating window painted',()=>evaluate(`Math.abs(new DOMMatrixReadOnly(getComputedStyle(document.querySelector('[data-terminal-background]')).transform).a-Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale')))<.001`));
+    const beforeDisplay=await api('/api/console/display');
+    await api('/api/console/display','PUT',{width:1920,height:1080,revision:beforeDisplay.revision});
+    await evaluate(`postMessage({type:'setDisplayMode',value:'fit'},location.origin)`);
+    await waitFor('desktop frame resized',()=>evaluate(`document.querySelector('#stream').videoWidth===1920`));
+    assert.equal(await evaluate(`Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale'))`),1);
+    await waitFor('unscaled floating window painted',()=>evaluate(`Math.abs(new DOMMatrixReadOnly(getComputedStyle(document.querySelector('[data-terminal-background]')).transform).a-1)<.001`));
     await click('#web-terminal-restore');await assertDefaultGeometry();
     await assertBounds();await drag('.web-terminal-floating .web-terminal-title',-40,-25);await assertBounds();
     const pinBefore=await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalPinned`);
     await click('#web-terminal-pin');assert.notEqual(await evaluate(`document.querySelector('[data-terminal-background]').dataset.terminalPinned`),pinBefore);
     await click('#web-terminal-pin');await click('#web-terminal-minimize');assert(!await isTerminalOpen());await click('#terminal-btn');assert(await isTerminalOpen());
-    await evaluate(`postMessage({type:'resetResolutionToWindow'},location.origin)`);await delay(250);await assertBounds();
-    pass('DPR, narrow and large viewports, manual scaling and fixed toolbar changes preserve reachable geometry and protocol limits');
+    const fittedDisplay=await api('/api/console/display');
+    await api('/api/console/display','PUT',{...beforeDisplay.desktop,revision:fittedDisplay.revision});
+    await waitFor('desktop restored',()=>evaluate(`document.querySelector('#stream').videoWidth===${beforeDisplay.desktop.width}`));
+    await delay(250);await assertBounds();
+    pass('DPR, narrow/large viewports and remote desktop resizing preserve local CSS geometry and protocol limits');
 
     const toolbarPinned=await evaluate(`document.querySelector('.taskbar').classList.contains('pinned')`);
     for(const pinned of [!toolbarPinned,toolbarPinned]) {
@@ -440,15 +447,15 @@ try {
     assert.equal(await evaluate('__terminalSockets.length'),1);
     pass('blocked window storage still permits restore, pinning and reopening using in-memory state');
 
-    await call('Page.navigate',{url:base+'/console'});await waitFor('standalone console',()=>evaluate(`!!document.querySelector('.console-select')`));
-    await click('#nav-apps');await click('#add-app-btn');await click('.console-select');
-    const popup=await evaluate(rectCode(`document.querySelector('.console-select-popup')`));assert(popup.top>=0&&popup.bottom<=800&&popup.width>100);
+    await call('Page.navigate',{url:base+'/console'});await waitFor('standalone console',()=>evaluate(`!!document.querySelector('#f-app-type + .console-select')`));
+    await click('#nav-apps');await click('#add-app-btn');await click('#f-app-type + .console-select');
+    const popup=await evaluate(rectCode(`document.querySelector('#f-app-type-listbox')`));assert(popup.top>=0&&popup.bottom<=800&&popup.width>100);
     await key('Escape','Escape',27);assert(await evaluate(`document.querySelector('#modal').classList.contains('show')`));
     await clickPoint(3,3);assert(!await evaluate(`document.querySelector('#modal').classList.contains('show')`));
     await call('Emulation.setDeviceMetricsOverride',{width:375,height:600,deviceScaleFactor:2,mobile:false});await delay(100);
     assert(await evaluate(`document.documentElement.scrollWidth<=innerWidth&&document.querySelector('#lang-toggle').getBoundingClientRect().right<=innerWidth`));
     await screenshot('console-narrow.png');
-    await click('#add-app-btn');await click('.console-select');
+    await click('#add-app-btn');await click('#f-app-type + .console-select');
     await key('Home','Home',36);await key('ArrowDown','ArrowDown',40);await key('Enter','Enter',13);
     await click('#desktop-launch-advanced > summary');
     await click('[aria-controls="f-desktop-compat-listbox"]');

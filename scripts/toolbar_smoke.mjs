@@ -71,6 +71,16 @@ const mouse = (type, x, y) => {
         button: type === 'mouseReleased' || mouseDown ? 'left' : 'none',
         buttons: mouseDown ? 1 : 0, clickCount: type === 'mouseMoved' ? 0 : 1 });
 };
+const clickTab = async selector => {
+    const point = await evaluate(`(() => {
+        const node = document.querySelector(${JSON.stringify(selector)});
+        node.scrollIntoView({block:'nearest',inline:'nearest'});
+        const r = node.querySelector('.toolbar-label').getBoundingClientRect();
+        return {x:r.left+Math.min(20,r.width/2),y:r.top+r.height/2};
+    })()`);
+    await mouse('mouseMoved',point.x,point.y);
+    await mouse('mousePressed',point.x,point.y); await mouse('mouseReleased',point.x,point.y);
+};
 const key = async (name, code = name, modifiers = 0) => {
     await call('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code, modifiers });
     await call('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code, modifiers });
@@ -92,7 +102,7 @@ const draftName = name => evaluate(`document.querySelector('.toolbar-rename-inpu
 const editorClosed = () => evaluate(`document.querySelector('.toolbar-rename').hidden`);
 const firstPoint = () => evaluate(`(() => {
     const viewport = document.querySelector('.toolbar-viewport'); viewport.scrollLeft = 0;
-    const n = document.querySelector('.toolbar-list .toolbar-grip'); const r = n.getBoundingClientRect();
+    const n = document.querySelector('.toolbar-list .taskbar-item'); const r = n.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
 const toolbarIds = () => evaluate(`[...new Set([...document.querySelectorAll('.toolbar-list .taskbar-item')].map(n => n.dataset.appId))]`);
@@ -199,15 +209,15 @@ try {
         if(menu.hidden) throw Error('gesture menu did not open');
         document.querySelector('.toolbar-gesture-action').click();
         if(!menu.hidden) throw Error('gesture menu stayed open');
-        const target=document.querySelector('#overlayInput');
-        for(const deltaX of [40,40,40,190]) target.dispatchEvent(new WheelEvent('wheel',{deltaX,bubbles:true,cancelable:true}));
+        const target=document.querySelector('#overlayInput'),rect=target.getBoundingClientRect();
+        for(const deltaX of [40,40,40,190]) target.dispatchEvent(new WheelEvent('wheel',{deltaX,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2,bubbles:true,cancelable:true}));
     })()`);
     assert.deepEqual(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,'))`), [`focus-key,${fake.windows[0].window_key}`]);
-    assert.equal(await evaluate(`window.__messages.some(message=>message.startsWith('w,'))`), false);
+    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), false);
     await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
     await delay(160);
-    await evaluate(`document.querySelector('#overlayInput').dispatchEvent(new WheelEvent('wheel',{deltaX:120,bubbles:true,cancelable:true}))`);
-    assert.equal(await evaluate(`window.__messages.some(message=>message.startsWith('w,'))`), true);
+    await evaluate(`(() => {const target=document.querySelector('#overlayInput'),r=target.getBoundingClientRect();target.dispatchEvent(new WheelEvent('wheel',{deltaX:120,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));})()`);
+    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), true);
     pass('opt-in horizontal wheel switches one ordered tab and leaves normal scrolling available when disabled');
 
     for (const count of [0, 1, 10, 30]) {
@@ -303,7 +313,7 @@ try {
     assert.equal(await evaluate(`document.querySelector('.toolbar-list [data-app-id="${ids[0]}"] .toolbar-label').textContent`), newName);
     await waitFor('immediate console name update', () => evaluate(`document.querySelector('.web-console-modal iframe').contentDocument.querySelector('#app-list tr[data-app-id="${ids[0]}"] strong')?.textContent===${JSON.stringify(newName)}`), 2000);
     assert.deepEqual(await api('/api/apps/order'), renameOrder);
-    assert.equal(await evaluate(`window.__messages.filter(m=>/^(focus|kd|ku|m|m2|cw),/.test(m)).length`),0);
+    assert.equal(await evaluate(`window.__messages.filter(m=>/^(i,[0-9]+,)?(focus|kd|ku|m|m2|cw),/.test(m)).length`),0);
     // A delayed synthetic snapshot cannot restore the old name.
     await evaluate(`window.__ivncWebRTC.ontaskbarupdate(window.__synthetic)`);
     assert.equal(await evaluate(`document.querySelector('.toolbar-list [data-app-id="${ids[0]}"] .toolbar-label').textContent`), newName);
@@ -339,7 +349,7 @@ try {
     await mouse('mousePressed',savePoint.x,savePoint.y); await mouse('mouseReleased',savePoint.x,savePoint.y);
     await key('Enter'); await waitFor('no-op editor save',editorClosed);
     assert.equal(await evaluate(`window.__renameCount`),1);
-    assert.equal(await evaluate(`window.__messages.filter(m=>/^(focus|kd|ku|m|m2|cw),/.test(m)).length`),0);
+    assert.equal(await evaluate(`window.__messages.filter(m=>/^(i,[0-9]+,)?(focus|kd|ku|m|m2|cw),/.test(m)).length`),0);
     await evaluate(`window.__nameMode=null`);
     assert.equal((await api(`/api/apps/${ids[0]}`)).name_revision,5);
     pass('offline drafts survive, committed timeouts recover, saves serialize and same-name saves keep the revision');
@@ -381,39 +391,41 @@ try {
     pass('Shift+F10 keeps the toolbar visible while editing; unmanaged and read-only tabs have no rename action');
 
     const start = await firstPoint();
+    assert.equal(await evaluate(`document.querySelectorAll('.toolbar-list .taskbar-item button').length`), 0);
     const target = await evaluate(`(() => { const r = document.querySelectorAll('.toolbar-list .taskbar-item')[1].getBoundingClientRect(); return {x:r.right-5,y:r.top+14}; })()`);
     await evaluate(`window.__trace = []; ['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture','blur'].forEach(type => window.addEventListener(type, event => window.__trace.push({type, target:event.target.className, x:event.clientX, y:event.clientY}), true))`);
     await mouse('mouseMoved', start.x, start.y); await mouse('mousePressed', start.x, start.y);
     await mouse('mouseMoved', start.x + 8, start.y);
     await mouse('mouseMoved', target.x, target.y);
+    assert.deepEqual((await toolbarIds()).slice(0,2), [ids[1],ids[0]]);
     await mouse('mouseReleased', target.x, target.y);
     await waitFor('saved mouse reorder', async () => (await api('/api/apps/order')).ordered_ids.indexOf(ids[1]) < (await api('/api/apps/order')).ordered_ids.indexOf(ids[0]));
     await waitFor('immediate console reorder', () => evaluate(`(() => {const rows=[...document.querySelector('.web-console-modal iframe').contentDocument.querySelectorAll('#app-list tr')].map(n=>n.dataset.appId); return rows.indexOf(${JSON.stringify(ids[1])}) < rows.indexOf(${JSON.stringify(ids[0])});})()`), 2000);
     const afterDrag = await api('/api/apps/order');
     assert.equal(afterDrag.ordered_ids.indexOf(hidden), before.ordered_ids.indexOf(hidden));
-    assert.equal(await evaluate(`window.__messages.filter(m => /^(focus|kd|ku|m|m2|cw),/.test(m)).length`), 0);
-    pass('real mouse drag persists, preserves hidden apps, updates console immediately and sends no remote input');
+    assert.equal(await evaluate(`window.__messages.filter(m => /^(i,[0-9]+,)?(focus|kd|ku|m|m2|cw),/.test(m)).length`), 0);
+    pass('whole-tab drag previews live without a handle, persists, preserves hidden apps and updates the console');
 
     // Arrow key reorder must stay local to the toolbar, even with the main
     // desktop's keyboard capture listener installed on window.
-    await waitFor('save complete', () => evaluate(`!document.querySelector('.toolbar-grip').disabled`));
-    await evaluate(`document.querySelector('.toolbar-grip').focus(); window.__messages = []`);
+    await waitFor('save complete', () => evaluate(`document.querySelector('.toolbar-list').getAttribute('aria-busy') === 'false'`));
+    await evaluate(`document.querySelector('.toolbar-list .taskbar-item').focus(); window.__messages = []`);
     await key('ArrowRight');
     await waitFor('keyboard reorder', async () => (await api('/api/apps/order')).order_revision > afterDrag.order_revision);
     assert.equal(await evaluate(`window.__messages.filter(m => /^(kd|ku),/.test(m)).length`), 0);
     pass('keyboard reorder is accessible and does not reach the remote desktop');
 
-    await waitFor('keyboard save complete', () => evaluate(`!document.querySelector('.toolbar-grip').disabled`));
+    await waitFor('keyboard save complete', () => evaluate(`document.querySelector('.toolbar-list').getAttribute('aria-busy') === 'false'`));
     const beforeFailure = await api('/api/apps/order');
-    await evaluate(`window.__failOrder = true; document.querySelector('.toolbar-grip').focus()`);
+    await evaluate(`window.__failOrder = true; document.querySelector('.toolbar-list .taskbar-item').focus()`);
     await key('ArrowRight');
-    await waitFor('failure notice', () => evaluate(`!document.querySelector('.toolbar-notice').hidden && !document.querySelector('.toolbar-grip').disabled`));
+    await waitFor('failure notice', () => evaluate(`!document.querySelector('.toolbar-notice').hidden && document.querySelector('.toolbar-list').getAttribute('aria-busy') === 'false'`));
     assert.deepEqual(await api('/api/apps/order'), beforeFailure);
     assert.deepEqual(await toolbarIds(), beforeFailure.ordered_ids.filter(id => ids.includes(id)));
     await evaluate(`window.__failOrder = false; window.__freezeOrder = true`);
     const external = await api('/api/apps/order', 'PUT', { ordered_ids: ids.slice().reverse(), base_revision: beforeFailure.order_revision });
-    await evaluate(`document.querySelector('.toolbar-grip').focus()`); await key('ArrowRight');
-    await waitFor('conflict recovery', () => evaluate(`!document.querySelector('.toolbar-grip').disabled && document.querySelector('.toolbar-notice').textContent.includes('changed')`));
+    await evaluate(`document.querySelector('.toolbar-list .taskbar-item').focus()`); await key('ArrowRight');
+    await waitFor('conflict recovery', () => evaluate(`document.querySelector('.toolbar-list').getAttribute('aria-busy') === 'false' && document.querySelector('.toolbar-notice').textContent.includes('changed')`));
     assert.deepEqual(await api('/api/apps/order'), external);
     assert.deepEqual(await toolbarIds(), external.ordered_ids.filter(id => ids.includes(id)));
     await evaluate(`window.__freezeOrder = false`);
@@ -450,27 +462,28 @@ try {
     pass('an application disappearing during drag cancels without saving');
 
     const beforeBusy = await api('/api/apps/order');
-    await evaluate(`window.__delayOrder = true; window.__putCount = 0; document.querySelector('.toolbar-grip').focus()`);
+    await evaluate(`window.__delayOrder = true; window.__putCount = 0; document.querySelector('.toolbar-list .taskbar-item').focus()`);
     await key('ArrowRight'); await key('ArrowRight');
-    await waitFor('serialized save', () => evaluate(`!document.querySelector('.toolbar-grip').disabled`));
+    await waitFor('serialized save', () => evaluate(`document.querySelector('.toolbar-list').getAttribute('aria-busy') === 'false'`));
     assert.equal(await evaluate(`window.__putCount`), 1);
     assert.equal((await api('/api/apps/order')).order_revision, beforeBusy.order_revision + 1);
     await evaluate(`window.__delayOrder = false`);
     pass('rapid repeated gestures issue one in-flight save');
 
     await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
-    const touchStart = await firstPoint();
-    const touchTarget = await evaluate(`(() => {const r=document.querySelectorAll('.toolbar-list .taskbar-item')[1].getBoundingClientRect();return {x:r.right-6,y:r.top+14};})()`);
+    const touchStart = await evaluate(`(() => {
+        const n = document.querySelector('.toolbar-list [data-app-id="${ids[0]}"]');
+        n.scrollIntoView({block:'nearest',inline:'nearest'});
+        const r = n.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2};
+    })()`);
     const beforeTouch = await api('/api/apps/order');
+    await evaluate(`window.__messages = []`);
     const touch = (type, point) => call('Input.dispatchTouchEvent', { type, touchPoints: point ? [{...point,id:1,radiusX:1,radiusY:1,force:1}] : [] });
     await touch('touchStart', touchStart);
-    await touch('touchMove', {x:touchStart.x+8,y:touchStart.y});
-    await touch('touchMove', touchTarget);
     await touch('touchEnd');
-    await waitFor('touch reorder save', async () => (await api('/api/apps/order')).order_revision > beforeTouch.order_revision);
-    await waitFor('touch save complete', () => evaluate(`!document.querySelector('.toolbar-grip').disabled`));
-    pass('real touch pointer drag through the handle saves order');
-    const afterTouch = await api('/api/apps/order');
+    await waitFor('touch tab activation', () => evaluate(`window.__messages.some(m => m.startsWith('focus-key,'))`));
+    assert.deepEqual(await api('/api/apps/order'), beforeTouch);
+    pass('touch taps activate the application without sorting');
     const swipeStart = await evaluate(`(() => {
         document.querySelector('.toolbar-viewport').scrollLeft = 0;
         const r=document.querySelectorAll('.toolbar-label')[1].getBoundingClientRect();
@@ -482,7 +495,7 @@ try {
     }
     await touch('touchEnd');
     await waitFor('native touch scrolling', () => evaluate(`document.querySelector('.toolbar-viewport').scrollLeft > 30`));
-    assert.deepEqual(await api('/api/apps/order'), afterTouch);
+    assert.deepEqual(await api('/api/apps/order'), beforeTouch);
     pass('touch swipes on labels scroll naturally without changing order');
 
     await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
@@ -497,14 +510,14 @@ try {
     for (const dx of [-30, -65, -110, -170]) await twoFingers('touchMove', dx);
     await twoFingers('touchEnd');
     assert.equal(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`), 1);
-    assert.equal(await evaluate(`window.__messages.some(message=>message.startsWith('w,'))`), false);
+    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), false);
     await evaluate(`window.__messages=[]`);
     await twoFingers('touchStart');
     await twoFingers('touchMove', 0, -50);
     await twoFingers('touchMove', 0, -130);
     await twoFingers('touchEnd');
     assert.equal(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`), 0);
-    assert.equal(await evaluate(`window.__messages.some(message=>message.startsWith('w,'))`), true);
+    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), true);
     await evaluate(`window.__messages=[]`);
     await twoFingers('touchStart');
     await twoFingers('touchMove', -50, 0, 30);
@@ -531,6 +544,10 @@ try {
     await waitFor('real peer reorder broadcast', () => evaluate(`(() => { const ids=[...document.querySelectorAll('.toolbar-list .taskbar-item')].map(n=>n.dataset.appId);return ids.indexOf(${JSON.stringify(real[1])})<ids.indexOf(${JSON.stringify(real[0])});})()`));
     assert.equal(await evaluate(`document.querySelectorAll('.toolbar-list [data-app-id="${real[0]}"]').length`), 2);
     pass('real GTK peer identity, multi-window grouping and order broadcast');
+    const clickedKey = await evaluate(`document.querySelector('.toolbar-list [data-app-id="${real[0]}"]').dataset.key`);
+    await clickTab(`.toolbar-list [data-key="${clickedKey}"]`);
+    await waitFor('native tab click focuses the compositor window', () => evaluate(`window.__actual.windows.some(w=>'window:'+w.window_key===${JSON.stringify(clickedKey)} && w.focused)`));
+    pass('native title click sends stable focus and activates the real compositor window');
     const realBefore = await api(`/api/apps/${real[0]}`);
     const realNameOrder = await api('/api/apps/order');
     const peer = await call('Target.createTarget',{url:base,background:true});
@@ -558,19 +575,22 @@ try {
     await api(`/api/apps/${real[1]}/sharing`, 'PUT', { enabled: true, password: 'toolbar-smoke-password' });
     await api(`/api/apps/${real[1]}/restart`, 'POST');
     await waitFor('shared stream tab', () => evaluate(`!!document.querySelector('.toolbar-list [data-key="app:${real[1]}"]')`), 30000);
-    await evaluate(`document.querySelector('.toolbar-list [data-key="app:${real[1]}"]').click()`);
+    await clickTab(`.toolbar-list [data-key="app:${real[1]}"]`);
     await waitFor('shared iframe connected', () => evaluate(`document.querySelector('.app-stream iframe')?.contentWindow?.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    await waitFor('shared frame decoded', () => evaluate(`(() => {const frame=document.querySelector('.app-stream.active iframe'),v=frame?.contentDocument?.querySelector('#stream');return v?.videoWidth>0 && v.readyState>=2 && frame.contentWindow.__ivncDisplayState?.protocol===1;})()`),60000);
     await evaluate(`window.__frame = document.querySelector('.app-stream iframe'); window.__frameUrl = window.__frame.src`);
     await evaluate(`(() => {
         document.querySelector('.toolbar-gesture-action').click();
         const frame=window.__frame;
-        frame.contentDocument.querySelector('#overlayInput').dispatchEvent(new frame.contentWindow.WheelEvent('wheel',{deltaX:120,bubbles:true,cancelable:true}));
+        const target=frame.contentDocument.querySelector('#overlayInput'),r=target.getBoundingClientRect();
+        target.dispatchEvent(new frame.contentWindow.WheelEvent('wheel',{deltaX:120,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));
     })()`);
     await waitFor('iframe swipe switches to desktop window', () => evaluate(`document.querySelector('.app-stream.active')===null`));
     const swipeCount = await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`);
-    await evaluate(`window.__frame.contentDocument.querySelector('#overlayInput').dispatchEvent(new window.__frame.contentWindow.WheelEvent('wheel',{deltaX:200,bubbles:true,cancelable:true}))`);
+    await evaluate(`(() => {const target=window.__frame.contentDocument.querySelector('#overlayInput'),r=target.getBoundingClientRect();target.dispatchEvent(new window.__frame.contentWindow.WheelEvent('wheel',{deltaX:200,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));})()`);
     assert.equal(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`), swipeCount);
-    await evaluate(`document.querySelector('.toolbar-gesture-action').click(); document.querySelector('.toolbar-list [data-key="app:${real[1]}"]').click()`);
+    await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
+    await clickTab(`.toolbar-list [data-key="app:${real[1]}"]`);
     await waitFor('shared iframe restored after swipe', () => evaluate(`document.querySelector('.app-stream.active')?.querySelector('iframe')===window.__frame`));
     pass('swiping inside a live shared iframe switches the parent tab once and retains its view');
     const liveOrder = await api('/api/apps/order');
@@ -598,7 +618,7 @@ try {
     console.log(`RESULT ${passed} passed; artifacts: ${work}`);
 } catch (error) {
     if (socket?.readyState === WebSocket.OPEN) {
-        console.log('DEBUG', JSON.stringify(await evaluate(`({trace:window.__trace, messages:window.__messages?.filter(m=>/^(focus|kd|ku|m),/.test(m)), ids:[...document.querySelectorAll('.toolbar-list .taskbar-item')].map(n=>n.dataset.appId), notice:document.querySelector('.toolbar-notice')?.textContent})`).catch(() => null)));
+        console.log('DEBUG', JSON.stringify(await evaluate(`({trace:window.__trace, messages:window.__messages?.filter(m=>/^(i,[0-9]+,)?(focus|kd|ku|m|m2),/.test(m)), ids:[...document.querySelectorAll('.toolbar-list .taskbar-item')].map(n=>n.dataset.appId), notice:document.querySelector('.toolbar-notice')?.textContent})`).catch(() => null)));
         const shot=await call('Page.captureScreenshot',{format:'png'}).catch(()=>null);
         if(shot)writeFileSync(path.join(work,'failure.png'),Buffer.from(shot.data,'base64'));
     }

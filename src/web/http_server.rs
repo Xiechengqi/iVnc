@@ -152,6 +152,10 @@ pub async fn run_http_server_with_webrtc(
             "/api/console/settings",
             get(console_settings_get_handler).put(console_settings_put_handler),
         )
+        .route(
+            "/api/console/display",
+            get(console_display_get_handler).put(console_display_put_handler),
+        )
         .route("/api/console/keyframe", post(console_keyframe_handler))
         .route("/api/capabilities", get(capabilities_handler))
         .route("/api/capabilities/apps", get(capability_apps_handler))
@@ -434,14 +438,21 @@ async fn handle_ice_connection(
     }
 }
 
+fn worker_path_allowed(path: &str) -> bool {
+    matches!(
+        path,
+        "/health"
+            | "/webrtc"
+            | "/ui-config"
+            | "/ws-config"
+            | "/api/render-status"
+            | "/api/console/display"
+    )
+}
+
 async fn worker_boundary(req: Request<Body>, next: middleware::Next) -> Response {
     let path = req.uri().path();
-    if crate::remote::worker::is_worker()
-        && !matches!(
-            path,
-            "/health" | "/webrtc" | "/ui-config" | "/ws-config" | "/api/render-status"
-        )
-    {
+    if crate::remote::worker::is_worker() && !worker_path_allowed(path) {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
     if (path.starts_with("/api/apps")
@@ -993,7 +1004,8 @@ async fn console_handler(State(_state): State<Arc<SharedState>>) -> Response {
 }
 
 async fn console_overview_handler(State(state): State<Arc<SharedState>>) -> Response {
-    let (screen_width, screen_height) = state.display_size();
+    let display = state.display.snapshot();
+    let (screen_width, screen_height) = (display.desktop.width, display.desktop.height);
     let stats = state.stats.lock().unwrap().clone();
     json_response(
         StatusCode::OK,
@@ -1013,6 +1025,7 @@ async fn console_overview_handler(State(state): State<Arc<SharedState>>) -> Resp
                 "configured_width": state.config.display.width,
                 "configured_height": state.config.display.height,
                 "refresh_rate": state.config.display.refresh_rate,
+                "state": display,
             },
             "runtime": {
                 "fps": stats.fps,
@@ -1048,8 +1061,6 @@ async fn console_settings_get_handler(State(state): State<Arc<SharedState>>) -> 
             "restart_required_fields": [
                 "http.host",
                 "http.port",
-                "display.width",
-                "display.height",
                 "tls",
                 "web_root",
                 "features"
@@ -1080,11 +1091,130 @@ async fn console_settings_put_handler(
             .apply_settings_json(&json!({"enable_binary_clipboard": enabled}).to_string());
     }
 
-    let mut config = crate::console_config::load();
-    config.runtime = body;
-    match crate::console_config::save(&config) {
+    match crate::console_config::update(|config| config.runtime = body) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true, "applied": "runtime"})),
         Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": err})),
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct DisplayScope {
+    app_id: Option<String>,
+}
+
+/// Management is deliberately outside app-view/remote proxy allowlists.
+/// A local worker is addressed only through its authenticated owner's console.
+async fn worker_display_request(
+    state: &SharedState,
+    id: &str,
+    body: Option<&crate::display::Resize>,
+) -> Response {
+    let Some(apps) = state.apps_state() else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({"error":"No applications manager"}),
+        );
+    };
+    let app = match apps.store.get(id) {
+        Ok(app) if app.app_type == crate::apps::app::AppType::DesktopApp => app,
+        _ => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error":"Choose a local desktop application; remote sizes are managed on the source instance"}),
+            )
+        }
+    };
+    if !apps
+        .remote
+        .policy(&app.id)
+        .map(|p| p.enabled)
+        .unwrap_or(false)
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error":"This application uses the main desktop"}),
+        );
+    }
+    let endpoint = match crate::remote::worker::endpoint(id) {
+        Ok(e) => e,
+        Err(e) => return json_response(StatusCode::CONFLICT, json!({"error":e})),
+    };
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error":e.to_string()}),
+            )
+        }
+    };
+    let url = format!("http://127.0.0.1:{}/api/console/display", endpoint.port);
+    let request = if let Some(body) = body {
+        client.put(url).json(body)
+    } else {
+        client.get(url)
+    };
+    match request
+        .basic_auth("worker", Some(&endpoint.password))
+        .send()
+        .await
+    {
+        Ok(r) => {
+            let status = r.status();
+            match r.json::<serde_json::Value>().await {
+                Ok(value) => json_response(status, value),
+                Err(_) => json_response(
+                    StatusCode::BAD_GATEWAY,
+                    json!({"error":"Invalid worker display response"}),
+                ),
+            }
+        }
+        Err(_) => json_response(
+            StatusCode::BAD_GATEWAY,
+            json!({"error":"Application runtime is unavailable"}),
+        ),
+    }
+}
+
+async fn console_display_get_handler(
+    State(state): State<Arc<SharedState>>,
+    Query(scope): Query<DisplayScope>,
+) -> Response {
+    if let Some(id) = scope.app_id {
+        return worker_display_request(&state, &id, None).await;
+    }
+    json_response(StatusCode::OK, json!(state.display.snapshot()))
+}
+
+async fn console_display_put_handler(
+    State(state): State<Arc<SharedState>>,
+    Query(scope): Query<DisplayScope>,
+    axum::extract::Json(body): axum::extract::Json<crate::display::Resize>,
+) -> Response {
+    if let Some(id) = scope.app_id {
+        return worker_display_request(&state, &id, Some(&body)).await;
+    }
+    match state.display.request(body) {
+        Err((status, error)) => json_response(
+            StatusCode::from_u16(status).unwrap(),
+            json!({"error":error,"state":state.display.snapshot()}),
+        ),
+        Ok(completed) => match completed.await {
+            Ok(Ok(snapshot)) => json_response(StatusCode::OK, json!(snapshot)),
+            Ok(Err(error)) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error":error,"state":state.display.snapshot()}),
+            ),
+            Err(_) => json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error":"Display service stopped"}),
+            ),
+        },
     }
 }
 
@@ -2262,7 +2392,21 @@ fn current_process_in_systemd_service(service_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_header_is_loopback, is_console_management_path};
+    use super::{host_header_is_loopback, is_console_management_path, worker_path_allowed};
+
+    #[test]
+    fn worker_exposes_only_display_management_to_its_authenticated_owner() {
+        assert!(worker_path_allowed("/api/console/display"));
+        assert!(is_console_management_path("/api/console/display"));
+        for path in [
+            "/api/console/display/",
+            "/api/console/settings",
+            "/api/apps",
+            "/terminal/ws",
+        ] {
+            assert!(!worker_path_allowed(path), "{path}");
+        }
+    }
 
     #[test]
     fn console_management_paths_are_restricted() {
@@ -2273,6 +2417,7 @@ mod tests {
             "/console.css",
             "/console.js",
             "/api/console/sessions",
+            "/api/console/display",
             "/api/apps",
             "/api/apps/chrome/start",
             "/api/apps/chrome/name",

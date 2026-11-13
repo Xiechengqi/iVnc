@@ -11,6 +11,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConsoleConfig {
     #[serde(default)]
+    pub display: Option<crate::display::Size>,
+    #[serde(default)]
     pub runtime: RuntimeConsoleConfig,
 }
 
@@ -40,17 +42,62 @@ pub fn load() -> ConsoleConfig {
     serde_json::from_str(&text).unwrap_or_default()
 }
 
-pub fn save(config: &ConsoleConfig) -> Result<(), String> {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let text = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
+/// Serialize read/modify/write so stream settings and geometry cannot erase each other.
+pub fn update(change: impl FnOnce(&mut ConsoleConfig)) -> Result<(), String> {
+    static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = WRITER.lock().unwrap();
+    let mut config = load();
+    change(&mut config);
+    save_at(&config_path(), &config)
+}
+
+fn save_at(path: &std::path::Path, config: &ConsoleConfig) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path.parent().ok_or("Invalid settings path")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temp = parent.join(format!(".console-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+            .map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&temp, path).map_err(|e| e.to_string())
+    })();
+    let _ = std::fs::remove_file(temp);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn atomic_settings_keep_runtime_and_geometry_and_private_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let dir = std::env::temp_dir().join(format!("ivnc-console-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("console.json");
+        let mut config = ConsoleConfig::default();
+        config.runtime.target_fps = Some(24);
+        config.display = Some(crate::display::Size::new(1280, 720));
+        save_at(&path, &config).unwrap();
+        let restored: ConsoleConfig =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.display, config.display);
+        assert_eq!(restored.runtime.target_fps, Some(24));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Rename failure must not expose a partial file or leave temporary files.
+        let blocked = dir.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(save_at(&blocked, &config).is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
-    Ok(())
 }

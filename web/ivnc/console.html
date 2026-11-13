@@ -66,6 +66,24 @@
             <section class="section" id="section-settings">
                 <div class="panel">
                     <div class="panel-section">
+                        <div class="panel-section-header"><h3 id="display-title">桌面分辨率</h3></div>
+                        <p class="muted-hint" id="display-hint">修改会影响所选桌面的所有连接。适应窗口和原始大小仅影响当前浏览器。</p>
+                        <div class="settings-grid">
+                            <div class="form-line">
+                                <label class="form-label"><span id="display-scope-label">桌面</span></label>
+                                <select id="display-scope"><option value="">主桌面</option></select>
+                            </div>
+                            <div class="form-line"><label class="form-label" for="display-width" id="display-width-label">宽度</label><input id="display-width" type="number" min="320" max="7680" step="2"></div>
+                            <div class="form-line"><label class="form-label" for="display-height" id="display-height-label">高度</label><input id="display-height" type="number" min="200" max="4320" step="2"></div>
+                        </div>
+                        <div class="panel-section-footer">
+                            <span class="muted-hint" id="display-status" role="status"></span>
+                            <button class="btn btn-primary" id="display-apply" type="button">应用到所选桌面</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-section">
                         <div class="panel-section-header">
                             <h3 id="settings-stream-title">串流参数</h3>
                             <span class="dirty-indicator" id="settings-dirty" hidden>● 未保存改动</span>

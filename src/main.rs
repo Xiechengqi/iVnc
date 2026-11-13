@@ -10,6 +10,7 @@ mod clipboard;
 mod compositor;
 mod config;
 mod console_config;
+mod display;
 mod file_upload;
 mod gstreamer;
 mod input;
@@ -261,6 +262,27 @@ fn main() {
     let (input_tx, input_rx) = mpsc::unbounded_channel::<InputEventData>();
     let ui_config = config::ui::UiConfig::from_env(&config);
 
+    if let Err(e) = display::initial_size(&config, &ui_config) {
+        error!("Invalid desktop dimensions: {e}");
+        std::process::exit(1);
+    }
+    let saved_runtime = console_config::load().runtime;
+    if let Some(v) = saved_runtime.target_fps {
+        runtime_settings.set_target_fps(v);
+    }
+    if let Some(v) = saved_runtime.video_bitrate_kbps {
+        runtime_settings.set_video_bitrate_kbps(v);
+    }
+    if let Some(v) = saved_runtime.audio_bitrate {
+        runtime_settings.set_audio_bitrate(v);
+    }
+    if let Some(v) = saved_runtime.keyframe_interval {
+        runtime_settings.set_keyframe_interval(v);
+    }
+    if let Some(v) = saved_runtime.binary_clipboard_enabled {
+        runtime_settings
+            .apply_settings_json(&serde_json::json!({"enable_binary_clipboard":v}).to_string());
+    }
     let shared_state = Arc::new(web::SharedState::new(
         config.clone(),
         ui_config,
@@ -270,14 +292,7 @@ fn main() {
         args.proxy_autostart,
     ));
 
-    if let Err(e) = run(
-        config,
-        shared_state,
-        runtime_settings,
-        input_rx,
-        width,
-        height,
-    ) {
+    if let Err(e) = run(config, shared_state, runtime_settings, input_rx) {
         eprintln!("Fatal error: {}", e);
         error!("Fatal error: {}", e);
         std::process::exit(1);
@@ -289,12 +304,13 @@ fn run(
     shared_state: Arc<web::SharedState>,
     runtime_settings: Arc<runtime_settings::RuntimeSettings>,
     mut input_rx: mpsc::UnboundedReceiver<InputEventData>,
-    width: u32,
-    height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (width, height, initial_fps, initial_bitrate) =
+    let (width, height) = shared_state.display_size();
+    let (encoded_width, encoded_height, initial_fps, initial_bitrate) =
         shared_state.video_parameters(width, height);
-    shared_state.set_display_size(width, height);
+    shared_state
+        .display
+        .set_encoded(display::Size::new(encoded_width, encoded_height));
     let running = Arc::new(AtomicBool::new(true));
     shared_state.set_shutdown_flag(running.clone());
 
@@ -416,8 +432,10 @@ fn run(
 
     // GStreamer pipeline
     let pipeline_config = PipelineConfig {
-        width,
-        height,
+        source_width: width,
+        source_height: height,
+        width: encoded_width,
+        height: encoded_height,
         framerate: initial_fps,
         codec: config.webrtc.video_codec,
         bitrate: initial_bitrate,
@@ -696,83 +714,104 @@ fn run(
             }
         }
 
-        if shared_state.take_pending_resize().is_some() {
-            video_update_retry_at = Instant::now();
-        }
-        let requested = shared_state.requested_display_size();
-        let (w, h, fps, bitrate) = shared_state.video_parameters(requested.0, requested.1);
+        let resize = shared_state.display.take_request();
+        let old_desktop = shared_state.display.snapshot().desktop;
+        let target = resize.as_ref().map(|r| r.size).unwrap_or(old_desktop);
+        let (w, h, fps, bitrate) = shared_state.video_parameters(target.width, target.height);
         let current = pipeline.config();
-        if (w, h, fps, bitrate)
+        let rebuild = (target.width, target.height, w, h, fps, bitrate)
             != (
+                current.source_width,
+                current.source_height,
                 current.width,
                 current.height,
                 current.framerate,
                 current.bitrate,
-            )
-            && Instant::now() >= video_update_retry_at
-        {
+            );
+        let mut display_changed = false;
+        if resize.is_some() || (rebuild && Instant::now() >= video_update_retry_at) {
             video_update_retry_at = Instant::now() + Duration::from_secs(3);
-            let size_changed = (w, h) != (current.width, current.height);
-            let new_config = PipelineConfig {
-                width: w,
-                height: h,
-                framerate: fps,
-                bitrate,
-                codec: config.webrtc.video_codec,
-                hardware_encoder: config.webrtc.hardware_encoder,
-                keyframe_interval: runtime_settings.keyframe_interval(),
-                latency_ms: config.webrtc.pipeline_latency_ms,
-            };
-            match gstreamer::VideoPipeline::new(new_config) {
-                Ok(new_pipeline) => {
-                    let _ = pipeline.stop();
-                    match new_pipeline
-                        .start()
-                        .map_err(|e| e.to_string())
-                        .and_then(|_| {
-                            if size_changed {
-                                backend.resize(w, h).map_err(|e| e.to_string())
-                            } else {
-                                Ok(())
-                            }
-                        }) {
-                        Ok(()) => {
-                            video_update_retry_at = Instant::now();
-                            pipeline = new_pipeline;
-                            if size_changed {
-                                shared_state.set_display_size(w, h);
-                                comp.resize_windows(w, h);
-                            }
-                            comp.needs_redraw = true;
-                            comp.taskbar_dirty = true;
-                            // Never replay or flush packets from the old encoder
-                            // after rebuilding its resolution/level.
-                            rtp_frame_buf.clear();
-                            keyframe_buf.clear();
-                            prev_rtp_ts = None;
-                            last_rtp_sample = None;
-                            in_keyframe = false;
-                            shared_state.set_keyframe_cache(Vec::new());
-                            pipeline.request_keyframe();
-                            info!(
-                                "Video output: {}x{} at {} fps, {} kbps (receive level {})",
-                                w,
-                                h,
-                                fps,
-                                bitrate,
-                                shared_state.video_receive_level().name
-                            );
+            let result = (|| -> Result<(), String> {
+                if !rebuild {
+                    return console_config::update(|c| c.display = Some(target));
+                }
+                let prepared = if target != old_desktop {
+                    Some(backend.prepare_resize(target.width, target.height)?)
+                } else {
+                    None
+                };
+                let new_pipeline = gstreamer::VideoPipeline::new(PipelineConfig {
+                    source_width: target.width,
+                    source_height: target.height,
+                    width: w,
+                    height: h,
+                    framerate: fps,
+                    bitrate,
+                    codec: config.webrtc.video_codec,
+                    hardware_encoder: config.webrtc.hardware_encoder,
+                    keyframe_interval: runtime_settings.keyframe_interval(),
+                    latency_ms: config.webrtc.pipeline_latency_ms,
+                })
+                .map_err(|e| e.to_string())?;
+                let _ = pipeline.stop();
+                if let Err(e) = new_pipeline.start() {
+                    let _ = new_pipeline.stop();
+                    let _ = pipeline.start();
+                    return Err(e.to_string());
+                }
+                let rollback = prepared.map(|p| backend.apply_resize(p));
+                if resize.is_some() {
+                    if let Err(e) = console_config::update(|c| c.display = Some(target)) {
+                        if let Some(old) = rollback {
+                            backend.apply_resize(old);
                         }
-                        Err(e) => {
-                            let _ = new_pipeline.stop();
-                            let _ = pipeline.start();
-                            error!("Video pipeline update failed: {}", e);
-                        }
+                        let _ = new_pipeline.stop();
+                        let _ = pipeline.start();
+                        return Err(format!("Cannot save desktop size: {e}"));
                     }
                 }
-                Err(e) => error!("Failed to create new pipeline: {}", e),
+                pipeline = new_pipeline;
+                if target != old_desktop {
+                    comp.resize_windows(target.width, target.height);
+                    last_render = Instant::now() - Duration::from_secs(1);
+                    let _ = shared_state.input_sender.send(InputEventData {
+                        event_type: InputEvent::KeyboardReset,
+                        ..Default::default()
+                    });
+                }
+                if resize.is_none() {
+                    display_changed |= shared_state.display.set_encoded(display::Size::new(w, h));
+                }
+                comp.needs_redraw = true;
+                comp.taskbar_dirty = true;
+                // Never reuse packets or cached frames from the previous encoder.
+                rtp_frame_buf.clear();
+                keyframe_buf.clear();
+                prev_rtp_ts = None;
+                last_rtp_sample = None;
+                in_keyframe = false;
+                shared_state.set_keyframe_cache(Vec::new());
+                pipeline.request_keyframe();
+                video_update_retry_at = Instant::now();
+                info!(
+                    "Desktop {}x{}, video {}x{} at {} fps, {} kbps",
+                    target.width, target.height, w, h, fps, bitrate
+                );
+                Ok(())
+            })();
+            if let Err(ref e) = result {
+                error!("Display/video update failed: {e}");
+            }
+            if let Some(request) = resize {
+                shared_state
+                    .display
+                    .complete(request, result, display::Size::new(w, h));
+                display_changed = true;
             }
             last_visual_activity_at = Instant::now();
+        }
+        if display_changed {
+            shared_state.send_text(shared_state.display_message());
         }
 
         if comp.needs_redraw {
@@ -955,6 +994,13 @@ fn drain_input_events(
             .pop_front()
             .or_else(|| input_rx.try_recv().ok())
     } {
+        // Events can have queued while an administrator changed the desktop.
+        if ev
+            .geometry_revision
+            .is_some_and(|r| r != shared.display.snapshot().revision)
+        {
+            continue;
+        }
         had_input = true;
         let serial = SERIAL_COUNTER.next_serial();
         // Use monotonic clock for Wayland event timestamps (milliseconds).

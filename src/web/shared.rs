@@ -142,12 +142,8 @@ pub struct SharedState {
     /// Input event sender
     pub input_sender: mpsc::UnboundedSender<InputEventData>,
 
-    /// Display dimensions
-    pub display_size: Arc<Mutex<(u32, u32)>>,
-
-    /// Preserve the user's requested size while a receiver temporarily needs
-    /// a smaller common stream. Restore it when that receiver leaves.
-    requested_display_size: Arc<Mutex<(u32, u32)>>,
+    /// Independent desktop and encoded-frame geometry.
+    pub display: Arc<crate::display::DisplayController>,
 
     /// H.264 receive levels of pending and connected sessions. A shared stream
     /// must respect the least capable receiver until that session is dropped.
@@ -158,9 +154,6 @@ pub struct SharedState {
 
     /// Request keyframe flag (for WebRTC)
     pub force_keyframe: Arc<AtomicBool>,
-
-    /// Pending display resize target (width, height); pipeline thread will apply it
-    pub pending_resize: Arc<Mutex<Option<(u32, u32)>>>,
 
     /// Runtime stats
     pub stats: Arc<Mutex<RuntimeStats>>,
@@ -224,7 +217,7 @@ impl std::fmt::Debug for SharedState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedState")
             .field("config", &self.config)
-            .field("display_size", &self.display_size)
+            .field("display_size", &self.display_size())
             .field("webrtc_sessions", &self.webrtc_sessions())
             .finish()
     }
@@ -240,8 +233,8 @@ impl SharedState {
         proxy_ip: Option<std::net::IpAddr>,
         proxy_autostart: Option<bool>,
     ) -> Self {
-        let initial_size = (config.display.width, config.display.height);
-        let display_size = Arc::new(Mutex::new(initial_size));
+        let (initial_size, locked) = crate::display::initial_size(&config, &ui_config)
+            .expect("validated desktop dimensions");
         let proxy_panel = Arc::new(ProxyPanelManager::new(
             config.ui_features.proxy_enabled,
             proxy_ip,
@@ -257,12 +250,10 @@ impl SharedState {
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
             input_sender,
-            requested_display_size: Arc::new(Mutex::new(initial_size)),
-            display_size,
+            display: Arc::new(crate::display::DisplayController::new(initial_size, locked)),
             video_receive_levels: Arc::new(Mutex::new(BTreeMap::new())),
             clipboard: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
-            pending_resize: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(RuntimeStats::default())),
             render_state: Arc::new(AtomicU64::new(RenderState::Active as u64)),
             start_time: std::time::Instant::now(),
@@ -452,15 +443,16 @@ impl SharedState {
         self.send_text("clipboard_finish".into());
     }
 
-    /// Update display size
-    pub fn set_display_size(&self, width: u32, height: u32) {
-        let mut size = self.display_size.lock().unwrap();
-        *size = (width, height);
+    pub fn display_size(&self) -> (u32, u32) {
+        let size = self.display.snapshot().desktop;
+        (size.width, size.height)
     }
 
-    /// Get current display size
-    pub fn display_size(&self) -> (u32, u32) {
-        *self.display_size.lock().unwrap()
+    pub fn display_message(&self) -> String {
+        format!(
+            "display,{}",
+            serde_json::to_string(&self.display.snapshot()).unwrap()
+        )
     }
 
     pub fn video_receive_level(&self) -> crate::webrtc::video_format::H264Level {
@@ -497,27 +489,6 @@ impl SharedState {
         } else {
             (width, height, fps, kbps)
         }
-    }
-
-    /// Request display resize
-    pub fn resize_display(&self, width: u32, height: u32) {
-        *self.requested_display_size.lock().unwrap() = (width, height);
-        let (width, height, _, _) = self.video_parameters(width, height);
-        let current = self.display_size();
-        if current == (width, height) {
-            return;
-        }
-        info!("Queuing display resize to {}x{}", width, height);
-        *self.pending_resize.lock().unwrap() = Some((width, height));
-    }
-
-    /// Take pending resize request (called by compositor thread)
-    pub fn take_pending_resize(&self) -> Option<(u32, u32)> {
-        self.pending_resize.lock().unwrap().take()
-    }
-
-    pub fn requested_display_size(&self) -> (u32, u32) {
-        *self.requested_display_size.lock().unwrap()
     }
 
     /// Update client-reported latency metric (ms)
@@ -713,6 +684,21 @@ impl SharedState {
             shutdown_tx: Some(shutdown_tx),
         };
         self.connections.lock().unwrap().insert(id, conn);
+    }
+
+    pub fn report_viewport(&self, id: &str, payload: &str) {
+        if payload.len() > 1024 {
+            return;
+        }
+        if let Ok(viewport) = serde_json::from_str::<Value>(payload) {
+            if !viewport.is_object() {
+                return;
+            }
+            if let Some(connection) = self.connections.lock().unwrap().get_mut(id) {
+                let info = connection.client_info.get_or_insert_with(|| json!({}));
+                info["viewport"] = viewport;
+            }
+        }
     }
 
     /// Update client-reported browser feature information for a connection.

@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod compositor;
 pub mod config;
 pub mod console_config;
+pub mod display;
 pub mod file_upload;
 pub mod gstreamer;
 pub mod input;

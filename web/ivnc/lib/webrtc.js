@@ -656,6 +656,8 @@ export class WebRTCDemo {
 			if (this.onlatencymeasurement !== null) {
 				this.onlatencymeasurement(msg.data.latency_ms);
 			}
+		} else if (msg.type === 'display') {
+			this.ondisplaystate?.(msg.data);
 		} else if (msg.type === 'server_settings') {
 			if (this.onserversettings !== null) {
 				this.onserversettings(msg.data);
