@@ -1,9 +1,15 @@
 .taskbar.ivnc-toolbar {
+    bottom: var(--ivnc-keyboard-inset, 0px);
+    height: calc(36px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 6px;
     isolation: isolate;
 }
+.ivnc-toolbar button.taskbar-pin { font: inherit; padding: 0; color: inherit; }
+.ivnc-toolbar #keyboard-toggle.active,
+.ivnc-toolbar #keyboard-toggle.active:hover { color: #8abbff; background: rgba(76, 134, 230, .25); }
 .ivnc-toolbar .toolbar-tools,
 .ivnc-toolbar .toolbar-status {
     display: flex;

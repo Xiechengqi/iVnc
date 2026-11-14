@@ -551,6 +551,7 @@ fn run(
     let mut prev_cursor_pos: (f64, f64) = (disp_w as f64 / 2.0, disp_h as f64 / 2.0);
     let mut prev_cursor_message: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
+    let mut prev_text_input_message = String::new();
     let mut prev_dc_open_count: u64 = 0;
     let mut prev_apps_generation: u64 = 0;
     let mut render_state = RenderState::Active;
@@ -629,6 +630,14 @@ fn run(
         // (receiver_count increases at subscribe time, before the DC is ready,
         //  so we use the datachannel_open_count which bumps on ChannelOpen)
         let cur_dc_open = shared_state.datachannel_open_count.load(Ordering::Relaxed);
+        if comp.text_input.dirty || comp.taskbar_dirty || cur_dc_open > prev_dc_open_count {
+            let message = comp.text_input_message();
+            if message != prev_text_input_message || cur_dc_open > prev_dc_open_count {
+                shared_state.send_text(message.clone());
+                prev_text_input_message = message;
+            }
+            comp.text_input.dirty = false;
+        }
         if cur_dc_open > prev_dc_open_count {
             prev_taskbar_json.clear();
             comp.taskbar_dirty = true;

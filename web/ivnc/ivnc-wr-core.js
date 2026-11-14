@@ -28,7 +28,8 @@
 import { WebRTCDemo } from "./lib/webrtc.js?v=26";
 import { WebRTCDemoSignaling } from "./lib/signaling.js?v=1";
 import { stringToBase64 } from "./lib/util.js?v=1";
-import { Input } from "./lib/input2.js?v=21";
+import { Input } from "./lib/input2.js?v=22";
+import { usesTouchKeyboard } from "./lib/text-input.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import terminalStyles from "@xterm/xterm/css/xterm.css?inline";
@@ -62,6 +63,8 @@ const MAIN_I18N = {
 		pinTaskbar: '固定任务栏',
 		imeOn: '中文输入 (Ctrl+Shift+Space)',
 		imeOff: '关闭中文输入 (Ctrl+Shift+Space)',
+		keyboardShow: '显示键盘',
+		keyboardHide: '收起键盘',
 		changePassword: '修改密码',
 		uploadFile: '上传文件到桌面',
 		restartOrUpgrade: '重启或升级',
@@ -170,6 +173,8 @@ const MAIN_I18N = {
 		pinTaskbar: 'Pin taskbar',
 		imeOn: 'Chinese IME (Ctrl+Shift+Space)',
 		imeOff: 'Disable Chinese IME (Ctrl+Shift+Space)',
+		keyboardShow: 'Show keyboard',
+		keyboardHide: 'Hide keyboard',
 		changePassword: 'Change password',
 		uploadFile: 'Upload file to desktop',
 		restartOrUpgrade: 'Restart or upgrade',
@@ -305,7 +310,9 @@ function InitUI() {
 		display: flex;
 		flex-direction: column;
 		height: calc(var(--vh, 1vh) * 100 - var(--ivnc-toolbar-height, 0px));
-		height: calc(100dvh - var(--ivnc-toolbar-height, 0px));
+		height: calc(var(--ivnc-visible-height, 100dvh) - var(--ivnc-toolbar-height, 0px));
+		position: relative;
+		top: var(--ivnc-visible-top, 0px);
 		width: 100%;
 	}
 
@@ -2891,6 +2898,13 @@ export default function webrtc() {
 		let message = event.data;
 		if (!message) return;
 		switch(message.type) {
+            case "showVirtualKeyboard":
+                // Compatibility only: the visible toolbar calls synchronously.
+                // Safari can still reject focus delivered via an async message.
+                if (navigator.userActivation?.isActive) {
+                    if (!appStreams?.toggleIme(true)) input?.toggleImeMode(true);
+                }
+                break;
             case "setDisplayMode":
                 setDisplayMode(message.value);
                 break;
@@ -3553,35 +3567,6 @@ export default function webrtc() {
 		clipboardController?.suspend();
 	}
 
-	function setupKeyBoardAssisstant() {
-		const keyboardInputAssist = document.getElementById('keyboard-input-assist');
-		if (keyboardInputAssist && input) {
-			keyboardInputAssist.addEventListener('input', (event) => {
-				const typedString = keyboardInputAssist.value;
-				if (typedString) {
-				input._typeString(typedString);
-				keyboardInputAssist.value = '';
-				}
-			});
-		keyboardInputAssist.addEventListener('keydown', (event) => {
-			if (event.key === 'Enter' || event.keyCode === 13) {
-			const enterKeysym = 0xFF0D;
-			input._guac_press(enterKeysym);
-			setTimeout(() => input._guac_release(enterKeysym), 5);
-			event.preventDefault();
-			keyboardInputAssist.value = '';
-			} else if (event.key === 'Backspace' || event.keyCode === 8) {
-			const backspaceKeysym = 0xFF08;
-			input._guac_press(backspaceKeysym);
-			setTimeout(() => input._guac_release(backspaceKeysym), 5);
-			event.preventDefault();
-			}
-		});
-		console.log("Added 'input' and 'keydown' listeners to #keyboard-input-assist.");
-		} else {
-		console.error(" Could not add listeners to keyboard assist: Element or Input handler instance not found.");
-		}
-	}
 
 	return {
 		initialize() {
@@ -3728,28 +3713,38 @@ export default function webrtc() {
 
 
 			// IME toggle button
-			let imeModeActive = getBoolParam('ime_mode', false);
+			let imeModeActive = !usesTouchKeyboard() && getBoolParam('ime_mode', false);
 			const imeSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="16" text-anchor="middle" font-size="11" fill="currentColor" stroke="none" font-weight="bold">中</text></svg>`;
-			const imeBtn = document.createElement('div');
+			const imeBtn = document.createElement('button');
+			imeBtn.type = 'button';
+			imeBtn.id = 'keyboard-toggle';
 			imeBtn.className = 'taskbar-pin' + (imeModeActive ? ' active' : '');
-			imeBtn.innerHTML = imeSvg;
-			setLiveTitle(imeBtn, imeModeActive ? 'imeOff' : 'imeOn');
-			const syncImeButton = () => {
-				const active = appStreams?.imeState() ?? !!input?._imeModeActive;
-				imeBtn.classList.toggle('active', active);
-				setLiveTitle(imeBtn, active ? 'imeOff' : 'imeOn');
-			};
-			imeBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				// The active stream tab answers with ivnc-ime-state.
-				if (appStreams?.toggleIme()) return;
-				if (input) {
-					const active = input.toggleImeMode();
-					imeBtn.classList.toggle('active', active);
-					setLiveTitle(imeBtn, active ? 'imeOff' : 'imeOn');
-					setBoolParam('ime_mode', active);
-				}
-			});
+			imeBtn.innerHTML = usesTouchKeyboard() ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M5 9h2m2 0h2m2 0h2m2 0h2M5 12h2m2 0h2m2 0h2m2 0h2M7 16h10"/></svg>' : imeSvg;
+			setLiveTitle(imeBtn, usesTouchKeyboard() ? 'keyboardShow' : (imeModeActive ? 'imeOff' : 'imeOn'));
+            const syncImeButton = () => {
+                const active = appStreams?.imeState() ?? (usesTouchKeyboard() ? !!input?.textInput.focused() : !!input?._imeModeActive);
+                imeBtn.classList.toggle('active', active);
+                setLiveTitle(imeBtn, usesTouchKeyboard() ? (active ? 'keyboardHide' : 'keyboardShow') : (active ? 'imeOff' : 'imeOn'));
+                imeBtn.setAttribute('aria-label', imeBtn.title);
+                imeBtn.setAttribute('aria-pressed', String(active));
+            };
+            // Remember intent before native button focus blurs the editor.
+            // Cancelling pointerdown suppresses Safari's subsequent touch click.
+            let keyboardWasActive;
+            imeBtn.addEventListener('pointerdown', () => {
+                keyboardWasActive = appStreams?.imeState() ?? (usesTouchKeyboard() ? !!input?.textInput.focused() : !!input?._imeModeActive);
+            });
+            imeBtn.addEventListener('pointercancel', () => { keyboardWasActive = undefined; });
+            imeBtn.addEventListener('keydown', () => { keyboardWasActive = undefined; });
+            imeBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                const desired = keyboardWasActive === undefined ? undefined : !keyboardWasActive;
+                keyboardWasActive = undefined;
+                if (appStreams?.toggleIme(desired)) return;
+                input?.toggleImeMode(desired);
+                syncImeButton();
+            });
+            syncImeButton();
 			toolbarController.addTool(imeBtn, true);
 
 			// Change password button
@@ -3925,6 +3920,7 @@ export default function webrtc() {
 						const streamActive = !!appStreams?.activeId();
 						if (streamActive !== mainCovered) {
 							mainCovered = streamActive;
+							input?.setViewActive(!streamActive);
 							updateStatusDisplay();
 							webrtc?.playback?.setActive(!streamActive);
 							clipboardController?.cancel();
@@ -3955,27 +3951,6 @@ export default function webrtc() {
 				},
 			});
 
-			if (!document.getElementById('keyboard-input-assist')) {
-				const keyboardInputAssist = document.createElement('input');
-				keyboardInputAssist.type = 'text';
-				keyboardInputAssist.id = 'keyboard-input-assist';
-				keyboardInputAssist.style.position = 'absolute';
-				keyboardInputAssist.style.left = '-9999px';
-				keyboardInputAssist.style.top = '-9999px';
-				keyboardInputAssist.style.width = '1px';
-				keyboardInputAssist.style.height = '1px';
-				keyboardInputAssist.style.opacity = '0';
-				keyboardInputAssist.style.border = '0';
-				keyboardInputAssist.style.padding = '0';
-				keyboardInputAssist.style.caretColor = 'transparent';
-				keyboardInputAssist.setAttribute('aria-hidden', 'true');
-				keyboardInputAssist.setAttribute('autocomplete', 'off');
-				keyboardInputAssist.setAttribute('autocorrect', 'off');
-				keyboardInputAssist.setAttribute('autocapitalize', 'off');
-				keyboardInputAssist.setAttribute('spellcheck', 'false');
-				document.body.appendChild(keyboardInputAssist);
-				console.log("Dynamically added #keyboard-input-assist element.");
-			}
 			// Fetch locally stored application data
 			appName = window.location.pathname.endsWith("/") && (window.location.pathname.split("/")[1]) || "webrtc";
 			debug = getBoolParam('debug', false);
@@ -4017,6 +3992,7 @@ export default function webrtc() {
             window.addEventListener('ivnc-auth-ended', () => {
                 clipboardController?.cancel();
                 gestureController?.reset();
+                input?.setViewActive(false);
                 webrtc?.destroy();
             }, { once: true });
 			// Embedded stream tab: the parent page drives activation, audio, upload and IME.
@@ -4040,6 +4016,7 @@ export default function webrtc() {
 					const open = webrtc._send_channel?.readyState === 'open';
 					if (message.type === 'ivnc-view-active') {
 						window.__ivncViewActive = !!message.active;
+						input?.setViewActive(!!message.active);
 						webrtc.playback.setActive(!!message.active);
 						// Release held keys when the tab is switched away.
 						if (!message.active) clipboardController?.cancel();
@@ -4060,13 +4037,14 @@ export default function webrtc() {
 				if (clipboardController) clipboardController.sendInput(data);
 				else webrtc.sendDataChannelMessage(data);
 			}
-			input = new Input(overlayInput, send, false, useCssScaling=useCssScaling);
+			input = new Input(overlayInput, send, false, 0, useCssScaling);
+			window.__ivncInput = input;
+			input.setViewActive(window.__ivncViewActive !== false && !appStreams?.activeId());
 			input.gestureNavigation = () => {
 				if (!window.__IVNC_EMBED__) return gestureController;
 				try { return window.parent.__ivncGestureNavigation || null; } catch (_) { return null; }
 			};
 
-			setupKeyBoardAssisstant();
 
 			// assign the handlers to respective objects
 			// TODO: Need to handle the logEntries and DebugEntries list
@@ -4215,12 +4193,12 @@ export default function webrtc() {
 				showDrawer = !showDrawer;
 			}
 
-			input.onimetoggle = (active) => {
-				imeBtn.classList.toggle('active', active);
-				setLiveTitle(imeBtn, active ? 'imeOff' : 'imeOn');
-				setBoolParam('ime_mode', active);
-				postToParent({ type: 'ivnc-ime-state', active });
-			};
+            input.onimetoggle = active => {
+                syncImeButton();
+                if (!usesTouchKeyboard()) setBoolParam('ime_mode', active);
+                viewportController?.caret(input.textInput.remote?.cursor, input.displayState?.desktop, usesTouchKeyboard() && active);
+                postToParent({ type: 'ivnc-ime-state', active });
+            };
 
 			webrtc.onplaystreamrequired = () => {
 				showStart = true;
@@ -4249,7 +4227,7 @@ export default function webrtc() {
 				getController: () => clipboardController,
 				restoreFocus: () => {
 					if (window.__ivncViewActive !== false && !appStreams?.activeId() && document.hasFocus()) {
-						(input?._imeModeActive ? input._imeTextarea : overlayInput)?.focus({ preventScroll: true });
+						(!usesTouchKeyboard() && input?._imeModeActive ? input._imeTextarea : overlayInput)?.focus({ preventScroll: true });
 					}
 				},
 			});
@@ -4310,6 +4288,10 @@ export default function webrtc() {
 				window.system_stats = stats;
 			}
 
+            webrtc.ontextinputstate = state => {
+                input?.setTextInputState(state);
+                viewportController?.caret(state?.cursor, input?.displayState?.desktop, usesTouchKeyboard() && !!input?.textInput.focused());
+            };
             webrtc.ondisplaystate = state => {
                 if (state?.protocol !== 1) return;
                 window.__ivncDisplayState = state;
@@ -4344,7 +4326,8 @@ export default function webrtc() {
 			window.__ivncClipboard = null;
 			clipboardNotice?.remove(); clipboardNotice = null;
 			clearTimeout(clipboardNoticeTimer);
-			input?.detach();
+			input?.destroy();
+			window.__ivncInput = null;
 			// reset the data
 			window.isManualResolutionMode = false;
 			window.fps = 0;

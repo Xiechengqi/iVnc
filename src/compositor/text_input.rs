@@ -11,7 +11,7 @@ use smithay::reexports::{
     wayland_server::{
         backend::{ClientId, ObjectId},
         protocol::wl_surface::WlSurface,
-        Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
+        Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
     },
 };
 use std::sync::Mutex;
@@ -21,12 +21,40 @@ pub struct InputState {
     serial: u32,
     enabled: bool,
     pending_enabled: Option<bool>,
+    purpose: u32,
+    pending_purpose: Option<u32>,
+    cursor: Option<[i32; 4]>,
+    pending_cursor: Option<[i32; 4]>,
+    pending_reset: bool,
+}
+
+impl InputState {
+    fn commit(&mut self) {
+        if std::mem::take(&mut self.pending_reset) {
+            self.purpose = 0;
+            self.cursor = None;
+        }
+        if let Some(enabled) = self.pending_enabled.take() {
+            self.enabled = enabled;
+        }
+        if let Some(purpose) = self.pending_purpose.take() {
+            self.purpose = purpose;
+        }
+        if let Some(cursor) = self.pending_cursor.take() {
+            self.cursor = Some(cursor);
+        }
+        if !self.enabled {
+            self.purpose = 0;
+            self.cursor = None;
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct TextInputState {
     instances: Vec<ZwpTextInputV3>,
     focus: Option<WlSurface>,
+    pub dirty: bool,
 }
 
 impl TextInputState {
@@ -54,9 +82,13 @@ impl TextInputState {
                     .unwrap();
                 state.enabled = false;
                 state.pending_enabled = None;
+                state.pending_purpose = None;
+                state.pending_cursor = None;
+                state.pending_reset = false;
             }
         }
         self.focus = surface.cloned();
+        self.dirty = true;
         for instance in &self.instances {
             if let Some(surface) = surface.filter(|s| s.id().same_client_as(&instance.id())) {
                 instance.enter(surface);
@@ -98,6 +130,58 @@ impl TextInputState {
         self.focus
             .as_ref()
             .is_some_and(|s| s.is_alive() && s.id().same_client_as(object))
+    }
+}
+
+impl Compositor {
+    /// Only editor capabilities and caret geometry leave the compositor. Never
+    /// expose surrounding text (especially passwords) to browser viewers.
+    pub fn text_input_message(&self) -> String {
+        let focus = self.text_input.focus.as_ref().filter(|s| s.is_alive());
+        let top = focus.map(|s| self.toplevel_surface(s));
+        let key = top
+            .as_ref()
+            .and_then(|s| self.window_keys.get(&s.id()))
+            .map(uuid::Uuid::to_string);
+        let mut enabled = false;
+        let mut purpose = 0;
+        let mut cursor = None;
+        if let Some(surface) = focus {
+            for instance in self
+                .text_input
+                .instances
+                .iter()
+                .rev()
+                .filter(|i| i.is_alive() && i.id().same_client_as(&surface.id()))
+            {
+                let data = instance
+                    .data::<Mutex<InputState>>()
+                    .unwrap()
+                    .lock()
+                    .unwrap();
+                if !data.enabled {
+                    continue;
+                }
+                enabled = true;
+                purpose = data.purpose;
+                // Popup/subsurface coordinates require their own transforms;
+                // omit those rather than send a misleading desktop position.
+                if top.as_ref() == Some(surface) {
+                    cursor = data.cursor.and_then(|mut rect| {
+                        let window = self.window_for_surface(surface)?;
+                        let location = self.space.element_location(&window)?;
+                        rect[0] = rect[0].saturating_add(location.x);
+                        rect[1] = rect[1].saturating_add(location.y);
+                        Some(rect)
+                    });
+                }
+                break;
+            }
+        }
+        serde_json::json!({"type":"text_input", "data": {
+            "protocol":1, "enabled":enabled, "focus":key, "purpose":purpose, "cursor":cursor
+        }})
+        .to_string()
     }
 }
 
@@ -163,12 +247,30 @@ impl Dispatch<ZwpTextInputV3, Mutex<InputState>> for Compositor {
             return;
         }
         match request {
-            zwp_text_input_v3::Request::Enable => data.pending_enabled = Some(true),
+            zwp_text_input_v3::Request::Enable => {
+                data.pending_enabled = Some(true);
+                data.pending_reset = true;
+                data.pending_purpose = None;
+                data.pending_cursor = None;
+            }
             zwp_text_input_v3::Request::Disable => data.pending_enabled = Some(false),
+            zwp_text_input_v3::Request::SetContentType {
+                purpose: WEnum::Value(purpose),
+                ..
+            } => {
+                data.pending_purpose = Some(purpose as u32);
+            }
+            zwp_text_input_v3::Request::SetCursorRectangle {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                data.pending_cursor = Some([x, y, width.max(0), height.max(0)]);
+            }
             zwp_text_input_v3::Request::Commit => {
-                if let Some(enabled) = data.pending_enabled.take() {
-                    data.enabled = enabled;
-                }
+                data.commit();
+                state.text_input.dirty = true;
                 // Acknowledge the surrounding-text/cursor updates too: Chromium
                 // holds subsequent state changes until this exact serial arrives.
                 input.done(data.serial);
@@ -179,5 +281,33 @@ impl Dispatch<ZwpTextInputV3, Mutex<InputState>> for Compositor {
 
     fn destroyed(state: &mut Self, _: ClientId, resource: &ZwpTextInputV3, _: &Mutex<InputState>) {
         state.text_input.instances.retain(|i| i != resource);
+        state.text_input.dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InputState;
+
+    #[test]
+    fn editor_attributes_are_double_buffered_and_disabled_state_is_empty() {
+        let mut state = InputState {
+            pending_enabled: Some(true),
+            pending_purpose: Some(6),
+            pending_cursor: Some([20, 30, 1, 18]),
+            ..Default::default()
+        };
+        assert!(!state.enabled);
+        assert_eq!(state.purpose, 0);
+        assert_eq!(state.cursor, None);
+        state.commit();
+        assert!(state.enabled);
+        assert_eq!(state.purpose, 6);
+        assert_eq!(state.cursor, Some([20, 30, 1, 18]));
+        state.pending_enabled = Some(false);
+        state.commit();
+        assert!(!state.enabled);
+        assert_eq!(state.purpose, 0);
+        assert_eq!(state.cursor, None);
     }
 }

@@ -188,6 +188,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		activeId = next ? next.id : null;
 		for (const s of streams.values()) {
 			s.wrap.classList.toggle('active', s === next);
+			try { s.frame?.contentWindow?.__ivncInput?.setViewActive(s === next); } catch (_) {}
 			post(s, { type: 'ivnc-view-active', active: s === next });
 		}
 		if (next) {
@@ -332,11 +333,17 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		frames: () => Array.from(streams.values()).map(s => s.frame).filter(Boolean),
 		// null when the main desktop has the keyboard.
 		imeState: () => active()?.ime ?? null,
-		toggleIme() {
+		toggleIme(desired) {
 			const s = active();
 			if (!s) return false;
 			s.frame?.contentWindow?.focus();
-			post(s, { type: 'ivnc-ime' });
+			// Same-origin call preserves the toolbar tap's user activation on iOS.
+			try {
+				const input = s.frame?.contentWindow?.__ivncInput;
+				if (input) { s.ime = input.toggleImeMode(desired); onChange(); return true; }
+			} catch (_) {}
+			// A loading view cannot accept keyboard input yet. Do not queue a
+			// deferred focus which could steal focus from another application.
 			return true;
 		},
 		upload(files) {

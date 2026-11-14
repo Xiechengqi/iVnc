@@ -11,6 +11,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:toolbar": "node ../../scripts/toolbar_interaction_test.mjs",
+    "test:mobile-input": "node ../../scripts/mobile_input_test.mjs",
     "test:viewport": "node ../../scripts/viewport_interaction_test.mjs",
     "test:auth": "node ../../scripts/auth_smoke.mjs"
   },

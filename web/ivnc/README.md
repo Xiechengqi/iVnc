@@ -46,7 +46,7 @@ All messages sent to the client should be JavaScript objects with a `type` prope
 **Type:** `showVirtualKeyboard`
 
 *   **Payload:** `{ type: 'showVirtualKeyboard' }`
-*   **Description:** Focuses a hidden input element to bring up the OS virtual keyboard on mobile/touch devices.
+*   **Description:** Compatibility request to show the active view's editable input proxy while browser user activation remains available. Mobile Safari may reject asynchronously delivered focus. Use the visible keyboard toolbar button for a synchronous user gesture. See [Mobile input](../../docs/MOBILE_INPUT.md) for input handling, application switching and keyboard viewport behavior.
 
 ---
 
@@ -177,6 +177,6 @@ An external dashboard needs to implement:
 4.  **Stats Display:** Read `connectionStat`, `window.fps` global variables.
 5.  **Clipboard:** Display content from `clipboardContentUpdate`, send changes via `clipboardUpdateFromUI`.
 6.  **File Upload:** Dispatch `CustomEvent('requestFileUpload')` on `window` to trigger file input. Listen for `fileUpload` messages for progress.
-7.  **Virtual Keyboard:** Send `showVirtualKeyboard` for mobile/touch environments.
+7.  **Virtual Keyboard:** Use the keyboard toolbar button on mobile/touch devices; `showVirtualKeyboard` messages are an opportunistic compatibility API.
 
 Remember to handle the origin check when sending messages.

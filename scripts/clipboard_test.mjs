@@ -46,7 +46,7 @@ test('actual keyboard path sends no V before clipboard capture and queues later 
         const ctx = { navigator: { platform: 'Linux' }, window: {}, document: { fullscreenElement: null,
             documentElement: { hasAttribute: name => name === 'data-ivnc-modal-blocked' && modalBlocked } }, pasteShortcut, setTimeout, clearTimeout };
         vm.createContext(ctx); vm.runInContext(inputSource + '\nglobalThis.InputClass = Input;', ctx);
-        const input = Object.assign(Object.create(ctx.InputClass.prototype), { _keyDownList: { ControlLeft: 0xffe3 }, _EVENT_MARKER: 'handled', clipboard: t.controller, send: t.controller.sendInput });
+        const input = Object.assign(Object.create(ctx.InputClass.prototype), { _viewActive: true, textInput: { keydown: () => false, owns: () => false }, _keyDownList: { ControlLeft: 0xffe3 }, _EVENT_MARKER: 'handled', clipboard: t.controller, send: t.controller.sendInput });
         modalBlocked = true;
         const beforeBlocked = t.sent.length;
         input._handleKeyDown(t.event());

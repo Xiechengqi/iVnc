@@ -47,4 +47,6 @@ jobs:
         run: npm run test:toolbar
       - name: Test independent viewport and pointer mapping in Chromium and WebKit
         run: npm run test:viewport
+      - name: Test mobile keyboard input in Chromium and WebKit
+        run: npm run test:mobile-input
       - run: npm run build

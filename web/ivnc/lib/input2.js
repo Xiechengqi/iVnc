@@ -24,6 +24,7 @@
 
 import { Queue } from './util.js?v=1';
 import { pasteShortcut } from '../clipboard.js';
+import { TextInput, usesTouchKeyboard } from './text-input.js';
 
 /**
  * Class used by frontend to whitelist elements for input
@@ -1176,17 +1177,19 @@ export class Input {
         this.isComposing = false;
         this.compositionString = "";
         this._imeModeActive = false;
-        this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
-
-        // Hidden textarea to capture IME composition events.
-        // Browsers only fire composition events on editable elements.
-        this._imeTextarea = document.createElement('textarea');
-        this._imeTextarea.style.cssText = 'position:fixed;left:-100px;top:-100px;width:1px;height:16px;color:transparent;background:transparent;caret-color:transparent;outline:none;border:0;padding:0;margin:0;pointer-events:none;z-index:99999;font-size:16px;line-height:16px;overflow:hidden;resize:none;';
-        this._imeTextarea.setAttribute('autocomplete', 'off');
-        this._imeTextarea.setAttribute('autocorrect', 'off');
-        this._imeTextarea.setAttribute('autocapitalize', 'off');
-        this._imeTextarea.setAttribute('spellcheck', 'false');
-        document.body.appendChild(this._imeTextarea);
+        this._viewActive = window.__ivncViewActive !== false;
+        this.textInput = new TextInput({
+            canInput: () => this.inputAttached && this._viewActive && !document.hidden && document.hasFocus()
+                && !document.documentElement.hasAttribute('data-ivnc-modal-blocked'),
+            sendText: text => this._sendCommittedText(text),
+            sendKey: keysym => { this.send('kd,' + keysym); this.send('ku,' + keysym); },
+            onComposition: (active, text) => { this.isComposing = active; this.compositionString = text; },
+            onChange: () => {
+                this._imeModeActive = this.textInput?.enabled || false;
+                this.onimetoggle?.(usesTouchKeyboard() ? this.textInput.focused() : this._imeModeActive);
+            },
+        });
+        this._imeTextarea = this.textInput.element;
 
         this._activeTouches = new Map();
         this._activeTouchIdentifier = null;
@@ -1216,17 +1219,47 @@ export class Input {
         this.isSharedMode = !!enabled;
     }
 
-    toggleImeMode() {
-        this._imeModeActive = !this._imeModeActive;
-        if (this._imeModeActive) {
-            if (this._imeTextarea) this._imeTextarea.focus({ preventScroll: true });
-        } else {
-            if (this._imeTextarea) {
-                this._imeTextarea.blur();
-                this._imeTextarea.value = '';
-            }
+    toggleImeMode(desired) {
+        const active = usesTouchKeyboard() ? this.textInput.focused() : this.textInput.enabled;
+        if (!(desired ?? !active)) this.textInput.hide();
+        else {
+            this._windowMath();
+            const rect = this.textInput.remote?.cursor;
+            const point = rect && this.m ? {
+                clientX: this.m.elementClientX + this.m.mouseOffsetX + rect[0] / this.m.mouseMultiX,
+                clientY: this.m.elementClientY + this.m.mouseOffsetY + (rect[1] + rect[3]) / this.m.mouseMultiY,
+            } : undefined;
+            this.textInput.show(point);
         }
-        return this._imeModeActive;
+        return usesTouchKeyboard() ? this.textInput.focused() : this.textInput.enabled;
+    }
+
+    setViewActive(active) {
+        if (this._viewActive === !!active) return;
+        this._viewActive = !!active;
+        if (!active) { this.textInput.hide(false); this.send('kr'); this.resetKeyboard(); }
+    }
+
+    setTextInputState(state) { this.textInput.remoteState(state); }
+
+    _sendCommittedText(text) {
+        // Legacy editors that do not enable text-input-v3 can still receive
+        // ordinary typing without a clipboard transaction for every character.
+        // Their Unicode/multi-character edits keep the existing text fallback.
+        if (this.textInput.remote?.enabled === false && /^[\x20-\x7e]$/.test(text)
+            && Object.keys(this._keyDownList).length === 0) {
+            const shift = /[A-Z~!@#$%^&*()_+{}|:"<>?]/.test(text);
+            if (shift) this.send('kd,65505');
+            this.send('kd,' + text.codePointAt(0));
+            this.send('ku,' + text.codePointAt(0));
+            if (shift) this.send('ku,65505');
+        } else this.send('t,' + text);
+    }
+
+    destroy() {
+        this.detach();
+        this.textInput.destroy();
+        this.cursorDiv.remove();
     }
 
     updateControllerSlot(newSlot) {
@@ -1412,6 +1445,7 @@ export class Input {
     }
 
     _handleKeyDown(event) {
+        if (!this._viewActive) return;
         if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
         if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
@@ -1432,6 +1466,8 @@ export class Input {
         ) {
             return;
         }
+
+        if (this.textInput.keydown(event)) return;
 
         const keycode = KeyboardUtil.getKeyCode(event);
         if (keycode in this._keyDownList) {
@@ -1607,6 +1643,8 @@ export class Input {
     }
 
     _handleKeyUp(event) {
+        if (!this._viewActive) return;
+        if (this.textInput.owns(event.target) && !(KeyboardUtil.getKeyCode(event) in this._keyDownList)) return;
         if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
         if (this._targetHasClass(event.target, 'taskbar')) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
@@ -1662,125 +1700,20 @@ export class Input {
         }
     }
 
-    _updateCompositionText(newText) {
-        const oldValue = this.compositionString;
-        const newValue = newText || "";
-
-        let diff_start = 0;
-        while (diff_start < oldValue.length && diff_start < newValue.length && oldValue[diff_start] === newValue[diff_start]) {
-            diff_start++;
-        }
-
-        const backspaces = oldValue.length - diff_start;
-        for (let i = 0; i < backspaces; i++) {
-            this._sendKeyEvent(KeyTable.XK_BackSpace, "Backspace", true);
-            this._sendKeyEvent(KeyTable.XK_BackSpace, "Backspace", false);
-        }
-
-        const newChars = newValue.substring(diff_start);
-        for (let i = 0; i < newChars.length; i++) {
-            const keysym = Keysyms.lookup(newChars.charCodeAt(i));
-            if (keysym) {
-                this._sendKeyEvent(keysym, 'Unidentified', true);
-                this._sendKeyEvent(keysym, 'Unidentified', false);
-            }
-        }
-
-        this.compositionString = newValue;
-    }
-
-    _compositionStart(event) {
-        if (!this._guac_markEvent(event)) return;
-        this.isComposing = true;
-        this.compositionString = "";
-    }
-
-    _compositionUpdate(event) {
-        if (!this._guac_markEvent(event)) return;
-        if (!this.isComposing) return;
-        // Store preedit text but don't send keysyms during composition
-        this.compositionString = event.data || "";
-    }
-
-    _compositionEnd(event) {
-        if (!this._guac_markEvent(event)) return;
-        if (!this.isComposing) return;
-        this.isComposing = false;
-        const text = event.data || "";
-        this.compositionString = "";
-        if (text) {
-            // Send committed text directly via text input channel
-            this.send("t," + text);
-        }
-        // Clear textarea content but keep focus for next IME input
-        if (this._imeTextarea) this._imeTextarea.value = '';
-    }
-
-    _handleTextInput(event) {
-        if (!event.data) return;
-
-        const text = event.data;
-        for (let i = 0; i < text.length; i++) {
-            const codepoint = text.charCodeAt(i);
-            const keysym = Keysyms.lookup(codepoint);
-            if (keysym) {
-                this._sendKeyEvent(keysym, 'Unidentified', true);
-                this._sendKeyEvent(keysym, 'Unidentified', false);
-            }
-        }
-    }
-
-    _handleMobileInput(event) {
-        const text = event.target.value;
-        if (!text) {
-            return;
-        }
-        for (let i = 0; i < text.length; i++) {
-            const char = text[i];
-            const isUpperCase = char >= 'A' && char <= 'Z';
-            if (isUpperCase) {
-                this.send("kd," + KeyTable.XK_Shift_L);
-                const lowerChar = char.toLowerCase();
-                const letterKeysym = Keysyms.lookup(lowerChar.charCodeAt(0));
-                if (letterKeysym) {
-                    this.send("kd," + letterKeysym);
-                    this.send("ku," + letterKeysym);
-                }
-                this.send("ku," + KeyTable.XK_Shift_L);
-            } else {
-                const keysym = Keysyms.lookup(char.charCodeAt(0));
-                if (keysym) {
-                    this.send("kd," + keysym);
-                    this.send("ku," + keysym);
-                }
-            }
-        }
-        event.target.value = '';
-    }
-
     _mouseButtonMovement(event) {
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
         }
         if (!document.pointerLockElement && !this._insideContent(event.clientX, event.clientY) && !this.buttonMask) return;
-        // Update IME textarea position on click.
-        if (this._imeTextarea && (event.type === 'mousedown' || event.type === 'pointerdown')) {
-            let imeX = event.clientX;
-            let imeY = event.clientY;
-            if (document.pointerLockElement && this._latestMouseX != null) {
-                imeX = this._latestMouseX;
-                imeY = this._latestMouseY;
-            }
-            if (imeX > 0 || imeY > 0) {
-                this._imeTextarea.style.left = (imeX - 4) + 'px';
-                this._imeTextarea.style.top = (imeY + 4) + 'px';
-            }
-            // If IME mode is active, keep textarea focused after click
+        if (event.type === 'mousedown' || event.type === 'pointerdown') {
+            if (this.isComposing) this.textInput.cancel();
             if (this._imeModeActive) {
-                setTimeout(() => {
-                    if (this._imeTextarea) this._imeTextarea.focus({ preventScroll: true });
-                }, 0);
+                this.textInput.show(event);
+                // The readonly picture overlay must not take focus back after
+                // the synchronous IME focus. Remote mouse events still flow.
+                event.preventDefault();
             }
+            else this.textInput.position(event);
         }
         if (this.inputAttached && !this.use_browser_cursors && !this._useDefaultCursor) {
             this.cursorDiv.style.display = this._cursorImageBitmap ? 'block' : 'none';
@@ -2284,7 +2217,9 @@ export class Input {
                     // Scrolling is handled externally
                 } else if (!swipeDetected && this._activeTouchIdentifier === null && this._activeTouches.size === 1 && this._activeTouches.has(identifier)) {
                     if (duration < this._TAP_MAX_DURATION && deltaDistSq < TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
+                        if (this.isComposing) this.textInput.cancel();
                         this._calculateTouchCoordinates(endedTouch); this.buttonMask |= 1; this._sendMouseState(); preventDefault = true;
+                        this.textInput.touch(endedTouch);
                         setTimeout(() => { this.buttonMask &= ~1; this._sendMouseState(); }, 10);
                     }
                 } else if (!swipeDetected && identifier === this._activeTouchIdentifier) {
@@ -2587,6 +2522,7 @@ export class Input {
     }
 
     _onOverlayInteraction() {
+        this.textInput.hide(false);
         this.send('kr');
         this.resetKeyboard();
         if (this.buttonMask) { this.buttonMask = 0; this._sendMouseState(); }
@@ -2656,26 +2592,12 @@ export class Input {
         this.listeners_context.push(addListener(window, 'keydown', this._handleKeyDown, this, true));
         this.listeners_context.push(addListener(window, 'keyup', this._handleKeyUp, this, true));
         this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
-        this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));
         this.listeners_context.push(addListener(document, 'mousedown', this._handleOutsideClick, this, true));
         this.listeners_context.push(addListener(document, 'touchstart', this._handleOutsideClick, this, true));
 
         this.listeners_context.push(addListener(this.element, 'wheel', this._mouseWheelWrapper, this));
         this.listeners_context.push(addListener(this.element, 'contextmenu', this._contextMenu, this));
 
-        const compositionTarget = this._imeTextarea;
-        this.listeners_context.push(addListener(compositionTarget, 'compositionstart', this._compositionStart, this));
-        this.listeners_context.push(addListener(compositionTarget, 'compositionupdate', this._compositionUpdate, this));
-        this.listeners_context.push(addListener(compositionTarget, 'compositionend', this._compositionEnd, this));
-        // Clear textarea after composition ends to prevent character buildup
-        this.listeners_context.push(addListener(compositionTarget, 'input', function(e) {
-            if (!this.isComposing) {
-                compositionTarget.value = '';
-            }
-        }, this));
-        if (browser.isLinux()) {
-            this.listeners_context.push(addListener(this.element, 'textInput', this._handleTextInput, this));
-        }
         this.listeners_context.push(addListener(this.element, 'pointerdown', this._handlePointerDown, this));
         this.listeners_context.push(addListener(this.element, 'pointermove', this._handlePointerMove, this));
         this.listeners_context.push(addListener(this.element, 'pointerup', this._handlePointerUp, this));
@@ -2707,9 +2629,11 @@ export class Input {
         removeListeners(this.listeners);
         this.listeners = [];
         this.detach_context();
+        this.textInput.remoteState(null);
     }
 
     detach_context() {
+        this.textInput.hide(false);
         removeListeners(this.listeners_context);
         this.listeners_context = [];
         this._setCursor('auto', false);
