@@ -258,6 +258,8 @@ try {
     await waitFor('cursor replay on reconnect',()=>local.evaluate('window.__cursorMessages.some(c=>!!c.curdata)'),1200);
     pass('a reconnected viewer immediately receives the cached bitmap cursor');
     const lock=await evaluate("(()=>{const r=document.getElementById('lock').getBoundingClientRect();return{x:r.left+8,y:r.top+8}})()");
+    // Pointer-lock apps opt out of the default-on browser swipe navigation.
+    await local.evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
     await send(`m,${Math.round(lock.x)},${Math.round(lock.y)},1,0`);await send(`m,${Math.round(lock.x)},${Math.round(lock.y)},0,0`);
     await waitFor('Electron pointer lock',()=>evaluate('!!document.pointerLockElement'));
     await evaluate('window.moves=[]');
@@ -336,14 +338,15 @@ try {
     pass('dragged child keeps its position across a repaint');
     await fixture('minimize');
     await waitFor('family hidden before resize',async()=>(await tabs()).some(w=>w.title==='Protocol Parent'&&w.minimized));
-    await send('r,640x480');
+    const displayBeforeResize=await api('/api/console/display');
+    const resizedDisplay=await api('/api/console/display','PUT',{width:640,height:480,revision:displayBeforeResize.revision});
     await waitFor('smaller desktop',()=>local.evaluate('document.querySelector("video").videoWidth===640&&document.querySelector("video").videoHeight===480'));
     await send('focus,'+parentTab.id);
     await waitFor('resized family restored',async()=>(await fixture()).childFocused===1);
     const restoredPresses=(await fixture()).childPressed;
     await send('m,620,460,1,0');await send('m,620,460,0,0');
     await waitFor('restored dialog clamped into output',async()=>(await fixture()).childPressed===restoredPresses+1);
-    await send(`r,${geometry.width}x${geometry.height}`);
+    await api('/api/console/display','PUT',{...displayBeforeResize.desktop,revision:resizedDisplay.revision});
     await waitFor('desktop size restored',()=>local.evaluate(`document.querySelector("video").videoWidth===${geometry.width}&&document.querySelector("video").videoHeight===${geometry.height}`));
     pass('minimized dialog stays reachable after the desktop shrinks');
     await createFixture('Colliding client',{FIXTURE_PORT:String(collisionPort),FIXTURE_SINGLE:'1',FIXTURE_SURFACE_ID:String(protocol.childId),FIXTURE_NAME:'Colliding Main'});

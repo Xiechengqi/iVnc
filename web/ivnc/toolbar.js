@@ -6,11 +6,15 @@ import { createOrderNotifications } from './app-order.js';
 
 const STRINGS = {
     zh: { apps: '应用', previous: '向左滚动应用', next: '向右滚动应用', more: '更多工具',
+        swipe: '滑动切换应用', swipeOn: '滑动切换应用：已开启，点击关闭', swipeOff: '滑动切换应用：已关闭，点击开启',
+        swipeHint: '双指左右滑动切换应用，纵向滑动滚动内容',
         move: '按住标签左右拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态',
         rename: '修改应用名', save: '保存', cancel: '取消', pending: '保存中…', nameFailed: '无法保存应用名',
         latest: '当前名称：', changed: '应用名已发生变化。请核对当前名称，再次保存以使用你的输入。',
         invalid: '名称不能为空、不能包含换行或控制字符，且不能超过 256 个 UTF-8 字节。' },
     en: { apps: 'Applications', previous: 'Scroll apps left', next: 'Scroll apps right', more: 'More tools',
+        swipe: 'Swipe to switch apps', swipeOn: 'Swipe to switch apps: on, click to turn off', swipeOff: 'Swipe to switch apps: off, click to turn on',
+        swipeHint: 'Swipe horizontally with two fingers to switch apps; swipe vertically to scroll',
         move: 'Hold and drag the tab left or right to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
         rename: 'Rename application', save: 'Save', cancel: 'Cancel', pending: 'Saving…', nameFailed: 'Could not save application name',
         latest: 'Current name: ', changed: 'The application name changed. Review the current name, then save again to use your draft.',
@@ -82,6 +86,36 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     let drag = null, saving = false, destroyed = false, ghost = null, frame = 0, noticeTimer;
     let lastActive = null, editor = null, renameBusy = false;
     let press = null, pressTimer, paintPending = false, suppressedPointer = null;
+    let navigation = null, navigationTimer, syncGestureButton = () => {};
+
+    function resetNavigation(hideNotice = true, repaint = true) {
+        const changed = !!navigation;
+        clearTimeout(navigationTimer);
+        navigation = null;
+        if (hideNotice) { clearTimeout(noticeTimer); notice.hidden = true; }
+        if (changed && repaint && !destroyed) paint();
+    }
+
+    function activateEntry(entry) {
+        if (entry.active && !navigation) return entry.activate() !== false;
+        // Set intent before activation: stream selection can synchronously
+        // re-enter update(), whereas desktop focus arrives over the network.
+        clearTimeout(navigationTimer);
+        const state = { key: entry.key, appId: entry.appId,
+            base: entries.find(e => e.active)?.key, wasActive: !!entry.active, sawChange: false };
+        navigation = state;
+        navigationTimer = setTimeout(() => resetNavigation(), 2000);
+        const previousEntries = entries;
+        try {
+            if (entry.activate() === false) { if (navigation === state) resetNavigation(); return false; }
+        } catch (error) {
+            if (navigation === state) resetNavigation();
+            throw error;
+        }
+        if (entries === previousEntries) paint();
+        reveal(nodes.get(entry.key));
+        return true;
+    }
 
     function finishPress(repaint = true) {
         clearTimeout(pressTimer);
@@ -97,7 +131,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
 
     function activateNode(node) {
         if (destroyed || (press?.cancelled && press.key === node._entry.key)) return;
-        entries.find(e => e.key === node._entry.key && e.appId === node._entry.appId)?.activate();
+        const entry = entries.find(e => e.key === node._entry.key && e.appId === node._entry.appId);
+        if (entry) activateEntry(entry);
     }
 
     function acceptName(app) {
@@ -307,6 +342,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             node.dataset.key = entry.key;
             node.dataset.appId = entry.appId || '';
             node.classList.toggle('focused', !!entry.active);
+            node.classList.toggle('switch-pending', navigation?.key === entry.key && !entry.active);
+            node.setAttribute('aria-busy', String(navigation?.key === entry.key && !entry.active));
             node.classList.toggle('taskbar-app', !!entry.dot);
             const dragged = !!drag?.started && drag.id === entry.appId;
             node.classList.toggle('dragging', dragged);
@@ -541,7 +578,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (event.target === viewport && drag?.started) cancelDrag();
     });
     listen(window, 'blur', cancelInteraction);
-    listen(document, 'visibilitychange', () => { if (document.hidden) cancelInteraction(); });
+    listen(document, 'visibilitychange', () => { if (document.hidden) { cancelInteraction(); resetNavigation(); } });
     listen(document, 'keydown', (event) => {
         if (event.key !== 'Escape') return;
         if (event.isComposing || event.keyCode === 229) return;
@@ -583,6 +620,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const resize = new ResizeObserver(layout);
     resize.observe(element); resize.observe(viewport); resize.observe(list); resize.observe(status);
     const translate = () => {
+        syncGestureButton();
         previous.title = tr('previous'); next.title = tr('next'); more.title = tr('more');
         [previous, next, more].forEach(n => n.setAttribute('aria-label', n.title));
         apps.setAttribute('aria-label', tr('apps'));
@@ -592,32 +630,53 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     };
     const untranslate = onLangChange(translate);
     translate();
+    function addTool(node, primary = false) {
+        const label = make('span', 'toolbar-tool-label', node);
+        toolEntries.push({ node, label, primary });
+        node.setAttribute('role', 'button'); node.tabIndex = 0;
+        listen(node, 'keydown', event => {
+            if (['Enter', ' '].includes(event.key) && !node.classList.contains('disabled')) {
+                event.preventDefault(); event.stopPropagation();
+                if (!event.repeat) node.click();
+            }
+        });
+        layout();
+    }
     return {
         status,
-        addTool(node, primary = false) {
-            const label = make('span', 'toolbar-tool-label', node);
-            toolEntries.push({ node, label, primary });
-            node.setAttribute('role', 'button'); node.tabIndex = 0;
-            listen(node, 'keydown', event => {
-                if (['Enter', ' '].includes(event.key) && !node.classList.contains('disabled')) {
-                    event.preventDefault(); node.click();
-                }
+        addTool,
+        addGestureToggle(controller, onToggle = () => {}) {
+            const button = make('button', 'taskbar-pin toolbar-gesture-action');
+            button.type = 'button';
+            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16m-4-4 4 4-4 4M8 8l-4 4 4 4"/></svg>';
+            syncGestureButton = () => {
+                button.title = tr(controller.enabled() ? 'swipeOn' : 'swipeOff');
+                button.setAttribute('aria-label', tr('swipe'));
+                button.setAttribute('aria-description', tr('swipeHint'));
+                button.setAttribute('aria-pressed', String(controller.enabled()));
+                button.classList.toggle('active', controller.enabled());
+            };
+            listen(button, 'click', () => {
+                closeMenu(); closeInfo();
+                controller.setEnabled(!controller.enabled());
+                resetNavigation();
+                syncGestureButton();
+                onToggle(controller.enabled());
             });
-            layout();
-        },
-        addMenuAction(node) {
-            menu.appendChild(node);
-            layout();
+            listen(document, 'visibilitychange', () => { if (document.hidden) controller.reset(); });
+            syncGestureButton();
+            addTool(button, true);
+            return button;
         },
         navigate(direction) {
-            if (destroyed || saving || press || drag?.started || editor) return null;
+            if (destroyed || saving || press || drag?.started || editor || !menu.hidden || !info.hidden || ![-1, 1].includes(direction)) return null;
             const sorted = orderedEntries();
-            const focused = sorted.findIndex(entry => entry.active);
+            const focused = sorted.findIndex(entry => navigation ? entry.key === navigation.key : entry.active);
             const current = focused < 0 ? (direction > 0 ? -1 : sorted.length) : focused;
             for (let index = current + direction; index >= 0 && index < sorted.length; index += direction) {
                 const entry = sorted[index];
                 if (entry.available === false || entry.stable === false) continue;
-                entry.activate();
+                if (!activateEntry(entry)) return null;
                 const label = entry.label;
                 clearTimeout(noticeTimer);
                 notice.textContent = label;
@@ -627,6 +686,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             }
             return null;
         },
+        resetNavigation,
         update(data, streams = [], streamActive = false) {
             acceptOrder(data);
             for (const w of data.windows || []) acceptName({ id: w.managed_app_id, name: w.managed_app_name, name_revision: w.name_revision });
@@ -641,6 +701,12 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
                 stable: typeof w.window_key === 'string' && w.window_key.length > 0,
                 activate: () => activateWindow(w.id, w.window_key)
             })).concat(streams);
+            if (navigation) {
+                const target = entries.find(e => e.key === navigation.key && e.appId === navigation.appId);
+                if (entries.find(e => e.active)?.key !== navigation.base) navigation.sawChange = true;
+                if (!target || target.available === false || target.stable === false) resetNavigation(true, false);
+                else if (target.active && (!navigation.wasActive || navigation.sawChange)) resetNavigation(false, false);
+            }
             if (editor && !entries.some(e => e.key === editor.key && e.appId === editor.id && e.canRename)) closeEditor();
             for (const id of names.keys()) if (!entries.some(e => e.appId === id)) names.delete(id);
             if (press && !entries.some(e => e.key === press.key && e.appId === press.appId)) press.cancelled = true;
@@ -650,6 +716,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         interacting: () => !!editor || !!press || !!drag?.started || !menu.hidden || !info.hidden,
         destroy() {
             destroyed = true;
+            clearTimeout(navigationTimer);
             closeEditor(); cancelInteraction(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
             clearTimeout(noticeTimer); untranslate(); notifications.destroy();
             element.remove(); nodes.clear();

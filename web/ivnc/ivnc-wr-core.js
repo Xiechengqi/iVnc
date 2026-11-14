@@ -67,9 +67,6 @@ const MAIN_I18N = {
 		proxyTooltip: '代理',
 		terminalTooltip: '终端',
 		consoleTooltip: '控制台',
-		gestureNavigation: '横滑切换应用',
-		gestureNavigationHint: '开启后，横向滑动切换应用；纵向滑动滚动内容',
-		gestureReverse: '反转横滑方向',
 		// floating windows
 		minimize: '最小化',
 		terminalBackgroundTranslucent: '半透明',
@@ -178,9 +175,6 @@ const MAIN_I18N = {
 		proxyTooltip: 'Proxy',
 		terminalTooltip: 'Terminal',
 		consoleTooltip: 'Console',
-		gestureNavigation: 'Swipe to switch apps',
-		gestureNavigationHint: 'Horizontal swipes switch apps; vertical swipes scroll content',
-		gestureReverse: 'Reverse swipe direction',
 		minimize: 'Minimize',
 		terminalBackgroundTranslucent: 'Translucent',
 		terminalBackgroundOpaque: 'Opaque',
@@ -3656,67 +3650,12 @@ export default function webrtc() {
 				canReorder: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
 				canRename: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
 				activateWindow: (id, key) => {
+					if (!webrtc.sendDataChannelMessage(key ? `focus-key,${key}` : `focus,${id}`)) return false;
 					if (appStreams?.activeId()) appStreams.activate(null);
-					webrtc.sendDataChannelMessage(key ? `focus-key,${key}` : `focus,${id}`);
+					return true;
 				},
 				onInteraction: (active) => active ? showTaskbar() : hideTaskbar(),
 			});
-			if (!window.__IVNC_EMBED__) {
-				gestureController = createGestureNavigation({
-					navigate: direction => toolbarController?.navigate(direction),
-					canHandle: source => {
-						if (document.hidden || toolbarController?.interacting() || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return false;
-						if (source === window) return !appStreams?.activeId();
-						return !!appStreams?.isActiveFrame(source);
-					},
-				});
-				gestureController.setEnabled(getBoolParam('gesture_navigation', false));
-				gestureController.setReversed(getBoolParam('gesture_navigation_reverse', false));
-				window.__ivncGestureNavigation = gestureController;
-				const syncGestureStyle = doc => doc?.documentElement?.classList.toggle('ivnc-gesture-navigation', gestureController.enabled());
-				const syncGestureStyles = () => {
-					syncGestureStyle(document);
-					for (const frame of appStreams?.frames() || []) {
-						try { syncGestureStyle(frame.contentDocument); } catch (_) {}
-					}
-				};
-				const releaseGesturePointerLock = doc => {
-					if (doc?.pointerLockElement?.id === 'overlayInput') doc.exitPointerLock();
-				};
-				const gestureButton = document.createElement('button');
-				gestureButton.type = 'button'; gestureButton.className = 'toolbar-gesture-action';
-				setLiveText(gestureButton, 'gestureNavigation');
-				setLiveTitle(gestureButton, 'gestureNavigationHint');
-				const reverseButton = document.createElement('button');
-				reverseButton.type = 'button'; reverseButton.className = 'toolbar-gesture-action';
-				setLiveText(reverseButton, 'gestureReverse');
-				const syncButtons = () => {
-					gestureButton.setAttribute('aria-pressed', String(gestureController.enabled()));
-					reverseButton.setAttribute('aria-pressed', String(gestureController.reversed()));
-					reverseButton.hidden = !gestureController.enabled();
-					syncGestureStyles();
-				};
-				gestureButton.addEventListener('click', () => {
-					gestureController.setEnabled(!gestureController.enabled());
-					if (gestureController.enabled()) {
-						releaseGesturePointerLock(document);
-						for (const frame of appStreams?.frames() || []) {
-							try { releaseGesturePointerLock(frame.contentDocument); } catch (_) {}
-						}
-					}
-					setBoolParam('gesture_navigation', gestureController.enabled());
-					syncButtons();
-				});
-				reverseButton.addEventListener('click', () => {
-					gestureController.setReversed(!gestureController.reversed());
-					setBoolParam('gesture_navigation_reverse', gestureController.reversed());
-					syncButtons();
-				});
-				toolbarController.addMenuAction(gestureButton);
-				toolbarController.addMenuAction(reverseButton);
-				syncButtons();
-			}
-
 			// Pin button (first element in taskbar)
 			let taskbarPinned = getBoolParam('taskbar_pinned', true);
 			// SVG icons for pin states
@@ -3741,6 +3680,40 @@ export default function webrtc() {
 				viewportController?.layout();
 			});
 			toolbarController.addTool(pinBtn, true);
+			if (!window.__IVNC_EMBED__) {
+				gestureController = createGestureNavigation({
+					navigate: direction => toolbarController?.navigate(direction),
+					canHandle: source => {
+						if (document.hidden || toolbarController?.interacting() || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return false;
+						if (source === window) return !appStreams?.activeId();
+						return !!appStreams?.isActiveFrame(source);
+					},
+				});
+				gestureController.setEnabled(getBoolParam('gesture_navigation', true));
+				window.__ivncGestureNavigation = gestureController;
+				const syncGestureStyle = doc => doc?.documentElement?.classList.toggle('ivnc-gesture-navigation', gestureController.enabled());
+				const syncGestureStyles = () => {
+					syncGestureStyle(document);
+					for (const frame of appStreams?.frames() || []) {
+						try { syncGestureStyle(frame.contentDocument); } catch (_) {}
+					}
+				};
+				const releaseGesturePointerLock = doc => {
+					if (doc?.pointerLockElement?.id === 'overlayInput') doc.exitPointerLock();
+				};
+				toolbarController.addGestureToggle(gestureController, enabled => {
+					if (enabled) {
+						releaseGesturePointerLock(document);
+						for (const frame of appStreams?.frames() || []) {
+							try { releaseGesturePointerLock(frame.contentDocument); } catch (_) {}
+						}
+					}
+					setBoolParam('gesture_navigation', enabled);
+					syncGestureStyles();
+				});
+				syncGestureStyles();
+			}
+
             displayModeButton = document.createElement('button');
             displayModeButton.type = 'button'; displayModeButton.className = 'taskbar-pin toolbar-display-mode';
             displayModeButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 11V7h4m6 6v4h-4"/></svg>';
@@ -4139,6 +4112,10 @@ export default function webrtc() {
 
 			webrtc.onconnectionstatechange = (state) => {
 				videoConnected = state;
+				if (['failed', 'disconnected', 'closed'].includes(state)) {
+					gestureController?.reset();
+					toolbarController?.resetNavigation();
+				}
 				if (videoConnected === "connected") {
 					// Repeatedly emit minimum latency target
 					webrtc.peerConnection.getReceivers().forEach((receiver) => {
@@ -4204,6 +4181,8 @@ export default function webrtc() {
 			}
 
 			webrtc.ondatachannelclose = () => {
+				gestureController?.reset();
+				toolbarController?.resetNavigation();
 				lastSentResolution = null;
 				clearTimeout(resizeTimer); resizeTimer = null;
 				resetNetworkQuality('offline');

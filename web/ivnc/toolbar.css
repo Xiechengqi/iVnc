@@ -77,6 +77,13 @@
 .ivnc-toolbar .toolbar-viewport.sorting .taskbar-item { cursor: grabbing; }
 .ivnc-toolbar .taskbar-item.dragging { opacity: .45; }
 .ivnc-toolbar .taskbar-item.drop-target { border-left: 3px solid #7cb3ff; }
+.ivnc-toolbar .taskbar-item.switch-pending { box-shadow: inset 0 0 0 1px #7cb3ff; }
+.ivnc-toolbar .toolbar-gesture-action.active,
+.ivnc-toolbar .toolbar-gesture-action.active:hover {
+    color: #8abbff;
+    background: rgba(76, 134, 230, .25);
+    border-color: rgba(76, 134, 230, .5);
+}
 .ivnc-toolbar button.toolbar-scroll,
 .ivnc-toolbar button.toolbar-more {
     flex: 0 0 auto;
@@ -121,22 +128,6 @@
     margin: 2px 0;
 }
 .ivnc-toolbar .toolbar-more-menu .toolbar-tool-label { display: inline; }
-.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action {
-    display: block;
-    width: 100%;
-    margin: 2px 0;
-    padding: 5px 8px;
-    border: 0;
-    border-radius: 4px;
-    background: transparent;
-    color: #eee;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-}
-.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action:hover,
-.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action[aria-pressed="true"] { background: #355d8e; }
-.ivnc-toolbar .toolbar-more-menu .toolbar-gesture-action[hidden] { display: none; }
 .ivnc-toolbar .toolbar-info { right: 0; width: max-content; }
 .ivnc-toolbar .toolbar-notice { right: 8px; max-width: min(420px, calc(100vw - 16px)); }
 .ivnc-toolbar .toolbar-rename { width: 320px; z-index: 3; white-space: normal; }

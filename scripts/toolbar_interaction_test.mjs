@@ -21,6 +21,7 @@ const fixture = `<!doctype html><meta name="viewport" content="width=device-widt
 <script type="module">
 import { createToolbar } from '/toolbar.js';
 import { createAppStreams } from '/app-streams.js';
+import { createGestureNavigation } from '/gesture-navigation.mjs';
 import { setLang } from '/lib/i18n.js?v=1';
 setLang('zh');
 const data = { order_revision:1, ordered_ids:['alpha','beta','shared','remote'], windows:[
@@ -33,8 +34,12 @@ let streams;
 const toolbar = createToolbar({element:document.querySelector('#taskbar'),
     canReorder:new URLSearchParams(location.search).get('reorder') !== '0', canRename:true,
     activateWindow:(id,key) => {
-        calls.push({id,key}); streams.activate(null);
+        calls.push({id,key});
+        if (window.fixture?.rejectFocus) return false;
+        streams.activate(null);
+        if (window.fixture?.deferFocus) return true;
         data.windows.forEach(w => w.focused = w.window_key === key); render();
+        return true;
     }
 });
 function render() { toolbar.update(data, streams.tabs(), !!streams.activeId()); }
@@ -44,10 +49,25 @@ streams.update([
     {id:'remote',name:'远程应用',name_revision:0,can_rename:true,kind:'remote',status:'connected'}
 ]);
 render();
+const navigation = createGestureNavigation({navigate:direction=>toolbar.navigate(direction),
+    now:()=>window.fixture.clock,
+    canHandle:source=>!document.hidden && !toolbar.interacting() && (source===window ? !streams.activeId() : streams.isActiveFrame(source))});
+navigation.setEnabled(localStorage.getItem('test.gesture_navigation') !== 'false');
+toolbar.addGestureToggle(navigation,enabled=>localStorage.setItem('test.gesture_navigation',String(enabled)));
+const extra = document.createElement('div'); extra.className='taskbar-pin fixture-tool'; extra.title='Other tool';
+toolbar.addTool(extra);
+function wheel(event,source) {
+    window.fixture.wheelCount++;
+    window.fixture.lastWheel=[event.deltaX,event.deltaY];
+    if(navigation.wheel(event,source)) {event.preventDefault(); event.stopPropagation();}
+    else window.fixture.scrolls.push([event.deltaX,event.deltaY]);
+}
+document.querySelector('#desktop').addEventListener('wheel',e=>wheel(e,window),{passive:false});
 document.addEventListener('pointerdown', e => pointerIds.push(e.pointerId), true);
-window.fixture = {data,calls,toolbar,streams,render,pointerIds};
+window.fixture = {data,calls,toolbar,streams,render,pointerIds,navigation,wheel,setLang,clock:0,wheelCount:0,scrolls:[]};
 </script>`;
-const embedded = `<!doctype html><div id="app" tabindex="0">Embedded application</div><script>
+const embedded = `<!doctype html><style>#app{position:fixed;inset:0}</style><div id="app" tabindex="0">Embedded application</div><script>
+document.querySelector('#app').addEventListener('wheel',e=>parent.fixture.wheel(e,window),{passive:false});
 addEventListener('message', e => {
     if(e.origin !== location.origin || e.source !== parent) return;
     if(e.data.type === 'ivnc-view-active') {
@@ -86,8 +106,138 @@ const drag = async (page, padding = false) => {
     await page.mouse.move(end.x + end.width - 2, start.y);
     return start;
 };
+const nativeWheel = async (page, time, dx, dy = 0) => {
+    // At DPR 2 the engines translate injected wheel units differently. Measure
+    // the actual DOM units once, with navigation disabled, before replaying a
+    // trace. The tested input remains native mouse.wheel in both engines.
+    if (!await page.evaluate(()=>fixture.wheelScale)) {
+        const initial=await page.evaluate(()=>{const enabled=fixture.navigation.enabled();fixture.navigation.setEnabled(false);return {enabled,count:fixture.wheelCount};});
+        await page.mouse.move(200,200); await page.mouse.wheel(16,0);
+        await page.waitForFunction(count=>fixture.wheelCount>count,initial.count);
+        await page.evaluate(enabled=>{fixture.wheelScale=16/fixture.lastWheel[0];fixture.navigation.setEnabled(enabled);fixture.scrolls=[];},initial.enabled);
+    }
+    const count = await page.evaluate(time => {fixture.clock=time; return fixture.wheelCount;},time);
+    const scale=await page.evaluate(()=>fixture.wheelScale);
+    await page.mouse.move(200,200); await page.mouse.wheel(dx*scale,dy*scale);
+    await page.waitForFunction(count=>fixture.wheelCount>count,count);
+};
+const localNavigation = page => page.evaluate(() => {
+    fixture.deferFocus=true;
+    fixture.data.windows[2].managed_app_id='gamma';
+    fixture.data.ordered_ids.splice(2,0,'gamma'); fixture.data.order_revision++;
+    fixture.render();
+});
 
 const cases = [
+    ['one default-on icon toggle persists and keyboard/hover states remain consistent', async page => {
+        const toggle=page.getByRole('button',{name:'滑动切换应用',exact:true});
+        assert.equal(await toggle.getAttribute('aria-pressed'),'true');
+        assert.equal(await page.locator('.toolbar-gesture-action').count(),1);
+        assert.equal(await toggle.locator('svg').count(),1);
+        assert(await toggle.evaluate(n=>n.parentElement.classList.contains('toolbar-tools')));
+        const color=await toggle.evaluate(n=>getComputedStyle(n).backgroundColor);
+        await toggle.hover(); assert.equal(await toggle.evaluate(n=>getComputedStyle(n).backgroundColor),color);
+        await toggle.focus(); await page.keyboard.press('Space');
+        assert.equal(await toggle.getAttribute('aria-pressed'),'false');
+        await page.reload(); await page.waitForFunction(()=>!!window.fixture);
+        assert.equal(await toggle.getAttribute('aria-pressed'),'false');
+        await toggle.focus(); await page.keyboard.press('Enter');
+        assert.equal(await toggle.getAttribute('aria-pressed'),'true');
+        await page.evaluate(()=>fixture.setLang('en'));
+        assert.equal(await toggle.count(),0);
+        assert.equal(await page.getByRole('button',{name:'Swipe to switch apps',exact:true}).getAttribute('aria-pressed'),'true');
+    }],
+    ['compact tools keep the swipe toggle visible outside the overflow menu', async page => {
+        await page.setViewportSize({width:430,height:800});
+        const toggle=page.locator('.toolbar-gesture-action');
+        await page.locator('.toolbar-more').click();
+        assert(await page.locator('.toolbar-more-menu .fixture-tool').isVisible());
+        assert(await toggle.isVisible());
+        assert(await toggle.evaluate(n=>n.parentElement.classList.contains('toolbar-tools')));
+        await toggle.click();
+        assert.equal(await toggle.getAttribute('aria-pressed'),'false');
+        assert.equal(await page.locator('.toolbar-more-menu').isVisible(),false);
+    }],
+    ['rapid navigation advances from pending intent across delayed and intermediate focus updates', async page => {
+        await localNavigation(page);
+        await page.evaluate(()=>{fixture.toolbar.navigate(1);fixture.toolbar.navigate(1);});
+        assert.deepEqual(await calls(page),[2,3]);
+        assert.equal(await row(page,'gamma').getAttribute('aria-busy'),'true');
+        assert(await row(page,'alpha').evaluate(n=>n.classList.contains('focused')));
+        await page.evaluate(()=>{
+            fixture.data.windows.forEach(w=>w.focused=w.id===2);fixture.render();
+            fixture.toolbar.navigate(-1);
+            fixture.data.windows.forEach(w=>w.focused=w.id===3);fixture.render();
+            fixture.data.windows.forEach(w=>w.focused=w.id===2);fixture.render();
+        });
+        assert.deepEqual(await calls(page),[2,3,2]);
+        assert.equal(await row(page,'beta').getAttribute('aria-busy'),'false');
+        assert(await row(page,'beta').evaluate(n=>n.classList.contains('focused')));
+    }],
+    ['a direct tab click supersedes pending swipes even when its old focus is still active', async page => {
+        await localNavigation(page);
+        await page.evaluate(()=>{fixture.toolbar.navigate(1);fixture.toolbar.navigate(1);});
+        await click(page,'alpha');
+        await page.evaluate(()=>{
+            fixture.render();
+            fixture.data.windows.forEach(w=>w.focused=w.id===2);fixture.render();
+            fixture.toolbar.navigate(1);
+        });
+        assert.deepEqual(await calls(page),[2,3,1,2]);
+    }],
+    ['pending navigation follows reordered keys and clears when its target disappears', async page => {
+        await localNavigation(page);
+        await page.evaluate(()=>{
+            fixture.toolbar.navigate(1);
+            fixture.data.ordered_ids=['beta','alpha','gamma','shared','remote'];fixture.data.order_revision++;fixture.render();
+            fixture.toolbar.navigate(1);
+            fixture.data.windows=fixture.data.windows.filter(w=>w.id!==1);fixture.render();
+        });
+        assert.deepEqual(await calls(page),[2,1]);
+        assert.equal(await page.locator('.switch-pending').count(),0);
+    }],
+    ['failed, timed out and explicitly reset navigation return to confirmed focus', async page => {
+        await localNavigation(page);
+        await page.evaluate(()=>{fixture.rejectFocus=true;fixture.toolbar.navigate(1);fixture.rejectFocus=false;fixture.toolbar.navigate(1);});
+        assert.deepEqual(await calls(page),[2,2]);
+        await page.waitForFunction(()=>!document.querySelector('.switch-pending'));
+        await page.evaluate(()=>{fixture.toolbar.navigate(1);fixture.toolbar.resetNavigation();fixture.toolbar.navigate(1);});
+        assert.deepEqual(await calls(page),[2,2,2,2]);
+    }],
+    ['navigation skips invalid windows, stops at the ends and resets when the page hides', async page => {
+        await localNavigation(page);
+        await page.evaluate(()=>{
+            fixture.streams.update([]);
+            fixture.data.windows[1].window_key='';fixture.render();
+            fixture.toolbar.navigate(1);
+            if(fixture.toolbar.navigate(1)!==null) throw Error('navigation wrapped at the last app');
+            Object.defineProperty(document,'hidden',{configurable:true,value:true});
+            document.dispatchEvent(new Event('visibilitychange'));delete document.hidden;
+            fixture.toolbar.navigate(1);
+        });
+        assert.deepEqual(await calls(page),[3,3]);
+    }],
+    ['native wheel bursts switch desktop/shared/remote views within 160 ms and keep existing iframes', async page => {
+        await nativeWheel(page,0,120);
+        for(const [t,dx] of [[16,50],[32,20],[48,5],[64,1],[160,55],[176,55]]) await nativeWheel(page,t,dx);
+        await page.waitForFunction(()=>fixture.streams.activeId()==='shared' && document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement?.dataset.active==='true');
+        await page.evaluate(()=>window.originalShared=document.querySelector('.app-stream.active iframe'));
+        for(const [t,dx] of [[192,30],[208,6],[224,1],[320,55],[336,55]]) await nativeWheel(page,t,dx);
+        await page.waitForFunction(()=>fixture.streams.activeId()==='remote' && document.querySelector('.app-stream.active iframe')?.contentDocument?.documentElement?.dataset.active==='true');
+        await page.evaluate(()=>window.originalRemote=document.querySelector('.app-stream.active iframe'));
+        for(const [t,dx] of [[480,-55],[496,-55],[640,-55],[656,-55]]) await nativeWheel(page,t,dx);
+        assert.deepEqual(await calls(page),[2,2]);
+        assert.equal(await page.evaluate(()=>fixture.streams.activeId()),null);
+        assert(await page.evaluate(()=>originalShared.isConnected && originalRemote.isConnected));
+        assert.deepEqual(await page.evaluate(()=>fixture.scrolls),[]);
+    }],
+    ['native vertical scrolling and disabled horizontal scrolling do not switch apps', async page => {
+        await nativeWheel(page,0,0,80);
+        await page.locator('.toolbar-gesture-action').click();
+        await nativeWheel(page,160,120);
+        assert.deepEqual(await calls(page),[]);
+        assert.deepEqual(await page.evaluate(()=>fixture.scrolls),[[0,80],[120,0]]);
+    }],
     ['native title, padding and unmanaged tab clicks', async page => {
         await click(page);
         const edge = await point(row(page, 'alpha'), true); await page.mouse.click(edge.x, edge.y);

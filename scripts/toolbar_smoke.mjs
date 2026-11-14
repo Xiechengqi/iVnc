@@ -164,6 +164,21 @@ try {
     };
     await call('Runtime.enable'); await call('Page.enable');
     await waitFor('production toolbar and data channel', () => evaluate(`!!document.querySelector('.ivnc-toolbar') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
+    await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
+    await call('Page.reload');
+    await waitFor('saved gesture preference after reload', () => evaluate(`!!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'false');
+    await evaluate(`(() => {
+        for(const key of Object.keys(localStorage)) if(key.endsWith('_gesture_navigation')) localStorage.removeItem(key);
+        const prefix=location.href.split('#')[0].replace(/[^a-zA-Z0-9.-_]/g,'_');
+        localStorage.setItem(prefix+'_gesture_navigation_reverse','true');
+    })()`);
+    await call('Page.reload');
+    await waitFor('default gesture preference after reload', () => evaluate(`!!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    await waitFor('decoded desktop after reload', () => evaluate(`(() => {const v=document.querySelector('#stream');return v?.videoWidth>0 && v.readyState>=2 && window.__ivncDisplayState?.protocol===1;})()`), 60000);
+    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
+    pass('swipe navigation defaults on, persists an explicit off and ignores the obsolete reverse preference');
     const rows = (await api('/api/apps')).apps;
     const fake = { windows: rows.filter(a => ids.slice(0, 20).includes(a.id)).map((a, i) => ({ id: i, window_key: `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, managed_app_id: a.id, managed_app_name:a.name, name_revision:a.name_revision, can_rename:a.can_rename, title: a.name, app_id: 'test.class', focused: false })),
         apps: rows.filter(a => ids.slice(20).includes(a.id)).map((a, i) => ({ id: a.id, name: a.name, name_revision:a.name_revision, can_rename:a.can_rename, kind: i % 2 ? 'shared' : 'remote', status: i % 2 ? 'starting' : 'connecting' })), ...before };
@@ -202,13 +217,10 @@ try {
     assert.deepEqual(await toolbarIds(), ids);
     pass('ordinary, shared and remote tabs share one application order');
 
-    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'false');
+    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
     await evaluate(`(() => {
-        const menu=document.querySelector('.toolbar-more-menu');
-        document.querySelector('.toolbar-more').click();
-        if(menu.hidden) throw Error('gesture menu did not open');
-        document.querySelector('.toolbar-gesture-action').click();
-        if(!menu.hidden) throw Error('gesture menu stayed open');
+        const button=document.querySelector('.toolbar-gesture-action');
+        if(document.querySelectorAll('.toolbar-gesture-action').length!==1 || !button.querySelector('svg') || !button.parentElement.classList.contains('toolbar-tools')) throw Error('expected one directly available swipe icon');
         const target=document.querySelector('#overlayInput'),rect=target.getBoundingClientRect();
         for(const deltaX of [40,40,40,190]) target.dispatchEvent(new WheelEvent('wheel',{deltaX,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2,bubbles:true,cancelable:true}));
     })()`);
@@ -218,7 +230,7 @@ try {
     await delay(160);
     await evaluate(`(() => {const target=document.querySelector('#overlayInput'),r=target.getBoundingClientRect();target.dispatchEvent(new WheelEvent('wheel',{deltaX:120,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));})()`);
     assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), true);
-    pass('opt-in horizontal wheel switches one ordered tab and leaves normal scrolling available when disabled');
+    pass('default-on horizontal wheel switches one ordered tab and leaves normal scrolling available when disabled');
 
     for (const count of [0, 1, 10, 30]) {
         await evaluate(`window.__synthetic = {...${JSON.stringify(fake)}, windows:${JSON.stringify(fake.windows)}.slice(0,Math.min(${count},20)), apps:${JSON.stringify(fake.apps)}.slice(0,Math.max(0,${count}-20))}; window.__ivncWebRTC.ontaskbarupdate(window.__synthetic)`);
