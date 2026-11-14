@@ -34,6 +34,7 @@
 * @property {function} disconnect - close connection to server.
 */
 import { t } from "./i18n.js?v=1";
+import { checkAuthentication } from '../auth-client.js';
 
 const LIB_I18N = {
     zh: { forcedDisconnectReload: "您已被管理员断开连接，请刷新页面重新连接" },
@@ -207,7 +208,9 @@ export class WebRTCDemoSignaling {
      * @private
      * @event
      */
-    _onServerError() {
+    async _onServerError() {
+        const socket = this._ws_conn;
+        if (await checkAuthentication() === false || this._destroyed || this._ws_conn !== socket || window.__ivncAuthRedirecting) return;
         this._setStatus("Connection error, retry in 3 seconds.");
         this.retry_count++;
         if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
@@ -305,8 +308,10 @@ export class WebRTCDemoSignaling {
      * @private
      * @event
      */
-    _onServerClose(event) {
+    async _onServerClose(event) {
+        const socket = this._ws_conn;
         this._stopKeepalive();
+        if (await checkAuthentication() === false || this._destroyed || this._ws_conn !== socket || window.__ivncAuthRedirecting) return;
         if (this.state !== 'connecting') {
             this.state = 'disconnected';
 
@@ -338,7 +343,7 @@ export class WebRTCDemoSignaling {
      * server and the server (peer) to negotiate ICE candidates and media capabilities.
      */
     connect() {
-        if (this._destroyed) return;
+        if (this._destroyed || window.__ivncAuthRedirecting) return;
         clearTimeout(this._retryTimer);
         clearTimeout(this._sessionTimer);
         this._stopKeepalive();

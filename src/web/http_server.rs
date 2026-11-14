@@ -8,21 +8,21 @@
 
 #![allow(dead_code)]
 
+use crate::web::auth::{self, AuthContext, TransportSecurity};
 use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::shared::SharedState;
 use axum::extract::Path;
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::ws::{Message as AxumWsMessage, WebSocket as AxumWebSocket},
-    extract::{Query, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Query, State, WebSocketUpgrade},
     http::{header, HeaderMap, Method, Request, StatusCode, Uri},
     middleware,
     response::{IntoResponse, Response},
     routing::{any, get, post},
-    Router,
+    Extension, Router,
 };
 
-use base64::Engine;
 use hyper_util::rt::TokioIo;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,15 @@ pub async fn run_http_server_with_webrtc(
         .route("/", get(index_handler))
         .route("/index.html", get(index_handler))
         .route("/connect", get(index_handler))
+        .route(
+            "/auth/login",
+            get(auth::login_page)
+                .post(auth::login)
+                .layer(DefaultBodyLimit::max(8192)),
+        )
+        .route("/login.html", get(auth::login_page))
+        .route("/auth/session", get(auth::status))
+        .route("/auth/logout", post(auth::logout))
         .route("/health", get(health_handler))
         .route("/version", get(public_version_handler))
         .route("/metrics", get(metrics_handler))
@@ -171,7 +180,9 @@ pub async fn run_http_server_with_webrtc(
         info!("Adding WebRTC signaling endpoint at /webrtc");
         let state_clone = state.clone();
         let manager_clone = manager.clone();
-        let signaling_handler = move |headers: axum::http::HeaderMap, ws: WebSocketUpgrade| {
+        let signaling_handler = move |headers: axum::http::HeaderMap,
+                                      Extension(auth): Extension<AuthContext>,
+                                      ws: WebSocketUpgrade| {
             let state = state_clone.clone();
             let manager = manager_clone.clone();
             let host_str = headers
@@ -180,8 +191,10 @@ pub async fn run_http_server_with_webrtc(
                 .map(|s| s.to_string());
             async move {
                 ws.on_upgrade(move |socket| async move {
-                    crate::transport::handle_signaling_connection(socket, state, manager, host_str)
-                        .await;
+                    crate::transport::handle_signaling_connection(
+                        socket, state, manager, host_str, auth,
+                    )
+                    .await;
                 })
             }
         };
@@ -227,7 +240,7 @@ pub async fn run_http_server_with_webrtc(
         ))
         .layer(middleware::from_fn_with_state(
             auth_state.clone(),
-            basic_auth_middleware,
+            auth::middleware,
         ))
         .layer(middleware::from_fn_with_state(
             auth_state,
@@ -348,7 +361,7 @@ pub async fn run_http_server_with_webrtc(
                     // TLS handshake
                     match acceptor.accept(tcp_stream).await {
                         Ok(tls_stream) => {
-                            serve_http(TokioIo::new(tls_stream), app, peer_addr).await;
+                            serve_http(TokioIo::new(tls_stream), app, peer_addr, true).await;
                         }
                         Err(e) => {
                             debug!("TLS handshake error from {}: {}", peer_addr, e);
@@ -382,7 +395,7 @@ pub async fn run_http_server_with_webrtc(
                     handle_ice_connection(tcp_stream, peer_addr, sm, media_router).await
                 }
                 ConnectionType::Http | ConnectionType::Tls => {
-                    serve_http(TokioIo::new(tcp_stream), app, peer_addr).await;
+                    serve_http(TokioIo::new(tcp_stream), app, peer_addr, false).await;
                 }
                 ConnectionType::Unknown => {
                     warn!(
@@ -396,7 +409,7 @@ pub async fn run_http_server_with_webrtc(
 }
 
 /// Serve HTTP over a generic IO stream
-async fn serve_http<I>(io: TokioIo<I>, app: Router<()>, peer_addr: SocketAddr)
+async fn serve_http<I>(io: TokioIo<I>, app: Router<()>, peer_addr: SocketAddr, secure: bool)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -405,6 +418,7 @@ where
         async move {
             let mut req = req;
             req.extensions_mut().insert(HttpPeerAddr(peer_addr));
+            req.extensions_mut().insert(TransportSecurity(secure));
             app.call(req).await
         }
     });
@@ -679,66 +693,6 @@ async fn render_status_handler(
     }))
 }
 
-async fn basic_auth_middleware(
-    State(state): State<Arc<SharedState>>,
-    req: Request<Body>,
-    next: middleware::Next,
-) -> Response {
-    if req.uri().path().starts_with("/remote/v1/apps/") || !state.config.http.basic_auth_enabled {
-        return next.run(req).await;
-    }
-
-    let path = req.uri().path();
-    if path == "/health"
-        || path == "/version"
-        || path == "/manifest.json"
-        || path == "/sw.js"
-        || path.starts_with("/icons/")
-    {
-        return next.run(req).await;
-    }
-
-    // Read password override; clone to release the RwLock guard immediately
-    let expected_password = {
-        let guard = state.password_override.read().await;
-        match guard.as_deref() {
-            Some(overridden) => overridden.to_string(),
-            None => state.config.http.basic_auth_password.clone(),
-        }
-    };
-
-    match req.headers().get(header::AUTHORIZATION) {
-        Some(value) => {
-            if let Ok(value_str) = value.to_str() {
-                if let Some(encoded) = value_str.strip_prefix("Basic ") {
-                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) {
-                        if let Ok(decoded_str) = String::from_utf8(decoded) {
-                            if let Some((user, pass)) = decoded_str.split_once(':') {
-                                if user == state.config.http.basic_auth_user
-                                    && pass == expected_password
-                                {
-                                    return next.run(req).await;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None => {}
-    }
-
-    let mut response = Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .body(Body::from("Unauthorized"))
-        .unwrap_or_else(|_| Response::new(Body::empty()));
-    response.headers_mut().insert(
-        header::WWW_AUTHENTICATE,
-        header::HeaderValue::from_static("Basic realm=\"ivnc\""),
-    );
-    response
-}
-
 async fn console_remote_access_middleware(
     State(state): State<Arc<SharedState>>,
     req: Request<Body>,
@@ -877,6 +831,7 @@ async fn ipv4_handler(State(state): State<Arc<SharedState>>) -> Response {
 /// Browser terminal WebSocket endpoint.
 async fn terminal_ws_handler(
     State(state): State<Arc<SharedState>>,
+    Extension(auth): Extension<AuthContext>,
     ws: WebSocketUpgrade,
 ) -> Response {
     if !state.config.terminal.enabled {
@@ -888,7 +843,10 @@ async fn terminal_ws_handler(
     }
 
     ws.on_upgrade(move |socket| async move {
-        crate::terminal::ws::handle_terminal_websocket(socket, state).await;
+        auth.run(crate::terminal::ws::handle_terminal_websocket(
+            socket, state,
+        ))
+        .await;
     })
     .into_response()
 }
@@ -956,18 +914,15 @@ async fn change_password_handler(
         }
     };
 
-    if new_password.len() < 4 {
+    if new_password.len() < 4 || new_password.len() > 4096 {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                r#"{"error":"password must be at least 4 characters"}"#,
-            ))
+            .body(Body::from(r#"{"error":"password must be 4–4096 bytes"}"#))
             .unwrap();
     }
 
-    let mut pw = state.password_override.write().await;
-    *pw = Some(new_password.to_string());
+    state.auth.change_password(new_password);
     info!("Password changed via /api/change-password");
 
     Response::builder()
@@ -1401,7 +1356,8 @@ async fn proxy_panel_handler(
 
 async fn proxy_panel_ws_handler(
     State(state): State<Arc<SharedState>>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
+    mut headers: HeaderMap,
     ws: WebSocketUpgrade,
     uri: Uri,
 ) -> Response {
@@ -1430,6 +1386,7 @@ async fn proxy_panel_ws_handler(
 
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = upstream.into_client_request().unwrap();
+    state.auth.strip_cookie(&mut headers);
     for name in [header::HOST, header::ORIGIN, header::COOKIE] {
         if let Some(value) = headers.get(&name) {
             request.headers_mut().insert(name, value.clone());
@@ -1449,9 +1406,27 @@ async fn proxy_panel_ws_handler(
         }
     };
     ws.on_upgrade(move |socket| async move {
-        proxy_miao_websocket(socket, upstream_socket).await;
+        auth.run(proxy_miao_websocket(socket, upstream_socket))
+            .await;
     })
     .into_response()
+}
+
+pub(super) fn is_miao_request(path: &str, headers: &HeaderMap) -> bool {
+    if path == "/proxy" || path.starts_with("/proxy/") || path.starts_with("/proxy-ws/") {
+        return true;
+    }
+    let referer_from_proxy = headers
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uri>().ok())
+        .is_some_and(|uri| uri.path().starts_with("/proxy/"));
+    path.starts_with("/_next/")
+        || path.starts_with("/miao-inject/")
+        || (path.starts_with("/api/")
+            && referer_from_proxy
+            && !is_console_management_path(path)
+            && !path.starts_with("/api/proxy/"))
 }
 
 async fn proxy_panel_absolute_path_middleware(
@@ -1460,19 +1435,11 @@ async fn proxy_panel_absolute_path_middleware(
     next: middleware::Next,
 ) -> Response {
     let path = req.uri().path();
-    let referer_from_proxy = req
-        .headers()
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<Uri>().ok())
-        .map(|uri| uri.path().starts_with("/proxy"))
-        .unwrap_or(false);
-    let should_proxy = path.starts_with("/_next/")
-        || path.starts_with("/miao-inject/")
-        || (path.starts_with("/api/")
-            && referer_from_proxy
-            && !is_console_management_path(path)
-            && !path.starts_with("/api/proxy/"));
+    // Explicit /proxy routes still dispatch through their own handlers.
+    let should_proxy = path != "/proxy"
+        && !path.starts_with("/proxy/")
+        && !path.starts_with("/proxy-ws/")
+        && is_miao_request(path, req.headers());
 
     if !should_proxy {
         return next.run(req).await;
@@ -1490,7 +1457,7 @@ async fn proxy_to_miao(
     state: Arc<SharedState>,
     method: Method,
     uri: Uri,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Body,
     strip_proxy_prefix: bool,
 ) -> Response {
@@ -1549,6 +1516,7 @@ async fn proxy_to_miao(
         }
     };
 
+    state.auth.strip_cookie(&mut headers);
     let mut req = client.request(method, upstream).body(body_bytes);
     for (name, value) in headers.iter() {
         // Preserve Host and Origin together for Miao's same-origin checks.
@@ -1563,6 +1531,7 @@ async fn proxy_to_miao(
             || name == header::TE
             || name == header::PROXY_AUTHORIZATION
             || name == header::PROXY_AUTHENTICATE
+            || name.as_str() == "x-ivnc-csrf"
         {
             continue;
         }
@@ -1592,6 +1561,9 @@ async fn proxy_to_miao(
             }
             let mut builder = Response::builder().status(status);
             for (name, value) in headers.iter() {
+                if name == header::SET_COOKIE && state.auth.is_own_cookie(value) {
+                    continue;
+                }
                 if name == header::CONTENT_LENGTH
                     || name == header::CONNECTION
                     || name == header::TRANSFER_ENCODING
@@ -1627,7 +1599,7 @@ fn proxy_stopped_response() -> Response {
         .body(Body::from(r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Miao</title></head>
 <body style="font:16px system-ui;margin:3rem;line-height:1.7"><h1>Miao</h1><p id="message">Miao 已停止或正在启动。访问面板不会自动启动服务。<br>Miao is stopped or starting. Opening this page does not start the service.</p>
 <button id="start" type="button">启动 Miao / Start Miao</button> <a href="/console" target="_top">应用列表 / Applications</a>
-<script>document.getElementById('start').onclick=async function(){this.disabled=true;try{const r=await fetch('/api/proxy/start',{method:'POST'});const d=await r.json();if(!r.ok)throw Error(d.error||'Start failed');location.reload()}catch(e){document.getElementById('message').textContent=e.message;this.disabled=false}};</script></body></html>"#)).unwrap()
+<script>document.getElementById('start').onclick=async function(){this.disabled=true;try{await import('/auth-client.js');await window.__ivncAuthReady;const r=await fetch('/api/proxy/start',{method:'POST'});const d=await r.json();if(!r.ok)throw Error(d.error||'Start failed');location.reload()}catch(e){document.getElementById('message').textContent=e.message;this.disabled=false}};</script></body></html>"#)).unwrap()
 }
 
 async fn proxy_miao_websocket(
@@ -1704,8 +1676,17 @@ fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
     return value;
   };
   const nativeFetch = window.fetch.bind(window);
+  const checkResponse = response => {
+    if (response.status === 401 && response.headers.get("x-ivnc-auth") === "required") {
+      try {
+        if (typeof window.top.__ivncRequireLogin === "function") window.top.__ivncRequireLogin();
+        else window.top.location.replace("/auth/login?next=" + encodeURIComponent(window.top.location.pathname + window.top.location.search));
+      } catch (_) { window.location.replace("/auth/login"); }
+    }
+    return response;
+  };
   window.fetch = (input, init) => {
-    if (typeof input === "string") return nativeFetch(mapPath(input), init);
+    if (typeof input === "string") return nativeFetch(mapPath(input), init).then(checkResponse);
     if (input instanceof Request) {
       const url = new URL(input.url);
       if (url.origin !== window.location.origin) return nativeFetch(input, init);
@@ -1714,7 +1695,7 @@ fn inject_proxy_panel_rewrite(bytes: Bytes) -> Bytes {
         input = new Request(mapped, input);
       }
     }
-    return nativeFetch(input, init);
+    return nativeFetch(input, init).then(checkResponse);
   };
   const NativeWebSocket = window.WebSocket;
   window.WebSocket = function(url, protocols) {
@@ -1784,12 +1765,6 @@ struct UpgradeLogEntry {
 #[derive(Deserialize)]
 struct GitHubRelease {
     tag_name: String,
-}
-
-/// WebSocket auth query
-#[derive(Deserialize)]
-struct WsAuthQuery {
-    token: Option<String>,
 }
 
 /// GET /version - Public build version information
@@ -1887,49 +1862,12 @@ async fn restart_handler(State(state): State<Arc<SharedState>>) -> Response {
 /// GET /api/upgrade/ws - WebSocket upgrade endpoint
 async fn upgrade_ws_handler(
     State(state): State<Arc<SharedState>>,
-    Query(_query): Query<WsAuthQuery>,
-    headers: axum::http::HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    // Verify authentication if basic auth is enabled
-    if state.config.http.basic_auth_enabled {
-        // Check Authorization header
-        if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if let Some(encoded) = auth_str.strip_prefix("Basic ") {
-                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) {
-                        if let Ok(decoded_str) = String::from_utf8(decoded) {
-                            if let Some((user, pass)) = decoded_str.split_once(':') {
-                                // Read password override
-                                let expected_password = {
-                                    let guard = state.password_override.read().await;
-                                    match guard.as_deref() {
-                                        Some(overridden) => overridden.to_string(),
-                                        None => state.config.http.basic_auth_password.clone(),
-                                    }
-                                };
-
-                                if user == state.config.http.basic_auth_user
-                                    && pass == expected_password
-                                {
-                                    let state = state.clone();
-                                    return Ok(ws.on_upgrade(move |socket| {
-                                        handle_upgrade_websocket(socket, state)
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Authentication failed
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // No auth required, proceed
-    Ok(ws.on_upgrade(move |socket| handle_upgrade_websocket(socket, state)))
+    Ok(ws.on_upgrade(move |socket| async move {
+        auth.run(handle_upgrade_websocket(socket, state)).await;
+    }))
 }
 
 /// Handle WebSocket connection for upgrade

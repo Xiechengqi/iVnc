@@ -39,6 +39,7 @@ import { createGestureNavigation } from "./gesture-navigation.mjs";
 import { createClipboard } from "./clipboard.js";
 import { createClipboardUI } from "./clipboard-ui.js";
 import { createViewport } from "./viewport.js";
+import { bindLogoutButton, checkAuthentication, credentialsChanged } from "./auth-client.js";
 import { createFloatingWindow } from "./floating-window.js";
 import { installOverlayGuard, minimizeOtherOverlays, createConsoleShield, releaseOverlayInput } from "./overlay-manager.js";
 
@@ -1256,7 +1257,7 @@ function showChangePasswordModal() {
 			if (resp.ok) {
 				msg.className = 'pwd-msg ok';
 				msg.textContent = tt('pwdChanged');
-				setTimeout(close, 1500);
+                setTimeout(credentialsChanged, 500);
 			} else {
 				const data = await resp.json().catch(() => ({}));
 				msg.className = 'pwd-msg error';
@@ -1811,7 +1812,7 @@ function createWebTerminalController() {
 	}
 
 	function connect() {
-		if (destroyed) return;
+		if (destroyed || window.__ivncAuthRedirecting) return;
 		if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
 			return;
 		}
@@ -1847,19 +1848,20 @@ function createWebTerminalController() {
 			setStatus('connection error', true);
 		};
 
-		socket.onclose = () => {
+		socket.onclose = async () => {
 			if (generation !== socketGeneration || destroyed) return;
 			if (socket && generation === socketGeneration) {
 				socket = null;
 			}
 			if (intentionalRestart) return;
 			setStatus('disconnected', true);
+			if (await checkAuthentication() === false || destroyed || generation !== socketGeneration) return;
 			scheduleReconnect();
 		};
 	}
 
 	function scheduleReconnect() {
-		if (destroyed || !modal || reconnectTimer) return;
+		if (destroyed || !modal || reconnectTimer || window.__ivncAuthRedirecting) return;
 		const delays = [300, 800, 1500, 3000, 5000, 8000];
 		const delay = delays[Math.min(reconnectAttempt, delays.length - 1)];
 		reconnectAttempt += 1;
@@ -3762,6 +3764,14 @@ export default function webrtc() {
 			});
 			if (!window.__IVNC_APP_VIEW__) toolbarController.addTool(pwdBtn);
 
+			if (!window.__IVNC_APP_VIEW__) {
+				const signout = document.createElement('button');
+				signout.type = 'button'; signout.id = 'signout-btn'; signout.className = 'taskbar-pin'; signout.hidden = true;
+				signout.style.cssText = 'border:0;color:inherit;font:inherit';
+				signout.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>';
+				bindLogoutButton(signout); toolbarController.addTool(signout);
+			}
+
 			// File upload button
 			const uploadSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
 			const uploadBtn = document.createElement('div');
@@ -4004,6 +4014,11 @@ export default function webrtc() {
 			var signaling = new WebRTCDemoSignaling(new URL(protocol + window.location.host + pathname + (window.__IVNC_APP_VIEW__ ? "webrtc" : appName + "/signaling/")));
 			webrtc = new WebRTCDemo(signaling, videoElement, 1);
             window.__ivncWebRTC = webrtc;
+            window.addEventListener('ivnc-auth-ended', () => {
+                clipboardController?.cancel();
+                gestureController?.reset();
+                webrtc?.destroy();
+            }, { once: true });
 			// Embedded stream tab: the parent page drives activation, audio, upload and IME.
 			// `view` lets the parent ignore messages from a view it already replaced.
 			const postToParent = (message) => {

@@ -47,7 +47,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub http_port: Option<u16>,
 
-    /// Enable or disable basic authentication (true/false)
+    /// Enable or disable browser login and Basic API authentication (true/false)
     #[arg(long)]
     pub basic_auth_enabled: Option<bool>,
 

@@ -190,8 +190,8 @@ pub struct SharedState {
     /// Per-session mpsc senders for text
     pub text_subscribers: Arc<Mutex<Vec<Subscriber<String>>>>,
 
-    /// Password override (set via /api/change-password, takes precedence over config)
-    pub password_override: Arc<RwLock<Option<String>>>,
+    /// Browser sessions, compatible Basic credentials and live revocation.
+    pub auth: Arc<super::auth::AuthStore>,
 
     /// Cached latest taskbar JSON for the window list
     pub last_taskbar_json: Arc<Mutex<Option<String>>>,
@@ -242,6 +242,7 @@ impl SharedState {
         ));
 
         Self {
+            auth: Arc::new(super::auth::AuthStore::new(&config.http)),
             media_router: Arc::new(crate::remote::media::MediaRouter::default()),
             app_views: Arc::new(crate::remote::gateway::Views::default()),
             taskbar_apps: Arc::new(Mutex::new(TaskbarApps::default())),
@@ -266,7 +267,6 @@ impl SharedState {
             rtp_subscribers: Arc::new(Mutex::new(Vec::new())),
             audio_subscribers: Arc::new(Mutex::new(Vec::new())),
             text_subscribers: Arc::new(Mutex::new(Vec::new())),
-            password_override: Arc::new(RwLock::new(None)),
             last_taskbar_json: Arc::new(Mutex::new(None)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             ipv4_address: Arc::new(RwLock::new(String::new())),

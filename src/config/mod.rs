@@ -155,7 +155,7 @@ pub struct HttpConfig {
     #[serde(default)]
     pub cors_origin: Option<String>,
 
-    /// Enable HTTP basic authentication
+    /// Enable browser-session authentication and explicit HTTP Basic clients.
     #[serde(default = "default_basic_auth_enabled")]
     pub basic_auth_enabled: bool,
 
@@ -166,6 +166,14 @@ pub struct HttpConfig {
     /// Basic auth password
     #[serde(default = "default_basic_auth_password")]
     pub basic_auth_password: String,
+
+    /// Browser-session idle timeout; page refreshes do not end a session.
+    #[serde(default = "default_auth_session_idle_seconds")]
+    pub auth_session_idle_seconds: u64,
+
+    /// Absolute browser-session lifetime. Sessions are held in memory only.
+    #[serde(default = "default_auth_session_max_seconds")]
+    pub auth_session_max_seconds: u64,
 
     /// Enable TLS with self-signed certificate (set via --tls CLI flag)
     #[serde(default)]
@@ -181,6 +189,8 @@ impl Default for HttpConfig {
             basic_auth_enabled: default_basic_auth_enabled(),
             basic_auth_user: default_basic_auth_user(),
             basic_auth_password: default_basic_auth_password(),
+            auth_session_idle_seconds: default_auth_session_idle_seconds(),
+            auth_session_max_seconds: default_auth_session_max_seconds(),
             tls: false,
         }
     }
@@ -467,6 +477,15 @@ impl Config {
             return Err("Basic auth is enabled but password is empty".into());
         }
 
+        if self.http.auth_session_idle_seconds == 0
+            || self.http.auth_session_idle_seconds > self.http.auth_session_max_seconds
+            || self.http.auth_session_max_seconds > 365 * 24 * 3600
+        {
+            return Err(
+                "Browser session timeouts must satisfy 0 < idle <= maximum <= one year".into(),
+            );
+        }
+
         for entry in &self.input.file_transfers {
             let value = entry.trim().to_ascii_lowercase();
             if value.is_empty() || value == "none" {
@@ -569,9 +588,25 @@ port = 9000
         assert_eq!(cfg.display.refresh_rate, 60);
         assert_eq!(cfg.http.host, "0.0.0.0");
         assert_eq!(cfg.http.port, 9000);
+        assert_eq!(cfg.http.auth_session_idle_seconds, 86400);
+        assert_eq!(cfg.http.auth_session_max_seconds, 604800);
         assert_eq!(cfg.server.pidfile, crate::paths::default_pidfile());
         assert!(cfg.terminal.enabled);
         assert_eq!(cfg.terminal.shell, "/bin/bash");
+    }
+
+    #[test]
+    fn browser_session_lifetimes_must_be_positive_ordered_and_bounded() {
+        for (idle, maximum) in [(0, 10), (10, 0), (11, 10), (1, 365 * 24 * 3600 + 1)] {
+            let mut cfg = Config::default();
+            cfg.http.auth_session_idle_seconds = idle;
+            cfg.http.auth_session_max_seconds = maximum;
+            assert!(cfg.validate().is_err());
+        }
+        let mut cfg = Config::default();
+        cfg.http.auth_session_idle_seconds = 1;
+        cfg.http.auth_session_max_seconds = 1;
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
@@ -632,6 +667,13 @@ fn default_enable_clipboard() -> bool {
 }
 fn default_mouse_sensitivity() -> f64 {
     1.0
+}
+
+fn default_auth_session_idle_seconds() -> u64 {
+    24 * 3600
+}
+fn default_auth_session_max_seconds() -> u64 {
+    7 * 24 * 3600
 }
 
 fn default_basic_auth_enabled() -> bool {

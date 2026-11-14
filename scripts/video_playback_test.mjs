@@ -173,18 +173,30 @@ test('replaced signaling sockets and disposed retry timers cannot renegotiate a 
         send(message) { (this.messages ||= []).push(message); }
     }
     const timers = new Map(); let sequence = 0;
-    const context = { WebSocket: Socket, setInterval, clearInterval, console,
+    let authentication = Promise.resolve(true);
+    const context = { WebSocket: Socket, setInterval, clearInterval, console, window: {},
+        checkAuthentication: () => authentication,
         setTimeout: fn => { const id = ++sequence; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) };
     vm.createContext(context); vm.runInContext(source + '\nglobalThis.Signaling=WebRTCDemoSignaling;', context);
     const signal = new context.Signaling('ws://localhost/webrtc');
     let ready = 0; signal.onready = () => ready++;
     const message = () => Object.assign(new Event('message'), { data: 'SESSION_OK' });
     signal.connect(); const old = signal._ws_conn;
-    signal.connect(); const current = signal._ws_conn;
+    signal.connect(); let current = signal._ws_conn;
     assert(old.closed);
     old.dispatchEvent(new Event('open')); old.dispatchEvent(message());
     assert.equal(ready, 0); assert.equal(old.messages, undefined);
     current.dispatchEvent(message()); assert.equal(ready, 1);
+    // A delayed authentication response must not let a previous socket's
+    // close/error callback disconnect or schedule retries for its replacement.
+    let resolveAuthentication;
+    authentication = new Promise(resolve => { resolveAuthentication = resolve; });
+    const closing = signal._onServerClose({ code: 1006 }), failing = signal._onServerError();
+    let disconnects = 0; signal.ondisconnect = () => disconnects++;
+    signal.connect(); current = signal._ws_conn; signal.state = 'connected';
+    resolveAuthentication(true); await Promise.all([closing, failing]);
+    assert.equal(disconnects, 0); assert.equal(signal.state, 'connected');
+    assert.equal(signal.retry_count, 0); assert.equal(timers.size, 0);
     current.dispatchEvent(Object.assign(new Event('message'), { data: "ERROR peer '0' not found" }));
     assert.equal(timers.size, 1);
     signal.destroy(); signal.connect(); current.dispatchEvent(message());

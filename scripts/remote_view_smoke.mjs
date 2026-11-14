@@ -24,15 +24,15 @@ assert(viewUrl && root, 'usage: remote_view_smoke.mjs <view-url> <workdir> [flag
 const embed = flags.includes('--embed');
 const targetUrl = new URL(viewUrl);
 const credentials = targetUrl.username
-    ? Buffer.from(`${decodeURIComponent(targetUrl.username)}:${decodeURIComponent(targetUrl.password)}`).toString('base64')
+    ? { username: decodeURIComponent(targetUrl.username), password: decodeURIComponent(targetUrl.password) }
     : null;
 targetUrl.username = ''; targetUrl.password = ''; targetUrl.search = '';
-// In embed mode Chrome opens a small same-origin page that hosts the iframe.
-// /ui-config sits behind the instance's Basic Auth, so Chrome learns the
-// credentials from the launch URL for the iframe's requests too.
-const launchUrl = new URL(viewUrl);
-if (embed) { launchUrl.pathname = '/ui-config'; launchUrl.search = ''; }
 const pagePath = embed ? '/ui-config' : targetUrl.pathname;
+// Authenticate through the same form as users. URL credentials and injected
+// Basic headers cannot exercise the browser's Cookie session or iframe sharing.
+const launchUrl = new URL(targetUrl);
+launchUrl.pathname = credentials ? '/auth/login' : pagePath;
+if (credentials) launchUrl.searchParams.set('next', pagePath);
 
 const server = net.createServer();
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -93,7 +93,8 @@ try {
             page = targets.find(t => {
                 if (t.type !== 'page') return false;
                 const url = new URL(t.url);
-                return url.origin === targetUrl.origin && url.pathname === pagePath;
+                return url.origin === targetUrl.origin &&
+                    [launchUrl.pathname, pagePath].includes(url.pathname);
             });
             if (page?.webSocketDebuggerUrl) break;
         } catch { /* Chrome not ready yet */ }
@@ -118,11 +119,20 @@ try {
     await call('Runtime.enable');
     await call('Page.enable');
 
+    if (credentials) {
+        await waitFor('login form', () => evaluateTop(
+            `location.pathname === '/auth/login' && !!document.getElementById('login-form') && !!window.__ivncAuthReady`));
+        await evaluateTop(`(() => {
+            document.getElementById('username').value = ${JSON.stringify(credentials.username)};
+            document.getElementById('password').value = ${JSON.stringify(credentials.password)};
+            document.getElementById('login-form').requestSubmit();
+            return true;
+        })()`);
+        await waitFor('authenticated destination', () => evaluateTop(
+            `location.pathname === ${JSON.stringify(pagePath)} && document.readyState === 'complete'`));
+    }
+
     if (embed) {
-        if (credentials) {
-            await call('Network.enable');
-            await call('Network.setExtraHTTPHeaders', { headers: { Authorization: `Basic ${credentials}` } });
-        }
         // Chrome can advertise the startup target URL while its active
         // document is still about:blank (also readyState=complete). Wait for
         // the real same-origin page before inserting a relative iframe URL.

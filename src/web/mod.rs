@@ -2,6 +2,7 @@
 //!
 //! Provides a lightweight HTTP server for monitoring.
 
+pub mod auth;
 pub mod shared;
 pub use shared::SharedState;
 

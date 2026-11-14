@@ -11,7 +11,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:toolbar": "node ../../scripts/toolbar_interaction_test.mjs",
-    "test:viewport": "node ../../scripts/viewport_interaction_test.mjs"
+    "test:viewport": "node ../../scripts/viewport_interaction_test.mjs",
+    "test:auth": "node ../../scripts/auth_smoke.mjs"
   },
   "author": "Selkies",
   "license": "GPL-3",

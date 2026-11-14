@@ -186,15 +186,18 @@ def scenario(binary, root, tls, browser=False):
         instance.request("/proxy/api/status", status=401)
         instance.request("/proxy/api/auth/setup", "POST",
                          {"password": "replacement", "confirm_password": "replacement"}, status=403)
+        if browser:
+            browser_env = dict(instance.env, MIAO_SMOKE_AUTH=instance.auth)
+            subprocess.run(["node", str(Path(__file__).with_name("miao_console_smoke.mjs")),
+                            instance.origin, str(root)], env=browser_env, check=True, timeout=60)
+            eventually(instance.ready)
+        # The browser also exercises stopped-panel startup. Create this Miao
+        # session afterward because that startup replaces its in-memory store.
         result, headers = instance.request("/proxy/api/auth/login", "POST", {})
         assert result["success"]
         cookie, csrf = headers["set-cookie"].split(";", 1)[0], result["data"]["csrf"]
         assert ("; Secure" in headers["set-cookie"]) == tls
         session = {"Cookie": cookie, "X-Miao-CSRF": csrf}
-        if browser:
-            browser_env = dict(instance.env, MIAO_SMOKE_AUTH=instance.auth)
-            subprocess.run(["node", str(Path(__file__).with_name("miao_console_smoke.mjs")),
-                            instance.origin, str(root)], env=browser_env, check=True, timeout=60)
         instance.request("/proxy/api/status", headers=session)
         instance.request("/proxy/api/auth/logout", "POST", {}, {"Cookie": cookie}, status=403)
         instance.request("/proxy/api/auth/logout", "POST", {}, dict(session, Origin="https://foreign.example"), status=403)

@@ -166,16 +166,18 @@ try {
     await waitFor('production toolbar and data channel', () => evaluate(`!!document.querySelector('.ivnc-toolbar') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
     assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
     await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
+    await evaluate(`window.__toolbarReloading = true`);
     await call('Page.reload');
-    await waitFor('saved gesture preference after reload', () => evaluate(`!!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    await waitFor('saved gesture preference after reload', () => evaluate(`!window.__toolbarReloading && !!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
     assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'false');
     await evaluate(`(() => {
         for(const key of Object.keys(localStorage)) if(key.endsWith('_gesture_navigation')) localStorage.removeItem(key);
         const prefix=location.href.split('#')[0].replace(/[^a-zA-Z0-9.-_]/g,'_');
         localStorage.setItem(prefix+'_gesture_navigation_reverse','true');
     })()`);
+    await evaluate(`window.__toolbarReloading = true`);
     await call('Page.reload');
-    await waitFor('default gesture preference after reload', () => evaluate(`!!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    await waitFor('default gesture preference after reload', () => evaluate(`!window.__toolbarReloading && !!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
     await waitFor('decoded desktop after reload', () => evaluate(`(() => {const v=document.querySelector('#stream');return v?.videoWidth>0 && v.readyState>=2 && window.__ivncDisplayState?.protocol===1;})()`), 60000);
     assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
     pass('swipe navigation defaults on, persists an explicit off and ignores the obsolete reverse preference');

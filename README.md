@@ -17,7 +17,7 @@
 - **文件传输** - 支持上传/下载文件
 - **Web UI** - 内置 Web 界面，支持 PWA 安装
 - **HTTP API** - 健康检查和 Prometheus 指标端点
-- **Basic Auth** - 内置 HTTP 基础认证
+- **登录认证** - 网页会话保持登录，兼容 HTTP Basic API 认证，见 [登录与会话](docs/AUTHENTICATION.md)
 - **远程桌面应用** - 按应用开启远程访问，A 启动后以工具栏标签显示，A 中继 B 的画面、输入、声音和上传，多个连接可同时操作
 - **应用工具栏** - 应用多时横向滚动，支持拖动排序并持久化，与控制台应用表同步；窄屏提供紧凑工具和状态，见 [工具栏与排序](docs/TOOLBAR.md)
 - **TLS** - 支持持久化自签名或指定证书（构建启用 `tls`，运行加 `--tls`）
@@ -215,7 +215,7 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) ./ivnc -c config.toml --http-port 8008
 | `--proxy-autostart <true/false>` | 兼容旧版偏好，首次默认开启 | 控制本次 Miao 自启动；关闭后仍可手动启动 |
 | `--proxy-enabled <true/false>` | 配置文件值 | Miao 总开关，关闭后禁止自启动和手动启动 |
 | `--tls` | | 启用自签名 HTTPS |
-| `--basic-auth-enabled` | `true` | 启用基础认证 |
+| `--basic-auth-enabled` | `true` | 启用网页登录与 Basic API 认证 |
 | `--basic-auth-user` | | 认证用户名 |
 | `--basic-auth-password` | | 认证密码 |
 | `-v, --verbose` | | 详细日志 |

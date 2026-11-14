@@ -17,7 +17,7 @@ The client connects to the iVnc server via WebRTC. All media (video/audio) is de
 
 ### Authentication
 
-HTTP Basic Auth is supported. When enabled, the browser prompts for credentials before loading the page. The WebSocket signaling connection inherits the HTTP authentication.
+The browser signs in at `/auth/login` and resumes with an HttpOnly session cookie, including WebSocket handshakes. Refreshes do not require another password prompt while the session is valid. Explicit HTTP Basic Auth remains available to API clients and internal workers. Sessions are held in memory and end on server restart. See [authentication](../../docs/AUTHENTICATION.md) for HTTP/HTTPS, CSRF, expiry and logout behavior.
 
 ## 1. Window Messaging API (Dashboard → Client)
 

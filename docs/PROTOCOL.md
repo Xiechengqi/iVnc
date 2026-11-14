@@ -593,7 +593,7 @@ debug!("Session {} DC parse error: {}", session.id, e);
 | `/ui-config` | GET | UI 配置 |
 | `/ws-config` | GET | WebSocket 端口配置 |
 
-所有 HTTP 端点支持 Basic Auth（可配置）。
+浏览器使用 HttpOnly Cookie 会话；HTTP API 与内部 worker 兼容显式 Basic Auth（可配置）。认证、CSRF、登录与退出接口见 [网页登录与会话](AUTHENTICATION.md)。远程应用接口继续使用独立的应用级认证。
 
 ---
 

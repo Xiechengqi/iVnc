@@ -434,6 +434,7 @@ pub async fn drive_session(
     runtime_settings: Arc<RuntimeSettings>,
     initial_buffer: Vec<u8>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    auth: crate::web::auth::AuthContext,
 ) {
     let session_id = session.id.clone();
     info!(
@@ -494,12 +495,19 @@ pub async fn drive_session(
         }
     }
 
+    let auth_cancelled = auth.cancelled();
+    tokio::pin!(auth_cancelled);
     loop {
         let delay = next_timeout.saturating_duration_since(Instant::now());
         let mut fatal = false;
 
         tokio::select! {
             biased;
+
+            _ = &mut auth_cancelled => {
+                info!("Session {} authentication ended", session_id);
+                break;
+            }
 
             // Shutdown signal from disconnect handler
             _ = &mut shutdown_rx => {

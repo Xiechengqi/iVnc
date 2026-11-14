@@ -32,6 +32,18 @@ const call = (method, params = {}) => new Promise((resolve, reject) => {
     pending.set(key, { resolve, reject, timer });
     socket.send(JSON.stringify({ id: key, method, params }));
 });
+const evaluate = async expression => {
+    const result = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+    if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+};
+const waitFor = async (name, expression) => {
+    for (let attempt = 0; attempt < 150; attempt++) {
+        try { if (await evaluate(expression)) return; } catch { /* navigation may replace the context */ }
+        await delay(100);
+    }
+    throw Error(`Timed out waiting for ${name}`);
+};
 
 try {
     let target;
@@ -67,12 +79,11 @@ try {
         pending.clear();
     };
     await call('Page.enable');
-    await call('Network.enable');
-    await call('Network.setExtraHTTPHeaders', { headers: { Authorization: process.env.MIAO_SMOKE_AUTH } });
+    await call('Runtime.enable');
     await delay(1000); // The initial about:blank navigation can race the first CDP navigation.
     let navigation;
     for (let attempt = 0; attempt < 3; attempt++) {
-        navigation = await call('Page.navigate', { url: `${origin}/console` });
+        navigation = await call('Page.navigate', { url: `${origin}/auth/login?next=%2Fconsole` });
         if (!navigation.errorText) break;
         await delay(500);
     }
@@ -80,6 +91,17 @@ try {
         console.error(readFileSync(path.join(root, 'browser.log'), 'utf8').slice(-3000));
         throw Error(JSON.stringify(navigation));
     }
+    const decoded = Buffer.from(process.env.MIAO_SMOKE_AUTH.replace(/^Basic /i, ''), 'base64').toString();
+    const separator = decoded.indexOf(':');
+    assert(separator > 0, 'MIAO_SMOKE_AUTH must contain test credentials');
+    await waitFor('session login form', `location.pathname === '/auth/login' && !!document.getElementById('login-form') && !!window.__ivncAuthReady`);
+    await evaluate(`(() => {
+        document.getElementById('username').value = ${JSON.stringify(decoded.slice(0, separator))};
+        document.getElementById('password').value = ${JSON.stringify(decoded.slice(separator + 1))};
+        document.getElementById('login-form').requestSubmit();
+        return true;
+    })()`);
+    await waitFor('authenticated console', `location.pathname === '/console' && !!document.querySelector('.nav-item[data-section="apps"]')`);
     // Return a concrete assertion result from the actual shipped console and embedded panel.
     await delay(500);
     const result = await call('Runtime.evaluate', { awaitPromise: true, returnByValue: true,
@@ -102,7 +124,7 @@ try {
             edit.click();
             await wait(() => document.querySelector('#modal').classList.contains('show') && !document.querySelector('#modal').classList.contains('loading'));
             const modal = document.querySelector('#modal');
-            if (!document.querySelector('.console-select').disabled) throw Error('managed app type selector is editable');
+            if (!document.querySelector('#f-app-type + .console-select').disabled) throw Error('managed app type selector is editable');
             if (getComputedStyle(document.querySelector('#background-config')).display === 'none') throw Error('background configuration is hidden');
             if (modal.querySelector('#miao-config,#miao-settings-help,#miao-panel-link')) throw Error('obsolete managed settings section remains');
             for (const field of modal.querySelectorAll('input,textarea,select')) {
@@ -177,14 +199,21 @@ try {
             if (frame.contentWindow.WebSocket.OPEN !== 1 || frame.contentWindow.WebSocket.CONNECTING !== 0) throw Error('WebSocket constants were lost');
             const auth = await (await frame.contentWindow.fetch('/api/auth/status')).json();
             if (!auth.data.authenticated || auth.data.password_required) throw Error('embedded panel did not create a passwordless session');
-            return { readonlyConfig: true, effectiveCommand: true, ordinaryEditing: true, protectedActions: true, iframe: true, panelAuth: true };
+            const stopped = await fetch('/api/apps/builtin-miao/stop', { method: 'POST' });
+            if (!stopped.ok) throw Error('Cookie session could not stop Miao');
+            frame.src = '/proxy/';
+            await wait(() => frame.contentDocument?.querySelector('#start'));
+            frame.contentDocument.getElementById('start').click();
+            await wait(() => frame.contentDocument?.querySelector('.topbar'));
+            if (!frame.contentWindow.__ivncProxyPanelRewrite) throw Error('stopped panel did not resume after starting with Cookie CSRF');
+            return { readonlyConfig: true, effectiveCommand: true, ordinaryEditing: true, protectedActions: true, iframe: true, panelAuth: true, cookieStart: true };
         })()` });
     if (result.exceptionDetails) {
         const page = await call('Runtime.evaluate', { expression: 'location.href + "\\n" + document.body?.innerText?.slice(0, 400)', returnByValue: true });
         throw Error(JSON.stringify({ exception: result.exceptionDetails, page: page.result?.value }));
     }
-    assert.deepEqual(result.result.value, { readonlyConfig: true, effectiveCommand: true, ordinaryEditing: true, protectedActions: true, iframe: true, panelAuth: true });
-    console.log('PASS Chrome UI: complete read-only Miao configuration, ordinary editing, protected actions and authenticated iframe');
+    assert.deepEqual(result.result.value, { readonlyConfig: true, effectiveCommand: true, ordinaryEditing: true, protectedActions: true, iframe: true, panelAuth: true, cookieStart: true });
+    console.log('PASS Chrome UI: complete read-only Miao configuration, ordinary editing, protected actions, authenticated iframe and Cookie/CSRF start');
 } finally {
     if (socket?.readyState === 1) {
         try { await call('Browser.close'); } catch { /* Chrome may close before acknowledging. */ }

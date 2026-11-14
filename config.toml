@@ -20,12 +20,15 @@ refresh_rate = 60
 host = "0.0.0.0"
 # HTTP server port (serves HTTP, WebSocket signaling, and ICE-TCP on the same port)
 port = 8000
-# Enable HTTP basic authentication
+# Enable browser login sessions and compatible HTTP Basic API authentication
 basic_auth_enabled = true
 # Basic auth username
 basic_auth_user = "user"
 # Basic auth password
 basic_auth_password = "mypasswd"
+# Browser sessions: idle timeout and absolute lifetime (seconds); restart ends sessions
+auth_session_idle_seconds = 86400
+auth_session_max_seconds = 604800
 
 [encoding]
 # Target frames per second

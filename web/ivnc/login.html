@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <base href="/">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#1a1a2e">
+    <title>登录 · iVnc</title>
+    <link rel="icon" href="/icons/icon.svg">
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: #f4f7f9; color: #253244; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        main { width: 100%; max-width: 360px; padding: 28px; background: #fff; border: 1px solid #dfe6e9; border-radius: 12px; box-shadow: 0 8px 28px #2532440c; }
+        header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+        h1 { font-size: 24px; margin: 0; letter-spacing: -.6px; }
+        h2 { font-size: 17px; margin: 0 0 22px; font-weight: 500; }
+        label { display: block; font-size: 14px; margin-bottom: 6px; }
+        input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #cbd5df; border-radius: 6px; margin-bottom: 18px; font: inherit; }
+        input:focus-visible { outline: 2px solid #0984e3; outline-offset: 2px; }
+        button { cursor: pointer; font: inherit; }
+        #language { background: none; border: 0; padding: 6px 0 6px 12px; color: #52657b; font-size: 13px; }
+        #submit { width: 100%; min-height: 44px; background: #0984e3; color: #fff; border: 0; border-radius: 6px; }
+        #submit:hover { background: #0872c3; }
+        #submit:disabled { opacity: .6; cursor: wait; }
+        #error { margin: 16px 0 0; color: #bc3232; font-size: 14px; overflow-wrap: anywhere; }
+        #error:empty { display: none; }
+        @media (max-height: 480px) { body { place-items: start center; } }
+    </style>
+</head>
+<body>
+    <main>
+        <header><h1>iVnc</h1><button id="language" type="button">English</button></header>
+        <h2 id="heading">登录远程桌面</h2>
+        <form id="login-form" method="post">
+            <label for="username" id="username-label">用户名</label>
+            <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="256">
+            <label for="password" id="password-label">密码</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="4096">
+            <button id="submit" type="submit">登录</button>
+            <p id="error" role="alert" aria-live="polite"></p>
+        </form>
+    </main>
+    <script type="module" src="/login.js"></script>
+</body>
+</html>

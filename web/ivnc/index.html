@@ -11,13 +11,18 @@
 </head>
 <body>
   <div id="app"></div>
-  <script>
-    (function() {
+  <script type="module">
+    (async function() {
+      await import('/auth-client.js');
+      if (await window.__ivncAuthReady === false) return;
       window.__IVNC_APP_VIEW__ = window.location.pathname.startsWith('/app-view/');
       // Embedded app views are stream tabs of the main desktop page (app-streams.js).
       window.__IVNC_EMBED__ = window.__IVNC_APP_VIEW__ && window.parent !== window
         && new URLSearchParams(window.location.search).get('embed') === '1';
       window.__ivncViewActive = !window.__IVNC_EMBED__;
+      if (!window.__IVNC_APP_VIEW__ && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch(err => console.warn('Service worker unavailable', err));
+      }
       const configBase = window.__IVNC_APP_VIEW__ ? window.location.pathname : '/';
       window.__IVNC_WS_HOST__ = window.location.hostname;
       // Server replaces __IVNC_INJECTED_PORT__ with actual port (e.g., "8007")
@@ -57,9 +62,6 @@
           document.head.appendChild(script);
         });
     })();
-    if (!window.__IVNC_APP_VIEW__ && 'serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(err => console.warn('Service worker unavailable', err));
-    }
   </script>
 </body>
 </html>

@@ -3,6 +3,8 @@ import { notifyAppStarted } from './app-streams.js';
 import { createOrderNotifications } from './app-order.js';
 import { createConsoleDialogs } from './console-dialogs.js';
 import { enhanceSelect } from './select-control.js';
+import { bindLogoutButton } from './auth-client.js';
+bindLogoutButton(document.getElementById('signout-btn'));
 
 const API = '/api/apps';
 let launchContext = null, launchInfo = null;

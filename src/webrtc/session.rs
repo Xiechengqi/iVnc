@@ -66,6 +66,7 @@ struct PendingSession {
     session: RtcSession,
     candidate_addr: SocketAddr,
     created_at: Instant,
+    auth: crate::web::auth::AuthContext,
 }
 
 impl SessionManager {
@@ -113,6 +114,7 @@ impl SessionManager {
         &self,
         offer_sdp: &str,
         client_host: Option<&str>,
+        auth: crate::web::auth::AuthContext,
     ) -> Result<(String, String), WebRTCError> {
         let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -161,6 +163,7 @@ impl SessionManager {
                 session,
                 candidate_addr,
                 created_at: Instant::now(),
+                auth,
             },
         );
         self.shared_state.increment_webrtc_sessions();
@@ -310,6 +313,7 @@ impl SessionManager {
         let ps = pending.remove(&session_id).unwrap();
         let mut session = ps.session;
         let candidate_addr = ps.candidate_addr;
+        let auth = ps.auth;
         drop(pending);
 
         info!(
@@ -387,6 +391,7 @@ impl SessionManager {
                 runtime_settings,
                 initial_buffer,
                 shutdown_rx,
+                auth,
             )
             .await;
         });

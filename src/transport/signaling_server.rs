@@ -51,6 +51,7 @@ pub async fn handle_signaling_connection(
     state: Arc<SharedState>,
     session_manager: Arc<SessionManager>,
     client_host: Option<String>,
+    auth: crate::web::auth::AuthContext,
 ) {
     info!(
         "New signaling WebSocket connection established (host: {:?})",
@@ -82,12 +83,19 @@ pub async fn handle_signaling_connection(
     let mut wire_format = WireFormat::Selkies;
 
     // Process incoming messages
+    let auth_cancelled = auth.cancelled();
+    tokio::pin!(auth_cancelled);
     loop {
         // A stalled writer closes the queue after its send timeout.
         if tx.is_closed() {
             break;
         }
-        let Some(result) = ws_receiver.next().await else {
+        let result = tokio::select! {
+            biased;
+            _ = &mut auth_cancelled => break,
+            result = ws_receiver.next() => result,
+        };
+        let Some(result) = result else {
             break;
         };
         match result {
@@ -109,6 +117,7 @@ pub async fn handle_signaling_connection(
                         &tx,
                         wire_format,
                         client_host.as_deref(),
+                        &auth,
                     )
                     .await
                     {
@@ -127,6 +136,7 @@ pub async fn handle_signaling_connection(
                             &tx,
                             wire_format,
                             client_host.as_deref(),
+                            &auth,
                         )
                         .await
                         {
@@ -196,6 +206,7 @@ async fn handle_signaling_message(
     tx: &mpsc::Sender<String>,
     wire_format: WireFormat,
     client_host: Option<&str>,
+    auth: &crate::web::auth::AuthContext,
 ) -> Option<String> {
     match message {
         SignalingMessage::Offer {
@@ -208,7 +219,7 @@ async fn handle_signaling_message(
             }
             // Create session and accept offer in one step
             match session_manager
-                .create_session_with_offer(&sdp, client_host)
+                .create_session_with_offer(&sdp, client_host, auth.clone())
                 .await
             {
                 Ok((sid, answer_sdp)) => {

@@ -1275,6 +1275,7 @@ async fn remote_data(
 async fn view_socket(
     State(g): State<Arc<Gateway>>,
     Path(id): Path<String>,
+    Extension(auth): Extension<crate::web::auth::AuthContext>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -1325,7 +1326,7 @@ async fn view_socket(
     ws.max_message_size(256 * 1024)
         .on_upgrade(move |socket| async move {
             let _pending = pending;
-            bridge(g, socket, v.target, lease, None).await
+            auth.run(bridge(g, socket, v.target, lease, None)).await;
         })
         .into_response()
 }
