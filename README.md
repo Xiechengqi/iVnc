@@ -74,6 +74,8 @@ IVNC_MIAO_BIN="$PWD/target/release/miao-rust" cargo build --release
 # 输出：target/release/ivnc
 ```
 
+GitHub Actions 保留构建发布与容器构建检查。UI 和浏览器回归在本地执行，见 [持续集成与本地验证](docs/CI.md)。
+
 ### Cargo Features
 
 | Feature | 说明 | 默认 |

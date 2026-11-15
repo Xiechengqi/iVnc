@@ -2,6 +2,8 @@
 
 This document outlines the API for an external dashboard to interact with the iVnc client-side application. Interaction primarily occurs via the standard `window.postMessage` mechanism and by observing specific global variables for statistics.
 
+UI and browser regression tests run locally. GitHub Actions retains build/release and container build checks; browser workflows, including manual browser smoke tests, are removed. Local test scripts and development dependencies remain available. See [CI and local verification](../../docs/CI.md).
+
 ## Connection Mode
 
 The client connects to the iVnc server via WebRTC. All media (video/audio) is delivered over WebRTC tracks, and all input/control messages are exchanged through a WebRTC DataChannel.

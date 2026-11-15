@@ -100,4 +100,4 @@ Docker daemon 在本开发环境不可用，因此提供了 `scripts/remote_app_
 | 双应用隔离、X11、私有音频与浏览器 | 通过 |
 | 原有桌面回归 | 56/56 通过 |
 
-Docker daemon 在开发环境仍不可用，seccomp 配置与容器内运行未实测；可用 GitHub Actions 的 “Remote application runtime smoke” 手动验证。
+该轮开发环境的 Docker daemon 不可用，seccomp 配置与容器内运行未实测；当时提供 GitHub Actions 的 “Remote application runtime smoke” 手动验证。2026-11-15 已移除包含浏览器测试的 Actions 入口，保留本地 Docker 验证脚本，见 [持续集成与本地验证](CI.md)。

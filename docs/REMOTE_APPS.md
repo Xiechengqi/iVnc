@@ -123,7 +123,7 @@ IVNC_BIN="$IVNC_BIN" SKIP_BUILD=1 SKIP_UNIT=1 bash scripts/desktop_smoke.sh
 
 测试依赖包括 `gtk-3-examples`、Chrome、Node.js、Python 3、jq、curl 和前端的 `ws` 包（`npm ci --prefix web/ivnc`）。远程测试创建两个临时实例，验证共享密码、A 启动远程应用、经 A 中继的视频和输入、多个连接同时操作、上传、内嵌视图（隐藏工具栏、连接指示和状态栏，并向父页面报告就绪和连接状态）以及关闭共享后的断开；加固测试验证运行方式切换与需重启提示、两种方式下相同的文件/网络/环境、启动器进程、崩溃退避、密码查看与修改、A 的状态与重新输入密码、限流和证书配置。测试不操作已有 iVnc 实例。
 
-Docker 验证入口（也可在 GitHub Actions 手动运行 “Remote application runtime smoke”）：
+本地 Docker 验证入口（包含浏览器端到端检查，GitHub Actions 入口已移除，见 [持续集成与本地验证](CI.md)）：
 
 ```bash
 docker build -t ivnc:remote-review .

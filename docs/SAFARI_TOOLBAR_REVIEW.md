@@ -50,7 +50,7 @@ IVNC_BIN=target/debug/ivnc node scripts/viewport_smoke.mjs
 
 以上为 169 项行为检查，重复运行不重复计数。整标签拖拽变更后重新运行其中 86 项（原生浏览器 44、真实 toolbar 32、手势仲裁 10）及前后端构建；其余 83 项为此前 Safari 点击修复的验证结果。Node 测试执行器另计的父级分组不计入行为检查数。
 
-新增 `web-tests.yml`，在主分支推送、相关 PR 和手动触发时，使用 Ubuntu 24.04、macOS 15 分别运行 Chromium/WebKit、状态测试、手势检查和生产构建。CI 工作流已添加，本地尚未执行远端 macOS job。
+当时新增 `web-tests.yml`，在主分支推送、相关 PR 和手动触发时，使用 Ubuntu 24.04、macOS 15 分别运行 Chromium/WebKit、状态测试、手势检查和生产构建；该轮本地未执行远端 macOS job。2026-11-15 已按用户要求移除 Actions UI 测试入口，保留本地回归，见 [持续集成与本地验证](CI.md)。
 
 ## 整体 Review
 

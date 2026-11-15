@@ -38,4 +38,4 @@ CHROME_BIN=/usr/bin/google-chrome ELECTRON_BIN=/path/to/electron node scripts/mo
 
 前者验证生产输入、视口和共享应用模块；后者通过真实 WebRTC 将移动浏览器输入送入 Electron Wayland 编辑框，并覆盖独立共享运行时。Linux Chromium／WebKit 自动化验证不等于 iPhone、iPad 或 Android 真机系统键盘验收。
 
-未设置 `CHROME_BIN` 时使用 Playwright 安装的 Chromium。CI 在 Linux 和 macOS 上运行移动输入交互套件。端到端脚本对 Chromium 强制等待画面；Linux 无头 WebKit 的画面展示可能受运行环境限制，脚本单独输出媒体诊断后继续检查文字链路。设置 `REQUIRE_VIDEO=1` 可对两种引擎都要求实际画面。
+未设置 `CHROME_BIN` 时使用 Playwright 安装的 Chromium。移动输入交互套件在本地执行，GitHub Actions 不再运行 UI 测试，见 [持续集成与本地验证](CI.md)。端到端脚本对 Chromium 强制等待画面；Linux 无头 WebKit 的画面展示可能受运行环境限制，脚本单独输出媒体诊断后继续检查文字链路。设置 `REQUIRE_VIDEO=1` 可对两种引擎都要求实际画面。
