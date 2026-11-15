@@ -880,6 +880,7 @@ tr:hover { background-color: #f8f9fa; }
   border: 1px solid #d1d8e0;
 }
 
+.app-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
 .modal-actions { margin-top: 20px; display: flex; gap: 8px; justify-content: flex-end; }
 .app-modal .modal-actions .btn {
   min-width: 64px;

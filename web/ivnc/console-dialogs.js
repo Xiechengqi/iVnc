@@ -24,7 +24,7 @@ export function createConsoleDialogs() {
         const element = current?.element;
         if (!element) return;
         const target = [...element.querySelectorAll('[autofocus], input:not([disabled]):not([type="hidden"]), button:not([disabled]), [tabindex="0"]')]
-            .find(node => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
+            .find(node => !node.matches(':disabled') && node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
         (target || element.querySelector('.modal') || element).focus({ preventScroll: true });
     }
     function close(restoreFocus = true, force = false) {
@@ -79,7 +79,7 @@ export function createConsoleDialogs() {
             event.preventDefault(); event.stopPropagation(); close();
         } else if (event.key === 'Tab') {
             const items = [...current.element.querySelectorAll('button, input, textarea, select, a[href], [tabindex="0"]')]
-                .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
+                .filter(node => !node.matches(':disabled') && node.tabIndex >= 0 && node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
             if (!items.length) { event.preventDefault(); focus(); return; }
             const first = items[0], last = items.at(-1), active = document.activeElement;
             if (event.shiftKey && (active === first || !items.includes(active))) {

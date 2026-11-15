@@ -1,6 +1,7 @@
 // Real pointer/keyboard, production UI, isolated server/PTY and delayed requests.
 // Build web/ivnc and ivnc first. IVNC_BIN=target/debug/ivnc node scripts/window_ui_smoke.mjs
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, openSync, closeSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -124,6 +125,13 @@ async function assertDefaultGeometry() {
 try {
     launch(binary,['--config',config,'--http-port',String(port),'--basic-auth-enabled','false','--proxy-enabled','false','--proxy-autostart','false','--width','800','--height','600'],'server',{env,cwd:root});
     await waitFor('server',()=>api('/api/apps'),30000);
+    const creationId=randomUUID(),creationBody={creation_id:creationId,name:'Recoverable add',app_type:'desktop',exec_command:'sleep 598'};
+    assert.equal((await api('/api/apps','POST',creationBody)).app.id,creationId);
+    const replay=await fetch(base+'/api/apps',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...creationBody,name:'Do not overwrite',exec_command:'different-command'})});
+    assert.equal(replay.status,409);assert.equal((await replay.json()).code,'app_creation_exists');
+    assert.equal((await api(`/api/apps/${creationId}`)).exec_command,'sleep 598');
+    await api(`/api/apps/${creationId}`,'DELETE');
+    pass('desktop creation IDs survive persistence and replay never overwrites an existing app');
     const a=(await api('/api/apps','POST',{name:'Window A',app_type:'desktop',exec_command:'sleep 600'})).app;
     const b=(await api('/api/apps','POST',{name:'Window B',app_type:'desktop',exec_command:'sleep 600'})).app;
     const detailApp=(await api('/api/apps','POST',{name:'Launch details',app_type:'desktop',exec_command:'sleep 599',desktop_launch:{compatibility:'auto',sandbox:'preserve'}})).app;
@@ -199,6 +207,21 @@ try {
     assert((await con(`document.querySelector('#desktop-launch-info').textContent`)).includes('UID:'));
     await screenshot('desktop-launch-details.png');await closeChild();
     pass('editing retains saved launch policies and displays the actual server launch report on demand');
+
+    await openAdd();
+    await con(`document.querySelector('#f-app-type').value='desktop';document.querySelector('#f-app-type').dispatchEvent(new Event('change'));
+        document.querySelector('#f-name').value='First shared add';document.querySelector('#f-exec').value='sleep 597';
+        document.querySelector('#f-share-enabled').click();document.querySelector('#f-share-password').value='first-sharing-password'`);
+    assert(await con(`!document.querySelector('#sharing-section').hidden&&document.querySelector('#share-url-copy').disabled`));
+    await click('#modal-save',true);
+    await waitFor('first added app sharing URL',()=>con(`document.querySelector('#f-share-url').value&&!document.querySelector('#modal-save').disabled`));
+    const firstShared=(await api('/api/apps')).apps.find(app=>app.name==='First shared add');
+    assert(firstShared);assert.equal((await api(`/api/apps/${firstShared.id}/sharing`)).password,'first-sharing-password');
+    assert.equal(await con(`document.querySelector('#f-share-url').value`),`${base}/remote/v1/apps/${firstShared.id}`);
+    assert.equal((await api(`/api/apps/${firstShared.id}`)).status,'stopped');
+    assert(await childOpen());await screenshot('console-first-add-sharing.png');await closeChild();
+    await api(`/api/apps/${firstShared.id}`,'DELETE');
+    pass('new desktop sharing saves through the real APIs and reveals its URL in the same dialog');
 
 
     await openAdd();await screenshot('console-add.png');

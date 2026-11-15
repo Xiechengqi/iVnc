@@ -12,7 +12,7 @@ const CAP_API = '/api/capabilities';
 let editId = null;
 let editBuiltin = false;
 let editApp = null;        // record of the app being edited
-let sharingState = null;   // GET /api/apps/{id}/sharing of the desktop app being edited
+let sharingState = null;   // persisted sharing settings, or the initial disabled draft
 let appSignature = '';     // launch settings as last saved; a change on a running app needs a restart
 let modalSaved = false;    // the open dialog has saved at least once
 const dialogs = createConsoleDialogs();
@@ -656,6 +656,7 @@ function applyTranslations() {
     ].forEach(([id, key]) => setText(id, key));
     setPlaceholderById('f-remote-url', t('remoteUrlPlaceholder'));
     ['f-remote-password', 'f-share-password'].forEach(syncPasswordToggle);
+    syncShareUrl();
     const notice = document.getElementById('restart-notice');
     if (notice?.dataset.key) setText('restart-notice-text', notice.dataset.key);
     setText('modal-cancel', editBuiltin || modalSaved ? 'close' : 'cancel');
@@ -691,7 +692,7 @@ function applyTranslations() {
 
     if (!editId && appDialog?.kind !== 'edit') {
         setText('modal-title', 'addModal');
-        setText('modal-save', 'addSave');
+        setText('modal-save', appDialog?.creationAttempt ? 'retryCreate' : 'addSave');
     } else {
         setText('modal-title', 'editModal');
         setText('modal-save', 'editSave');
@@ -1347,8 +1348,13 @@ function resetModal() {
     document.getElementById('sharing-section').hidden = true;
     document.getElementById('basic-title').hidden = true;
     document.getElementById('f-share-enabled').checked = false;
+    document.getElementById('f-share-enabled').disabled = false;
+    document.getElementById('sharing-fields').hidden = true;
+    document.getElementById('app-fields').disabled = false;
     setValue('f-share-password', '');
+    setPlaceholderById('f-share-password', '');
     setValue('f-share-url', '');
+    syncShareUrl();
     showRestartNotice(null);
     clearFormErrors();
     document.getElementById('remote-test').disabled = false;
@@ -1420,6 +1426,7 @@ function showAdd() {
     const modal = document.getElementById('modal');
     modal.querySelector('#modal-title').textContent = t('addModal');
     modal.querySelector('#modal-save').textContent = t('addSave');
+    sharingState = { enabled: false, password_set: false, password_viewable: false, share_path: null };
     document.getElementById('f-app-type').value = 'background';
     updateAppTypeVisibility();
     appTypeControl?.sync();
@@ -1586,9 +1593,16 @@ function renderSharing(data) {
     password.value = data.password_viewable && data.password ? data.password : '';
     password.placeholder = data.password_set && !data.password_viewable ? t('sharePasswordLegacy') : '';
     setPasswordVisible('f-share-password', false);
-    document.getElementById('f-share-url').value = new URL(data.share_path, location.origin).href;
+    syncShareUrl();
     syncSharingFields();
     if (data.restart_required) showRestartNotice('restartPending');
+}
+
+function syncShareUrl() {
+    const input = document.getElementById('f-share-url');
+    input.value = sharingState?.share_path ? new URL(sharingState.share_path, location.origin).href : '';
+    input.placeholder = editId ? '' : t('shareUrlPending');
+    document.getElementById('share-url-copy').disabled = !input.value;
 }
 
 function syncSharingFields() {
@@ -1636,9 +1650,37 @@ async function saveSharing(id, body) {
     return putJson(`${API}/${id}/sharing`, body);
 }
 
+// Reconcile a lost write response before retrying a password change, which would
+// otherwise revoke sessions twice. A successful PUT is enough to retain a saved
+// baseline even if the following read is temporarily unavailable.
+async function saveAndReadSharing(id, body, original) {
+    let result, data;
+    try {
+        result = await saveSharing(id, body);
+    } catch (error) {
+        try { data = await fetchJson(`${API}/${id}/sharing`); } catch (_) {}
+        if (!data || data.enabled !== body.enabled
+            || (body.password && (!data.password_viewable || data.password !== body.password))) throw error;
+        result = { restart_required: data.restart_required, revoked: original.enabled
+            && (body.enabled !== original.enabled || !!body.password) };
+    }
+    if (!data) {
+        try { data = await fetchJson(`${API}/${id}/sharing`); } catch (_) {
+            data = { ...original, enabled: body.enabled,
+                password_set: original.password_set || !!body.password,
+                password: body.password ?? original.password,
+                password_viewable: body.password ? true : original.password_viewable,
+                share_path: original.share_path || `/remote/v1/apps/${encodeURIComponent(id)}`,
+                restart_required: !!result.restart_required };
+        }
+    }
+    return { result, data };
+}
+
 async function copyShareUrl() {
     const session = appDialog;
     const btn = document.getElementById('share-url-copy');
+    if (btn.disabled || !document.getElementById('f-share-url').value) return;
     try {
         await copyText(document.getElementById('f-share-url').value);
         if (!session?.isCurrent()) return;
@@ -1810,6 +1852,60 @@ function validateAppBody(body) {
     return true;
 }
 
+function newCreationId() {
+    // getRandomValues also works on HTTP origins where randomUUID is absent.
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function createDesktopRecord(attempt) {
+    let failure, rejected = false;
+    try {
+        const response = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...attempt.body, creation_id: attempt.id }) });
+        const data = await parseJsonResponse(response);
+        if (response.ok && !data.error && data.app?.id === attempt.id && data.app.app_type === 'desktop') return data.app;
+        rejected = response.status >= 400 && response.status < 500;
+        failure = new Error(serverErrorText(data) || response.statusText);
+    } catch (error) { failure = error; }
+
+    // The ID belongs to this attempt, so a same-name app from another client
+    // can never be mistaken for the application just created here.
+    try {
+        const response = await fetch(`${API}/${attempt.id}`, { cache: 'no-store' });
+        const data = await parseJsonResponse(response);
+        if (response.ok && !data.error && data.id === attempt.id && data.app_type === 'desktop') return data;
+        if (response.status === 404 && rejected && !attempt.uncertain) throw Object.assign(failure, { definitive: true });
+    } catch (error) {
+        if (error.definitive) throw error;
+    }
+    attempt.uncertain = true;
+    throw new Error(t('appCreateUncertain'));
+}
+
+function adoptCreatedApp(app, session) {
+    editId = app.id;
+    editApp = app;
+    session.kind = 'edit';
+    session.creationAttempt = null;
+    modalSaved = true;
+    setText('modal-title', 'editModal');
+    setValue('f-name', app.name);
+    if (app.app_type === 'desktop') {
+        setValue('f-exec', app.exec_command || '');
+        setValue('f-env', envToText(app.env_vars));
+        document.getElementById('f-autostart').checked = !!app.autostart;
+        setValue('f-desktop-compat', app.desktop_launch?.compatibility || 'auto');
+        setValue('f-desktop-sandbox', app.desktop_launch?.sandbox || 'auto');
+    }
+    updateAppTypeVisibility();
+    appSignature = JSON.stringify(readAppBody(app.app_type));
+    syncShareUrl();
+}
+
 async function saveApp() {
     const session = appDialog;
     if (!session?.isCurrent() || session.saving || session.restarting || editBuiltin
@@ -1818,13 +1914,18 @@ async function saveApp() {
     const appType = document.getElementById('f-app-type').value;
     const body = readAppBody(appType);
     if (!validateAppBody(body)) return;
-    const sharing = editId && appType === 'desktop' ? readSharingChange() : null;
+    const sharing = appType === 'desktop' ? readSharingChange() : null;
     if (sharing === false) return;
     if (sharing?.password && sharingState.enabled && sharingState.password_set && !confirm(t('confirmPasswordChange'))) return;
-    const snapshot = { id: editId, app: editApp && { ...editApp }, signature: appSignature,
+    if (!editId && appType === 'desktop' && !session.creationAttempt) {
+        session.creationAttempt = { id: newCreationId(), body, uncertain: false };
+    }
+    const snapshot = { id: editId || session.creationAttempt?.id, app: editApp && { ...editApp }, signature: appSignature,
         sharing: sharingState && { ...sharingState }, wasEditing: !!editId };
     const btn = document.getElementById('modal-save');
     session.saving = true;
+    appTypeControl?.close(); launchModeControl?.close(); sandboxControl?.close();
+    document.getElementById('app-fields').disabled = true;
     btn.disabled = true; btn.textContent = t('savePending');
     const report = message => {
         if (session.isCurrent()) showModalError(message);
@@ -1832,66 +1933,80 @@ async function saveApp() {
     };
     const operation = Promise.resolve().then(async () => {
         try {
-            const r = await fetch(snapshot.id ? API + '/' + snapshot.id : API, {
-                method: snapshot.id ? 'PUT' : 'POST',
-                headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-            });
-            const d = await parseJsonResponse(r);
-            if (!r.ok || d.error) {
-                if (d.code === 'app_name_conflict' && snapshot.app && Number.isSafeInteger(d.params?.name_revision)) {
-                    const app = { ...snapshot.app, name: d.params.name, name_revision: d.params.name_revision };
-                    latestNames.set(snapshot.id, { name: app.name, name_revision: app.name_revision });
-                    if (session.isCurrent()) editApp = app;
-                    load();
+            let saved;
+            if (!snapshot.wasEditing && session.creationAttempt) {
+                saved = await createDesktopRecord(session.creationAttempt);
+            } else {
+                const r = await fetch(snapshot.wasEditing ? API + '/' + snapshot.id : API, {
+                    method: snapshot.wasEditing ? 'PUT' : 'POST',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+                });
+                const d = await parseJsonResponse(r);
+                if (!r.ok || d.error) {
+                    if (d.code === 'app_name_conflict' && snapshot.app && Number.isSafeInteger(d.params?.name_revision)) {
+                        const app = { ...snapshot.app, name: d.params.name, name_revision: d.params.name_revision };
+                        latestNames.set(snapshot.id, { name: app.name, name_revision: app.name_revision });
+                        if (session.isCurrent()) editApp = app;
+                        load();
+                    }
+                    report(serverErrorText(d) || r.statusText);
+                    return;
                 }
-                report(serverErrorText(d) || r.statusText);
-                return;
+                saved = d.app || d;
             }
-            if (d.id && Number.isSafeInteger(d.name_revision)) orderNotifications.publishName(d.id, d.name_revision);
+            if (saved.id && Number.isSafeInteger(saved.name_revision)) orderNotifications.publishName(saved.id, saved.name_revision);
+            if (!snapshot.wasEditing) {
+                snapshot.id = saved.id;
+                pendingAppWrites.set(snapshot.id, operation);
+                session.revealShareAfterSave = appType === 'desktop' && !!sharing?.enabled;
+                if (session.isCurrent()) adoptCreatedApp(saved, session);
+            }
             const signature = JSON.stringify(body);
             let restart = snapshot.wasEditing && !['cli', 'remote'].includes(appType)
                 && signature !== snapshot.signature && isActive(snapshot.app);
             let revoked = false;
-            if (session.isCurrent()) {
+            if (session.isCurrent() && snapshot.wasEditing) {
                 appSignature = signature;
-                if (d.id) editApp = { ...editApp, ...d };
+                if (saved.id) editApp = { ...editApp, ...saved };
             }
             if (sharing) {
                 try {
-                    const result = await saveSharing(snapshot.id, sharing);
+                    const { result, data } = await saveAndReadSharing(snapshot.id, sharing, snapshot.sharing);
                     revoked = !!result.revoked;
-                    restart = restart || !!result.restart_required;
-                    if (session.isCurrent()) {
-                        sharingState = { ...snapshot.sharing, enabled: sharing.enabled,
-                            password_set: snapshot.sharing.password_set || !!sharing.password,
-                            password: sharing.password ?? snapshot.sharing.password,
-                            password_viewable: sharing.password ? true : snapshot.sharing.password_viewable,
-                            restart_required: !!result.restart_required };
-                    }
+                    restart = restart || !!result.restart_required || !!data.restart_required;
+                    if (session.isCurrent()) renderSharing(data);
                 } catch (e) {
+                    const message = session.revealShareAfterSave ? `${t('appSharingIncomplete')} ${e.message}` : e.message;
                     if (session.isCurrent()) {
                         modalSaved = true; setText('modal-cancel', 'close');
-                        setTextById('err-f-share-enabled', e.message);
+                        setTextById('err-f-share-enabled', message);
                     }
                     // The application write has succeeded, even if sharing failed.
-                    toast(`${body.name || snapshot.app?.name || ''}: ${t('updated')} · ${e.message}`, 'err');
+                    toast(`${body.name || snapshot.app?.name || ''}: ${message}`, 'err');
                     load(); return;
                 }
             }
             load();
             if (session.isCurrent()) {
                 if (restart) { modalSaved = true; setText('modal-cancel', 'close'); showRestartNotice('restartSaved'); }
+                else if (session.revealShareAfterSave && sharingState?.enabled) {
+                    modalSaved = true; setText('modal-cancel', 'close');
+                }
                 else hideModal();
+                session.revealShareAfterSave = false;
             }
             toast(revoked ? t('sharingRevoked') : snapshot.wasEditing ? t('updated') : t('added'), 'ok');
         } catch (e) {
+            if (e.definitive) session.creationAttempt = null;
             report(t('actionFailed') + e.message);
         } finally {
             session.saving = false;
             if (snapshot.id && pendingAppWrites.get(snapshot.id) === operation) pendingAppWrites.delete(snapshot.id);
             if (session.isCurrent()) {
                 btn.disabled = editBuiltin;
-                btn.textContent = t(snapshot.wasEditing ? 'editSave' : 'addSave');
+                document.getElementById('app-fields').disabled = !!session.creationAttempt;
+                btn.textContent = t(editId ? 'editSave' : session.creationAttempt ? 'retryCreate' : 'addSave');
+                updateDesktopLaunchControls();
             }
         }
     });
@@ -2009,10 +2124,8 @@ function updateAppTypeVisibility() {
     document.getElementById('f-skill-paths').closest('.form-line').hidden = type === 'remote';
     document.getElementById('name-required-mark').hidden = type === 'remote';
     document.getElementById('remote-password-required-mark').hidden = !!editId;
-    if (type !== 'desktop' || !editId || editBuiltin) {
-        document.getElementById('sharing-section').hidden = true;
-        document.getElementById('basic-title').hidden = true;
-    }
+    document.getElementById('sharing-section').hidden = type !== 'desktop' || editBuiltin;
+    document.getElementById('basic-title').hidden = type !== 'desktop' || editBuiltin;
     updateTypePlaceholders();
 
     if (!autostartControl.parentElement) {

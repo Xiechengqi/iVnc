@@ -180,6 +180,7 @@
                 <h2 id="modal-title">添加应用</h2>
                 <button class="modal-close" id="modal-close" type="button" aria-label="关闭">×</button>
             </div>
+            <fieldset id="app-fields" class="app-fields">
             <div class="advanced-title modal-section-first" id="basic-title" hidden>基本信息</div>
             <div class="form-line">
                 <label class="form-label required-label" for="f-name">
@@ -244,7 +245,7 @@
                     <button type="button" id="remote-test" class="btn btn-action btn-sm">测试连接</button>
                     <span class="field-hint" id="remote-test-result" role="status"></span>
                 </div>
-                <span class="help-text" id="remote-help">在共享端编辑该应用并开启远程访问，然后复制连接地址和密码。</span>
+                <span class="help-text" id="remote-help">在共享端添加或编辑桌面应用，开启远程访问并保存，然后复制连接地址和密码。</span>
             </div>
             <div id="background-config">
                 <div class="form-line command-line">
@@ -404,19 +405,20 @@
                             <button type="button" class="btn btn-cancel btn-sm" id="share-password-generate">生成</button>
                         </div>
                         <div class="field-hint field-error" id="err-f-share-password"></div>
-                        <span class="help-text" id="help-share-password">至少 8 位。修改密码会断开所有远程连接。</span>
+                        <span class="help-text" id="help-share-password">8–256 字节。修改密码会断开所有远程连接。</span>
                     </div>
                     <div class="form-line">
                         <label class="form-label" for="f-share-url" id="label-share-url">连接地址</label>
                         <div class="input-actions">
                             <input id="f-share-url" type="text" readonly data-fixed-readonly>
-                            <button type="button" class="btn btn-cancel btn-sm" id="share-url-copy">复制</button>
+                            <button type="button" class="btn btn-cancel btn-sm" id="share-url-copy" disabled>复制</button>
                         </div>
                         <span class="help-text" id="help-share-url">在另一台 iVnc（A）中添加“远程应用”，填入此地址和密码。地址按当前浏览器访问本机的方式生成；如果 A 访问本机的地址不同（如 Docker 端口映射、反向代理、内网 IP），请改成 A 能访问到的地址。</span>
                     </div>
                 </div>
             </div>
 
+            </fieldset>
             <div class="modal-notice" id="restart-notice" role="status" hidden>
                 <span id="restart-notice-text"></span>
                 <button type="button" class="btn btn-restart btn-sm" id="restart-now">立即重启</button>

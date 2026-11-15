@@ -1163,6 +1163,29 @@ async fn rename_app(
     }
 }
 
+// A desktop creation can be reconciled by its ID when the HTTP response is lost.
+// Reusing the ID never updates an existing application.
+fn creation_id(body: &serde_json::Value, app_type: AppType) -> Result<String, ApiError> {
+    match body.get("creation_id") {
+        None => Ok(uuid::Uuid::new_v4().to_string()),
+        Some(value) => value
+            .as_str()
+            .and_then(|s| {
+                uuid::Uuid::parse_str(s)
+                    .ok()
+                    .filter(|id| id.to_string() == s)
+            })
+            .filter(|id| app_type == AppType::DesktopApp && id.get_version_num() == 4)
+            .map(|id| id.to_string())
+            .ok_or_else(|| {
+                ApiError::new(
+                    "app_creation_invalid",
+                    "Invalid desktop creation identifier",
+                )
+            }),
+    }
+}
+
 async fn add_app(
     State(state): State<Arc<AppsState>>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
@@ -1191,6 +1214,25 @@ async fn add_app(
             )
         }
     };
+    let id = match creation_id(&body, app_type) {
+        Ok(id) => id,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+    if body.get("creation_id").is_some() {
+        match state.store.get_optional(&id) {
+            Ok(Some(_)) => {
+                return err_response(
+                    StatusCode::CONFLICT,
+                    ApiError::new(
+                        "app_creation_exists",
+                        "This application was already created",
+                    ),
+                )
+            }
+            Ok(None) => {}
+            Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+        }
+    }
     let remote_target = if app_type == AppType::RemoteApp {
         match crate::remote::gateway::connect_target(&body, &state.remote.node_id).await {
             Ok(target) => Some(target),
@@ -1328,7 +1370,7 @@ async fn add_app(
         Default::default()
     };
     let app = ManagedApp {
-        id: uuid::Uuid::new_v4().to_string(),
+        id,
         name,
         app_type,
         autostart,
@@ -1808,6 +1850,60 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_creation_ids_are_optional_canonical_v4_uuids() {
+        let id = "a47d022a-191a-4833-9212-70e92bff314c";
+        assert_eq!(
+            creation_id(&json!({"creation_id": id}), AppType::DesktopApp).unwrap(),
+            id
+        );
+        assert!(
+            uuid::Uuid::parse_str(&creation_id(&json!({}), AppType::DesktopApp).unwrap()).is_ok()
+        );
+        for value in [
+            json!(null),
+            json!(17),
+            json!("bad/id"),
+            json!(uuid::Uuid::nil().to_string()),
+            json!(id.to_uppercase()),
+        ] {
+            assert_eq!(
+                creation_id(&json!({"creation_id": value}), AppType::DesktopApp)
+                    .unwrap_err()
+                    .code,
+                "app_creation_invalid"
+            );
+        }
+        for kind in [AppType::BackgroundApp, AppType::CliApp, AppType::RemoteApp] {
+            assert!(creation_id(&json!({"creation_id": id}), kind).is_err());
+            assert!(creation_id(&json!({}), kind).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_creation_replay_never_overwrites_an_existing_app() {
+        let state = state(None, None);
+        let id = uuid::Uuid::new_v4().to_string();
+        let app = ManagedApp::for_test(&id, AppType::DesktopApp);
+        state.store.add(&app).unwrap();
+        let before = state.store.list().unwrap().len();
+        let response = add_app(State(state.clone()), axum::Json(json!({
+            "creation_id": id, "name": "A different name", "app_type": "desktop", "exec_command": "different-command"
+        }))).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "app_creation_exists"
+        );
+        let saved = state.store.get(&id).unwrap();
+        assert_eq!(saved.name, app.name);
+        assert_eq!(saved.exec_command, app.exec_command);
+        assert_eq!(state.store.list().unwrap().len(), before);
+    }
 
     #[tokio::test]
     async fn desktop_options_validate_and_legacy_updates_preserve_them() {

@@ -25,6 +25,7 @@ npm --prefix web/ivnc run test:toolbar
 npm --prefix web/ivnc run test:viewport
 npm --prefix web/ivnc run test:mobile-input
 npm --prefix web/ivnc run test:settings
+npm --prefix web/ivnc run test:app-sharing
 node --test scripts/video_playback_test.mjs scripts/viewport_test.mjs scripts/clipboard_test.mjs
 node scripts/gesture_navigation_smoke.mjs
 npm --prefix web/ivnc run build
