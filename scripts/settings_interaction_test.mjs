@@ -1,0 +1,267 @@
+// Production settings controller, console, actions and modal input guard in
+// Chromium/WebKit. Privileged operations are intercepted; no service restarts.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+const require = createRequire(new URL('../web/ivnc/package.json', import.meta.url));
+const { createServer } = require('vite'), engines = require('playwright');
+const { WebSocketServer } = require('ws');
+const root = fileURLToPath(new URL('../web/ivnc/', import.meta.url));
+const source = readFileSync(path.join(root, 'ivnc-wr-core.js'), 'utf8');
+const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+// Run the actual desktop controller without starting a media session.
+const fixture = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{margin:0} ${slice('\t.web-terminal-modal {', '\t.connect-page {')}</style>
+<button id="underlay" style="position:fixed;inset:0">Application</button>
+<script type="module">
+import {t,onLangChange} from '/lib/i18n.js?v=1';
+import {installOverlayGuard,minimizeOtherOverlays,createConsoleShield,releaseOverlayInput} from '/overlay-manager.js';
+${slice('const MAIN_I18N =', 'function InitUI()')}
+${slice('function getBasePath()', 'function createWebTerminalController()')}
+${slice('function createConsoleModalController(', 'function createProxyModalController()')}
+const controller=createConsoleModalController(new URLSearchParams(location.search).get('console')!=='0');
+controller.show();window.fixture={controller,clicks:0};
+document.getElementById('underlay').onclick=()=>fixture.clicks++;
+</script>`;
+const wait = (frame, fn) => frame.waitForFunction(fn);
+const openPassword = async frame => { await frame.locator('#settings-password').click(); await frame.locator('#pwd-new').waitFor(); };
+const openUpdate = async frame => { await frame.locator('#settings-update').click(); await frame.locator('#update-ok').waitFor(); };
+const closed = frame => wait(frame, () => !document.querySelector('.settings-dialog-bg'));
+const locked = frame => wait(frame, () => window.__ivncConsoleDialogState.locked);
+const unlocked = frame => wait(frame, () => !window.__ivncConsoleDialogState.locked);
+
+const cases = [
+    ['desktop header keeps navigation and exposes all actions without requests', async ({ page, frame, calls }) => {
+        assert.equal(await frame.locator('.nav-item').count(), 3);
+        assert(await frame.locator('#settings-password').isVisible());
+        assert(await frame.locator('#settings-update').isVisible());
+        assert(await frame.locator('#signout-btn').isVisible());
+        const positions = await frame.evaluate(() => ['.nav-list','#settings-password','#settings-update','#lang-toggle','#signout-btn'].map(s => {
+            const r=document.querySelector(s).getBoundingClientRect(); return {left:r.left,right:r.right,top:r.top};
+        }));
+        assert(positions.every((r,i) => i===0 || r.left>=positions[i-1].right));
+        assert.equal(await page.locator('.web-terminal-title span').textContent(), '设置');
+        assert.equal(calls.filter(c => c.method==='POST').length, 0);
+    }],
+    ['minimal settings needs no console page or management requests', async ({ page, url, calls }) => {
+        const count=calls.length;
+        await page.goto(url+'?console=0');
+        const frame=page.frameLocator('#settings-frame');
+        await frame.locator('#settings-password').waitFor();
+        assert((await page.locator('#settings-frame').getAttribute('src')).endsWith('/settings.html'));
+        await frame.locator('#settings-update').click(); await frame.locator('#update-cancel').click();
+        assert(!calls.slice(count).some(c => ['/console','/console.css','/console.js'].includes(c.url) || c.url.startsWith('/api/console/') || c.url.startsWith('/api/apps')));
+        assert.equal(await frame.locator('.nav-item').count(), 0);
+    }],
+    ['320px to desktop layouts and both languages fit without overlapping', async ({ page, frame }) => {
+        for (const width of [320,375,768,1280]) {
+            await page.setViewportSize({width,height:720});
+            for(let language=0;language<2;language++) {
+                await frame.locator('#lang-toggle').click();
+                const b=await frame.evaluate(() => {
+                    const nav=document.querySelector('.nav-list').getBoundingClientRect(), a=document.querySelector('#settings-actions').getBoundingClientRect();
+                    return {navRight:nav.right,actionsLeft:a.left,right:a.right,width:innerWidth,scroll:document.documentElement.scrollWidth,
+                        buttons:[...document.querySelectorAll('.settings-action')].map(n=>({height:n.getBoundingClientRect().height,label:n.getAttribute('aria-label')}))};
+                });
+                assert(b.right<=b.width+1 && b.scroll<=b.width && b.navRight<=b.actionsLeft,JSON.stringify(b));
+                assert(b.buttons.every(n=>n.label && (width>760 || n.height>=44)));
+            }
+        }
+    }],
+    ['password validation and failed submission keep native input and CSRF', async ({ page, frame, calls }) => {
+        await page.route('**/api/change-password', route => route.fulfill({status:403,json:{error:'<img src=x onerror=alert(1)>'}}));
+        await openPassword(frame);
+        await frame.locator('#pwd-new').fill('abc'); await frame.locator('#pwd-confirm').fill('abc');
+        await frame.locator('#pwd-ok').click(); assert.match(await frame.locator('#pwd-msg').textContent(),/4/);
+        await frame.locator('#pwd-new').fill('password'); await frame.locator('#pwd-confirm').fill('different');
+        await frame.locator('#pwd-ok').click(); assert.match(await frame.locator('#pwd-msg').textContent(),/不一致/);
+        assert.equal(calls.filter(c=>c.url==='/api/change-password').length,0);
+        await frame.locator('#pwd-new').fill('输入🙂password'); await frame.locator('#pwd-confirm').fill('输入🙂password');
+        await frame.locator('#pwd-confirm').press('Enter');
+        await wait(frame,()=>document.querySelector('#pwd-msg').textContent.includes('<img'));
+        assert.equal(await frame.locator('#pwd-msg img').count(),0);
+        const request=calls.find(c=>c.url==='/api/change-password');
+        assert.equal(request.csrf,'fixture-csrf'); assert.equal(request.body.new_password,'输入🙂password');
+        assert.equal(await frame.locator('#pwd-ok').isDisabled(),false);
+    }],
+    ['Escape, backdrop and parent clicks dismiss only the child and restore focus', async ({ page, frame }) => {
+        for (const method of ['escape','backdrop','parent']) {
+            await openPassword(frame);
+            await frame.locator('#pwd-new').evaluate(el=>el.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',isComposing:true,bubbles:true,cancelable:true})));
+            assert.equal(await frame.locator('#pwd-new').count(),1);
+            if(method==='escape') await frame.locator('#pwd-new').press('Escape');
+            else if(method==='backdrop') await frame.locator('.settings-dialog-bg').click({position:{x:2,y:2}});
+            else await page.mouse.click(2,2);
+            await closed(frame);
+            assert(await page.locator('.web-settings-modal').isVisible());
+            assert(await frame.locator('#settings-password').evaluate(el=>document.activeElement===el));
+            assert.equal(await page.evaluate(()=>fixture.clicks),0);
+            assert.equal(await page.evaluate(()=>document.documentElement.hasAttribute('data-ivnc-modal-blocked')),false);
+        }
+    }],
+    ['password request locks dismissal, minimizing and duplicate submission', async ({ page, frame, calls }) => {
+        let release;
+        const gate=new Promise(resolve=>{release=resolve});
+        await page.route('**/api/change-password',async route=>{await gate;await route.fulfill({status:500,json:{error:'test failure'}})});
+        try {
+            await openPassword(frame); await frame.locator('#pwd-new').fill('test-password'); await frame.locator('#pwd-confirm').fill('test-password');
+            await frame.locator('#pwd-ok').click(); await locked(frame);
+            await frame.evaluate(()=>{document.querySelector('form.settings-dialog').requestSubmit();window.__ivncConsoleDialogState.dismiss(window.__ivncConsoleDialogState.id)});
+            await frame.evaluate(()=>document.querySelector('#add-app-btn').click());
+            await page.mouse.click(2,2); await page.keyboard.press('Escape');
+            await page.evaluate(()=>fixture.controller.minimize());
+            assert(await page.locator('.web-settings-modal').isVisible());
+            assert(await page.locator('#web-console-minimize').isDisabled());
+            assert(await frame.locator('#pwd-cancel').isDisabled());
+            assert.equal(calls.filter(c=>c.url==='/api/change-password').length,1);
+            release(); await unlocked(frame);
+            assert.equal(await page.locator('#web-console-minimize').isDisabled(),false);
+            await frame.locator('#pwd-cancel').click(); await closed(frame);
+        } finally { release(); }
+    }],
+    ['restart defaults to no upgrade and HTTP failure unlocks the dialog', async ({ page, frame, calls }) => {
+        await page.route('**/api/restart',route=>route.fulfill({status:500,json:{error:'restart refused'}}));
+        await openUpdate(frame);
+        assert.equal(await frame.locator('#upgrade-latest').isChecked(),false);
+        assert.equal(calls.filter(c=>c.url==='/api/restart').length,0);
+        await frame.locator('#update-ok').click();
+        await wait(frame,()=>document.querySelector('#update-logs').textContent.includes('restart refused'));
+        await unlocked(frame);
+        assert.equal(calls.filter(c=>c.url==='/api/restart').length,1);
+        assert.equal(calls.find(c=>c.url==='/api/restart').csrf,'fixture-csrf');
+        await frame.locator('#update-cancel').click(); await closed(frame);
+    }],
+    ['upgrade starts only after confirmation and final restart error is not success', async ({ frame, calls, handleUpgrade }) => {
+        let socket,opened=0;
+        handleUpgrade(ws=>{socket=ws;opened++});
+        await openUpdate(frame); await frame.locator('#upgrade-latest').check();
+        assert.match(await frame.locator('#update-ok').textContent(),/升级/); assert.equal(opened,0);
+        await frame.locator('#update-ok').click(); await locked(frame);
+        await wait(frame,()=>document.querySelector('#update-info').hidden);
+        for(let attempt=0;!socket&&attempt<100;attempt++) await new Promise(resolve=>setTimeout(resolve,20));
+        assert(socket,await frame.locator('#update-logs').textContent());
+        socket.send(JSON.stringify({step:10,total_steps:10,level:'info',message:'restarting'}));
+        socket.send(JSON.stringify({step:10,total_steps:10,level:'error',message:'restart failed'}));
+        socket.close(1000,'fixture');
+        await unlocked(frame);
+        assert.equal(opened,1); assert.match(await frame.locator('#update-logs').textContent(),/restart failed/);
+        assert.equal(calls.filter(c=>c.url==='/health').length,0);
+        await frame.locator('#update-cancel').click(); await closed(frame);
+    }],
+    ['an incomplete upgrade socket cannot be reported as successful', async ({ frame, calls, handleUpgrade }) => {
+        handleUpgrade(ws=>{ws.send(JSON.stringify({step:2,total_steps:10,level:'info',message:'downloading'}));ws.close(1000)});
+        await openUpdate(frame); await frame.locator('#upgrade-latest').check(); await frame.locator('#update-ok').click();
+        await unlocked(frame);
+        assert.match(await frame.locator('#update-logs').textContent(),/无法确认/);
+        assert.equal(calls.filter(c=>c.url==='/health').length,0);
+    }],
+    ['a stalled upgrade unlocks after its inactivity timeout', async ({ page, frame, handleUpgrade }) => {
+        handleUpgrade(()=>{});
+        await page.clock.install();
+        await openUpdate(frame); await frame.locator('#upgrade-latest').check(); await frame.locator('#update-ok').click();
+        await locked(frame); await page.clock.runFor(120001); await unlocked(frame);
+        assert.match(await frame.locator('#update-logs').textContent(),/无法确认/);
+        assert.equal(await page.locator('#web-console-minimize').isDisabled(),false);
+        await frame.locator('#update-cancel').click(); await closed(frame);
+    }],
+    ['successful upgrade tolerates a recovered warning and reloads the main page', async ({ page, frame, calls, handleUpgrade }) => {
+        handleUpgrade(ws=>{
+            for(const entry of [{step:0,level:'error',message:'state save warning'},{step:1,level:'success',message:'continuing'},
+                {step:10,level:'info',message:'restarting'},{step:10,level:'success',message:'restart triggered'}]) ws.send(JSON.stringify({...entry,total_steps:10}));
+            ws.close(1000);
+        });
+        await openUpdate(frame); await frame.locator('#upgrade-latest').check();
+        const navigation=page.waitForEvent('framenavigated',{predicate:f=>f===page.mainFrame()});
+        await frame.locator('#update-ok').click(); await navigation;
+        await page.frameLocator('#settings-frame').locator('#settings-update').waitFor();
+        assert(calls.some(c=>c.url==='/health'));
+    }],
+    ['software keyboard and pinch keep settings within the visible work area', async ({ page, frame }) => {
+        await page.setViewportSize({width:375,height:800}); await openPassword(frame);
+        await page.evaluate(()=>{
+            fixture.originalViewport=window.visualViewport;fixture.layoutEvents=0;
+            window.addEventListener('ivnc-overlay-layout',()=>fixture.layoutEvents++);
+            const visual=Object.assign(new EventTarget(),{height:360,offsetTop:10,scale:1});
+            Object.defineProperty(window,'visualViewport',{configurable:true,value:visual});fixture.originalViewport.dispatchEvent(new Event('resize'));
+        });
+        const bounds=await page.locator('.web-settings-modal').boundingBox();
+        assert(bounds.y>=10 && bounds.y+bounds.height<=370,JSON.stringify(bounds));
+        await frame.locator('#pwd-ok').scrollIntoViewIfNeeded();
+        const button=await frame.locator('#pwd-ok').boundingBox();
+        assert(button.y>=10 && button.y+button.height<=370,JSON.stringify(button));
+        await page.evaluate(()=>{Object.assign(visualViewport,{height:150,offsetTop:30,scale:2});fixture.originalViewport.dispatchEvent(new Event('scroll'))});
+        assert.deepEqual(await page.locator('.web-settings-modal').boundingBox(),bounds);
+        assert.equal(await page.evaluate(()=>fixture.layoutEvents),0,'keyboard layout must not cancel terminal dragging');
+    }],
+    ['disabled authentication hides account actions while preserving restart', async ({ page, url, state }) => {
+        state.enabled=false; await page.goto(url+'?console=0');
+        const frame=page.frameLocator('#settings-frame'); await frame.locator('#settings-update').waitFor();
+        assert.equal(await frame.locator('#settings-password').isVisible(),false);
+        assert.equal(await frame.locator('#signout-btn').isVisible(),false);
+        await frame.locator('#settings-update').click(); await frame.locator('#update-cancel').click();
+    }],
+    ['password success immediately redirects the top document and other tabs', async ({ page, frame, context, url }) => {
+        const other=await context.newPage();
+        await other.route('**/auth/session',route=>route.fulfill({json:{enabled:true,authenticated:true,kind:'session',csrf:'fixture-csrf'}}));
+        await other.goto(new URL('/settings.html',url).href);await other.locator('#settings-password').waitFor();
+        await page.route('**/api/change-password',route=>route.fulfill({json:{ok:true}}));
+        await openPassword(frame); await frame.locator('#pwd-new').fill('new-password');await frame.locator('#pwd-confirm').fill('new-password');
+        await frame.locator('#pwd-ok').click(); await page.waitForURL(/\/auth\/login/);await other.waitForURL(/\/auth\/login/);
+    }],
+    ['leaving a locked operation cleans up its socket and modal shield', async ({ page, frame, handleUpgrade }) => {
+        handleUpgrade(()=>{});
+        await openUpdate(frame);await frame.locator('#upgrade-latest').check();await frame.locator('#update-ok').click();await locked(frame);
+        await frame.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false})));
+        assert.equal(await frame.locator('.settings-dialog-bg').count(),0);
+        assert.equal(await page.evaluate(()=>document.documentElement.hasAttribute('data-ivnc-modal-blocked')),false);
+        assert.equal(await page.locator('#web-console-minimize').isDisabled(),false);
+    }],
+];
+
+await test('settings actions',async t=>{
+    const work=mkdtempSync(path.join(tmpdir(),'ivnc-settings-test-'));
+    const server=await createServer({configFile:false,root,cacheDir:path.join(work,'vite'),logLevel:'error',optimizeDeps:{noDiscovery:true,include:[]},server:{host:'127.0.0.1',port:0,hmr:false},plugins:[{name:'settings-fixture',configureServer(s){s.middlewares.use((req,res,next)=>{
+        const url=req.url.split('?')[0];
+        if(url==='/__settings'||url==='/console'||url==='/auth/login') {
+            res.setHeader('Content-Type','text/html; charset=utf-8');
+            return res.end(url==='/__settings'?fixture:url==='/console'?readFileSync(path.join(root,'console.html'),'utf8'):'<p>Sign in</p>');
+        }
+        next();
+    })}}]});
+    const sockets=new WebSocketServer({noServer:true});
+    let upgradeHandler=()=>{};
+    try {
+        await server.listen();const url=`http://127.0.0.1:${server.httpServer.address().port}/__settings`;
+        server.httpServer.on('upgrade',(request,socket,head)=>{
+            if(request.url!=='/api/upgrade/ws')return;
+            sockets.handleUpgrade(request,socket,head,ws=>{ws.on('error',()=>{});upgradeHandler(ws)});
+        });
+        for(const name of (process.env.BROWSERS||'chromium,webkit').split(',')) await t.test(name,async t=>{
+            const browser=await engines[name].launch({headless:true,...(name==='chromium'&&process.env.CHROME_BIN?{executablePath:process.env.CHROME_BIN}:{})});
+            try { for(const [title,run] of cases) await t.test(title,async()=>{
+                const context=await browser.newContext({viewport:{width:1280,height:800},locale:'zh-CN'});
+                const page=await context.newPage(),errors=[],calls=[],state={enabled:true};
+                context.setDefaultTimeout(7000);
+                page.on('pageerror',error=>errors.push(error.message));
+                page.on('websocket',socket=>calls.push({url:new URL(socket.url()).pathname,method:'WS'}));
+                page.on('request',request=>{const u=new URL(request.url());if(u.pathname.startsWith('/api/')||u.pathname.startsWith('/console')||u.pathname==='/health')calls.push({url:u.pathname,method:request.method(),csrf:request.headers()['x-ivnc-csrf'],body:request.postDataJSON()})});
+                await page.route('**/auth/session',route=>route.fulfill({json:{enabled:state.enabled,authenticated:true,kind:state.enabled?'session':'anonymous',csrf:'fixture-csrf'}}));
+                await page.route('**/api/**',route=>route.fulfill({json:{apps:[],metrics:{},version:{},display:{},settings:{}}}));
+                await page.route('**/health',route=>route.fulfill({json:{ok:true}}));
+                try {
+                    await page.goto(url);
+                    await page.frameLocator('#settings-frame').locator('#settings-password').waitFor();
+                    const child=page.frames().find(f=>new URL(f.url()).pathname==='/console');
+                    upgradeHandler=()=>{throw Error('Upgrade started without confirmation')};
+                    await run({page,frame:child,context,calls,state,url,handleUpgrade:handler=>{upgradeHandler=handler}});
+                    assert.deepEqual(errors,[]);
+                } catch(error) { error.message += `\nBrowser errors: ${JSON.stringify(errors)}\nRequests: ${JSON.stringify(calls.map(c=>[c.method,c.url]))}`;throw error; }
+                finally { await context.close(); }
+            }); } finally { await browser.close(); }
+        });
+    } finally { for(const socket of sockets.clients)socket.terminate();sockets.close();await server.close();rmSync(work,{recursive:true,force:true}); }
+});

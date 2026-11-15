@@ -1,10 +1,9 @@
-import { getLang, setLang, onLangChange, APP_STRINGS, remoteStateText, serverErrorText } from './lib/i18n.js?v=1';
+import { getLang, onLangChange, APP_STRINGS, remoteStateText, serverErrorText } from './lib/i18n.js?v=1';
 import { notifyAppStarted } from './app-streams.js';
 import { createOrderNotifications } from './app-order.js';
 import { createConsoleDialogs } from './console-dialogs.js';
 import { enhanceSelect } from './select-control.js';
-import { bindLogoutButton } from './auth-client.js';
-bindLogoutButton(document.getElementById('signout-btn'));
+import { createSettingsActions } from './settings-actions.js';
 
 const API = '/api/apps';
 let launchContext = null, launchInfo = null;
@@ -17,6 +16,7 @@ let sharingState = null;   // GET /api/apps/{id}/sharing of the desktop app bein
 let appSignature = '';     // launch settings as last saved; a change on a running app needs a restart
 let modalSaved = false;    // the open dialog has saved at least once
 const dialogs = createConsoleDialogs();
+createSettingsActions(document.getElementById('settings-actions'), dialogs);
 const pendingAppWrites = new Map();
 let appDialog = null, appTypeControl = null, launchModeControl = null, sandboxControl = null;
 let lastDataHash = '';
@@ -47,7 +47,7 @@ const I18N = {
         displayLocked: 'Locked by server configuration', displayBusy: 'Applying…', displaySaved: 'Desktop resolution applied and saved',
         displayDimensions: (s) => `Desktop ${s.desktop.width}×${s.desktop.height} · Video ${s.encoded.width}×${s.encoded.height}`,
 
-        pageTitle: 'Management Console',
+        pageTitle: 'Settings',
         subtitle: 'Manage apps and runtime settings',
         navOverview: 'Overview',
         navApps: 'Apps',
@@ -94,7 +94,6 @@ const I18N = {
         toggleEnabled: 'Enabled',
         defaultOption: 'Default',
         settingsSaved: 'Settings applied',
-        langToggle: '中文',
         addApp: '+ Add App',
         thName: 'Name',
         thType: 'Type',
@@ -258,7 +257,7 @@ const I18N = {
         displayLocked: '服务器配置已锁定', displayBusy: '正在应用…', displaySaved: '桌面分辨率已应用并保存',
         displayDimensions: (s) => `桌面 ${s.desktop.width}×${s.desktop.height} · 视频 ${s.encoded.width}×${s.encoded.height}`,
 
-        pageTitle: '管理控制台',
+        pageTitle: '设置',
         subtitle: '管理应用与运行参数',
         navOverview: '概览',
         navApps: '应用',
@@ -305,7 +304,6 @@ const I18N = {
         toggleEnabled: '启用',
         defaultOption: '默认',
         settingsSaved: '设置已应用',
-        langToggle: 'English',
         addApp: '+ 添加应用',
         thName: '名称',
         thType: '类型',
@@ -600,7 +598,6 @@ function applyTranslations() {
     const coordDefault = document.querySelector('#provider-coord-space option[value=""]');
     if (coordDefault) coordDefault.textContent = t('defaultOption');
 
-    setText('lang-toggle', 'langToggle');
     setText('add-app-btn', 'addApp');
     setText('th-name', 'thName');
     setText('th-type', 'thType');
@@ -1360,7 +1357,7 @@ function resetModal() {
 }
 
 function openAppDialog() {
-    dialogs.close(false);
+    if (!dialogs.close(false)) return null;
     resetModal();
     const modal = document.getElementById('modal');
     appDialog = dialogs.open(modal, () => {
@@ -1419,7 +1416,7 @@ async function loadLaunchInfo() {
 }
 
 function showAdd() {
-    openAppDialog();
+    if (!openAppDialog()) return;
     const modal = document.getElementById('modal');
     modal.querySelector('#modal-title').textContent = t('addModal');
     modal.querySelector('#modal-save').textContent = t('addSave');
@@ -1431,6 +1428,7 @@ function showAdd() {
 
 async function showEdit(id) {
     const session = openAppDialog();
+    if (!session) return;
     session.kind = 'edit';
     const modal = document.getElementById('modal');
     modal.classList.add('loading');
@@ -1964,6 +1962,7 @@ async function showLogs(id, name) {
         delete title.dataset.appName;
         title.textContent = t('logsTitle');
     });
+    if (!session) return;
     title.dataset.appName = name;
     title.textContent = t('logsFor')(name);
     const content = document.getElementById('log-content');
@@ -2068,9 +2067,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('desktop-launch-advanced').addEventListener('toggle', event => {
         if (!event.target.open) { launchModeControl.close(); sandboxControl.close(); }
-    });
-    document.getElementById('lang-toggle').addEventListener('click', () => {
-        setLang(currentLang === 'en' ? 'zh' : 'en');
     });
     onLangChange((lang) => {
         currentLang = lang;

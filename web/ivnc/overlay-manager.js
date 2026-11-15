@@ -14,10 +14,14 @@ export function minimizeOtherOverlays(active = null) {
     }
 }
 
-export function installOverlayGuard(updateLayout) {
+export function installOverlayGuard(updateLayout, updateSettingsViewport = () => {}) {
     if (window.__ivncOverlayModalInputGuardInstalled) return;
     window.__ivncOverlayModalInputGuardInstalled = true;
     window.addEventListener('resize', updateLayout);
+    // Visual viewport events can arrive during a terminal drag. Updating only
+    // settings avoids dispatching a global layout event that ends that drag.
+    window.visualViewport?.addEventListener('resize', updateSettingsViewport);
+    window.visualViewport?.addEventListener('scroll', updateSettingsViewport);
     const sync = source => controllers().forEach(controller => controller.syncChild?.(source));
     window.__ivncSyncConsoleDialogs = sync;
     window.addEventListener('message', event => {
@@ -105,6 +109,8 @@ export function createConsoleShield(modal, frame) {
         const active = !!childState()?.id && !modal.classList.contains('minimized');
         shield.hidden = !active;
         modal.classList.toggle('has-child-dialog', active);
+        const minimize = modal.querySelector('#web-console-minimize');
+        if (minimize) minimize.disabled = active && !!childState()?.locked;
         document.documentElement.toggleAttribute('data-ivnc-modal-blocked', active);
         if (active && !wasActive) releaseOverlayInput();
         wasActive = active;

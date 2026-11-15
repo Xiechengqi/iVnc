@@ -1,0 +1,62 @@
+.settings-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.settings-actions .settings-action {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    min-width: 38px; min-height: 38px; padding: 6px 10px; border: 1px solid #dfe6e9;
+    border-radius: 6px; background: #fff; color: #34495e;
+    font: 13px/1.4 system-ui, sans-serif; white-space: nowrap; cursor: pointer;
+}
+.settings-actions .settings-action:hover { background: #eef6ff; border-color: #8fc2ee; }
+.settings-actions .settings-action:focus-visible,
+.settings-dialog :focus-visible { outline: 2px solid #0984e3; outline-offset: 2px; }
+.settings-actions .settings-signout { color: #b52b2b; }
+.settings-actions [hidden], .settings-dialog [hidden] { display: none !important; }
+.settings-dialog-bg {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    padding: 12px; background: #0008; align-items: center; justify-content: center;
+    overflow: auto; box-sizing: border-box; touch-action: pan-y;
+}
+.settings-dialog-bg.show { display: flex; }
+.settings-dialog-bg .settings-dialog {
+    display: flex; flex-direction: column; gap: 10px; box-sizing: border-box;
+    width: min(480px, 100%); min-width: 0; max-width: 100%;
+    max-height: calc(var(--settings-dialog-height, 100dvh) - 24px); overflow: auto; margin: auto;
+    padding: 22px; border: 1px solid #dfe6e9; border-radius: 8px;
+    background: #fff; color: #2d3436; font: 14px/1.5 system-ui, sans-serif;
+    box-shadow: 0 8px 32px #0003;
+}
+.settings-dialog h2 { margin: 0; font-size: 18px; }
+.settings-dialog .settings-hint { margin: 0; color: #636e72; font-size: 13px; overflow-wrap: anywhere; }
+.settings-dialog label { font-size: 13px; }
+.settings-dialog input[type="password"] {
+    width: 100%; min-width: 0; padding: 9px; box-sizing: border-box;
+    border: 1px solid #aebdc6; border-radius: 4px; background: #fff;
+    color: #2d3436; font: 16px/1.4 system-ui, sans-serif;
+}
+.settings-dialog .settings-message { min-height: 20px; color: #b52b2b; font-size: 13px; overflow-wrap: anywhere; margin: 0; }
+.settings-dialog .settings-message.success { color: #087f5b; }
+.settings-dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.settings-dialog-buttons button {
+    min-height: 40px; padding: 8px 14px; border: 1px solid #aebdc6; border-radius: 5px;
+    background: #f4f7f9; color: #2d3436; font: inherit; cursor: pointer;
+}
+.settings-dialog-buttons .settings-primary { background: #0984e3; color: #fff; border-color: #0984e3; }
+.settings-dialog button:disabled { opacity: .55; cursor: default; }
+.settings-dialog .settings-upgrade-option { display: flex; align-items: center; gap: 8px; min-height: 36px; }
+.settings-upgrade-option input { width: 18px; height: 18px; flex: 0 0 auto; }
+.settings-dialog progress { width: 100%; height: 12px; accent-color: #0984e3; }
+.settings-dialog #progress-text { color: #636e72; font-size: 13px; overflow-wrap: anywhere; }
+.settings-dialog .settings-logs {
+    background: #18232d; color: #e1ebf2; border-radius: 5px; padding: 12px;
+    max-height: 220px; min-height: 60px; overflow: auto; overflow-wrap: anywhere;
+    font: 12px/1.5 ui-monospace, monospace;
+}
+.settings-log-error { color: #ffb4b4; }
+.settings-log-warning { color: #ffe197; }
+.settings-log-success { color: #9ee8c5; }
+@media (max-width: 760px) {
+    .settings-actions { gap: 4px; }
+    .settings-actions .settings-action { min-width: 40px; min-height: 44px; padding: 6px; }
+    .settings-actions #settings-password span, .settings-actions #settings-update span { display: none; }
+    .settings-actions .settings-language { font-size: 12px; }
+    .settings-dialog-bg .settings-dialog { padding: 16px; }
+}

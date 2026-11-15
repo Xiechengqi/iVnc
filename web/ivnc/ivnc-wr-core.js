@@ -40,7 +40,7 @@ import { createGestureNavigation } from "./gesture-navigation.mjs";
 import { createClipboard } from "./clipboard.js";
 import { createClipboardUI } from "./clipboard-ui.js";
 import { createViewport } from "./viewport.js";
-import { bindLogoutButton, checkAuthentication, credentialsChanged } from "./auth-client.js";
+import { checkAuthentication } from "./auth-client.js";
 import { createFloatingWindow } from "./floating-window.js";
 import { installOverlayGuard, minimizeOtherOverlays, createConsoleShield, releaseOverlayInput } from "./overlay-manager.js";
 
@@ -65,12 +65,10 @@ const MAIN_I18N = {
 		imeOff: '关闭中文输入 (Ctrl+Shift+Space)',
 		keyboardShow: '显示键盘',
 		keyboardHide: '收起键盘',
-		changePassword: '修改密码',
 		uploadFile: '上传文件到桌面',
-		restartOrUpgrade: '重启或升级',
 		proxyTooltip: '代理',
 		terminalTooltip: '终端',
-		consoleTooltip: '控制台',
+		consoleTooltip: '设置',
 		// floating windows
 		minimize: '最小化',
 		terminalBackgroundTranslucent: '半透明',
@@ -82,40 +80,10 @@ const MAIN_I18N = {
 		terminalUnpin: '取消终端置顶',
 		terminalPinned: '终端置顶',
 		terminalRestore: '还原窗口位置和大小',
-		consoleTitle: '控制台',
+		consoleTitle: '设置',
 		proxyTitle: '代理',
-		consoleFrameTitle: 'iVnc 控制台',
+		consoleFrameTitle: 'iVnc 设置',
 		proxyFrameTitle: 'iVnc 代理',
-		// password modal
-		pwdHeader: '修改密码',
-		pwdNewPlaceholder: '新密码 (至少4位)',
-		pwdConfirmPlaceholder: '确认新密码',
-		cancel: '取消',
-		confirm: '确定',
-		pwdTooShort: '密码至少需要4个字符',
-		pwdMismatch: '两次输入的密码不一致',
-		pwdChanged: '密码已修改，下次请求将使用新密码',
-		pwdChangeFailed: '修改失败',
-		networkError: '网络错误',
-		// upgrade modal
-		upgradeHeader: '重启或升级',
-		upgradeNotice: '将重启 iVNC 服务，连接会短暂中断。',
-		upgradeOption: '升级到最新',
-		upgradeWarning: '勾选后会先更新 iVNC binary，然后重启服务。',
-		restartService: '重启服务',
-		upgradeAndRestart: '升级并重启',
-		close: '关闭',
-		upgradePreparing: '准备升级...',
-		restartPreparing: '准备重启...',
-		restarting: '重启中...',
-		failed: '失败',
-		upgradeDoneWaiting: '更新完成，等待服务重启...',
-		websocketFailed: 'WebSocket 连接失败',
-		requestingRestart: '正在请求重启服务...',
-		restartSent: '重启请求已发送，等待服务恢复...',
-		restartRequestFailed: err => `重启请求失败: ${err}`,
-		serviceRecovered: '服务已恢复，即将刷新页面...',
-		serviceNotRecovered: '服务未恢复，请稍后手动刷新',
 		// no-window overlay
 		waitingAppTitle: '等待应用启动',
 		noAppRunning: '当前没有应用在运行',
@@ -175,12 +143,10 @@ const MAIN_I18N = {
 		imeOff: 'Disable Chinese IME (Ctrl+Shift+Space)',
 		keyboardShow: 'Show keyboard',
 		keyboardHide: 'Hide keyboard',
-		changePassword: 'Change password',
 		uploadFile: 'Upload file to desktop',
-		restartOrUpgrade: 'Restart or upgrade',
 		proxyTooltip: 'Proxy',
 		terminalTooltip: 'Terminal',
-		consoleTooltip: 'Console',
+		consoleTooltip: 'Settings',
 		minimize: 'Minimize',
 		terminalBackgroundTranslucent: 'Translucent',
 		terminalBackgroundOpaque: 'Opaque',
@@ -191,38 +157,10 @@ const MAIN_I18N = {
 		terminalUnpin: 'Unpin terminal',
 		terminalPinned: 'Terminal always on top',
 		terminalRestore: 'Restore window position and size',
-		consoleTitle: 'Console',
+		consoleTitle: 'Settings',
 		proxyTitle: 'Proxy',
-		consoleFrameTitle: 'iVnc Console',
+		consoleFrameTitle: 'iVnc Settings',
 		proxyFrameTitle: 'iVnc Proxy',
-		pwdHeader: 'Change Password',
-		pwdNewPlaceholder: 'New password (min 4 chars)',
-		pwdConfirmPlaceholder: 'Confirm new password',
-		cancel: 'Cancel',
-		confirm: 'OK',
-		pwdTooShort: 'Password must be at least 4 characters',
-		pwdMismatch: 'Passwords do not match',
-		pwdChanged: 'Password changed. The next request will use the new password.',
-		pwdChangeFailed: 'Change failed',
-		networkError: 'Network error',
-		upgradeHeader: 'Restart or Upgrade',
-		upgradeNotice: 'iVNC service will restart, the connection will be briefly interrupted.',
-		upgradeOption: 'Upgrade to latest',
-		upgradeWarning: 'If checked, the iVNC binary will be updated before restarting.',
-		restartService: 'Restart',
-		upgradeAndRestart: 'Upgrade & restart',
-		close: 'Close',
-		upgradePreparing: 'Preparing upgrade...',
-		restartPreparing: 'Preparing restart...',
-		restarting: 'Restarting...',
-		failed: 'Failed',
-		upgradeDoneWaiting: 'Update complete, waiting for service to restart...',
-		websocketFailed: 'WebSocket connection failed',
-		requestingRestart: 'Requesting service restart...',
-		restartSent: 'Restart request sent, waiting for service to recover...',
-		restartRequestFailed: err => `Restart request failed: ${err}`,
-		serviceRecovered: 'Service recovered, refreshing page...',
-		serviceNotRecovered: 'Service not recovered, please refresh manually later',
 		waitingAppTitle: 'Waiting for App',
 		noAppRunning: 'No app is currently running',
 		connectionMgmtTitle: 'Connection Management',
@@ -859,216 +797,20 @@ function InitUI() {
 		padding: 0;
 		background: #101214;
 	}
+	.web-settings-modal {
+		box-sizing: border-box;
+		min-width: 0;
+		min-height: 0;
+		width: min(var(--ivnc-console-width, 1080px), calc(100vw - 16px));
+		height: min(var(--ivnc-console-height, 720px), calc(var(--ivnc-settings-visible-height, 100dvh) - 16px));
+		top: calc(var(--ivnc-settings-visible-top, 0px) + var(--ivnc-settings-visible-height, 100dvh) / 2);
+	}
 	.web-console-frame {
 		width: 100%;
 		height: 100%;
 		border: 0;
 		display: block;
 		background: #101214;
-	}
-	.pwd-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0,0,0,0.6);
-		z-index: 2000;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-	.pwd-dialog {
-		background: #1e1e1e;
-		border: 1px solid #444;
-		border-radius: 8px;
-		padding: 24px;
-		min-width: 300px;
-		color: #eee;
-		font-family: system-ui, sans-serif;
-	}
-	.pwd-dialog h3 {
-		margin: 0 0 16px;
-		font-size: 15px;
-		font-weight: 600;
-	}
-	.pwd-dialog input {
-		display: block;
-		width: 100%;
-		padding: 8px;
-		margin-bottom: 10px;
-		border: 1px solid #555;
-		border-radius: 4px;
-		background: #2a2a2a;
-		color: #eee;
-		font-size: 13px;
-		box-sizing: border-box;
-	}
-	.pwd-dialog input:focus {
-		outline: none;
-		border-color: #4c86e6;
-	}
-	.pwd-dialog .pwd-btns {
-		display: flex;
-		justify-content: flex-end;
-		gap: 8px;
-		margin-top: 14px;
-	}
-	.pwd-dialog button {
-		padding: 6px 16px;
-		border: none;
-		border-radius: 4px;
-		font-size: 13px;
-		cursor: pointer;
-	}
-	.pwd-dialog .pwd-cancel {
-		background: #444;
-		color: #ccc;
-	}
-	.pwd-dialog .pwd-cancel:hover {
-		background: #555;
-	}
-	.pwd-dialog .pwd-ok {
-		background: #4c86e6;
-		color: #fff;
-	}
-	.pwd-dialog .pwd-ok:hover {
-		background: #5a94f0;
-	}
-	.pwd-msg {
-		font-size: 12px;
-		margin-top: 8px;
-		min-height: 16px;
-	}
-	.pwd-msg.error { color: #e85959; }
-	.pwd-msg.ok { color: #5cb85c; }
-
-	/* Force update modal styles */
-	.update-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0,0,0,0.6);
-		z-index: 2000;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-	.update-dialog {
-		background: #1e1e1e;
-		border: 1px solid #444;
-		border-radius: 8px;
-		padding: 24px;
-		min-width: 400px;
-		max-width: 600px;
-		max-height: 80vh;
-		color: #eee;
-		font-family: system-ui, sans-serif;
-		display: flex;
-		flex-direction: column;
-	}
-	.update-dialog h3 {
-		margin: 0 0 16px;
-		font-size: 15px;
-		font-weight: 600;
-	}
-	.update-info {
-		margin-bottom: 16px;
-		font-size: 13px;
-	}
-	.update-info p {
-		margin: 8px 0;
-	}
-	.update-info strong {
-		color: #4c86e6;
-	}
-	.update-warning {
-		color: #f59e0b;
-		margin-top: 12px !important;
-	}
-	.update-option {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin-top: 12px;
-		color: #ddd;
-		user-select: none;
-	}
-	.update-option input {
-		width: 16px;
-		height: 16px;
-	}
-	.update-ok-msg {
-		color: #10b981;
-	}
-	.update-error {
-		color: #ef4444;
-	}
-	.update-progress {
-		margin-bottom: 16px;
-	}
-	.progress-bar {
-		width: 100%;
-		height: 8px;
-		background: #2a2a2a;
-		border-radius: 4px;
-		overflow: hidden;
-		margin-bottom: 8px;
-	}
-	.progress-fill {
-		height: 100%;
-		background: #4c86e6;
-		transition: width 0.3s ease;
-	}
-	.progress-text {
-		font-size: 12px;
-		color: #999;
-		text-align: center;
-	}
-	.update-logs {
-		max-height: 300px;
-		overflow-y: auto;
-		background: #0a0a0a;
-		border: 1px solid #333;
-		border-radius: 4px;
-		padding: 12px;
-		margin-bottom: 16px;
-		font-family: 'Courier New', monospace;
-		font-size: 12px;
-	}
-	.log-entry {
-		margin-bottom: 4px;
-		line-height: 1.4;
-	}
-	.log-info { color: #94a3b8; }
-	.log-success { color: #10b981; }
-	.log-error { color: #ef4444; }
-	.log-progress { color: #60a5fa; }
-	.update-btns {
-		display: flex;
-		justify-content: flex-end;
-		gap: 8px;
-	}
-	.update-dialog button {
-		padding: 6px 16px;
-		border: none;
-		border-radius: 4px;
-		font-size: 13px;
-		cursor: pointer;
-	}
-	.update-dialog button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.update-cancel {
-		background: #444;
-		color: #ccc;
-	}
-	.update-cancel:hover:not(:disabled) {
-		background: #555;
-	}
-	.update-ok {
-		background: #4c86e6;
-		color: #fff;
-	}
-	.update-ok:hover:not(:disabled) {
-		background: #5a94f0;
 	}
 	.connect-page {
 		position: fixed;
@@ -1198,290 +940,19 @@ function getBasePath() {
 	return pathname.slice(0, pathname.lastIndexOf("/") + 1);
 }
 
-function showChangePasswordModal() {
-	// Remove existing modal if any
-	const existing = document.querySelector('.pwd-overlay');
-	if (existing) existing.remove();
-
-	const overlay = document.createElement('div');
-	overlay.className = 'pwd-overlay';
-
-	const dialog = document.createElement('div');
-	dialog.className = 'pwd-dialog';
-	dialog.innerHTML = `
-		<h3>${tt('pwdHeader')}</h3>
-		<input type="password" id="pwd-new" placeholder="${tt('pwdNewPlaceholder')}" autocomplete="new-password" />
-		<input type="password" id="pwd-confirm" placeholder="${tt('pwdConfirmPlaceholder')}" autocomplete="new-password" />
-		<div class="pwd-msg" id="pwd-msg"></div>
-		<div class="pwd-btns">
-			<button class="pwd-cancel" id="pwd-cancel">${tt('cancel')}</button>
-			<button class="pwd-ok" id="pwd-ok">${tt('confirm')}</button>
-		</div>
-	`;
-	overlay.appendChild(dialog);
-	document.body.appendChild(overlay);
-	const close = registerTransientOverlay(overlay);
-
-	const newInput = document.getElementById('pwd-new');
-	const confirmInput = document.getElementById('pwd-confirm');
-	// Allow native keyboard input (bypass VNC key capture)
-	newInput.classList.add('allow-native-input');
-	confirmInput.classList.add('allow-native-input');
-	const msg = document.getElementById('pwd-msg');
-	const okBtn = document.getElementById('pwd-ok');
-	const cancelBtn = document.getElementById('pwd-cancel');
-
-	newInput.focus();
-
-	overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-	cancelBtn.addEventListener('click', close);
-
-	okBtn.addEventListener('click', async () => {
-		const np = newInput.value;
-		const cp = confirmInput.value;
-		msg.className = 'pwd-msg';
-		msg.textContent = '';
-
-		if (np.length < 4) {
-			msg.className = 'pwd-msg error';
-			msg.textContent = tt('pwdTooShort');
-			return;
-		}
-		if (np !== cp) {
-			msg.className = 'pwd-msg error';
-			msg.textContent = tt('pwdMismatch');
-			return;
-		}
-
-		okBtn.disabled = true;
-		okBtn.textContent = '...';
-		try {
-			const resp = await fetch('/api/change-password', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ new_password: np }),
-			});
-			if (resp.ok) {
-				msg.className = 'pwd-msg ok';
-				msg.textContent = tt('pwdChanged');
-                setTimeout(credentialsChanged, 500);
-			} else {
-				const data = await resp.json().catch(() => ({}));
-				msg.className = 'pwd-msg error';
-				msg.textContent = data.error || tt('pwdChangeFailed');
-			}
-		} catch (e) {
-			msg.className = 'pwd-msg error';
-			msg.textContent = tt('networkError');
-		}
-		okBtn.disabled = false;
-		okBtn.textContent = tt('confirm');
-	});
-}
-
-function showForceUpdateModal() {
-	// Remove existing modal if any
-	const existing = document.querySelector('.update-overlay');
-	if (existing) existing.remove();
-
-	const overlay = document.createElement('div');
-	overlay.className = 'update-overlay';
-
-	const dialog = document.createElement('div');
-	dialog.className = 'update-dialog';
-	dialog.innerHTML = `
-		<h3>${tt('upgradeHeader')}</h3>
-		<div class="update-info" id="update-info">
-			<p>${tt('upgradeNotice')}</p>
-			<label class="update-option">
-				<input type="checkbox" id="upgrade-latest">
-				<span>${tt('upgradeOption')}</span>
-			</label>
-			<p class="update-warning">${tt('upgradeWarning')}</p>
-		</div>
-		<div class="update-progress" id="update-progress" style="display:none;">
-			<div class="progress-bar">
-				<div class="progress-fill" id="progress-fill"></div>
-			</div>
-			<div class="progress-text" id="progress-text">0%</div>
-		</div>
-		<div class="update-logs" id="update-logs" style="display:none;"></div>
-		<div class="update-btns" id="update-btns">
-			<button class="update-cancel" id="update-cancel">${tt('cancel')}</button>
-			<button class="update-ok" id="update-ok">${tt('restartService')}</button>
-		</div>
-	`;
-	overlay.appendChild(dialog);
-	document.body.appendChild(overlay);
-	const close = registerTransientOverlay(overlay);
-
-	const infoDiv = document.getElementById('update-info');
-	const progressDiv = document.getElementById('update-progress');
-	const logsDiv = document.getElementById('update-logs');
-	const progressFill = document.getElementById('progress-fill');
-	const progressText = document.getElementById('progress-text');
-	const btnsDiv = document.getElementById('update-btns');
-	const okBtn = document.getElementById('update-ok');
-	const cancelBtn = document.getElementById('update-cancel');
-	const upgradeCheckbox = document.getElementById('upgrade-latest');
-
-	let isUpdating = false;
-
-	const closeIfIdle = () => {
-		if (!isUpdating) close();
-	};
-	overlay.addEventListener('click', (e) => { if (e.target === overlay && !isUpdating) closeIfIdle(); });
-	cancelBtn.addEventListener('click', closeIfIdle);
-	upgradeCheckbox.addEventListener('change', () => {
-		okBtn.textContent = upgradeCheckbox.checked ? tt('upgradeAndRestart') : tt('restartService');
-	});
-
-	okBtn.addEventListener('click', () => {
-		isUpdating = true;
-		okBtn.disabled = true;
-		cancelBtn.disabled = true;
-		infoDiv.style.display = 'none';
-		progressDiv.style.display = 'block';
-		logsDiv.style.display = 'block';
-		logsDiv.innerHTML = '';
-		progressFill.style.backgroundColor = '#4c86e6';
-		progressFill.style.width = '5%';
-		progressText.textContent = upgradeCheckbox.checked ? tt('upgradePreparing') : tt('restartPreparing');
-
-		if (!upgradeCheckbox.checked) {
-			restartService();
-			return;
-		}
-
-		// Connect to WebSocket
-		const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-		const wsUrl = `${wsProtocol}//${window.location.host}/api/upgrade/ws`;
-		const ws = new WebSocket(wsUrl);
-
-		ws.onmessage = (event) => {
-			try {
-				const entry = JSON.parse(event.data);
-				const logEntry = document.createElement('div');
-				logEntry.className = `log-entry log-${entry.level}`;
-				logEntry.textContent = `[${entry.step}/${entry.total_steps}] ${entry.message}`;
-				logsDiv.appendChild(logEntry);
-				logsDiv.scrollTop = logsDiv.scrollHeight;
-
-				const progress = Math.round((entry.step / entry.total_steps) * 100);
-				progressFill.style.width = progress + '%';
-				progressText.textContent = progress + '%';
-
-				if (entry.level === 'error') {
-					progressFill.style.backgroundColor = '#ef4444';
-					isUpdating = false;
-					cancelBtn.disabled = false;
-					cancelBtn.textContent = tt('close');
-				}
-			} catch (err) {
-				console.error('Failed to parse upgrade log:', err);
-			}
-		};
-
-		ws.onclose = () => {
-			const hasError = Array.from(logsDiv.querySelectorAll('.log-error')).length > 0;
-			if (!hasError) {
-				progressFill.style.backgroundColor = '#10b981';
-				const logEntry = document.createElement('div');
-				logEntry.className = 'log-entry log-success';
-				logEntry.textContent = tt('upgradeDoneWaiting');
-				logsDiv.appendChild(logEntry);
-				logsDiv.scrollTop = logsDiv.scrollHeight;
-				waitForRestart();
-			} else {
-				isUpdating = false;
-				cancelBtn.disabled = false;
-				cancelBtn.textContent = tt('close');
-			}
-		};
-
-		ws.onerror = () => {
-			const logEntry = document.createElement('div');
-			logEntry.className = 'log-entry log-error';
-			logEntry.textContent = tt('websocketFailed');
-			logsDiv.appendChild(logEntry);
-			progressFill.style.backgroundColor = '#ef4444';
-			isUpdating = false;
-			cancelBtn.disabled = false;
-			cancelBtn.textContent = tt('close');
-		};
-	});
-
-	async function restartService() {
-		const logEntry = document.createElement('div');
-		logEntry.className = 'log-entry log-info';
-		logEntry.textContent = tt('requestingRestart');
-		logsDiv.appendChild(logEntry);
-
-		try {
-			const resp = await fetch('/api/restart', { method: 'POST' });
-			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-			progressFill.style.width = '50%';
-			progressText.textContent = tt('restarting');
-
-			const okEntry = document.createElement('div');
-			okEntry.className = 'log-entry log-success';
-			okEntry.textContent = tt('restartSent');
-			logsDiv.appendChild(okEntry);
-			logsDiv.scrollTop = logsDiv.scrollHeight;
-			waitForRestart();
-		} catch (err) {
-			progressFill.style.backgroundColor = '#ef4444';
-			progressText.textContent = tt('failed');
-			const errEntry = document.createElement('div');
-			errEntry.className = 'log-entry log-error';
-			errEntry.textContent = tt('restartRequestFailed', err.message || err);
-			logsDiv.appendChild(errEntry);
-			logsDiv.scrollTop = logsDiv.scrollHeight;
-			isUpdating = false;
-			cancelBtn.disabled = false;
-			cancelBtn.textContent = tt('close');
-		}
-	}
-
-	function waitForRestart() {
-		let attempts = 0;
-		const maxAttempts = 30;
-		const checkInterval = setInterval(() => {
-			attempts++;
-			fetch('/health')
-				.then(resp => {
-					if (resp.ok) {
-						clearInterval(checkInterval);
-						const logEntry = document.createElement('div');
-						logEntry.className = 'log-entry log-success';
-						logEntry.textContent = tt('serviceRecovered');
-						logsDiv.appendChild(logEntry);
-						setTimeout(() => window.location.reload(), 1000);
-					}
-				})
-				.catch(() => {
-					// Still waiting
-				});
-
-			if (attempts >= maxAttempts) {
-				clearInterval(checkInterval);
-				const logEntry = document.createElement('div');
-				logEntry.className = 'log-entry log-error';
-				logEntry.textContent = tt('serviceNotRecovered');
-				logsDiv.appendChild(logEntry);
-				isUpdating = false;
-				cancelBtn.disabled = false;
-				cancelBtn.textContent = tt('close');
-			}
-		}, 1000);
-	}
-}
-
 function clampNumber(value, min, max) {
 	return Math.max(min, Math.min(max, value));
 }
 
+function updateSettingsViewport() {
+	const visual = window.visualViewport;
+	if (visual && Math.abs(visual.scale - 1) >= .01) return;
+	const style = document.documentElement.style;
+	style.setProperty('--ivnc-settings-visible-height', `${visual?.height ?? window.innerHeight}px`);
+	style.setProperty('--ivnc-settings-visible-top', `${visual?.offsetTop ?? 0}px`);
+}
+
+let overlayLayoutKey = '';
 function updateOverlayModalScale() {
 	// Browser controls use CSS pixels, independently of the remote video. CSS
 	// transforms also break xterm's cell-based pointer/selection coordinates.
@@ -1493,16 +964,25 @@ function updateOverlayModalScale() {
 	const consoleWidth = Math.min(1080, Math.max(360, (window.innerWidth - horizontalMargin) / scale));
 	const consoleHeight = Math.min(720, Math.max(300, (window.innerHeight - verticalMargin) / scale));
 	const rootStyle = document.documentElement.style;
+	updateSettingsViewport();
 	rootStyle.setProperty('--ivnc-modal-scale', scale.toFixed(3));
 	rootStyle.setProperty('--ivnc-terminal-width', `${terminalWidth.toFixed(1)}px`);
 	rootStyle.setProperty('--ivnc-terminal-height', `${terminalHeight.toFixed(1)}px`);
 	rootStyle.setProperty('--ivnc-console-width', `${consoleWidth.toFixed(1)}px`);
 	rootStyle.setProperty('--ivnc-console-height', `${consoleHeight.toFixed(1)}px`);
-	window.dispatchEvent(new Event('ivnc-overlay-layout'));
+	// Caret and scroll notifications can remeasure the same work area during a
+	// captured terminal drag. Only an actual geometry change ends that gesture.
+	const area = document.querySelector('.video-container')?.getBoundingClientRect();
+	const layoutKey = [window.innerWidth, window.innerHeight, scale,
+		area?.left, area?.top, area?.right, area?.bottom].join(':');
+	if (layoutKey !== overlayLayoutKey) {
+		overlayLayoutKey = layoutKey;
+		window.dispatchEvent(new Event('ivnc-overlay-layout'));
+	}
 }
 
 function installOverlayModalInputGuard() {
-    installOverlayGuard(updateOverlayModalScale);
+    installOverlayGuard(updateOverlayModalScale, updateSettingsViewport);
 }
 
 function registerOverlayController(controller) {
@@ -1521,22 +1001,6 @@ function unregisterOverlayController(controller) {
 
 function minimizeOverlayControllersExcept(activeController = null) {
     minimizeOtherOverlays(activeController);
-}
-
-function registerTransientOverlay(overlay) {
-	let controller = null;
-	const close = () => {
-		overlay.remove();
-		unregisterOverlayController(controller);
-	};
-	controller = registerOverlayController({
-		minimize: close,
-		isOpen: () => overlay.isConnected,
-		contains: target => overlay.contains(target),
-	});
-	minimizeOverlayControllersExcept(controller);
-	releaseOverlayInput();
-	return close;
 }
 
 function createWebTerminalController() {
@@ -1982,7 +1446,7 @@ function createWebTerminalController() {
 	return controller;
 }
 
-function createConsoleModalController() {
+function createConsoleModalController(consoleEnabled) {
 	installOverlayModalInputGuard();
 	let modal = null;
 	let frame = null;
@@ -2003,7 +1467,7 @@ function createConsoleModalController() {
 		updateOverlayModalScale();
 
 		modal = document.createElement('div');
-		modal.className = 'web-terminal-modal web-console-modal minimized';
+		modal.className = 'web-terminal-modal web-console-modal web-settings-modal minimized';
 		modal.innerHTML = `
 			<div class="web-terminal-header">
 				<div class="web-terminal-title">${consoleSvgSmall}<span>${tt('consoleTitle')}</span></div>
@@ -2012,7 +1476,7 @@ function createConsoleModalController() {
 				</div>
 			</div>
 			<div class="web-terminal-body web-console-body">
-				<iframe class="web-console-frame" title="${tt('consoleFrameTitle')}"></iframe>
+				<iframe id="settings-frame" class="web-console-frame" title="${tt('consoleFrameTitle')}"></iframe>
 			</div>
 		`;
 		document.body.appendChild(modal);
@@ -2021,7 +1485,7 @@ function createConsoleModalController() {
 		setLiveText(modal.querySelector('.web-terminal-title span'), 'consoleTitle');
 		setLiveTitle(modal.querySelector('#web-console-minimize'), 'minimize');
 		setLiveTitle(frame, 'consoleFrameTitle');
-		frame.src = `${getBasePath()}console`;
+		frame.src = `${getBasePath()}${consoleEnabled ? 'console' : 'settings.html'}`;
 		modal.querySelector('#web-console-minimize').addEventListener('click', (e) => {
 			e.stopPropagation();
 			minimize();
@@ -2041,6 +1505,7 @@ function createConsoleModalController() {
 
 	function minimize() {
 		if (!modal) return;
+		if (childBridge?.childState()?.locked) { childBridge.childState().focus(); return; }
 		modal.classList.add('minimized');
 		childBridge?.syncChild();
 		consoleBtn?.classList.remove('active');
@@ -2307,7 +1772,7 @@ export default function webrtc() {
 	const toolbarFeatureEnabled = (name) => toolbarFeatures[name] !== false;
 	const terminalController = createWebTerminalController();
 	const proxyController = createProxyModalController();
-	const consoleController = createConsoleModalController();
+	const consoleController = createConsoleModalController(toolbarFeatureEnabled('console'));
 	let encoderLabel = "";
 	let encoder = ""
 
@@ -3747,26 +3212,6 @@ export default function webrtc() {
             syncImeButton();
 			toolbarController.addTool(imeBtn, true);
 
-			// Change password button
-			const pwdSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
-			const pwdBtn = document.createElement('div');
-			pwdBtn.className = 'taskbar-pin';
-			pwdBtn.innerHTML = pwdSvg;
-			setLiveTitle(pwdBtn, 'changePassword');
-			pwdBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				showChangePasswordModal();
-			});
-			if (!window.__IVNC_APP_VIEW__) toolbarController.addTool(pwdBtn);
-
-			if (!window.__IVNC_APP_VIEW__) {
-				const signout = document.createElement('button');
-				signout.type = 'button'; signout.id = 'signout-btn'; signout.className = 'taskbar-pin'; signout.hidden = true;
-				signout.style.cssText = 'border:0;color:inherit;font:inherit';
-				signout.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>';
-				bindLogoutButton(signout); toolbarController.addTool(signout);
-			}
-
 			// File upload button
 			const uploadSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
 			const uploadBtn = document.createElement('div');
@@ -3788,19 +3233,6 @@ export default function webrtc() {
 				}
 			});
 			toolbarController.addTool(uploadBtn, true);
-
-			// Restart / upgrade button
-			const updateSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>`;
-			const updateBtn = document.createElement('div');
-			updateBtn.className = 'taskbar-pin';
-			updateBtn.id = 'update-btn';
-			updateBtn.innerHTML = updateSvg;
-			setLiveTitle(updateBtn, 'restartOrUpgrade');
-			updateBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				showForceUpdateModal();
-			});
-			if (!window.__IVNC_APP_VIEW__) toolbarController.addTool(updateBtn);
 
 			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('proxy')) {
 				const proxySvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 0-6"/><path d="M4.6 9a7.8 7.8 0 0 0 0 6"/><path d="M16.2 4.9a12 12 0 0 1 0 14.2"/><path d="M7.8 19.1a12 12 0 0 1 0-14.2"/></svg>`;
@@ -3836,7 +3268,7 @@ export default function webrtc() {
 				toolbarController.addTool(terminalBtn);
 			}
 
-			if (!window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console')) {
+			if (!window.__IVNC_APP_VIEW__) {
 				const consoleSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
 				const consoleBtn = document.createElement('div');
 				consoleBtn.className = 'taskbar-pin';
@@ -3850,7 +3282,7 @@ export default function webrtc() {
 					consoleController.toggle();
 				});
 				consoleController.setButton(consoleBtn);
-				toolbarController.addTool(consoleBtn);
+				toolbarController.addTool(consoleBtn, true);
 			}
 
 			const connIndicator = document.createElement('div');

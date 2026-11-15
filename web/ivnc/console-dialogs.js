@@ -7,6 +7,7 @@ export function createConsoleDialogs() {
     const state = {
         get id() { return current?.id ?? null; },
         get element() { return current?.element ?? null; },
+        get locked() { return current?.locked === true; },
         dismiss(id) { if (current?.id === id) close(); },
         focus() { focus(); },
     };
@@ -24,10 +25,11 @@ export function createConsoleDialogs() {
         if (!element) return;
         const target = [...element.querySelectorAll('[autofocus], input:not([disabled]):not([type="hidden"]), button:not([disabled]), [tabindex="0"]')]
             .find(node => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
-        (target || element).focus({ preventScroll: true });
+        (target || element.querySelector('.modal') || element).focus({ preventScroll: true });
     }
-    function close(restoreFocus = true) {
-        if (!current) return;
+    function close(restoreFocus = true, force = false) {
+        if (!current) return true;
+        if (current.locked && !force) { focus(); return false; }
         const previous = current;
         current = null;
         previous.abort.abort();
@@ -35,13 +37,16 @@ export function createConsoleDialogs() {
         previous.onClose?.();
         notify();
         if (restoreFocus && previous.opener?.isConnected) previous.opener.focus({ preventScroll: true });
+        return true;
     }
     function open(element, onClose) {
-        close(false);
+        if (!close(false)) return null;
         const session = {
             id: `${documentId}:${++sequence}`, element, onClose, opener: document.activeElement,
             abort: new AbortController(), saving: false,
             isCurrent: () => current === session,
+            locked: false,
+            setLocked(value) { if (current === session) { session.locked = !!value; notify(); } },
         };
         current = session;
         element.classList.add('show');
@@ -95,7 +100,7 @@ export function createConsoleDialogs() {
     listen(window, 'pageshow', notify);
     listen(window, 'pagehide', event => {
         if (event.persisted) return;
-        close(false); events.abort();
+        close(false, true); events.abort();
         if (window.__ivncConsoleDialogState === state) delete window.__ivncConsoleDialogState;
     });
     notify();

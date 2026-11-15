@@ -261,7 +261,7 @@ try {
     await call('Emulation.setDeviceMetricsOverride', { width: 320, height: 800, deviceScaleFactor: 1, mobile: false });
     await delay(100);
     await evaluate(`document.querySelector('.toolbar-more').click()`);
-    assert(await evaluate(`!document.querySelector('.toolbar-more-menu').hidden && document.querySelector('.toolbar-more-menu #console-btn') !== null`));
+    assert(await evaluate(`!document.querySelector('.toolbar-more-menu').hidden && document.querySelector('.toolbar-tools > #console-btn') !== null`));
     await evaluate(`document.querySelector('.toolbar-more').click(); document.querySelector('#network-quality').click()`);
     assert(await evaluate(`!document.querySelector('.toolbar-info').hidden && document.querySelector('.toolbar-info').textContent.length > 0`));
     await evaluate(`document.querySelector('#network-quality').click()`);

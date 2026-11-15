@@ -53,7 +53,7 @@ async function evaluate(expression) {
     const r = await call('Runtime.evaluate', {expression,awaitPromise:true,returnByValue:true,userGesture:true});
     if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result.value;
 }
-const consoleWindow = `document.querySelector('iframe[title="iVnc Console"], iframe[title="iVnc 控制台"]')?.contentWindow`;
+const consoleWindow = `document.querySelector('#settings-frame')?.contentWindow`;
 const con = expression => evaluate(`(() => {const w=${consoleWindow};return w.eval(${JSON.stringify(expression)});})()`);
 const rectCode = node => `(() => {const r=${node}.getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height};})()`;
 const terminalRect = () => evaluate(rectCode(`document.querySelector('[data-terminal-background]')`));
@@ -74,7 +74,7 @@ async function mouse(type, x, y) {
 async function clickPoint(x,y) { await mouse('mousePressed',x,y); await mouse('mouseReleased',x,y); }
 async function point(selector, inside = false) {
     return evaluate(`(() => {
-        const f=${inside ? `document.querySelector('iframe[title="iVnc Console"], iframe[title="iVnc 控制台"]')` : 'null'};
+        const f=${inside ? `document.querySelector('#settings-frame')` : 'null'};
         const d=f?f.contentDocument:document,n=d.querySelector(${JSON.stringify(selector)});
         if(!n) throw Error('Missing target '+${JSON.stringify(selector)});
         n.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
@@ -87,9 +87,13 @@ async function key(name, code = name, keyCode, modifiers = 0, text) {
     const params={key:name,code,modifiers,...(keyCode?{windowsVirtualKeyCode:keyCode}:{}),...(text?{text}:{})};
     await call('Input.dispatchKeyEvent',{type:'keyDown',...params}); await call('Input.dispatchKeyEvent',{type:'keyUp',...params});
 }
-async function drag(selector, dx, dy, cancel = false) {
+async function drag(selector, dx, dy, cancel = false, remeasure = false) {
     const p=await point(selector); await mouse('mousePressed',p.x,p.y);
-    for (let i=1;i<=6;i++) { await mouse('mouseMoved',p.x+dx*i/6,p.y+dy*i/6); await delay(20); }
+    for (let i=1;i<=6;i++) {
+        await mouse('mouseMoved',p.x+dx*i/6,p.y+dy*i/6);
+        if (remeasure && i===1) await evaluate(`window.dispatchEvent(new Event('resize'))`);
+        await delay(20);
+    }
     if (cancel) await key('Escape','Escape',27);
     await mouse('mouseReleased',p.x+dx,p.y+dy); await delay(150);
 }
@@ -280,7 +284,7 @@ try {
     const initialArea=await evaluate(rectCode(`document.querySelector('.video-container')`));
     const moveX=Math.min(80,(initialArea.right-8-initial.right)/2),moveY=-Math.min(35,(initial.top-initialArea.top-8)/2);
     assert(moveX>1 && moveY<-1);
-    await drag('.web-terminal-floating .web-terminal-title',moveX,moveY);
+    await drag('.web-terminal-floating .web-terminal-title',moveX,moveY,false,true);
     const moved=await terminalRect();assert(Math.abs(moved.left-initial.left-moveX)<2&&Math.abs(moved.top-initial.top-moveY)<2);
     await drag('.resize-se',-180,-100);const resized=await terminalRect();
     assert(Math.abs(resized.width-moved.width+180)<2&&Math.abs(resized.height-moved.height+100)<2);

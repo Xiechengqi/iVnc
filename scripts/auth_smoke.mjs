@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, openSync, closeSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, networkInterfaces } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
@@ -42,14 +42,14 @@ function request(server, target, { method = 'GET', headers = {}, body } = {}) {
         req.on('error', reject); req.on('timeout', () => req.destroy(Error('HTTP timeout'))); req.end(payload);
     });
 }
-async function startServer(name, { tls = false, idle = 600, maximum = 3600, enabled = true } = {}) {
+async function startServer(name, { tls = false, idle = 600, maximum = 3600, enabled = true, consoleEnabled = true, host: httpHost } = {}) {
     const dir = path.join(work, name); mkdirSync(dir);
     const env = { ...process.env, IVNC_HOME: path.join(dir, 'home'), XDG_RUNTIME_DIR: path.join(dir, 'run'),
         XDG_CONFIG_HOME: path.join(dir, 'config'), XDG_DATA_HOME: path.join(dir, 'data'), XDG_CACHE_HOME: path.join(dir, 'cache'), IVNC_MIAO_PORT: String(await freePort()) };
     for (const key of ['IVNC_HOME','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME']) mkdirSync(env[key], { mode: 0o700 });
     const port = await freePort(), config = path.join(dir, 'ivnc.toml');
-    writeFileSync(config, `[http]\nport=${port}\nbasic_auth_enabled=${enabled}\nbasic_auth_user=${JSON.stringify(username)}\nbasic_auth_password=${JSON.stringify(originalPassword)}\nauth_session_idle_seconds=${idle}\nauth_session_max_seconds=${maximum}\n[audio]\nenabled=false\nsample_rate=48000\nchannels=2\nbitrate=128000\n`, { mode: 0o600 });
-    const host = tls ? '127.0.0.1' : (process.env.IVNC_TEST_HTTP_HOST || '127.0.0.1');
+    writeFileSync(config, `[http]\nport=${port}\nbasic_auth_enabled=${enabled}\nbasic_auth_user=${JSON.stringify(username)}\nbasic_auth_password=${JSON.stringify(originalPassword)}\nauth_session_idle_seconds=${idle}\nauth_session_max_seconds=${maximum}\n[ui_features]\nconsole_enabled=${consoleEnabled}\n[audio]\nenabled=false\nsample_rate=48000\nchannels=2\nbitrate=128000\n`, { mode: 0o600 });
+    const host = tls ? '127.0.0.1' : (httpHost || process.env.IVNC_TEST_HTTP_HOST || '127.0.0.1');
     const server = { tls, port, dir, config, env, password: originalPassword, origin: `${tls ? 'https' : 'http'}://${host}:${port}` };
     servers.push(server);
     await launchServer(server); return server;
@@ -148,6 +148,24 @@ try {
             assert(!await page.evaluate(() => document.cookie.includes('ivnc_session_')));
             assert.equal((await page.evaluate(async () => (await (await fetch('/auth/session')).json()).kind)), 'session');
             pass(`${tag}: real login form, mobile layout, errors and HttpOnly Cookie attributes`);
+            assert.equal(await page.locator('#taskbar #signout-btn, #taskbar #update-btn, #taskbar [title="修改密码"], #taskbar [title="Change password"]').count(), 0);
+            await page.locator('.toolbar-tools > #console-btn').click();
+            const settings = page.frameLocator('#settings-frame');
+            await settings.locator('#settings-password').waitFor();
+            assert(await settings.locator('#settings-update').isVisible());
+            assert(await settings.locator('#signout-btn').isVisible());
+            await page.screenshot({ path: path.join(work, `${name}-${server.tls ? 'https' : 'http'}-settings.png`) });
+            await settings.locator('#settings-password').click();
+            await settings.locator('#pwd-new').fill('cancelled-password');
+            await settings.locator('#pwd-cancel').click();
+            assert(await page.locator('.web-settings-modal').isVisible());
+            if (name === 'chromium' && !server.tls) {
+                await page.setViewportSize({ width: 1280, height: 800 });
+                await page.screenshot({ path: path.join(work, 'settings-desktop.png') });
+                await page.setViewportSize({ width: 390, height: 844 });
+            }
+            await page.locator('#web-console-minimize').click();
+            pass(`${tag}: mobile settings exposes account/service actions and bottom toolbar removes all three entries`);
             for (let i = 0; i < 10; i++) {
                 await page.reload(); await page.locator('#taskbar').waitFor(); assert.equal(new URL(page.url()).pathname, '/');
                 assert.equal(await page.evaluate(async () => (await fetch('/api/apps')).status), 200);
@@ -256,9 +274,39 @@ try {
     await waitFor('idle expiration closes an otherwise live terminal', () => expiringSocket.readyState === WebSocket.CLOSED, 5000);
     assert.equal((await request(short, '/api/apps', { headers: expiring })).status, 401);
     pass('idle expiration closes live sockets without another HTTP request');
+    const lan = Object.values(networkInterfaces()).flat().find(address => address.family === 'IPv4' && !address.internal)?.address;
+    const restricted = await startServer('settings-only', { consoleEnabled: false, host: lan });
+    assert.equal((await request(restricted, '/ui-config', { headers: basic(restricted) })).json.features.console, false);
+    if (lan) {
+        assert.equal((await request(restricted, '/console', { headers: basic(restricted) })).status, 404);
+        assert.equal((await request(restricted, '/api/console/overview', { headers: basic(restricted) })).status, 404);
+    }
+    const settingsBrowser = await engines.chromium.launch({ executablePath: process.env.CHROME_BIN || '/usr/bin/google-chrome', args: ['--no-sandbox', '--disable-dev-shm-usage'] }); browsers.push(settingsBrowser);
+    const settingsContext = await settingsBrowser.newContext({ locale: 'zh-CN' }), settingsPage = await settingsContext.newPage();
+    await formLogin(settingsPage, restricted);
+    await settingsPage.locator('.toolbar-tools > #console-btn').click();
+    const settings = settingsPage.frameLocator('#settings-frame');
+    await settings.locator('#settings-password').waitFor();
+    assert((await settingsPage.locator('#settings-frame').getAttribute('src')).endsWith('/settings.html'));
+    const anotherPage = await settingsContext.newPage(); await anotherPage.goto(restricted.origin + '/settings.html');
+    await anotherPage.locator('#settings-password').waitFor();
+    await settings.locator('#settings-password').click();
+    await settings.locator('#pwd-new').fill('new-settings-password'); await settings.locator('#pwd-confirm').fill('new-settings-password');
+    await settings.locator('#pwd-ok').click();
+    await settingsPage.waitForURL(/\/auth\/login/); await anotherPage.waitForURL(/\/auth\/login/);
+    restricted.password = 'new-settings-password';
+    await formLogin(settingsPage, restricted);
+    pass('console-disabled settings retains real password changes and cross-tab session revocation');
+    await settingsContext.close(); await settingsBrowser.close();
     const open = await startServer('disabled', { enabled: false });
     assert.equal((await request(open, '/api/apps')).status, 200);
     const noAuthSocket = await terminal(open, {}); noAuthSocket.close();
+    const noAuthBrowser = await engines.chromium.launch({ executablePath: process.env.CHROME_BIN || '/usr/bin/google-chrome', args: ['--no-sandbox', '--disable-dev-shm-usage'] }); browsers.push(noAuthBrowser);
+    const noAuthPage = await noAuthBrowser.newPage(); await noAuthPage.goto(open.origin + '/settings.html');
+    await noAuthPage.locator('#settings-update').waitFor();
+    assert.equal(await noAuthPage.locator('#settings-password').isVisible(), false);
+    assert.equal(await noAuthPage.locator('#signout-btn').isVisible(), false);
+    await noAuthBrowser.close();
     pass('authentication-disabled installations retain API and terminal access');
     console.log(`${passed} authentication smoke checks passed. Artifacts: ${work}`);
 } catch (error) {

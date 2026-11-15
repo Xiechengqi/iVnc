@@ -3,14 +3,14 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>管理控制台</title>
+    <title>设置</title>
     <link rel="stylesheet" href="./console.css">
 </head>
 <body>
     <div class="console-shell">
         <header class="console-topbar">
             <div class="console-brand" hidden>
-                <span id="page-title">管理控制台</span>
+                <span id="page-title">设置</span>
                 <span id="console-subtitle">管理应用与运行参数</span>
             </div>
             <nav class="nav-list" aria-label="Console sections">
@@ -18,10 +18,7 @@
                 <button class="nav-item" data-section="apps" id="nav-apps" type="button">应用</button>
                 <button class="nav-item" data-section="settings" id="nav-settings" type="button">连接质量</button>
             </nav>
-            <button class="lang-toggle" id="lang-toggle" type="button">English</button>
-            <button class="lang-toggle" id="signout-btn" type="button" hidden>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
-            </button>
+            <div id="settings-actions"></div>
         </header>
 
         <main class="console-main">

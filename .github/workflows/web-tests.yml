@@ -49,4 +49,6 @@ jobs:
         run: npm run test:viewport
       - name: Test mobile keyboard input in Chromium and WebKit
         run: npm run test:mobile-input
+      - name: Test settings actions and modal isolation in Chromium and WebKit
+        run: npm run test:settings
       - run: npm run build

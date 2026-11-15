@@ -19,6 +19,8 @@ The client connects to the iVnc server via WebRTC. All media (video/audio) is de
 
 The browser signs in at `/auth/login` and resumes with an HttpOnly session cookie, including WebSocket handshakes. Refreshes do not require another password prompt while the session is valid. Explicit HTTP Basic Auth remains available to API clients and internal workers. Sessions are held in memory and end on server restart. See [authentication](../../docs/AUTHENTICATION.md) for HTTP/HTTPS, CSRF, expiry and logout behavior.
 
+The toolbar gear opens Settings. Password changes, restart/upgrade and sign out are in its top-right action group. When console management is disabled, the same entry opens an account/service-only settings page without loading console management APIs. See [Settings](../../docs/SETTINGS.md).
+
 ## 1. Window Messaging API (Dashboard → Client)
 
 The client listens for messages sent via `window.postMessage`. To ensure security, the client only accepts messages from the same origin (`event.origin === window.location.origin`).

@@ -599,7 +599,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         menu.hidden = !menu.hidden; more.setAttribute('aria-expanded', String(!menu.hidden)); onInteraction(!menu.hidden);
     });
     // Tool handlers stop propagation; close before they open their own panels.
-    listen(menu, 'click', (event) => { if (event.target.closest('.taskbar-pin, .toolbar-gesture-action')) closeMenu(); }, { capture: true });
+    listen(tools, 'click', (event) => { if (event.target.closest('.taskbar-pin, .toolbar-gesture-action')) closeMenu(); }, { capture: true });
     listen(document, 'pointerdown', (event) => {
         if (!renamePanel.contains(event.target)) closeEditor();
         if (!tools.contains(event.target)) closeMenu();

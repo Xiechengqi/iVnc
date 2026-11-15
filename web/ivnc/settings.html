@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>设置</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; background: #f4f7f9; color: #2d3436; font: 14px/1.5 system-ui, sans-serif; }
+        .settings-topbar { display: flex; align-items: center; justify-content: flex-end; padding: 10px 16px; background: #fff; border-bottom: 1px solid #dfe6e9; }
+        main { padding: 24px; } h1 { font-size: 20px; margin: 0 0 8px; } p { color: #636e72; }
+        @media (max-width: 760px) { .settings-topbar { padding: 8px; } main { padding: 16px; } }
+    </style>
+</head>
+<body>
+    <header class="settings-topbar"><div id="settings-actions"></div></header>
+    <main><h1 id="settings-title">设置</h1><p id="settings-hint">账户与服务操作</p></main>
+    <script type="module" src="./settings.js"></script>
+</body>
+</html>

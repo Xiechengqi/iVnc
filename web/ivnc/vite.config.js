@@ -28,6 +28,7 @@ export default defineConfig({
       input: {
         main: './index.html',
         console: './console.html',
+        settings: './settings.html',
         'ivnc-core': './ivnc-core.js',
         login: './login.html',
         'auth-client': './auth-client.js',
