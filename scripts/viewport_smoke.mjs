@@ -175,6 +175,16 @@ try {
     await local.evaluate(`document.querySelector('.taskbar').style.height=''`); await automatic();
     await assertStable(initial,native);
     pass('toolbar pin and measured height only change the local work area');
+    await local.call('Emulation.setPageScaleFactor',{pageScaleFactor:1.5});
+    for (const height of [650,900]) {
+        await local.call('Emulation.setDeviceMetricsOverride',{width:1024,height,deviceScaleFactor:1,mobile:false});
+        b=await automatic();assert.equal(b.area.height,height-36);assert.equal(b.area.bottom,b.bar.top);
+        await pin();b=await automatic();assert.equal(b.area.height,height);
+        await pin();b=await automatic();assert.equal(b.area.bottom,b.bar.top);
+    }
+    await local.call('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+    await automatic();await clickBottom();await assertStable(initial,native);
+    pass('native browser zoom followed by resize keeps the application above the pinned toolbar');
     for (const [width,height,dpr] of [[375,640,2],[1440,900,2],[1024,601,1]]) {
         await local.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:dpr,mobile:false});
         await automatic(); await clickBottom(); await assertStable(initial,native);
@@ -246,10 +256,16 @@ try {
     await waitFor('shared app tab',()=>local.evaluate(`!!document.querySelector('[data-key="app:${app.id}"]')`));
     await local.evaluate(`document.querySelector('[data-key="app:${app.id}"]').click()`);
     await waitFor('embedded app connection',()=>local.evaluate(`document.querySelector('.app-stream.active iframe')?.contentWindow?.__ivncWebRTC?._send_channel?.readyState==='open'`),60000);
-    const embeddedFits=()=>local.evaluate(`(() => {const f=document.querySelector('.app-stream.active iframe'),d=f.contentDocument;const a=document.querySelector('.video-container').getBoundingClientRect(),r=f.getBoundingClientRect(),c=d.querySelector('.video-container').getBoundingClientRect();return Math.abs(a.height-r.height)<1 && Math.abs(r.height-c.height)<1 && !d.querySelector('.taskbar');})()`);
+    const embeddedFits=()=>local.evaluate(`(() => {const f=document.querySelector('.app-stream.active iframe'),d=f.contentDocument;const a=document.querySelector('.video-container').getBoundingClientRect(),r=f.getBoundingClientRect(),c=d.querySelector('.video-container').getBoundingClientRect(),bar=document.querySelector('.taskbar');const bottom=bar.classList.contains('pinned')?bar.getBoundingClientRect().top:innerHeight;return Math.abs(a.bottom-bottom)<1 && Math.abs(a.height-r.height)<1 && Math.abs(r.height-c.height)<1 && !d.querySelector('.taskbar');})()`);
     await waitFor('embedded layout',embeddedFits);
     await local.evaluate(`window.__savedFrame=document.querySelector('.app-stream.active iframe');window.__savedChannel=window.__savedFrame.contentWindow.__ivncWebRTC._send_channel`);
     await pin(); await waitFor('embedded unpin',embeddedFits);await pin();await waitFor('embedded pin',embeddedFits);
+    await local.call('Emulation.setPageScaleFactor',{pageScaleFactor:1.5});
+    await local.call('Emulation.setDeviceMetricsOverride',{width:900,height:520,deviceScaleFactor:1,mobile:false});
+    await waitFor('zoomed embedded resize',embeddedFits);
+    await pin();await waitFor('zoomed embedded unpin',embeddedFits);await pin();await waitFor('zoomed embedded pin',embeddedFits);
+    await local.call('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+    await waitFor('embedded zoom reset',embeddedFits);
     const workerUrl=`/api/console/display?app_id=${app.id}`, workerState=await api(workerUrl);
     await api(workerUrl,'PUT',{width:1280,height:720,revision:workerState.revision});
     await waitFor('worker resized',()=>local.evaluate(`document.querySelector('.app-stream.active iframe').contentWindow.__ivncDisplayState?.desktop.width===1280`));

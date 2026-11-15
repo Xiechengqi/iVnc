@@ -1,7 +1,7 @@
 // Real layout and native input in Chromium/WebKit, using production modules.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -9,12 +9,14 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(new URL('../web/ivnc/package.json', import.meta.url));
 const { createServer } = require('vite'), engines = require('playwright');
 const root = fileURLToPath(new URL('../web/ivnc/', import.meta.url));
+// Exercise the desktop's actual CSS, including the root height calculation.
+// An independent inset-only fixture can hide stale --ivnc-visible-height bugs.
+const desktopStyles = readFileSync(path.join(root, 'ivnc-wr-core.js'), 'utf8')
+    .match(/function InitUI\(\) \{[\s\S]*?style\.textContent = `([\s\S]*?)`;/)[1];
 const fixture = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-html,body{margin:0;overflow:hidden}#app{position:fixed;inset:0}
-.video-container{position:absolute;inset:0 0 var(--ivnc-toolbar-height,0px);overflow:hidden}
-.video-container.manual-exact{overflow:auto}#stream,#overlayInput{position:absolute;display:block}
-#toolbar{position:fixed;bottom:0;height:36px;width:100%;background:#333}
+${desktopStyles}
+#toolbar{position:fixed;bottom:var(--ivnc-keyboard-inset,0px);height:36px;width:100%;background:#333}
 </style>
 <div id="app"><div class="video-container"><video id="stream"></video><div id="overlayInput"></div></div></div><div id="toolbar"></div>
 <script type="module">
@@ -33,7 +35,7 @@ window.fixture={input,viewport,messages,container,video,overlay,
  pin(value){pinned=value;viewport.layout()},
  frame(w,h){width=w;height=h;video.dispatchEvent(new Event('resize'));pendingFrame?.()},
  clear(){messages.length=0},
- bounds(){const r=n=>{const b=n.getBoundingClientRect();return {left:b.left,top:b.top,width:b.width,height:b.height}};return {video:r(video),input:r(overlay),area:r(container),scroll:[container.scrollLeft,container.scrollTop]}}
+ bounds(){const r=n=>{const b=n.getBoundingClientRect();return {left:b.left,top:b.top,bottom:b.bottom,width:b.width,height:b.height}};return {video:r(video),input:r(overlay),area:r(container),bar:r(toolbar),scroll:[container.scrollLeft,container.scrollTop]}}
 };
 </script>`;
 
@@ -48,6 +50,26 @@ const cases = [
         await page.evaluate(()=>{document.querySelector('#toolbar').style.height='52px';fixture.viewport.layout()});
         assert.equal((await bounds(page)).area.height,948);
         await page.evaluate(()=>fixture.pin(false));assert.equal((await bounds(page)).area.height,1000);
+    }],
+    ['resizing while zoomed keeps the work area aligned with toolbar pin and measured height', async page => {
+        // Both engines exercise the same zoomed VisualViewport state. The real
+        // Chromium pinch/resize sequence is also covered by viewport_smoke.
+        await page.evaluate(()=>{
+            const visual=Object.assign(new EventTarget(),{height:innerHeight/1.5,offsetTop:0,scale:1.5});
+            Object.defineProperty(window,'visualViewport',{configurable:true,value:visual});
+            fixture.viewport.layout();
+        });
+        for(const height of [650,900]) {
+            await page.setViewportSize({width:1024,height});await nextLayout(page);
+            let b=await bounds(page);
+            assert.equal(b.area.bottom,b.bar.top);assert.equal(b.area.height,height-36);
+            assert(b.video.bottom<=b.bar.top);assert.deepEqual(b.video,b.input);
+            await page.evaluate(()=>fixture.pin(false));assert.equal((await bounds(page)).area.height,height);
+            await page.evaluate(()=>fixture.pin(true));
+            b=await bounds(page);assert.equal(b.area.bottom,b.bar.top);
+        }
+        await page.evaluate(()=>document.querySelector('#toolbar').style.height='52px');await nextLayout(page);
+        const b=await bounds(page);assert.equal(b.area.bottom,b.bar.top);assert.equal(b.area.height,848);
     }],
     ['native mouse uses desktop coordinates across a reduced encoded stream', async page => {
         await page.mouse.move(640,382);await page.mouse.down();await page.mouse.up();

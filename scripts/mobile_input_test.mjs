@@ -206,6 +206,17 @@ const cases = [
         assert.deepEqual(await page.evaluate(()=>fixture.bounds()),before);
         assert(await page.evaluate(()=>fixture.input.textInput.focused()));
     }],
+    ['resizing while zoomed preserves keyboard occlusion and follows the current toolbar position', async page => {
+        await open(page);await page.evaluate(()=>fixture.resize(480,20));
+        await page.evaluate(()=>fixture.resize(230,40,2));
+        await page.setViewportSize({width:390,height:700});
+        await page.waitForFunction(()=>document.querySelector('#area').getBoundingClientRect().bottom===document.querySelector('#toolbar').getBoundingClientRect().top);
+        const b=await page.evaluate(()=>fixture.bounds());
+        assert.equal(b[0].top,20);assert.equal(b[1].height,300);assert.equal(b[2].bottom,356);
+        assert(await page.evaluate(()=>fixture.input.textInput.focused()));
+        await page.evaluate(()=>fixture.resize(700));
+        assert.equal((await page.evaluate(()=>fixture.bounds()))[1].height,664);
+    }],
     ['native view scrolls the reported caret into the reduced work area', async page => {
         await open(page);await page.evaluate(()=>{
             fixture.resize(450);fixture.viewport.mode('native');

@@ -1,7 +1,7 @@
 // One work area for the desktop, input surface and embedded application views.
 export function createViewport({ root, container, video, overlay, toolbar, isPinned, embedded, onChange }) {
     let disposed = false, frame = 0, mode = 'fit', previousSize = '', pixelRatioQuery;
-    let caret = null, visibleArea = null;
+    let caret = null, occlusion = { top: 0, inset: 0 };
     const set = (element, property, value) => {
         if (element.style[property] !== value) element.style[property] = value;
     };
@@ -13,14 +13,20 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
         // or 100dvh). Embedded views already inherit their parent's work area.
         const visual = !embedded && window.visualViewport;
         const unzoomed = visual && Math.abs(visual.scale - 1) < 0.01;
-        if (unzoomed || !visibleArea || !visual) {
-            const height = unzoomed ? visual.height : window.innerHeight;
-            const top = unzoomed ? visual.offsetTop : 0;
-            visibleArea = { height, top, inset: Math.max(0, window.innerHeight - height - top) };
+        if (unzoomed) {
+            occlusion = {
+                top: Math.max(0, visual.offsetTop),
+                inset: Math.max(0, window.innerHeight - visual.height - visual.offsetTop),
+            };
+        } else if (!visual) {
+            occlusion = { top: 0, inset: 0 };
         }
-        // Keep the last keyboard work area while pinch zoom changes scale.
-        // A zoomed visual viewport alone cannot identify keyboard occlusion.
-        const { height, top, inset } = visibleArea;
+        // Pinch zoom alone cannot identify keyboard occlusion. Keep only the
+        // known occluded edges, not a cached work-area height: the layout
+        // viewport can still resize while zoomed, moving the fixed toolbar.
+        const top = Math.min(occlusion.top, window.innerHeight);
+        const inset = Math.min(occlusion.inset, window.innerHeight - top);
+        const height = window.innerHeight - top - inset;
         root.style.setProperty('--ivnc-visible-height', `${height}px`);
         root.style.setProperty('--ivnc-visible-top', `${top}px`);
         toolbar.style.setProperty('--ivnc-keyboard-inset', `${inset}px`);
