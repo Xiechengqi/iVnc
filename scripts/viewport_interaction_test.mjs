@@ -18,9 +18,10 @@ const fixture = `<!doctype html><meta name="viewport" content="width=device-widt
 ${desktopStyles}
 #toolbar{position:fixed;bottom:var(--ivnc-keyboard-inset,0px);height:36px;width:100%;background:#333}
 </style>
-<div id="app"><div class="video-container"><video id="stream"></video><div id="overlayInput"></div></div></div><div id="toolbar"></div>
+<div id="app"><div class="video-container"><video id="stream"></video><div id="overlayInput"></div></div></div><div id="toolbar" class="taskbar pinned"></div>
 <script type="module">
 import { createViewport } from '/viewport.js';
+import { createToolbarVisibility } from '/toolbar-visibility.js';
 import { Input } from '/lib/input2.js';
 const root=document.querySelector('#app'),container=document.querySelector('.video-container'),video=document.querySelector('video'),overlay=document.querySelector('#overlayInput'),toolbar=document.querySelector('#toolbar');
 let width=1280,height=720,pinned=true,pendingFrame;
@@ -28,11 +29,14 @@ Object.defineProperties(video,{videoWidth:{get:()=>width},videoHeight:{get:()=>h
 video.requestVideoFrameCallback=cb=>{pendingFrame=cb};
 const messages=[];
 const input=new Input(overlay,m=>messages.push(m));
-const viewport=createViewport({root,container,video,overlay,toolbar,isPinned:()=>pinned,embedded:false,onChange:()=>input.resize()});
+let viewport,interacting=false;
+const visibility=createToolbarVisibility({element:toolbar,pinned,onChange:()=>viewport?.layout(),interacting:()=>interacting});
+viewport=createViewport({root,container,video,overlay,toolbar,isToolbarReserved:()=>visibility.isReserved(),embedded:false,onChange:()=>input.resize()});
 input.attach();
 input.setDisplayState({protocol:1,revision:1,desktop:{width:1920,height:1080},encoded:{width:1280,height:720}});
-window.fixture={input,viewport,messages,container,video,overlay,
- pin(value){pinned=value;viewport.layout()},
+window.fixture={input,viewport,visibility,messages,container,video,overlay,
+ pin(value){pinned=value;visibility.setPinned(value);viewport.layout()},
+ interact(value){interacting=value},
  frame(w,h){width=w;height=h;video.dispatchEvent(new Event('resize'));pendingFrame?.()},
  clear(){messages.length=0},
  bounds(){const r=n=>{const b=n.getBoundingClientRect();return {left:b.left,top:b.top,bottom:b.bottom,width:b.width,height:b.height}};return {video:r(video),input:r(overlay),area:r(container),bar:r(toolbar),scroll:[container.scrollLeft,container.scrollTop]}}
@@ -42,6 +46,8 @@ window.fixture={input,viewport,messages,container,video,overlay,
 const pointer = page => page.evaluate(() => fixture.messages.filter(m => /^(i,|m,|m2,|w,)/.test(m)));
 const bounds = page => page.evaluate(() => fixture.bounds());
 const nextLayout = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const hiddenToolbar = page => page.waitForFunction(()=>!fixture.visibility.isReserved());
+const shownToolbar = page => page.waitForFunction(()=>new DOMMatrixReadOnly(getComputedStyle(document.querySelector('#toolbar')).transform).m42===0);
 const cases = [
     ['proportional fit, measured toolbar and portrait reflow', async page => {
         let b=await bounds(page); assert.equal(b.area.height,764); assert.equal(b.video.width,1280); assert.equal(b.video.height,720); assert.equal(b.video.top,22); assert.deepEqual(b.video,b.input);
@@ -49,7 +55,7 @@ const cases = [
         b=await bounds(page); assert.equal(b.video.width,500); assert.equal(b.video.height,281.25); assert.equal(b.area.height,964);
         await page.evaluate(()=>{document.querySelector('#toolbar').style.height='52px';fixture.viewport.layout()});
         assert.equal((await bounds(page)).area.height,948);
-        await page.evaluate(()=>fixture.pin(false));assert.equal((await bounds(page)).area.height,1000);
+        await page.evaluate(()=>fixture.pin(false));await hiddenToolbar(page);assert.equal((await bounds(page)).area.height,1000);
     }],
     ['resizing while zoomed keeps the work area aligned with toolbar pin and measured height', async page => {
         // Both engines exercise the same zoomed VisualViewport state. The real
@@ -64,8 +70,8 @@ const cases = [
             let b=await bounds(page);
             assert.equal(b.area.bottom,b.bar.top);assert.equal(b.area.height,height-36);
             assert(b.video.bottom<=b.bar.top);assert.deepEqual(b.video,b.input);
-            await page.evaluate(()=>fixture.pin(false));assert.equal((await bounds(page)).area.height,height);
-            await page.evaluate(()=>fixture.pin(true));
+            await page.evaluate(()=>fixture.pin(false));await hiddenToolbar(page);assert.equal((await bounds(page)).area.height,height);
+            await page.evaluate(()=>fixture.pin(true));await shownToolbar(page);
             b=await bounds(page);assert.equal(b.area.bottom,b.bar.top);
         }
         await page.evaluate(()=>document.querySelector('#toolbar').style.height='52px');await nextLayout(page);
@@ -100,6 +106,64 @@ const cases = [
         const b=await bounds(page);assert.equal(b.video.width,1280);assert.deepEqual(b.video,b.input);assert.deepEqual(b.scroll,[390,320]);
         await page.mouse.click(250,180);assert((await pointer(page)).includes('i,1,m,960,750,1,0'));
         await page.evaluate(()=>fixture.viewport.mode('fit'));assert.deepEqual((await bounds(page)).scroll,[0,0]);
+    }],
+    ['reapplying original size preserves scrolling and bottom controls stay above the toolbar', async page => {
+        await page.setViewportSize({width:500,height:400});await nextLayout(page);
+        await page.evaluate(()=>{fixture.viewport.mode('native');fixture.container.scrollLeft=200;fixture.container.scrollTop=200});await nextLayout(page);
+        await page.evaluate(()=>fixture.viewport.mode('native'));
+        assert.deepEqual((await bounds(page)).scroll,[200,200]);
+        await page.evaluate(()=>fixture.container.scrollTop=fixture.container.scrollHeight);await nextLayout(page);
+        let b=await bounds(page);assert(b.video.bottom<=b.bar.top+1);assert.deepEqual(b.video,b.input);
+        await page.mouse.click(250,b.video.bottom-4);
+        assert((await pointer(page)).includes('i,1,m,675,1074,1,0'));
+    }],
+    ['original-size bottom anchoring survives a taller toolbar and a smaller work area', async page => {
+        await page.setViewportSize({width:500,height:400});await nextLayout(page);
+        await page.evaluate(()=>{fixture.viewport.mode('native');fixture.container.scrollTop=fixture.container.scrollHeight});await nextLayout(page);
+        await page.evaluate(()=>document.querySelector('#toolbar').style.height='52px');await nextLayout(page);
+        let b=await bounds(page);assert(b.video.bottom<=b.bar.top+1);assert.equal(b.area.bottom,b.bar.top);
+        await page.setViewportSize({width:500,height:340});await nextLayout(page);
+        b=await bounds(page);assert(b.video.bottom<=b.bar.top+1);assert.equal(b.area.bottom,b.bar.top);
+        // Away from the edge, reflow must not unexpectedly scroll to the bottom.
+        await page.evaluate(()=>fixture.container.scrollTop=100);await nextLayout(page);
+        await page.evaluate(()=>document.querySelector('#toolbar').style.height='70px');await nextLayout(page);
+        assert.equal((await bounds(page)).scroll[1],100);
+    }],
+    ['both modes reserve space throughout temporary toolbar reveal and hiding transitions', async page => {
+        await page.setViewportSize({width:500,height:400});await nextLayout(page);
+        await page.evaluate(()=>fixture.pin(false));await hiddenToolbar(page);
+        for(const mode of ['fit','native']) {
+            await page.evaluate(mode=>{fixture.viewport.mode(mode);fixture.container.scrollTop=fixture.container.scrollHeight;fixture.visibility.show()},mode);
+            // Sample every frame: the toolbar must not cover the video or
+            // its input surface, even while the toolbar is moving.
+            const samples=await page.evaluate(async()=>{
+                const samples=[];
+                for(let i=0;i<12;i++){await new Promise(requestAnimationFrame);samples.push(fixture.bounds())}
+                fixture.visibility.hide({immediate:true});
+                for(let i=0;i<18;i++){await new Promise(requestAnimationFrame);samples.push(fixture.bounds())}
+                return samples;
+            });
+            for(const b of samples){assert(b.area.bottom<=b.bar.top+1,JSON.stringify(b));assert(b.video.bottom<=b.bar.top+1,JSON.stringify(b));assert.deepEqual(b.video,b.input)}
+            await hiddenToolbar(page);assert.equal((await bounds(page)).area.height,400);
+        }
+    }],
+    ['rapid reveal, cancelled transitions and interaction keep toolbar reservation consistent', async page => {
+        await page.evaluate(()=>fixture.pin(false));await hiddenToolbar(page);
+        await page.evaluate(()=>{for(let i=0;i<5;i++){fixture.visibility.show();fixture.visibility.hide({immediate:true})}fixture.visibility.show()});
+        await nextLayout(page);assert.equal((await bounds(page)).area.height,764);
+        await page.evaluate(()=>{fixture.interact(true);fixture.visibility.hide({immediate:true})});
+        assert(await page.evaluate(()=>fixture.visibility.isReserved()));
+        await page.evaluate(()=>{fixture.interact(false);fixture.visibility.hide({immediate:true});document.querySelector('#toolbar').style.transition='none'});
+        await hiddenToolbar(page);assert.equal((await bounds(page)).area.height,800);
+        await page.evaluate(()=>{fixture.pin(true);fixture.visibility.hide({immediate:true})});
+        assert.equal((await bounds(page)).area.height,764);
+    }],
+    ['reduced motion hides without transition events or a stale work area', async page => {
+        await page.emulateMedia({reducedMotion:'reduce'});
+        await page.evaluate(()=>fixture.pin(false));await hiddenToolbar(page);
+        await page.evaluate(()=>fixture.visibility.show());assert.equal((await bounds(page)).area.height,764);
+        await page.evaluate(()=>fixture.visibility.hide({immediate:true}));await hiddenToolbar(page);
+        assert.equal((await bounds(page)).area.height,800);
     }],
     ['touch and pen share coordinates; pen cancellation releases buttons', async page => {
         await page.touchscreen.tap(640,382);

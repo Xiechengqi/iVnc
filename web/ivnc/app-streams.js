@@ -128,11 +128,17 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 	// Sends the view its current state. Runs on load and again on
 	// ivnc-view-ready, since the view's listener may not exist at load yet.
 	function sync(s) {
-		post(s, { type: 'setDisplayMode', value: displayMode() });
+		sendDisplayMode(s);
 		post(s, { type: 'ivnc-view-active', active: s.id === activeId });
 		// unlocked: the user has activated this tab, so audio may play.
 		if (s.unlocked) post(s, { type: 'ivnc-unmute' });
 		if (s.id === activeId) s.frame.contentWindow.focus();
+	}
+
+	// Display changes must also reach background views, without activation,
+	// audio or focus side effects. Load/ready repair messages sent too early.
+	function sendDisplayMode(s) {
+		post(s, { type: 'setDisplayMode', value: displayMode() });
 	}
 
 	function end(s, reason, error = null) {
@@ -192,6 +198,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 			post(s, { type: 'ivnc-view-active', active: s === next });
 		}
 		if (next) {
+			sendDisplayMode(next);
 			// Activation follows a user gesture, so the view may play audio.
 			next.unlocked = true;
 			if (next.state === null || next.state === 'ended') {
@@ -328,6 +335,9 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		tabs,
 		activate,
 		layout,
+		syncDisplayMode() {
+			if (!disposed) for (const s of streams.values()) sendDisplayMode(s);
+		},
 		activeId: () => activeId,
 		isActiveFrame: (frame) => !!activeId && streams.get(activeId)?.frame?.contentWindow === frame,
 		frames: () => Array.from(streams.values()).map(s => s.frame).filter(Boolean),

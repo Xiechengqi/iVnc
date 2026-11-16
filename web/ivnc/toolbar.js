@@ -396,7 +396,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         for (const tool of toolEntries) {
             const parent = compact && !tool.primary ? menu : tools;
             if (tool.node.parentNode !== parent) parent.insertBefore(tool.node, parent === tools ? more : null);
-            tool.label.textContent = tool.node.title;
+            tool.label.textContent = tool.node.dataset.toolLabel || tool.node.title;
         }
         more.hidden = !menu.children.length;
         if (!compact) closeMenu();

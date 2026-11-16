@@ -71,11 +71,19 @@ const bounds = `(() => {
     const video=document.getElementById('stream'),bar=document.querySelector('.taskbar');
     return {video:rect(video),input:rect(document.getElementById('overlayInput')),area:rect(document.querySelector('.video-container')),
         bar:bar?rect(bar):null,pinned:!!bar?.classList.contains('pinned'),fullscreen:!!document.fullscreenElement,
+        reserved:parseFloat(document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height'))||0,
         width:innerWidth,height:innerHeight,frame:[video.videoWidth,video.videoHeight],dpr:devicePixelRatio,
         manual:window.isManualResolutionMode,scroll:document.documentElement.scrollHeight};
 })()`;
 const matches = (a,b) => ['left','top','width','height'].every(key=>Math.abs(a[key]-b[key])<1);
-const pin = () => local.evaluate(`document.querySelector('.toolbar-tools .taskbar-pin').click()`);
+async function pin() {
+    await local.evaluate(`document.querySelector('.toolbar-tools .taskbar-pin').click()`);
+    await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});
+    await waitFor('toolbar settles after pin toggle',()=>local.evaluate(`(() => {
+        const bar=document.querySelector('.taskbar'),reserved=parseFloat(document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height'))||0;
+        return bar.classList.contains('pinned') ? new DOMMatrixReadOnly(getComputedStyle(bar).transform).m42===0 && reserved>0 : !bar.classList.contains('visible') && reserved===0;
+    })()`));
+}
 const message = data => local.evaluate(`window.postMessage(${JSON.stringify(data)},location.origin)`);
 async function reload() {
     await local.call('Page.bringToFront');
@@ -87,8 +95,10 @@ async function automatic(peer = local) {
     await peer.call('Page.bringToFront');
     return waitFor('independent fitted work area and decoded resolution', async () => {
         const b = await peer.evaluate(bounds), state = await peer.evaluate('window.__ivncDisplayState');
-        const height = b.height - (b.pinned && !b.fullscreen ? b.bar.height : 0);
+        const height = b.height - b.reserved;
         if (!state || !b.frame[0]) return false;
+        if (!b.fullscreen && b.bar && b.bar.top<b.height && b.area.bottom>b.bar.top+1) return false;
+        if (b.pinned && !b.fullscreen && Math.abs(b.reserved-b.bar.height)>1) return false;
         const scale = Math.min(b.area.width/b.frame[0], b.area.height/b.frame[1]);
         if (Math.abs(b.area.height-height)>1 || !matches(b.video,b.input)) return false;
         if (Math.abs(b.video.width - b.frame[0]*scale)>1 || Math.abs(b.video.height - b.frame[1]*scale)>1) return false;
@@ -213,6 +223,27 @@ try {
     // clickBottom's fitted-layout wait is intentionally skipped in native mode.
     b=await local.evaluate(bounds);
     assert(matches(b.video,b.input)); assert(b.video.top<0); await clickBottom(local,false); await assertStable(initial,native);
+    await pin();
+    b=await local.evaluate(bounds);assert(b.video.bottom<=b.area.bottom+1);
+    await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:8,y:b.height-1});
+    await waitFor('temporary toolbar leaves native bottom visible',async()=>{
+        const b=await local.evaluate(bounds);
+        return b.reserved>0 && Math.abs(b.bar.top-b.area.bottom)<1 && b.video.bottom<=b.bar.top+1 && matches(b.video,b.input);
+    });
+    await clickBottom(local,false);
+    await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});
+    await waitFor('temporary toolbar releases native work area',()=>local.evaluate(`!document.querySelector('.taskbar').classList.contains('visible') && document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height')==='0px'`));
+    await pin();await assertStable(initial,native);
+    pass('native bottom stays visible and clickable through temporary toolbar reveal and hiding');
+    await message({type:'setDisplayMode',value:'fit'});await automatic();await pin();
+    b=await local.evaluate(bounds);
+    await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:8,y:b.height-1});
+    await waitFor('temporary toolbar reserves fitted work area',()=>local.evaluate(`parseFloat(document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height'))>0`));
+    await automatic();await clickBottom();
+    await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});
+    await waitFor('temporary toolbar releases fitted work area',()=>local.evaluate(`document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height')==='0px'`));
+    await pin();await message({type:'setDisplayMode',value:'native'});await assertStable(initial,native);
+    pass('fitted bottom controls remain visible and clickable with a temporarily revealed toolbar');
     await reload();
     await waitFor('native preference restored',()=>local.evaluate(`document.querySelector('.video-container').classList.contains('manual-exact')`));
     await message({type:'setDisplayMode',value:'fit'}); await automatic();
@@ -254,11 +285,39 @@ try {
     const app=(await api('/api/apps','POST',{name:'Viewport shared GTK',app_type:'desktop',exec_command:'gtk3-demo'})).app;
     await api(`/api/apps/${app.id}/sharing`,'PUT',{enabled:true,password:'viewport-smoke-password'});await api(`/api/apps/${app.id}/start`,'POST');
     await waitFor('shared app tab',()=>local.evaluate(`!!document.querySelector('[data-key="app:${app.id}"]')`));
+    await message({type:'setDisplayMode',value:'native'});
     await local.evaluate(`document.querySelector('[data-key="app:${app.id}"]').click()`);
     await waitFor('embedded app connection',()=>local.evaluate(`document.querySelector('.app-stream.active iframe')?.contentWindow?.__ivncWebRTC?._send_channel?.readyState==='open'`),60000);
-    const embeddedFits=()=>local.evaluate(`(() => {const f=document.querySelector('.app-stream.active iframe'),d=f.contentDocument;const a=document.querySelector('.video-container').getBoundingClientRect(),r=f.getBoundingClientRect(),c=d.querySelector('.video-container').getBoundingClientRect(),bar=document.querySelector('.taskbar');const bottom=bar.classList.contains('pinned')?bar.getBoundingClientRect().top:innerHeight;return Math.abs(a.bottom-bottom)<1 && Math.abs(a.height-r.height)<1 && Math.abs(r.height-c.height)<1 && !d.querySelector('.taskbar');})()`);
-    await waitFor('embedded layout',embeddedFits);
+    await waitFor('embedded starts in native mode',()=>local.evaluate(`document.querySelector('.app-stream.active iframe').contentWindow.isManualResolutionMode===true`));
     await local.evaluate(`window.__savedFrame=document.querySelector('.app-stream.active iframe');window.__savedChannel=window.__savedFrame.contentWindow.__ivncWebRTC._send_channel`);
+    await local.evaluate(`document.querySelector('.toolbar-list [data-key^="window:"]').click()`);
+    await waitFor('main desktop selected',()=>local.evaluate(`!document.querySelector('.app-stream.active')`));
+    // Use the real toolbar action, not a test-only postMessage repair.
+    await local.evaluate(`document.querySelector('.toolbar-display-mode').click()`);await automatic();
+    await waitFor('background child follows parent fit mode',()=>local.evaluate(`window.__savedFrame.contentWindow.isManualResolutionMode===false`));
+    await local.evaluate(`document.querySelector('[data-key="app:${app.id}"]').click()`);
+    const embeddedFits=()=>local.evaluate(`(() => {
+        const f=document.querySelector('.app-stream.active iframe');if(!f)return false;
+        const d=f.contentDocument,v=d?.getElementById('stream'),c=d?.querySelector('.video-container');if(!v?.videoWidth || !c)return false;
+        const a=document.querySelector('.video-container').getBoundingClientRect(),r=f.getBoundingClientRect(),area=c.getBoundingClientRect(),video=v.getBoundingClientRect(),input=d.getElementById('overlayInput').getBoundingClientRect();
+        const reserved=parseFloat(document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height'))||0;
+        const bar=document.querySelector('.taskbar').getBoundingClientRect();
+        const scale=Math.min(c.clientWidth/v.videoWidth,c.clientHeight/v.videoHeight);
+        return !window.isManualResolutionMode && !f.contentWindow.isManualResolutionMode && !c.classList.contains('manual-exact')
+            && Math.abs(a.bottom-(innerHeight-reserved))<1 && Math.abs(a.height-r.height)<1 && Math.abs(r.height-area.height)<1
+            && a.bottom<=bar.top+1
+            && video.bottom<=area.bottom+1 && Math.abs(video.width-v.videoWidth*scale)<1 && Math.abs(video.height-v.videoHeight*scale)<1
+            && ['left','top','width','height'].every(key=>Math.abs(video[key]-input[key])<1) && !d.querySelector('.taskbar');
+    })()`);
+    await waitFor('embedded actual fitted video, mode and input geometry',embeddedFits);
+    await local.evaluate(`document.querySelector('.toolbar-display-mode').click()`);
+    await waitFor('active embedded native mode',()=>local.evaluate(`window.isManualResolutionMode && window.__savedFrame.contentWindow.isManualResolutionMode`));
+    await local.evaluate(`(() => {const c=window.__savedFrame.contentDocument.querySelector('.video-container');c.scrollTop=c.scrollHeight;c.scrollLeft=100;window.__savedScroll=[c.scrollLeft,c.scrollTop]})()`);
+    await local.evaluate(`document.querySelector('.toolbar-list [data-key^="window:"]').click()`);
+    await local.evaluate(`document.querySelector('[data-key="app:${app.id}"]').click()`);
+    await waitFor('native embedded reactivation preserves scroll',()=>local.evaluate(`(() => {const c=window.__savedFrame.contentDocument.querySelector('.video-container'),v=window.__savedFrame.contentDocument.getElementById('stream').getBoundingClientRect();return c.scrollLeft===window.__savedScroll[0] && c.scrollTop===window.__savedScroll[1] && v.bottom<=c.getBoundingClientRect().bottom+1})()`));
+    await local.evaluate(`document.querySelector('.toolbar-display-mode').click()`);await waitFor('embedded fit restored',embeddedFits);
+    pass('background mode synchronization and native reactivation preserve real iframe video/input geometry and scroll');
     await pin(); await waitFor('embedded unpin',embeddedFits);await pin();await waitFor('embedded pin',embeddedFits);
     await local.call('Emulation.setPageScaleFactor',{pageScaleFactor:1.5});
     await local.call('Emulation.setDeviceMetricsOverride',{width:900,height:520,deviceScaleFactor:1,mobile:false});

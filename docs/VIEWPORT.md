@@ -1,23 +1,28 @@
-# 应用可用区域与固定 toolbar
+# 应用可用区域与 toolbar
 
 固定 toolbar 以前只改变浮层的显示状态，主视频与输入层仍占满整个浏览器；自动分辨率也读取整个窗口高度，导致应用底部被挡住。共享视图另有一份扣减逻辑，与主视图不一致。
 
 `web/ivnc/viewport.js` 现在统一管理可用区域和视频/输入层的布局：
 
-- 固定且可见的 toolbar 按实际测量高度预留空间。高度变化由 `ResizeObserver` 跟踪，不写死 36px。
+- 固定显示或临时展开的 toolbar 按实际测量高度预留空间。高度变化由 `ResizeObserver` 跟踪，包含安全区，不写死 36px。
 - `#app` 使用动态视口高度减去预留高度，视频与输入层使用同一组位置和尺寸。
-- 未固定时不预留；鼠标移到边缘临时展开 toolbar 不触发桌面重排。
+- `toolbar-visibility.js` 在展开前同步预留空间，收起动画期间继续预留，完全隐藏后释放。按实际 transform 判断收起完成，兼容减少动画、零时长和取消动画；Pin、快速反复显隐和销毁均清理待执行任务。
+- 工具栏显隐只改变客户端工作区，不改变服务端桌面或原生应用尺寸。布局变化不主动触发显隐，菜单、编辑、拖拽期间保持展开。
 - 嵌入应用由父页面分配可用区域，不再次扣减；单独打开的应用视图使用自己的 toolbar。
 - 视频单独全屏时，其外部 toolbar 不可见，不预留；退出后恢复。
 - 缩放期间保留已确认的键盘遮挡量，仍按当前浏览器窗口高度计算可用区域。窗口缩放、旋转或调整大小后，应用底边继续与固定 toolbar 顶边对齐。
 
-例如可见页面高 800 CSS px、固定 toolbar 高 36 CSS px，可用高度为 764 CSS px。窗口缩小到 650 CSS px 后，可用高度为 614 CSS px；取消固定后恢复为 650 CSS px。DPR 不参与 toolbar 高度扣减。
+例如可见页面高 800 CSS px、显示的 toolbar 高 36 CSS px，可用高度为 764 CSS px。窗口缩小到 650 CSS px 后，可用高度为 614 CSS px；取消固定并完全隐藏 toolbar 后恢复为 650 CSS px。DPR 不参与 toolbar 高度扣减。
 
 ## 分辨率与输入
 
-适应窗口模式将完整远端画面等比例缩放到当前客户端的可用区域，原始大小模式提供横纵滚动条。Pin、窗口大小、DPR 和浏览器缩放只影响当前客户端，不再通过 `r,宽x高` 改变共享桌面分辨率。服务端分辨率由管理员在设置中明确修改，详见 [不同客户端的显示适配](DISPLAY_ADAPTATION.md)。
+两种模式先使用同一块已扣除 toolbar 的工作区。适应窗口模式将完整远端画面等比例缩放到其中，底部直接可见；原始大小模式保持视频尺寸，在工作区内提供横纵滚动条，滚动到底后最后一行必须完整可见、可点击，横向滚动条也位于 toolbar 上方。Pin、窗口大小、DPR 和浏览器缩放只影响当前客户端，不再通过 `r,宽x高` 改变共享桌面分辨率。服务端分辨率由管理员在设置中明确修改，详见 [不同客户端的显示适配](DISPLAY_ADAPTATION.md)。
 
-适应窗口／原始大小偏好保存在本机，刷新后恢复；切回适应窗口时清除滚动位置。客户端仅用 `_viewport` 报告可用区域，不据此请求调整远端应用窗口。
+主页面的适应窗口／原始大小偏好保存在本机，刷新后恢复。父页面在模式修改时同步所有已创建的共享/远程 iframe，并在激活、load 和 ready 时校准；同步显示模式不携带聚焦、音频或激活副作用。未打开的应用不因此创建视图。嵌入页继承父页面，不读取或改写独立 app-view 的模式偏好；独立访问页面仍保留自己的选择。
+
+真实切换模式时清除滚动位置；重复应用同模式不会清除滚动。原始大小下已在底部/右侧时，工作区缩小或 toolbar 变高后继续保持相应边缘可见，其他位置保留有效滚动偏移。客户端仅用 `_viewport` 报告可用区域，不据此请求调整远端应用窗口。
+
+按钮与折叠菜单显示当前模式，tooltip 和无障碍标签同时说明当前模式及点击后的动作；中英文实时更新。显示控制消息只接受同源的本页、父级 dashboard 或所属控制台，嵌入页只接受父页面；非法模式值不改变当前状态。
 
 鼠标和触摸均根据视频实际显示位置映射到桌面坐标，使用相同映射；触摸不再次乘 DPR。滚动和布局变化刷新坐标，画面外的留白不接收远端点击。
 
@@ -26,15 +31,20 @@
 ## 验证
 
 ```bash
-CHROME_BIN=/usr/bin/google-chrome node --test scripts/viewport_interaction_test.mjs scripts/mobile_input_test.mjs
+CHROME_BIN=/usr/bin/google-chrome npm --prefix web/ivnc run test:viewport
+CHROME_BIN=/usr/bin/google-chrome node --test scripts/mobile_input_test.mjs scripts/toolbar_interaction_test.mjs
 npm --prefix web/ivnc run build
 IVNC_BIN="$PWD/target/debug/ivnc" IVNC_WEB_ROOT="$PWD/web/ivnc/dist" CHROME_BIN=/usr/bin/google-chrome node scripts/viewport_smoke.mjs
 ```
 
 布局 smoke 使用独立 iVnc、真实 Wayland Chrome、独立 headless 查看器和共享 GTK 应用。实际点击远端页面底部按钮，覆盖固定切换、动态高度、窄屏、奇数尺寸、DPR 切换、原始大小与滚动、刷新、全屏、浏览器实际缩放后的窗口变化及嵌入应用。所有运行目录、端口和浏览器配置隔离。
 
+`test:viewport` 包含视口输入回归和 `display_mode_interaction_test.mjs`。后者使用生产模式入口、偏好初始化、消息处理、app-streams 和实际 CSS，检查后台共享/远程页面、延迟加载与重载、激活校准、偏好隔离、焦点/音频隔离及中英文提示。画面使用固定媒体尺寸；真实实例 smoke 另检查真实子视频的模式、比例、底边、输入层及原 iframe/DataChannel 保留，避免只验证 iframe 外框而漏掉内部画面裁切。
+
 2026-11-15 回归定位：`d063545` 增加移动端键盘适配后，在 `visualViewport.scale != 1` 时保留了完整的旧可用区域。浏览器从 800px 缩到 650px，应用底边仍为 764px，固定 toolbar 顶边则已变为 614px，导致遮挡。修复只保留已确认的键盘遮挡量，每次布局重新读取窗口高度，并测量当前固定 toolbar 的高度。普通未缩放页面的 Pin 切换在修复前已正常。
 
 视口浏览器回归改为读取实际桌面 CSS，防止测试使用另一套布局而漏报；新增的窗口缩小用例在修复前于 Chromium/WebKit 均失败（764 ≠ 614）。修复后视口每个引擎 9 场景、移动输入每个引擎 25 场景通过，共 68 场景；Node 执行器含父级分组为 74 项。真实实例布局 smoke 19 项、前端生产构建、JavaScript 语法及补丁空白检查通过。
 
 整体 review 核对了未缩放、缩放中窗口大小变化、软键盘、Pin 切换、实测 toolbar 高度、全屏和嵌入视图。共享应用只扣减父页面 toolbar 一次，原 iframe 与 DataChannel 保留，服务端桌面及原生应用尺寸保持稳定。已验证范围内没有剩余阻塞项。移动设备软键盘的系统弹出行为仍需实机验证，本轮新增验证针对其视口几何状态。
+
+2026-11-16 补充修复父子页面显示模式同步、两种模式下的 toolbar 避让及原始大小滚动保持，完整审查与验证记录见 [toolbar 避让与显示模式同步 Review](VIEWPORT_REVIEW.md)。

@@ -40,6 +40,7 @@ import { createGestureNavigation } from "./gesture-navigation.mjs";
 import { createClipboard } from "./clipboard.js";
 import { createClipboardUI } from "./clipboard-ui.js";
 import { createViewport } from "./viewport.js";
+import { createToolbarVisibility } from "./toolbar-visibility.js";
 import { checkAuthentication } from "./auth-client.js";
 import { createFloatingWindow } from "./floating-window.js";
 import { installOverlayGuard, minimizeOtherOverlays, createConsoleShield, releaseOverlayInput } from "./overlay-manager.js";
@@ -378,6 +379,9 @@ function InitUI() {
 	}
 	.taskbar.pinned {
 		transform: translateY(0);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.taskbar { transition: none; }
 	}
 	.taskbar-pin {
 		display: inline-flex;
@@ -1801,6 +1805,8 @@ export default function webrtc() {
 	let toolbarController = null;
 	let gestureController = null;
 	let viewportController = null;
+	let taskbarVisibility = null;
+	let cleanupTaskbarEvents = () => {};
 	let displayMode = 'fit', displayModeButton = null;
 	// An active stream tab covers the main desktop.
 	let mainCovered = false;
@@ -2198,6 +2204,7 @@ export default function webrtc() {
 		}
 	}
 	const stopPlaybackLanguageUpdates = onLangChange(updateStatusDisplay);
+	const stopDisplayModeLanguageUpdates = onLangChange(syncDisplayModeButton);
 
 	function updateVideoImageRendering() {
         if (!videoElement?.videoWidth) return;
@@ -2325,21 +2332,36 @@ export default function webrtc() {
 	}
 
     function setDisplayMode(value, persist = true) {
-        displayMode = value === 'native' ? 'native' : 'fit';
+        if (value !== 'native' && value !== 'fit') return;
+        displayMode = value;
+        scaleLocal = displayMode === 'fit';
         window.isManualResolutionMode = displayMode === 'native';
         viewportController?.mode(displayMode);
-        if (persist) setStringParam('display_mode', displayMode);
+        // Embedded tabs inherit the desktop's mode, not a standalone app
+        // viewer's stored preference. Parent commands never overwrite it.
+        if (persist && !window.__IVNC_EMBED__) setStringParam('display_mode', displayMode);
         syncDisplayModeButton();
+        appStreams?.syncDisplayMode();
     }
 
     function syncDisplayModeButton() {
         if (!displayModeButton) return;
-        displayModeButton.title = getLang() === 'en' ? (displayMode === 'fit' ? 'Fit window' : 'Original size') : (displayMode === 'fit' ? '适应窗口' : '原始大小');
+        const english = getLang() === 'en';
+        const current = english ? (displayMode === 'fit' ? 'Fit window' : 'Original size') : (displayMode === 'fit' ? '适应窗口' : '原始大小');
+        const next = english ? (displayMode === 'fit' ? 'Original size' : 'Fit window') : (displayMode === 'fit' ? '原始大小' : '适应窗口');
+        displayModeButton.title = english ? `Current: ${current}; switch to ${next}` : `当前：${current}；点击切换为${next}`;
         displayModeButton.setAttribute('aria-label', displayModeButton.title);
         const label = displayModeButton.querySelector('.toolbar-tool-label');
-        if (label) label.textContent = displayModeButton.title;
+        displayModeButton.dataset.toolLabel = current;
+        if (label) label.textContent = current;
         displayModeButton.classList.toggle('active', displayMode === 'native');
         displayModeButton.setAttribute('aria-pressed', String(displayMode === 'native'));
+    }
+
+    function isDisplayModeSource(event) {
+        if (window.__IVNC_EMBED__) return event.source === window.parent;
+        if (event.source === window || (window.parent !== window && event.source === window.parent)) return true;
+        return [...document.querySelectorAll('iframe.web-console-frame')].some(frame => frame.contentWindow === event.source);
     }
 
     function reportViewport() {
@@ -2362,6 +2384,8 @@ export default function webrtc() {
 		if (event.origin !== window.location.origin) return;
 		let message = event.data;
 		if (!message) return;
+		if (['setDisplayMode', 'setScaleLocally', 'resetResolutionToWindow', 'setManualResolution'].includes(message.type)
+            && !isDisplayModeSource(event)) return;
 		switch(message.type) {
             case "showVirtualKeyboard":
                 // Compatibility only: the visible toolbar calls synchronously.
@@ -3110,6 +3134,9 @@ export default function webrtc() {
 			});
 			// Pin button (first element in taskbar)
 			let taskbarPinned = getBoolParam('taskbar_pinned', true);
+			taskbarVisibility?.destroy();
+			taskbarVisibility = createToolbarVisibility({ element: taskbar, pinned: taskbarPinned,
+				interacting: () => !!toolbarController?.interacting(), onChange: () => viewportController?.layout() });
 			// SVG icons for pin states
 			// Unpinned: tilted pin (📌 style)
 			const pinSvgUnpinned = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><g transform="rotate(-45 12 12)"><path d="M12 17v5"/><path d="M9 11V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v7"/><path d="M5 15h14"/><path d="M9 11l-2 4h10l-2-4"/></g></svg>`;
@@ -3120,12 +3147,11 @@ export default function webrtc() {
 			pinBtn.className = 'taskbar-pin' + (taskbarPinned ? ' active' : '');
 			pinBtn.innerHTML = taskbarPinned ? pinSvgPinned : pinSvgUnpinned;
 			setLiveTitle(pinBtn, taskbarPinned ? 'unpinTaskbar' : 'pinTaskbar');
-			if (taskbarPinned) taskbar.classList.add('pinned');
 			pinBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
 				taskbarPinned = !taskbarPinned;
 				pinBtn.classList.toggle('active', taskbarPinned);
-				taskbar.classList.toggle('pinned', taskbarPinned);
+				taskbarVisibility.setPinned(taskbarPinned);
 				pinBtn.innerHTML = taskbarPinned ? pinSvgPinned : pinSvgUnpinned;
 				setLiveTitle(pinBtn, taskbarPinned ? 'unpinTaskbar' : 'pinTaskbar');
 				setBoolParam('taskbar_pinned', taskbarPinned);
@@ -3171,7 +3197,6 @@ export default function webrtc() {
             displayModeButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 11V7h4m6 6v4h-4"/></svg>';
             displayModeButton.addEventListener('click', () => {
                 setDisplayMode(displayMode === 'fit' ? 'native' : 'fit');
-                document.querySelector('.app-stream.active iframe')?.contentWindow?.postMessage({type:'setDisplayMode', value:displayMode}, location.origin);
             });
             syncDisplayModeButton();
             toolbarController.addTool(displayModeButton);
@@ -3311,22 +3336,13 @@ export default function webrtc() {
 				document.body.appendChild(taskbar);
 			}
 
-			let taskbarHideTimer = null;
-			const showTaskbar = () => {
-				clearTimeout(taskbarHideTimer);
-				taskbar.classList.add('visible');
-			};
-			const hideTaskbar = () => {
-				if (taskbarPinned || toolbarController?.interacting()) return;
-				taskbarHideTimer = setTimeout(() => {
-					if (!toolbarController?.interacting()) taskbar.classList.remove('visible');
-				}, 400);
-			};
+			const showTaskbar = () => taskbarVisibility?.show();
+			const hideTaskbar = () => taskbarVisibility?.hide();
 			// overlayInput captures all pointer events, so taskbar-trigger
 			// never receives mouseenter. Detect bottom-edge hover via
 			// mousemove on the document instead.
 			let atBottomEdge = false;
-			document.addEventListener('mousemove', (e) => {
+			const handleTaskbarEdge = (e) => {
 				if (window.__IVNC_EMBED__) {
 					const edge = e.clientY >= window.innerHeight - 6;
 					if (edge && !atBottomEdge) window.parent.postMessage({ type: 'ivnc-edge-hover' }, window.location.origin);
@@ -3336,9 +3352,16 @@ export default function webrtc() {
 				} else if (e.clientY < window.innerHeight - taskbar.getBoundingClientRect().height - 6) {
 					hideTaskbar();
 				}
-			});
+			};
+			cleanupTaskbarEvents();
+			document.addEventListener('mousemove', handleTaskbarEdge);
 			taskbar.addEventListener('mouseenter', showTaskbar);
 			taskbar.addEventListener('mouseleave', hideTaskbar);
+			cleanupTaskbarEvents = () => {
+				document.removeEventListener('mousemove', handleTaskbarEdge);
+				taskbar.removeEventListener('mouseenter', showTaskbar);
+				taskbar.removeEventListener('mouseleave', hideTaskbar);
+			};
 
 			if (!window.__IVNC_APP_VIEW__) {
 				appStreams = createAppStreams({
@@ -3373,7 +3396,7 @@ export default function webrtc() {
 			viewportController?.destroy();
 			viewportController = createViewport({
 				root: appDiv, container: videoContainer, video: videoElement, overlay: overlayInput,
-				toolbar: taskbar, isPinned: () => taskbarPinned, embedded: !!window.__IVNC_EMBED__,
+				toolbar: taskbar, isToolbarReserved: () => taskbarVisibility.isReserved(), embedded: !!window.__IVNC_EMBED__,
 				onChange: ({ changed }) => {
 					input?.resize();
 					appStreams?.layout();
@@ -3388,7 +3411,7 @@ export default function webrtc() {
 			debug = getBoolParam('debug', false);
 			setBoolParam('debug', debug);
 			// TCP-only: ignore legacy relay switch setting entirely.
-            scaleLocal = getBoolParam('scaleLocallyManual', true);
+            scaleLocal = window.__IVNC_EMBED__ || getBoolParam('scaleLocallyManual', true);
 			videoBitRate = getIntParam('video_bitrate', videoBitRate);
 			setIntParam('video_bitrate', videoBitRate);
 			videoFramerate = getIntParam('framerate', videoFramerate);
@@ -3396,10 +3419,12 @@ export default function webrtc() {
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
 			setIntParam('audio_bitrate', audioBitRate);
             // Migrate only the local fit/original preference; discard old global dimensions.
-            const legacyNative = getBoolParam('is_manual_resolution_mode', false) && !getBoolParam('scaleLocallyManual', true);
-            displayMode = getStringParam('display_mode', legacyNative ? 'native' : 'fit');
-            setIntParam('manual_width', null); setIntParam('manual_height', null);
-            setBoolParam('is_manual_resolution_mode', false);
+            const legacyNative = !window.__IVNC_EMBED__ && getBoolParam('is_manual_resolution_mode', false) && !getBoolParam('scaleLocallyManual', true);
+            displayMode = !window.__IVNC_EMBED__ && getStringParam('display_mode', legacyNative ? 'native' : 'fit') === 'native' ? 'native' : 'fit';
+            if (!window.__IVNC_EMBED__) {
+                setIntParam('manual_width', null); setIntParam('manual_height', null);
+                setBoolParam('is_manual_resolution_mode', false);
+            }
             setDisplayMode(displayMode);
 			encoder = getStringParam('encoder_rtc', 'x264enc');
 			setStringParam('encoder_rtc', encoder)
@@ -3693,7 +3718,7 @@ export default function webrtc() {
 				const streams = appStreams ? appStreams.tabs() : [];
 				toolbarController.update(lastTaskbarData, streams, !!appStreams?.activeId());
 				if (!(lastTaskbarData.windows || []).length && !streams.length) {
-					taskbar.classList.remove('visible');
+					taskbarVisibility.hide({ immediate: true });
 				} else if (reveal && !taskbarPinned) {
 					showTaskbar();
 				}
@@ -3750,9 +3775,12 @@ export default function webrtc() {
 		},
 		cleanup() {
 			stopPlaybackLanguageUpdates();
+			stopDisplayModeLanguageUpdates();
 			webrtc?.destroy();
 			clearTimeout(resizeTimer); resizeTimer = null;
 			viewportController?.destroy(); viewportController = null;
+			taskbarVisibility?.destroy(); taskbarVisibility = null;
+			cleanupTaskbarEvents(); cleanupTaskbarEvents = () => {};
 			clipboardController?.destroy(); clipboardController = null;
 			clipboardUI?.destroy(); clipboardUI = null;
 			window.__ivncClipboard = null;

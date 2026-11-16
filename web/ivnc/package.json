@@ -14,7 +14,7 @@
     "test:settings": "node ../../scripts/settings_interaction_test.mjs",
     "test:app-sharing": "node ../../scripts/app_sharing_interaction_test.mjs",
     "test:mobile-input": "node ../../scripts/mobile_input_test.mjs",
-    "test:viewport": "node ../../scripts/viewport_interaction_test.mjs",
+    "test:viewport": "node --test ../../scripts/viewport_interaction_test.mjs ../../scripts/display_mode_interaction_test.mjs",
     "test:auth": "node ../../scripts/auth_smoke.mjs"
   },
   "author": "Selkies",

@@ -27,6 +27,8 @@ The toolbar gear opens Settings. Password changes, restart/upgrade and sign out 
 
 The client listens for messages sent via `window.postMessage`. To ensure security, the client only accepts messages from the same origin (`event.origin === window.location.origin`).
 
+Display-mode controls additionally require the sender to be this window, its parent dashboard, or an owned console frame. An embedded stream tab accepts display controls only from its parent. Invalid mode values are ignored.
+
 All messages sent to the client should be JavaScript objects with a `type` property indicating the action to perform.
 
 ### Supported Messages:
@@ -43,7 +45,7 @@ All messages sent to the client should be JavaScript objects with a `type` prope
 **Type:** `setDisplayMode`
 
 *   **Payload:** `{ type: 'setDisplayMode', value: 'fit' | 'native' }`
-*   **Description:** Fits the complete video proportionally into this browser's work area, or shows the original video pixels with scrolling. Defaults to `fit`, persists locally, and does not resize remote applications or other clients.
+*   **Description:** Fits the complete video proportionally into this browser's work area, or shows the original video pixels with scrolling. Both modes reserve space for a pinned or temporarily visible toolbar. Defaults to `fit` and persists locally; a desktop page synchronizes all opened embedded tabs without overwriting standalone app-view preferences. Does not resize remote applications or other clients.
 
 ---
 
