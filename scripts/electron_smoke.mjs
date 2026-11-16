@@ -258,8 +258,7 @@ try {
     await waitFor('cursor replay on reconnect',()=>local.evaluate('window.__cursorMessages.some(c=>!!c.curdata)'),1200);
     pass('a reconnected viewer immediately receives the cached bitmap cursor');
     const lock=await evaluate("(()=>{const r=document.getElementById('lock').getBoundingClientRect();return{x:r.left+8,y:r.top+8}})()");
-    // Pointer-lock apps opt out of the default-on browser swipe navigation.
-    await local.evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
+    // Explicit pointer lock yields input even though swipe navigation stays on.
     await send(`m,${Math.round(lock.x)},${Math.round(lock.y)},1,0`);await send(`m,${Math.round(lock.x)},${Math.round(lock.y)},0,0`);
     await waitFor('Electron pointer lock',()=>evaluate('!!document.pointerLockElement'));
     await evaluate('window.moves=[]');
@@ -268,11 +267,34 @@ try {
     await evaluate('window.moves=[]');
     await send('m2,2000,1500,0,0');await send('m2,25,10,0,0');
     await waitFor('relative motion beyond boundary',()=>evaluate('window.moves.reduce((n,m)=>n+m[2],0)===2025&&window.moves.reduce((n,m)=>n+m[3],0)===1510'));
-    await local.evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
-    await waitFor('enabling gestures releases pointer lock',()=>local.evaluate('!document.pointerLockElement'));
-    assert.equal(await local.evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`),'true');
-    await local.evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
-    pass('locked pointer receives relative deltas and enabling gestures releases it');
+    await local.call('Page.bringToFront');
+    // A reopened data channel/cursor can precede the first decoded video frame.
+    // Local pointer hit testing intentionally waits for valid frame geometry.
+    await waitFor('local input ready for manual lock',()=>local.evaluate(`(() => {
+        const i=window.__ivncInput,v=document.querySelector('#stream');
+        return i?.inputAttached && v?.videoWidth>0 && v.readyState>=2 && i._geometryReady();
+    })()`),60000);
+    await local.evaluate(`(() => {
+        window.__lockEvents=[];
+        for(const type of ['mousedown','pointerlockchange','pointerlockerror']) document.addEventListener(type,e=>window.__lockEvents.push({type,target:e.target.id,ctrl:e.ctrlKey,shift:e.shiftKey,locked:document.pointerLockElement?.id}),true);
+    })()`);
+    const lockPoint=await local.evaluate(`(() => {const r=window.__ivncInput.element.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    for(const type of ['mouseMoved','mousePressed','mouseReleased']) await local.call('Input.dispatchMouseEvent',{
+        type,...lockPoint,modifiers:10,button:type==='mouseMoved'?'none':'left',buttons:type==='mousePressed'?1:0,clickCount:1,
+    });
+    await waitFor('explicit local pointer lock',()=>local.evaluate('document.pointerLockElement===window.__ivncInput.element'));
+    assert.equal(await local.evaluate('window.__ivncGestureNavigation.enabled()'),true);
+    await local.evaluate(`(() => {
+        const rtc=window.__ivncWebRTC,send=rtc.sendDataChannelMessage.bind(rtc);window.__lockedInput=[];
+        rtc.sendDataChannelMessage=m=>{window.__lockedInput.push(m);return send(m)};
+        const e=window.__ivncInput.element,r=e.getBoundingClientRect();
+        e.dispatchEvent(new WheelEvent('wheel',{deltaX:120,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));
+        rtc.sendDataChannelMessage=send;
+    })()`);
+    assert(await local.evaluate(`window.__lockedInput.some(m=>/^(i,[0-9]+,)?w,/.test(m)) && !window.__lockedInput.some(m=>m.startsWith('focus-key,'))`));
+    await local.evaluate('document.exitPointerLock()');
+    await waitFor('explicit lock releases normally',()=>local.evaluate('!document.pointerLockElement'));
+    pass('relative pointer input and manually locked horizontal scrolling work with always-on swipe navigation');
     const uploaded='Electron 文件上传😀';
     const uploadBytes=[...new TextEncoder().encode(uploaded)];
     await send(`FILE_UPLOAD_START:electron-test.txt:${uploadBytes.length}`);
@@ -390,6 +412,7 @@ try {
     console.log(`Electron Wayland smoke: ${passed} passed`);
 } catch(error) {
     console.error(error);
+    try{console.error('Local input state',await local?.evaluate(`(() => {const i=window.__ivncInput,r=i?.element.getBoundingClientRect();return {attached:i?.inputAttached,trackpad:i?._trackpadMode,composing:i?.isComposing,active:document.activeElement?.id,lock:document.pointerLockElement?.id,focused:document.hasFocus(),hit:r&&document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.outerHTML.slice(0,350),events:window.__lockEvents}})()`))}catch(_){}
     try{console.error('Native state',await control('state'));console.error('Input state',await evaluate('({moves:window.moves.slice(-10),locked:!!document.pointerLockElement,active:document.activeElement.id})'))}catch(_){}
     console.error(`Logs: ${work}`);process.exitCode=1;
 } finally {

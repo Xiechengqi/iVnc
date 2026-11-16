@@ -1,17 +1,19 @@
+// Legacy original-size preferences now select a complete, stretched picture.
+export function normalizeDisplayMode(value) {
+    if (value === 'native') return 'fill';
+    return value === 'fit' || value === 'fill' ? value : null;
+}
+
 // One work area for the desktop, input surface and embedded application views.
 export function createViewport({ root, container, video, overlay, toolbar, isPinned, isToolbarReserved = isPinned, embedded, onChange }) {
     let disposed = false, frame = 0, mode = 'fit', previousSize = '', pixelRatioQuery;
-    let caret = null, scrollBounds = null, occlusion = { top: 0, inset: 0 };
+    let occlusion = { top: 0, inset: 0 };
     const set = (element, property, value) => {
         if (element.style[property] !== value) element.style[property] = value;
     };
 
     function layout() {
         if (disposed || !container.isConnected) return;
-        // Remember an edge before changing the work area. Native-size users at
-        // the bottom must still see the last row when the toolbar grows/shows.
-        const atRight = mode === 'native' && scrollBounds?.x > 0 && container.scrollLeft >= scrollBounds.x - 1;
-        const atBottom = mode === 'native' && scrollBounds?.y > 0 && container.scrollTop >= scrollBounds.y - 1;
         const fullscreen = document.fullscreenElement;
         // Software keyboards can resize only the visual viewport (not innerHeight
         // or 100dvh). Embedded views already inherit their parent's work area.
@@ -38,31 +40,22 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
             && (!fullscreen || fullscreen.contains(toolbar));
         const reserved = reservesToolbar ? Math.min(height, toolbar.getBoundingClientRect().height) : 0;
         root.style.setProperty('--ivnc-toolbar-height', `${reserved}px`);
-        container.classList.toggle('manual-exact', mode === 'native');
         const width = container.clientWidth, areaHeight = container.clientHeight;
         let left = 0, videoTop = 0, videoWidth = width, videoHeight = areaHeight;
         const frameWidth = video.videoWidth || Math.max(1, width), frameHeight = video.videoHeight || Math.max(1, areaHeight);
-        const scale = mode === 'fit' ? Math.min(width / frameWidth, areaHeight / frameHeight) : 1;
-        videoWidth = frameWidth * scale; videoHeight = frameHeight * scale;
-        if (mode === 'fit') { left = (width - videoWidth) / 2; videoTop = (areaHeight - videoHeight) / 2; }
+        if (mode === 'fit') {
+            const scale = Math.min(width / frameWidth, areaHeight / frameHeight);
+            videoWidth = frameWidth * scale; videoHeight = frameHeight * scale;
+            left = (width - videoWidth) / 2; videoTop = (areaHeight - videoHeight) / 2;
+        }
         for (const element of [video, overlay]) {
             set(element, 'left', `${left}px`); set(element, 'top', `${videoTop}px`);
             set(element, 'width', `${videoWidth}px`); set(element, 'height', `${videoHeight}px`);
         }
-        set(video, 'objectFit', 'contain');
-        if (atRight) container.scrollLeft = container.scrollWidth;
-        if (atBottom) container.scrollTop = container.scrollHeight;
-        if (mode === 'native' && caret?.follow && caret.desktop?.width > 0 && caret.desktop?.height > 0) {
-            const [x, y, w, h] = caret.rect;
-            const sx = videoWidth / caret.desktop.width, sy = videoHeight / caret.desktop.height;
-            const right = (x + w) * sx + 12, bottom = (y + h) * sy + 12;
-            const desiredX = x * sx - 12, desiredY = y * sy - 12;
-            if (desiredX < container.scrollLeft) container.scrollLeft = Math.max(0, desiredX);
-            else if (right > container.scrollLeft + width) container.scrollLeft = right - width;
-            if (desiredY < container.scrollTop) container.scrollTop = Math.max(0, desiredY);
-            else if (bottom > container.scrollTop + areaHeight) container.scrollTop = bottom - areaHeight;
-        }
-        scrollBounds = { x: container.scrollWidth - container.clientWidth, y: container.scrollHeight - container.clientHeight };
+        set(video, 'objectFit', mode === 'fill' ? 'fill' : 'contain');
+        // Both modes show the complete picture. Focus/legacy scroll offsets
+        // must never move its bottom edge underneath the toolbar.
+        container.scrollLeft = container.scrollTop = 0;
         const size = `${width}x${areaHeight}@${window.devicePixelRatio}/${frameWidth}x${frameHeight}/${mode}`;
         const changed = size !== previousSize;
         previousSize = size;
@@ -92,21 +85,19 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
     layout();
     return {
         layout,
-        caret(rect, desktop, follow) {
-            caret = Array.isArray(rect) && rect.length === 4 && rect.every(Number.isFinite) ? { rect, desktop, follow } : null;
+        caret() {
             schedule();
         },
         mode(value) {
-            const next = value === 'native' ? 'native' : 'fit';
+            const next = normalizeDisplayMode(value) || 'fit';
             if (mode !== next) {
                 mode = next;
-                scrollBounds = null;
                 container.scrollLeft = container.scrollTop = 0;
             }
             layout();
         },
         automatic() { this.mode('fit'); },
-        manual(width, height, fit) { this.mode(fit ? 'fit' : 'native'); },
+        manual(width, height, fit) { this.mode(fit ? 'fit' : 'fill'); },
         destroy() {
             disposed = true; cancelAnimationFrame(frame); observer.disconnect();
             video.removeEventListener('resize', schedule);

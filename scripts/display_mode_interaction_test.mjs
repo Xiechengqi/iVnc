@@ -22,7 +22,7 @@ const fixture=`<!doctype html><meta name="viewport" content="width=device-width,
 <div id="app"><div class="video-container"><video id="stream"></video><div id="overlayInput"></div></div></div>
 <div id="toolbar"><button id="mode"><span class="toolbar-tool-label"></span></button></div>
 <script type="module">
-import {createViewport} from '/viewport.js';
+import {createViewport,normalizeDisplayMode} from '/viewport.js';
 import {createAppStreams} from '/app-streams.js';
 import {getLang,onLangChange,setLang} from '/lib/i18n.js?v=1';
 window.__IVNC_APP_VIEW__=location.pathname.startsWith('/app-view/');
@@ -51,7 +51,7 @@ const snapshot=()=>{
     const rect=e=>{const r=e.getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,width:r.width,height:r.height}};
     return {mode:displayMode,area:rect(container),video:rect(video),input:rect(overlay),scroll:[container.scrollLeft,container.scrollTop],stored:localStorage.getItem(storageAppName+'_display_mode')};
 };
-window.fixture={streams:appStreams,viewport:viewportController,setDisplayMode,snapshot,setLang,received:[],
+window.fixture={legacyMode(){localStorage.setItem(storageAppName+'_display_mode','native')},streams:appStreams,viewport:viewportController,setDisplayMode,snapshot,setLang,received:[],
     ready(){parent.postMessage({type:'ivnc-view-ready',view:location.pathname},location.origin)},
     scroll(){container.scrollLeft=200;container.scrollTop=100}
 };
@@ -71,8 +71,8 @@ const modes=page=>page.evaluate(()=>fixture.streams.frames().map(f=>f.contentWin
 const allModes=async(page,value)=>page.waitForFunction(value=>fixture.streams.frames().length>0 && fixture.streams.frames().every(f=>f.contentWindow.fixture?.snapshot().mode===value),value,{timeout:10000});
 const cases=[
     ['hidden shared and remote views follow mode changes made on the main desktop',async page=>{
-        await mode(page,'native');await activate(page,'shared');await activate(page,'remote');await activate(page,null);
-        assert.deepEqual(await modes(page),['native','native']);
+        await mode(page,'fill');await activate(page,'shared');await activate(page,'remote');await activate(page,null);
+        assert.deepEqual(await modes(page),['fill','fill']);
         await mode(page,'fit');await allModes(page,'fit');
         await activate(page,'shared');await settled(page);
         const b=await page.evaluate(()=>{const f=fixture.streams.frames()[0];return {parent:fixture.snapshot(),child:f.contentWindow.fixture.snapshot(),frame:f.getBoundingClientRect().height}});
@@ -84,38 +84,39 @@ const cases=[
         let mints=0;page.on('request',request=>{if(/\/api\/apps\/[^/]+\/view$/.test(request.url()))mints++});
         await activate(page,'shared');await activate(page,'remote');
         await page.evaluate(()=>{window.savedFrames=fixture.streams.frames();fixture.received=[];document.getElementById('mode').focus()});
-        await page.locator('#mode').click();await allModes(page,'native');
+        await page.locator('#mode').click();await allModes(page,'fill');
         assert(await page.evaluate(()=>document.activeElement.id==='mode'));
         const extra=await page.evaluate(()=>fixture.streams.frames().flatMap(f=>f.contentWindow.fixture.received).filter(t=>['ivnc-view-active','ivnc-unmute'].includes(t)).length);
         await page.evaluate(()=>window.postMessage({type:'setScaleLocally',value:true},location.origin));await allModes(page,'fit');
-        await page.evaluate(()=>window.postMessage({type:'setScaleLocally',value:false},location.origin));await allModes(page,'native');
-        await page.evaluate(()=>window.postMessage({type:'setManualResolution',width:3840,height:2160},location.origin));await allModes(page,'native');
+        await page.evaluate(()=>window.postMessage({type:'setScaleLocally',value:false},location.origin));await allModes(page,'fill');
+        await page.evaluate(()=>window.postMessage({type:'setManualResolution',width:3840,height:2160},location.origin));await allModes(page,'fill');
         await page.evaluate(()=>window.postMessage({type:'resetResolutionToWindow'},location.origin));await allModes(page,'fit');
         assert(await page.evaluate(()=>savedFrames.every((f,i)=>f===fixture.streams.frames()[i])));
         assert.equal(await page.evaluate(()=>fixture.streams.frames().flatMap(f=>f.contentWindow.fixture.received).filter(t=>['ivnc-view-active','ivnc-unmute'].includes(t)).length),extra);
         assert.equal(mints,2,'mode sync never opens an unopened application or mints another token');
     }],
-    ['reactivation corrects stale child state and repeated native synchronization keeps scrolling',async page=>{
+    ['reactivation corrects stale child state and repeated fill synchronization keeps all edges visible',async page=>{
         await page.setViewportSize({width:1280,height:800});await settled(page);
-        await mode(page,'native');await activate(page,'shared');await allModes(page,'native');
+        await mode(page,'fill');await activate(page,'shared');await allModes(page,'fill');
         await page.evaluate(()=>fixture.streams.frames()[0].contentWindow.fixture.scroll());await settled(page);
         await activate(page,null);await activate(page,'shared');await settled(page);
-        assert.deepEqual(await page.evaluate(()=>fixture.streams.frames()[0].contentWindow.fixture.snapshot().scroll),[200,100]);
+        assert.deepEqual(await page.evaluate(()=>fixture.streams.frames()[0].contentWindow.fixture.snapshot().scroll),[0,0]);
         const child=page.frames().find(f=>f.url().includes('/app-view/shared/'));
         const received=await child.evaluate(()=>fixture.received.length);
         await child.evaluate(()=>parent.postMessage({type:'ivnc-view-ready',view:'/app-view/expired/'},location.origin));await settled(page);
         assert.equal(await child.evaluate(()=>fixture.received.length),received,'stale view identity is ignored');
         await child.evaluate(()=>fixture.ready());await settled(page);
-        assert.deepEqual(await child.evaluate(()=>fixture.snapshot().scroll),[200,100]);
+        assert.deepEqual(await child.evaluate(()=>fixture.snapshot().scroll),[0,0]);
+        const picture=await child.evaluate(()=>fixture.snapshot());assert.deepEqual(picture.video,picture.area);assert.deepEqual(picture.video,picture.input);
         await page.evaluate(()=>fixture.streams.frames()[0].contentWindow.fixture.setDisplayMode('fit',false));
-        await activate(page,null);await activate(page,'shared');await allModes(page,'native');
+        await activate(page,null);await activate(page,'shared');await allModes(page,'fill');
     }],
     ['a delayed iframe and a reloaded iframe apply the latest parent mode',async page=>{
         let release;const gate=new Promise(r=>release=r);
         await page.route('**/app-view/remote/?embed=1',async route=>{await gate;await route.continue()});
         await page.evaluate(()=>fixture.streams.activate('remote'));
-        await mode(page,'native');await mode(page,'fit');await mode(page,'native');release();
-        await allModes(page,'native');await mode(page,'fit');await allModes(page,'fit');
+        await mode(page,'fill');await mode(page,'fit');await mode(page,'fill');release();
+        await allModes(page,'fill');await mode(page,'fit');await allModes(page,'fit');
         await page.evaluate(()=>{const f=fixture.streams.frames()[0];f.contentWindow.__displayReloading=true;f.contentWindow.location.reload()});
         await page.waitForFunction(()=>{const w=fixture.streams.frames()[0]?.contentWindow;return w?.fixture && !w.__displayReloading});
         await allModes(page,'fit');await settled(page);
@@ -124,39 +125,49 @@ const cases=[
     ['embedded views neither inherit nor overwrite the standalone view preference',async(page,url)=>{
         const standalone=await page.context().newPage();await standalone.goto(url+'/app-view/standalone/');
         await standalone.waitForFunction(()=>!!window.fixture);
-        await mode(standalone,'native');await settled(standalone);
-        assert.equal((await standalone.evaluate(()=>fixture.snapshot())).stored,'native');
+        await mode(standalone,'fill');await settled(standalone);
+        assert.equal((await standalone.evaluate(()=>fixture.snapshot())).stored,'fill');
         await activate(page,'shared');await allModes(page,'fit');
-        assert.equal(await page.evaluate(()=>fixture.streams.frames()[0].contentWindow.fixture.snapshot().stored),'native');
+        assert.equal(await page.evaluate(()=>fixture.streams.frames()[0].contentWindow.fixture.snapshot().stored),'fill');
         await standalone.reload();await standalone.waitForFunction(()=>!!window.fixture);
-        assert.equal((await standalone.evaluate(()=>fixture.snapshot())).mode,'native');await standalone.close();
+        assert.equal((await standalone.evaluate(()=>fixture.snapshot())).mode,'fill');await standalone.close();
     }],
     ['unrelated frames and invalid values cannot change display modes',async page=>{
-        await activate(page,'shared');await mode(page,'native');await allModes(page,'native');
+        await activate(page,'shared');await mode(page,'fill');await allModes(page,'fill');
         await page.frames().find(f=>f.url().includes('/app-view/shared/')).evaluate(()=>parent.postMessage({type:'setDisplayMode',value:'fit'},location.origin));
         await page.evaluate(()=>{
             const f=fixture.streams.frames()[0];
             window.postMessage({type:'setDisplayMode',value:'invalid'},location.origin);
             f.contentWindow.postMessage({type:'setDisplayMode',value:'invalid'},location.origin);
         });await settled(page);
-        assert.equal((await page.evaluate(()=>fixture.snapshot())).mode,'native');assert.deepEqual(await modes(page),['native']);
+        assert.equal((await page.evaluate(()=>fixture.snapshot())).mode,'fill');assert.deepEqual(await modes(page),['fill']);
         await page.evaluate(()=>{
             const frame=document.createElement('iframe');frame.className='web-console-frame';document.body.appendChild(frame);
         });
         const consoleFrame=page.frames().find(f=>f!==page.mainFrame() && !f.url().includes('/app-view/shared/'));
         await consoleFrame.evaluate(()=>parent.document.querySelector('.app-stream iframe').contentWindow.postMessage({type:'setDisplayMode',value:'fit'},parent.location.origin));await settled(page);
-        assert.deepEqual(await modes(page),['native'],'an embedded view only accepts its parent');
+        assert.deepEqual(await modes(page),['fill'],'an embedded view only accepts its parent');
         await consoleFrame.evaluate(()=>parent.postMessage({type:'resetResolutionToWindow'},parent.location.origin));
         await allModes(page,'fit');
     }],
     ['a same-origin parent dashboard retains control of an embedded desktop page',async(page,url)=>{
         await page.evaluate(url=>{const f=document.createElement('iframe');f.id='dashboard-view';f.src=url+'/__display-test';document.body.appendChild(f)},url);
         const desktop=await page.locator('#dashboard-view').contentFrame();await desktop.locator('#mode').waitFor();
-        await page.evaluate(()=>document.getElementById('dashboard-view').contentWindow.postMessage({type:'setDisplayMode',value:'native'},location.origin));
-        await page.waitForFunction(()=>document.getElementById('dashboard-view').contentWindow.fixture?.snapshot().mode==='native');
+        await page.evaluate(()=>document.getElementById('dashboard-view').contentWindow.postMessage({type:'setDisplayMode',value:'fill'},location.origin));
+        await page.waitForFunction(()=>document.getElementById('dashboard-view').contentWindow.fixture?.snapshot().mode==='fill');
+    }],
+    ['legacy original-size preferences, legacy flags and control messages migrate to fill',async(page,url)=>{
+        await page.evaluate(()=>fixture.legacyMode());
+        await page.reload();await page.waitForFunction(()=>!!window.fixture);
+        let state=await page.evaluate(()=>fixture.snapshot());assert.equal(state.mode,'fill');assert.equal(state.stored,'fill');
+        assert.deepEqual(state.video,state.area);assert.deepEqual(state.scroll,[0,0]);
+        await mode(page,'fit');await settled(page);await mode(page,'native');await settled(page);
+        assert.equal((await page.evaluate(()=>fixture.snapshot())).mode,'fill');
+        await page.goto(url+'/__display-test?is_manual_resolution_mode=true&scaleLocallyManual=false');await page.waitForFunction(()=>!!window.fixture);
+        assert.equal((await page.evaluate(()=>fixture.snapshot())).mode,'fill');
     }],
     ['mode hints distinguish current state and the next action in both languages',async page=>{
-        for(const [language,current,next] of [['zh','适应窗口','原始大小'],['en','Fit window','Original size']]) {
+        for(const [language,current,next] of [['zh','适应窗口','铺满屏幕'],['en','Fit window','Fill screen']]) {
             await page.evaluate(language=>fixture.setLang(language),language);await mode(page,'fit');await settled(page);
             const title=await page.locator('#mode').getAttribute('title');assert(title.includes(current) && title.includes(next));
             assert.equal(await page.locator('#mode').getAttribute('aria-label'),title);

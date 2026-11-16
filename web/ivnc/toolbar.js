@@ -6,15 +6,11 @@ import { createOrderNotifications } from './app-order.js';
 
 const STRINGS = {
     zh: { apps: '应用', previous: '向左滚动应用', next: '向右滚动应用', more: '更多工具',
-        swipe: '滑动切换应用', swipeOn: '滑动切换应用：已开启，点击关闭', swipeOff: '滑动切换应用：已关闭，点击开启',
-        swipeHint: '双指左右滑动切换应用，纵向滑动滚动内容',
         move: '按住标签左右拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态',
         rename: '修改应用名', save: '保存', cancel: '取消', pending: '保存中…', nameFailed: '无法保存应用名',
         latest: '当前名称：', changed: '应用名已发生变化。请核对当前名称，再次保存以使用你的输入。',
         invalid: '名称不能为空、不能包含换行或控制字符，且不能超过 256 个 UTF-8 字节。' },
     en: { apps: 'Applications', previous: 'Scroll apps left', next: 'Scroll apps right', more: 'More tools',
-        swipe: 'Swipe to switch apps', swipeOn: 'Swipe to switch apps: on, click to turn off', swipeOff: 'Swipe to switch apps: off, click to turn on',
-        swipeHint: 'Swipe horizontally with two fingers to switch apps; swipe vertically to scroll',
         move: 'Hold and drag the tab left or right to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
         rename: 'Rename application', save: 'Save', cancel: 'Cancel', pending: 'Saving…', nameFailed: 'Could not save application name',
         latest: 'Current name: ', changed: 'The application name changed. Review the current name, then save again to use your draft.',
@@ -86,7 +82,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     let drag = null, saving = false, destroyed = false, ghost = null, frame = 0, noticeTimer;
     let lastActive = null, editor = null, renameBusy = false;
     let press = null, pressTimer, paintPending = false, suppressedPointer = null;
-    let navigation = null, navigationTimer, syncGestureButton = () => {};
+    let navigation = null, navigationTimer;
 
     function resetNavigation(hideNotice = true, repaint = true) {
         const changed = !!navigation;
@@ -599,7 +595,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         menu.hidden = !menu.hidden; more.setAttribute('aria-expanded', String(!menu.hidden)); onInteraction(!menu.hidden);
     });
     // Tool handlers stop propagation; close before they open their own panels.
-    listen(tools, 'click', (event) => { if (event.target.closest('.taskbar-pin, .toolbar-gesture-action')) closeMenu(); }, { capture: true });
+    listen(tools, 'click', (event) => { if (event.target.closest('.taskbar-pin')) closeMenu(); }, { capture: true });
     listen(document, 'pointerdown', (event) => {
         if (!renamePanel.contains(event.target)) closeEditor();
         if (!tools.contains(event.target)) closeMenu();
@@ -620,7 +616,6 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const resize = new ResizeObserver(layout);
     resize.observe(element); resize.observe(viewport); resize.observe(list); resize.observe(status);
     const translate = () => {
-        syncGestureButton();
         previous.title = tr('previous'); next.title = tr('next'); more.title = tr('more');
         [previous, next, more].forEach(n => n.setAttribute('aria-label', n.title));
         apps.setAttribute('aria-label', tr('apps'));
@@ -642,49 +637,31 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         });
         layout();
     }
+    // Query and activation share ordering, pending intent and eligibility.
+    // A gesture can yield at an edge without sending a focus request.
+    function navigationTarget(direction) {
+        if (destroyed || saving || press || drag?.started || editor || !menu.hidden || !info.hidden || ![-1, 1].includes(direction)) return null;
+        const sorted = orderedEntries();
+        const focused = sorted.findIndex(entry => navigation ? entry.key === navigation.key : entry.active);
+        const current = focused < 0 ? (direction > 0 ? -1 : sorted.length) : focused;
+        for (let index = current + direction; index >= 0 && index < sorted.length; index += direction) {
+            const entry = sorted[index];
+            if (entry.available !== false && entry.stable !== false) return entry;
+        }
+        return null;
+    }
     return {
         status,
         addTool,
-        addGestureToggle(controller, onToggle = () => {}) {
-            const button = make('button', 'taskbar-pin toolbar-gesture-action');
-            button.type = 'button';
-            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16m-4-4 4 4-4 4M8 8l-4 4 4 4"/></svg>';
-            syncGestureButton = () => {
-                button.title = tr(controller.enabled() ? 'swipeOn' : 'swipeOff');
-                button.setAttribute('aria-label', tr('swipe'));
-                button.setAttribute('aria-description', tr('swipeHint'));
-                button.setAttribute('aria-pressed', String(controller.enabled()));
-                button.classList.toggle('active', controller.enabled());
-            };
-            listen(button, 'click', () => {
-                closeMenu(); closeInfo();
-                controller.setEnabled(!controller.enabled());
-                resetNavigation();
-                syncGestureButton();
-                onToggle(controller.enabled());
-            });
-            listen(document, 'visibilitychange', () => { if (document.hidden) controller.reset(); });
-            syncGestureButton();
-            addTool(button, true);
-            return button;
-        },
+        canNavigate: direction => !!navigationTarget(direction),
         navigate(direction) {
-            if (destroyed || saving || press || drag?.started || editor || !menu.hidden || !info.hidden || ![-1, 1].includes(direction)) return null;
-            const sorted = orderedEntries();
-            const focused = sorted.findIndex(entry => navigation ? entry.key === navigation.key : entry.active);
-            const current = focused < 0 ? (direction > 0 ? -1 : sorted.length) : focused;
-            for (let index = current + direction; index >= 0 && index < sorted.length; index += direction) {
-                const entry = sorted[index];
-                if (entry.available === false || entry.stable === false) continue;
-                if (!activateEntry(entry)) return null;
-                const label = entry.label;
-                clearTimeout(noticeTimer);
-                notice.textContent = label;
-                notice.hidden = false;
-                noticeTimer = setTimeout(() => { notice.hidden = true; }, 1300);
-                return entry.key;
-            }
-            return null;
+            const entry = navigationTarget(direction);
+            if (!entry || !activateEntry(entry)) return null;
+            clearTimeout(noticeTimer);
+            notice.textContent = entry.label;
+            notice.hidden = false;
+            noticeTimer = setTimeout(() => { notice.hidden = true; }, 1300);
+            return entry.key;
         },
         resetNavigation,
         update(data, streams = [], streamActive = false) {

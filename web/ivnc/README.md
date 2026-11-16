@@ -38,14 +38,14 @@ All messages sent to the client should be JavaScript objects with a `type` prope
 **Type:** `setScaleLocally`
 
 *   **Payload:** `{ type: 'setScaleLocally', value: <boolean> }`
-*   **Description:** Compatibility alias for local display mode: `true` selects `fit`, `false` selects `native`. Persisted locally; never changes the server desktop.
+*   **Description:** Compatibility alias for local display mode: `true` selects `fit`, `false` selects `fill`. Persisted locally; never changes the server desktop.
 
 ---
 
 **Type:** `setDisplayMode`
 
-*   **Payload:** `{ type: 'setDisplayMode', value: 'fit' | 'native' }`
-*   **Description:** Fits the complete video proportionally into this browser's work area, or shows the original video pixels with scrolling. Both modes reserve space for a pinned or temporarily visible toolbar. Defaults to `fit` and persists locally; a desktop page synchronizes all opened embedded tabs without overwriting standalone app-view preferences. Does not resize remote applications or other clients.
+*   **Payload:** `{ type: 'setDisplayMode', value: 'fit' | 'fill' }`
+*   **Description:** Fits the complete video proportionally into this browser's work area, or stretches its width and height independently to fill that area without cropping. Both modes reserve space for a pinned or temporarily visible toolbar and require no viewport scrolling. Legacy `native` values are accepted as `fill`. Defaults to `fit` and persists locally; a desktop page synchronizes all opened embedded tabs without overwriting standalone app-view preferences. Does not resize remote applications or other clients.
 
 ---
 
@@ -178,7 +178,7 @@ The client communicates with the iVnc server through a WebRTC DataChannel. See [
 An external dashboard needs to implement:
 
 1.  **Settings Controls:** Use the `settings` message type for bitrate, framerate, etc.
-2.  **Display Mode:** Use `setDisplayMode` for local fit/original size. Manage actual desktop dimensions through the console; this affects every connection to that desktop.
+2.  **Display Mode:** Use `setDisplayMode` for local proportional fit/stretched fill. Manage actual desktop dimensions through the console; this affects every connection to that desktop.
 3.  **Fullscreen:** Send `requestFullscreen` message.
 4.  **Stats Display:** Read `connectionStat`, `window.fps` global variables.
 5.  **Clipboard:** Display content from `clipboardContentUpdate`, send changes via `clipboardUpdateFromUI`.

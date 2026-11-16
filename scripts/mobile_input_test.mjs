@@ -13,7 +13,7 @@ const root = fileURLToPath(new URL('../web/ivnc/', import.meta.url));
 const fixture = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;overflow:hidden}#app{position:relative;top:var(--ivnc-visible-top,0px);height:calc(var(--ivnc-visible-height,100dvh) - var(--ivnc-toolbar-height,0px))}
-#area{position:relative;width:100%;height:100%;overflow:hidden}#area.manual-exact{overflow:auto}#stream,#overlayInput{position:absolute}#overlayInput{opacity:0;touch-action:none;border:0;padding:0}
+#area{position:relative;width:100%;height:100%;overflow:hidden}#stream,#overlayInput{position:absolute}#overlayInput{opacity:0;touch-action:none;border:0;padding:0}
 #toolbar{position:fixed;bottom:var(--ivnc-keyboard-inset,0px);height:36px;width:100%;background:#333}button{height:36px}
 .app-streams{position:fixed;z-index:5;pointer-events:none}.app-stream{position:absolute;inset:0;display:none}.app-stream.active{display:block;pointer-events:auto}.app-stream iframe{width:100%;height:100%;border:0}.app-stream-status{display:none}
 </style><div id="app"><div id="area"><video id="stream"></video><input id="overlayInput" readonly></div></div><div id="toolbar"><button id="keyboard-toggle">Keyboard</button></div>
@@ -217,13 +217,18 @@ const cases = [
         await page.evaluate(()=>fixture.resize(700));
         assert.equal((await page.evaluate(()=>fixture.bounds()))[1].height,664);
     }],
-    ['native view scrolls the reported caret into the reduced work area', async page => {
+    ['fill keeps the complete picture and reported caret inside the keyboard-reduced area without scrolling', async page => {
         await open(page);await page.evaluate(()=>{
-            fixture.resize(450);fixture.viewport.mode('native');
+            fixture.resize(450);fixture.viewport.mode('fill');
             fixture.viewport.caret([1100,650,2,18],{width:1280,height:720},true);fixture.viewport.layout();
         });
         const scroll=await page.evaluate(()=>({x:document.querySelector('#area').scrollLeft,y:document.querySelector('#area').scrollTop}));
-        assert(scroll.x>600&&scroll.y>200,JSON.stringify(scroll));
+        assert.deepEqual(scroll,{x:0,y:0});
+        const picture=await page.evaluate(()=>{
+            const v=document.querySelector('#stream').getBoundingClientRect(),c=document.querySelector('#area').getBoundingClientRect(),bar=document.querySelector('#toolbar').getBoundingClientRect();
+            return {video:[v.left,v.top,v.width,v.height],area:[c.left,c.top,c.width,c.height],bottom:v.bottom,toolbar:bar.top};
+        });
+        assert.deepEqual(picture.video,picture.area);assert.equal(picture.bottom,picture.toolbar);
     }],
     ['overlay interaction cancels editing and disconnect destroys the proxy', async page => {
         await open(page); await page.evaluate(()=>window.dispatchEvent(new Event('ivnc-overlay-interaction')));

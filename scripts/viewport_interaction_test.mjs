@@ -100,40 +100,52 @@ const cases = [
         await page.mouse.click(640,382);messages=await pointer(page);
         assert(messages.includes('i,1,m,960,540,1,0'));
     }],
-    ['original-size scrolling maps to the content and preserves local mode', async page => {
+    ['fill stretches the complete picture and maps independent axes without scrolling', async page => {
         await page.setViewportSize({width:500,height:400});await nextLayout(page);
-        await page.evaluate(()=>{fixture.viewport.mode('native');fixture.container.scrollTop=320;fixture.container.scrollLeft=390});await nextLayout(page);
-        const b=await bounds(page);assert.equal(b.video.width,1280);assert.deepEqual(b.video,b.input);assert.deepEqual(b.scroll,[390,320]);
-        await page.mouse.click(250,180);assert((await pointer(page)).includes('i,1,m,960,750,1,0'));
-        await page.evaluate(()=>fixture.viewport.mode('fit'));assert.deepEqual((await bounds(page)).scroll,[0,0]);
+        await page.evaluate(()=>fixture.viewport.mode('fill'));await nextLayout(page);
+        const b=await bounds(page);assert.deepEqual(b.video,b.input);assert.deepEqual(b.video,b.area);
+        assert.deepEqual(b.scroll,[0,0]);assert.equal(b.video.bottom,b.bar.top);
+        assert.equal(await page.locator('#stream').evaluate(v=>getComputedStyle(v).objectFit),'fill');
+        for(const [x,y] of [[1,1],[499,1],[1,363],[499,363],[250,182]]) {
+            await page.mouse.click(x,y);
+            const press=(await pointer(page)).filter(m=>m.endsWith(',1,0')).at(-1).split(',').map(Number);
+            assert.equal(press[3],Math.round(x*1920/500));assert.equal(press[4],Math.round(y*1080/364));
+        }
+        await page.evaluate(()=>{fixture.container.scrollTop=320;fixture.container.scrollLeft=390;fixture.viewport.mode('fill')});
+        assert.deepEqual((await bounds(page)).scroll,[0,0]);
     }],
-    ['reapplying original size preserves scrolling and bottom controls stay above the toolbar', async page => {
+    ['fill bottom controls stay clickable without moving the viewing area', async page => {
         await page.setViewportSize({width:500,height:400});await nextLayout(page);
-        await page.evaluate(()=>{fixture.viewport.mode('native');fixture.container.scrollLeft=200;fixture.container.scrollTop=200});await nextLayout(page);
-        await page.evaluate(()=>fixture.viewport.mode('native'));
-        assert.deepEqual((await bounds(page)).scroll,[200,200]);
-        await page.evaluate(()=>fixture.container.scrollTop=fixture.container.scrollHeight);await nextLayout(page);
-        let b=await bounds(page);assert(b.video.bottom<=b.bar.top+1);assert.deepEqual(b.video,b.input);
+        await page.evaluate(()=>fixture.viewport.mode('fill'));await nextLayout(page);
+        const b=await bounds(page);assert.equal(b.video.bottom,b.bar.top);
         await page.mouse.click(250,b.video.bottom-4);
-        assert((await pointer(page)).includes('i,1,m,675,1074,1,0'));
+        assert((await pointer(page)).includes('i,1,m,960,1068,1,0'));
+        assert(await page.evaluate(()=>fixture.container.scrollHeight===fixture.container.clientHeight && fixture.container.scrollWidth===fixture.container.clientWidth));
     }],
-    ['original-size bottom anchoring survives a taller toolbar and a smaller work area', async page => {
+    ['fill tracks toolbar height and work-area resizing with every edge visible', async page => {
         await page.setViewportSize({width:500,height:400});await nextLayout(page);
-        await page.evaluate(()=>{fixture.viewport.mode('native');fixture.container.scrollTop=fixture.container.scrollHeight});await nextLayout(page);
-        await page.evaluate(()=>document.querySelector('#toolbar').style.height='52px');await nextLayout(page);
-        let b=await bounds(page);assert(b.video.bottom<=b.bar.top+1);assert.equal(b.area.bottom,b.bar.top);
-        await page.setViewportSize({width:500,height:340});await nextLayout(page);
-        b=await bounds(page);assert(b.video.bottom<=b.bar.top+1);assert.equal(b.area.bottom,b.bar.top);
-        // Away from the edge, reflow must not unexpectedly scroll to the bottom.
-        await page.evaluate(()=>fixture.container.scrollTop=100);await nextLayout(page);
-        await page.evaluate(()=>document.querySelector('#toolbar').style.height='70px');await nextLayout(page);
-        assert.equal((await bounds(page)).scroll[1],100);
+        await page.evaluate(()=>fixture.viewport.mode('fill'));
+        for(const [height,bar] of [[400,52],[340,70],[900,36]]) {
+            await page.setViewportSize({width:500,height});
+            await page.evaluate(bar=>document.querySelector('#toolbar').style.height=bar+'px',bar);await nextLayout(page);
+            const b=await bounds(page);assert.deepEqual(b.video,b.area);assert.equal(b.video.bottom,b.bar.top);assert.deepEqual(b.scroll,[0,0]);
+        }
+    }],
+    ['legacy original-size requests select fill and caret updates never scroll the picture', async page => {
+        await page.setViewportSize({width:500,height:400});await nextLayout(page);
+        await page.evaluate(()=>{
+            fixture.viewport.mode('native');
+            fixture.viewport.caret([1800,1040,5,24],{width:1920,height:1080},true);
+        });await nextLayout(page);
+        const b=await bounds(page);assert.deepEqual(b.video,b.area);assert.deepEqual(b.scroll,[0,0]);
+        await page.evaluate(()=>fixture.viewport.mode('fit'));await nextLayout(page);
+        assert.equal((await bounds(page)).video.width,500);assert.deepEqual((await bounds(page)).scroll,[0,0]);
     }],
     ['both modes reserve space throughout temporary toolbar reveal and hiding transitions', async page => {
         await page.setViewportSize({width:500,height:400});await nextLayout(page);
         await page.evaluate(()=>fixture.pin(false));await hiddenToolbar(page);
-        for(const mode of ['fit','native']) {
-            await page.evaluate(mode=>{fixture.viewport.mode(mode);fixture.container.scrollTop=fixture.container.scrollHeight;fixture.visibility.show()},mode);
+        for(const mode of ['fit','fill']) {
+            await page.evaluate(mode=>{fixture.viewport.mode(mode);fixture.visibility.show()},mode);
             // Sample every frame: the toolbar must not cover the video or
             // its input surface, even while the toolbar is moving.
             const samples=await page.evaluate(async()=>{

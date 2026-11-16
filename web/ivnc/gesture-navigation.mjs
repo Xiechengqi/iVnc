@@ -8,8 +8,7 @@ const SWITCH_DISTANCE = 100;
 const REARM_MS = 100;
 const PAUSE_MS = 90;
 
-export function createGestureNavigation({ navigate, canHandle, now = () => performance.now() }) {
-    let enabled = true;
+export function createGestureNavigation({ navigate, canNavigate = () => true, canHandle, now = () => performance.now() }) {
     let mode = 'idle';
     let x = 0, y = 0, last = null, source = null, kind = null;
     let committedAt = 0, direction = 0, peak = 0, valley = Infinity, previous = 0;
@@ -27,19 +26,19 @@ export function createGestureNavigation({ navigate, canHandle, now = () => perfo
     }
 
     function move(dx, dy, origin, blocked, inputKind) {
-        if (!enabled || !Number.isFinite(dx) || !Number.isFinite(dy)) return false;
+        if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
         if (!dx && !dy) return false;
         const time = now();
         const gap = last === null ? Infinity : time - last;
         if (kind !== inputKind || (inputKind === 'wheel' && gap > IDLE_MS)) reset();
-        if (blocked) { reset(); return false; }
         const allowed = canHandle(origin);
         const ax = Math.abs(dx), ay = Math.abs(dy);
+        if (mode === 'consumed') { last = time; return true; }
         if (mode === 'committed') {
             last = time;
             // A view switch moves the remaining momentum into another iframe.
             // Hidden views can drain it, but cannot initiate another switch.
-            if (inputKind === 'touch' || !allowed) {
+            if (inputKind === 'touch' || !allowed || blocked) {
                 valley = Math.min(valley, ax); previous = ax;
                 candidate = null; return true;
             }
@@ -59,6 +58,12 @@ export function createGestureNavigation({ navigate, canHandle, now = () => perfo
                     candidate.x += dx; candidate.y += dy; candidate.samples++;
                     candidate.peak = Math.max(candidate.peak, ax);
                     if (candidate.samples >= 2 && Math.abs(candidate.x) >= SWITCH_DISTANCE && Math.abs(candidate.x) >= Math.abs(candidate.y) * 1.8) {
+                        // This is a newly recognized gesture, not the old tail.
+                        // At the boundary it belongs to the remote application.
+                        if (!canNavigate(sign)) {
+                            mode = 'passthrough'; source = origin; candidate = null;
+                            return false;
+                        }
                         peak = candidate.peak;
                         commit(time, candidate.x);
                     }
@@ -70,7 +75,19 @@ export function createGestureNavigation({ navigate, canHandle, now = () => perfo
         if (!allowed) { reset(); return false; }
         if (mode !== 'idle' && source !== origin) reset();
         last = time; source = origin; kind = inputKind;
-        if (mode === 'vertical') return false;
+        if (mode === 'vertical' || mode === 'passthrough') return false;
+        if (mode === 'horizontal' && blocked) {
+            // A modifier/pinch/drag beginning after reservation cancels this
+            // switch, but must not deliver a partial gesture to the application.
+            mode = 'consumed';
+            return true;
+        }
+        // Decide before reserving any horizontal motion. Keep a yielded gesture
+        // yielded even if modifiers, direction or available targets change.
+        if (blocked || (mode === 'idle' && (dx ? !canNavigate(Math.sign(dx)) : !canNavigate(-1) && !canNavigate(1)))) {
+            mode = 'passthrough';
+            return false;
+        }
         x += dx; y += dy;
         peak = Math.max(peak, ax); previous = ax;
         const totalX = Math.abs(x), totalY = Math.abs(y);
@@ -91,17 +108,12 @@ export function createGestureNavigation({ navigate, canHandle, now = () => perfo
     }
 
     return {
-        enabled: () => enabled,
-        setEnabled(value) { enabled = !!value; reset(); },
+        enabled: () => true,
         reset,
         wheel(event, origin, blocked = false) {
-            if (!enabled) return false;
-            if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
-                if (mode !== 'committed') reset();
-                return false;
-            }
             const unit = event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? 800 : 1;
-            return move(event.deltaX * unit, event.deltaY * unit, origin, blocked, 'wheel');
+            const modified = event.ctrlKey || event.metaKey || event.altKey || event.shiftKey;
+            return move(event.deltaX * unit, event.deltaY * unit, origin, blocked || modified, 'wheel');
         },
         // Touch coordinates move opposite to scroll deltas. The caller tracks
         // both contacts and blocks navigation once their separation changes.

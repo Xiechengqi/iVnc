@@ -39,7 +39,7 @@ import { createToolbar } from "./toolbar.js";
 import { createGestureNavigation } from "./gesture-navigation.mjs";
 import { createClipboard } from "./clipboard.js";
 import { createClipboardUI } from "./clipboard-ui.js";
-import { createViewport } from "./viewport.js";
+import { createViewport, normalizeDisplayMode } from "./viewport.js";
 import { createToolbarVisibility } from "./toolbar-visibility.js";
 import { checkAuthentication } from "./auth-client.js";
 import { createFloatingWindow } from "./floating-window.js";
@@ -269,7 +269,6 @@ function InitUI() {
 		position: relative;
 		overflow: hidden;
 	}
-	.video-container.manual-exact { overflow: auto; }
 	.video-container:fullscreen { width: 100%; height: 100%; }
 
 	.video-container video,
@@ -309,6 +308,7 @@ function InitUI() {
 	}
 
 	.video-container .status-bar {
+		box-sizing: border-box;
 		position: absolute;
 		bottom: 0;
 		left: 0;
@@ -1804,6 +1804,7 @@ export default function webrtc() {
 	let appStreams = null;
 	let toolbarController = null;
 	let gestureController = null;
+	let cleanupGestureEvents = () => {};
 	let viewportController = null;
 	let taskbarVisibility = null;
 	let cleanupTaskbarEvents = () => {};
@@ -2209,8 +2210,11 @@ export default function webrtc() {
 	function updateVideoImageRendering() {
         if (!videoElement?.videoWidth) return;
         const rect = videoElement.getBoundingClientRect();
-        const scale = rect.width * (window.devicePixelRatio || 1) / videoElement.videoWidth;
-        videoElement.style.imageRendering = scale >= 1 && Math.abs(scale - Math.round(scale)) < 0.01 ? 'pixelated' : 'auto';
+        const dpr = window.devicePixelRatio || 1;
+        const sx = rect.width * dpr / videoElement.videoWidth;
+        const sy = rect.height * dpr / videoElement.videoHeight;
+        const integer = value => value >= 1 && Math.abs(value - Math.round(value)) < 0.01;
+        videoElement.style.imageRendering = Math.abs(sx - sy) < 0.01 && integer(sx) && integer(sy) ? 'pixelated' : 'auto';
     }
 
 	function sanitizeAndStoreSettings(serverSettings) {
@@ -2332,10 +2336,11 @@ export default function webrtc() {
 	}
 
     function setDisplayMode(value, persist = true) {
-        if (value !== 'native' && value !== 'fit') return;
-        displayMode = value;
+        const normalized = normalizeDisplayMode(value);
+        if (!normalized) return;
+        displayMode = normalized;
         scaleLocal = displayMode === 'fit';
-        window.isManualResolutionMode = displayMode === 'native';
+        window.isManualResolutionMode = false; // fit/fill both use the complete work area.
         viewportController?.mode(displayMode);
         // Embedded tabs inherit the desktop's mode, not a standalone app
         // viewer's stored preference. Parent commands never overwrite it.
@@ -2347,15 +2352,15 @@ export default function webrtc() {
     function syncDisplayModeButton() {
         if (!displayModeButton) return;
         const english = getLang() === 'en';
-        const current = english ? (displayMode === 'fit' ? 'Fit window' : 'Original size') : (displayMode === 'fit' ? '适应窗口' : '原始大小');
-        const next = english ? (displayMode === 'fit' ? 'Original size' : 'Fit window') : (displayMode === 'fit' ? '原始大小' : '适应窗口');
+        const current = english ? (displayMode === 'fit' ? 'Fit window' : 'Fill screen') : (displayMode === 'fit' ? '适应窗口' : '铺满屏幕');
+        const next = english ? (displayMode === 'fit' ? 'Fill screen' : 'Fit window') : (displayMode === 'fit' ? '铺满屏幕' : '适应窗口');
         displayModeButton.title = english ? `Current: ${current}; switch to ${next}` : `当前：${current}；点击切换为${next}`;
         displayModeButton.setAttribute('aria-label', displayModeButton.title);
         const label = displayModeButton.querySelector('.toolbar-tool-label');
         displayModeButton.dataset.toolLabel = current;
         if (label) label.textContent = current;
-        displayModeButton.classList.toggle('active', displayMode === 'native');
-        displayModeButton.setAttribute('aria-pressed', String(displayMode === 'native'));
+        displayModeButton.classList.toggle('active', displayMode === 'fill');
+        displayModeButton.setAttribute('aria-pressed', String(displayMode === 'fill'));
     }
 
     function isDisplayModeSource(event) {
@@ -2400,16 +2405,16 @@ export default function webrtc() {
             case "setScaleLocally":
                 if (typeof message.value === 'boolean') {
                     scaleLocal = message.value;
-                    setDisplayMode(scaleLocal ? 'fit' : 'native');
+                    setDisplayMode(scaleLocal ? 'fit' : 'fill');
                 }
                 break;
             case "resetResolutionToWindow":
                 setDisplayMode('fit');
                 break;
             case "setManualResolution":
-                // Older dashboards can still select fit/original locally, but
+                // Older dashboards can still select fit/fill locally, but
                 // only the authenticated console can change desktop dimensions.
-                setDisplayMode(scaleLocal ? 'fit' : 'native');
+                setDisplayMode(scaleLocal ? 'fit' : 'fill');
                 break;
 			case "setUseCssScaling":
 				console.warn("Skipping cssScaling since hidpi needs to be implemented")
@@ -3161,42 +3166,28 @@ export default function webrtc() {
 			if (!window.__IVNC_EMBED__) {
 				gestureController = createGestureNavigation({
 					navigate: direction => toolbarController?.navigate(direction),
+					canNavigate: direction => !!toolbarController?.canNavigate(direction),
 					canHandle: source => {
 						if (document.hidden || toolbarController?.interacting() || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return false;
 						if (source === window) return !appStreams?.activeId();
 						return !!appStreams?.isActiveFrame(source);
 					},
 				});
-				gestureController.setEnabled(getBoolParam('gesture_navigation', true));
-				window.__ivncGestureNavigation = gestureController;
-				const syncGestureStyle = doc => doc?.documentElement?.classList.toggle('ivnc-gesture-navigation', gestureController.enabled());
-				const syncGestureStyles = () => {
-					syncGestureStyle(document);
-					for (const frame of appStreams?.frames() || []) {
-						try { syncGestureStyle(frame.contentDocument); } catch (_) {}
-					}
-				};
-				const releaseGesturePointerLock = doc => {
-					if (doc?.pointerLockElement?.id === 'overlayInput') doc.exitPointerLock();
-				};
-				toolbarController.addGestureToggle(gestureController, enabled => {
-					if (enabled) {
-						releaseGesturePointerLock(document);
-						for (const frame of appStreams?.frames() || []) {
-							try { releaseGesturePointerLock(frame.contentDocument); } catch (_) {}
-						}
-					}
-					setBoolParam('gesture_navigation', enabled);
-					syncGestureStyles();
-				});
-				syncGestureStyles();
+                // Swipe navigation is always available. Old local/URL off
+                // preferences no longer control it; protected input yields per gesture.
+                window.__ivncGestureNavigation = gestureController;
+                document.documentElement.classList.add('ivnc-gesture-navigation');
+                cleanupGestureEvents();
+                const resetHiddenGesture = () => { if (document.hidden) gestureController?.reset(); };
+                document.addEventListener('visibilitychange', resetHiddenGesture);
+                cleanupGestureEvents = () => document.removeEventListener('visibilitychange', resetHiddenGesture);
 			}
 
             displayModeButton = document.createElement('button');
             displayModeButton.type = 'button'; displayModeButton.className = 'taskbar-pin toolbar-display-mode';
             displayModeButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 11V7h4m6 6v4h-4"/></svg>';
             displayModeButton.addEventListener('click', () => {
-                setDisplayMode(displayMode === 'fit' ? 'native' : 'fit');
+                setDisplayMode(displayMode === 'fit' ? 'fill' : 'fit');
             });
             syncDisplayModeButton();
             toolbarController.addTool(displayModeButton);
@@ -3420,7 +3411,7 @@ export default function webrtc() {
 			setIntParam('audio_bitrate', audioBitRate);
             // Migrate only the local fit/original preference; discard old global dimensions.
             const legacyNative = !window.__IVNC_EMBED__ && getBoolParam('is_manual_resolution_mode', false) && !getBoolParam('scaleLocallyManual', true);
-            displayMode = !window.__IVNC_EMBED__ && getStringParam('display_mode', legacyNative ? 'native' : 'fit') === 'native' ? 'native' : 'fit';
+            displayMode = window.__IVNC_EMBED__ ? 'fit' : normalizeDisplayMode(getStringParam('display_mode', legacyNative ? 'fill' : 'fit')) || 'fit';
             if (!window.__IVNC_EMBED__) {
                 setIntParam('manual_width', null); setIntParam('manual_height', null);
                 setBoolParam('is_manual_resolution_mode', false);
@@ -3846,6 +3837,7 @@ export default function webrtc() {
 			resetNetworkQuality('unknown');
 			networkQualityBadge = null;
 			appStreams?.destroy(); appStreams = null;
+			cleanupGestureEvents(); cleanupGestureEvents = () => {};
 			gestureController?.reset(); gestureController = null;
 			if (!window.__IVNC_EMBED__) window.__ivncGestureNavigation = null;
 			document.documentElement.classList.remove('ivnc-gesture-navigation');

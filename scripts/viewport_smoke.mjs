@@ -111,6 +111,7 @@ async function automatic(peer = local) {
 async function clickBottom(peer = local, fitted = true) {
     await peer.call('Page.bringToFront');
     if (fitted) await automatic(peer);
+    await waitFor('decoded video and valid input mapping',()=>peer.evaluate(`document.getElementById('stream')?.readyState>=2 && window.__ivncInput?._geometryReady()`),60000);
     const before = await remote.evaluate('window.clicks');
     const b = await peer.evaluate(bounds);
     const state = await api('/api/console/display');
@@ -217,24 +218,26 @@ try {
     await local.call('Input.dispatchMouseEvent',{type:'mouseReleased',...blank,button:'left',buttons:0,clickCount:1});
     await waitFor('release outside content',()=>remote.evaluate(`window.ups>${ups}`));
     pass('drag release outside the image does not leave the remote button held');
-    await message({type:'setDisplayMode',value:'native'});
-    await waitFor('native scrolling',()=>local.evaluate(`document.querySelector('.video-container').classList.contains('manual-exact') && document.getElementById('stream').getBoundingClientRect().width===document.getElementById('stream').videoWidth`));
-    await local.evaluate(`(() => {const c=document.querySelector('.video-container');c.scrollTop=c.scrollHeight;c.scrollLeft=(document.getElementById('stream').videoWidth-c.clientWidth)/2;})()`);
-    // clickBottom's fitted-layout wait is intentionally skipped in native mode.
+    await message({type:'setDisplayMode',value:'native'}); // Legacy requests migrate to fill.
+    await waitFor('complete stretched picture without scrolling',()=>local.evaluate(`(() => {
+        const c=document.querySelector('.video-container'),v=document.getElementById('stream'),r=v.getBoundingClientRect();
+        return v.style.objectFit==='fill' && r.width===c.clientWidth && r.height===c.clientHeight && c.scrollHeight===c.clientHeight && c.scrollWidth===c.clientWidth;
+    })()`));
     b=await local.evaluate(bounds);
-    assert(matches(b.video,b.input)); assert(b.video.top<0); await clickBottom(local,false); await assertStable(initial,native);
+    assert(matches(b.video,b.input)); assert(matches(b.video,b.area)); await clickBottom(local,false); await assertStable(initial,native);
+    assert.equal(await local.evaluate(`document.getElementById('stream').style.imageRendering`),'auto');
     await pin();
     b=await local.evaluate(bounds);assert(b.video.bottom<=b.area.bottom+1);
     await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:8,y:b.height-1});
-    await waitFor('temporary toolbar leaves native bottom visible',async()=>{
+    await waitFor('temporary toolbar leaves stretched bottom visible',async()=>{
         const b=await local.evaluate(bounds);
-        return b.reserved>0 && Math.abs(b.bar.top-b.area.bottom)<1 && b.video.bottom<=b.bar.top+1 && matches(b.video,b.input);
+        return b.reserved>0 && Math.abs(b.bar.top-b.area.bottom)<1 && matches(b.video,b.area) && matches(b.video,b.input);
     });
     await clickBottom(local,false);
     await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});
-    await waitFor('temporary toolbar releases native work area',()=>local.evaluate(`!document.querySelector('.taskbar').classList.contains('visible') && document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height')==='0px'`));
+    await waitFor('temporary toolbar releases stretched work area',()=>local.evaluate(`!document.querySelector('.taskbar').classList.contains('visible') && document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height')==='0px'`));
     await pin();await assertStable(initial,native);
-    pass('native bottom stays visible and clickable through temporary toolbar reveal and hiding');
+    pass('stretched bottom stays visible and clickable without scrolling through toolbar reveal and hiding');
     await message({type:'setDisplayMode',value:'fit'});await automatic();await pin();
     b=await local.evaluate(bounds);
     await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:8,y:b.height-1});
@@ -242,14 +245,15 @@ try {
     await automatic();await clickBottom();
     await local.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});
     await waitFor('temporary toolbar releases fitted work area',()=>local.evaluate(`document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height')==='0px'`));
-    await pin();await message({type:'setDisplayMode',value:'native'});await assertStable(initial,native);
+    await pin();await message({type:'setDisplayMode',value:'fill'});await assertStable(initial,native);
     pass('fitted bottom controls remain visible and clickable with a temporarily revealed toolbar');
     await reload();
-    await waitFor('native preference restored',()=>local.evaluate(`document.querySelector('.video-container').classList.contains('manual-exact')`));
+    await waitFor('fill preference restored',()=>local.evaluate(`document.getElementById('stream').style.objectFit==='fill'`));
+    await clickBottom(local,false);
     await message({type:'setDisplayMode',value:'fit'}); await automatic();
     assert.equal(await local.evaluate('document.querySelector(".video-container").scrollTop'),0);
     await clickBottom();
-    pass('original-size scrolling and reload preserve only local preference; returning to fit clears scrolling');
+    pass('fill mode and reload preserve local preference without scrolling or changing the desktop');
     await local.evaluate(`(() => {const prefix=Object.keys(localStorage).find(k=>k.endsWith('_display_mode')).slice(0,-'display_mode'.length);localStorage.removeItem(prefix+'display_mode');localStorage.setItem(prefix+'manual_width','3840');localStorage.setItem(prefix+'manual_height','2160');localStorage.setItem(prefix+'is_manual_resolution_mode','true');localStorage.setItem(prefix+'scaleLocallyManual','true');})()`);
     await reload(); await automatic(); await assertStable(initial,native);
     assert.equal(await local.evaluate(`Object.keys(localStorage).some(k=>k.endsWith('_manual_width')||k.endsWith('_manual_height'))`),false);
@@ -285,10 +289,10 @@ try {
     const app=(await api('/api/apps','POST',{name:'Viewport shared GTK',app_type:'desktop',exec_command:'gtk3-demo'})).app;
     await api(`/api/apps/${app.id}/sharing`,'PUT',{enabled:true,password:'viewport-smoke-password'});await api(`/api/apps/${app.id}/start`,'POST');
     await waitFor('shared app tab',()=>local.evaluate(`!!document.querySelector('[data-key="app:${app.id}"]')`));
-    await message({type:'setDisplayMode',value:'native'});
+    await message({type:'setDisplayMode',value:'fill'});
     await local.evaluate(`document.querySelector('[data-key="app:${app.id}"]').click()`);
     await waitFor('embedded app connection',()=>local.evaluate(`document.querySelector('.app-stream.active iframe')?.contentWindow?.__ivncWebRTC?._send_channel?.readyState==='open'`),60000);
-    await waitFor('embedded starts in native mode',()=>local.evaluate(`document.querySelector('.app-stream.active iframe').contentWindow.isManualResolutionMode===true`));
+    await waitFor('embedded starts in fill mode',()=>local.evaluate(`document.querySelector('.app-stream.active iframe').contentDocument.getElementById('stream').style.objectFit==='fill'`));
     await local.evaluate(`window.__savedFrame=document.querySelector('.app-stream.active iframe');window.__savedChannel=window.__savedFrame.contentWindow.__ivncWebRTC._send_channel`);
     await local.evaluate(`document.querySelector('.toolbar-list [data-key^="window:"]').click()`);
     await waitFor('main desktop selected',()=>local.evaluate(`!document.querySelector('.app-stream.active')`));
@@ -303,7 +307,7 @@ try {
         const reserved=parseFloat(document.getElementById('app').style.getPropertyValue('--ivnc-toolbar-height'))||0;
         const bar=document.querySelector('.taskbar').getBoundingClientRect();
         const scale=Math.min(c.clientWidth/v.videoWidth,c.clientHeight/v.videoHeight);
-        return !window.isManualResolutionMode && !f.contentWindow.isManualResolutionMode && !c.classList.contains('manual-exact')
+        return v.style.objectFit==='contain'
             && Math.abs(a.bottom-(innerHeight-reserved))<1 && Math.abs(a.height-r.height)<1 && Math.abs(r.height-area.height)<1
             && a.bottom<=bar.top+1
             && video.bottom<=area.bottom+1 && Math.abs(video.width-v.videoWidth*scale)<1 && Math.abs(video.height-v.videoHeight*scale)<1
@@ -311,13 +315,13 @@ try {
     })()`);
     await waitFor('embedded actual fitted video, mode and input geometry',embeddedFits);
     await local.evaluate(`document.querySelector('.toolbar-display-mode').click()`);
-    await waitFor('active embedded native mode',()=>local.evaluate(`window.isManualResolutionMode && window.__savedFrame.contentWindow.isManualResolutionMode`));
+    await waitFor('active embedded fill mode',()=>local.evaluate(`document.getElementById('stream').style.objectFit==='fill' && window.__savedFrame.contentDocument.getElementById('stream').style.objectFit==='fill'`));
     await local.evaluate(`(() => {const c=window.__savedFrame.contentDocument.querySelector('.video-container');c.scrollTop=c.scrollHeight;c.scrollLeft=100;window.__savedScroll=[c.scrollLeft,c.scrollTop]})()`);
     await local.evaluate(`document.querySelector('.toolbar-list [data-key^="window:"]').click()`);
     await local.evaluate(`document.querySelector('[data-key="app:${app.id}"]').click()`);
-    await waitFor('native embedded reactivation preserves scroll',()=>local.evaluate(`(() => {const c=window.__savedFrame.contentDocument.querySelector('.video-container'),v=window.__savedFrame.contentDocument.getElementById('stream').getBoundingClientRect();return c.scrollLeft===window.__savedScroll[0] && c.scrollTop===window.__savedScroll[1] && v.bottom<=c.getBoundingClientRect().bottom+1})()`));
+    await waitFor('fill embedded reactivation preserves the complete picture',()=>local.evaluate(`(() => {const c=window.__savedFrame.contentDocument.querySelector('.video-container'),v=window.__savedFrame.contentDocument.getElementById('stream').getBoundingClientRect();return c.scrollLeft===0 && c.scrollTop===0 && Math.abs(v.width-c.clientWidth)<1 && Math.abs(v.height-c.clientHeight)<1 && v.bottom<=c.getBoundingClientRect().bottom+1})()`));
     await local.evaluate(`document.querySelector('.toolbar-display-mode').click()`);await waitFor('embedded fit restored',embeddedFits);
-    pass('background mode synchronization and native reactivation preserve real iframe video/input geometry and scroll');
+    pass('background mode synchronization and fill reactivation preserve the complete real iframe picture without scrolling');
     await pin(); await waitFor('embedded unpin',embeddedFits);await pin();await waitFor('embedded pin',embeddedFits);
     await local.call('Emulation.setPageScaleFactor',{pageScaleFactor:1.5});
     await local.call('Emulation.setDeviceMetricsOverride',{width:900,height:520,deviceScaleFactor:1,mobile:false});

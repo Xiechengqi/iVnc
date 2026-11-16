@@ -50,16 +50,15 @@ streams.update([
 ]);
 render();
 const navigation = createGestureNavigation({navigate:direction=>toolbar.navigate(direction),
-    now:()=>window.fixture.clock,
+    now:()=>window.fixture.clock, canNavigate:direction=>toolbar.canNavigate(direction),
     canHandle:source=>!document.hidden && !toolbar.interacting() && (source===window ? !streams.activeId() : streams.isActiveFrame(source))});
-navigation.setEnabled(localStorage.getItem('test.gesture_navigation') !== 'false');
-toolbar.addGestureToggle(navigation,enabled=>localStorage.setItem('test.gesture_navigation',String(enabled)));
+document.addEventListener('visibilitychange',()=>{if(document.hidden)navigation.reset()});
 const extra = document.createElement('div'); extra.className='taskbar-pin fixture-tool'; extra.title='Other tool';
 toolbar.addTool(extra);
 function wheel(event,source) {
     window.fixture.wheelCount++;
     window.fixture.lastWheel=[event.deltaX,event.deltaY];
-    if(navigation.wheel(event,source)) {event.preventDefault(); event.stopPropagation();}
+    if(!window.fixture.calibrating && navigation.wheel(event,source)) {event.preventDefault(); event.stopPropagation();}
     else window.fixture.scrolls.push([event.deltaX,event.deltaY]);
 }
 document.querySelector('#desktop').addEventListener('wheel',e=>wheel(e,window),{passive:false});
@@ -108,13 +107,13 @@ const drag = async (page, padding = false) => {
 };
 const nativeWheel = async (page, time, dx, dy = 0) => {
     // At DPR 2 the engines translate injected wheel units differently. Measure
-    // the actual DOM units once, with navigation disabled, before replaying a
+    // the actual DOM units once, outside gesture recognition, before replaying a
     // trace. The tested input remains native mouse.wheel in both engines.
     if (!await page.evaluate(()=>fixture.wheelScale)) {
-        const initial=await page.evaluate(()=>{const enabled=fixture.navigation.enabled();fixture.navigation.setEnabled(false);return {enabled,count:fixture.wheelCount};});
+        const initial=await page.evaluate(()=>{fixture.calibrating=true;return {count:fixture.wheelCount}});
         await page.mouse.move(200,200); await page.mouse.wheel(16,0);
         await page.waitForFunction(count=>fixture.wheelCount>count,initial.count);
-        await page.evaluate(enabled=>{fixture.wheelScale=16/fixture.lastWheel[0];fixture.navigation.setEnabled(enabled);fixture.scrolls=[];},initial.enabled);
+        await page.evaluate(()=>{fixture.wheelScale=16/fixture.lastWheel[0];fixture.calibrating=false;fixture.scrolls=[];});
     }
     const count = await page.evaluate(time => {fixture.clock=time; return fixture.wheelCount;},time);
     const scale=await page.evaluate(()=>fixture.wheelScale);
@@ -129,34 +128,38 @@ const localNavigation = page => page.evaluate(() => {
 });
 
 const cases = [
-    ['one default-on icon toggle persists and keyboard/hover states remain consistent', async page => {
-        const toggle=page.getByRole('button',{name:'滑动切换应用',exact:true});
-        assert.equal(await toggle.getAttribute('aria-pressed'),'true');
-        assert.equal(await page.locator('.toolbar-gesture-action').count(),1);
-        assert.equal(await toggle.locator('svg').count(),1);
-        assert(await toggle.evaluate(n=>n.parentElement.classList.contains('toolbar-tools')));
-        const color=await toggle.evaluate(n=>getComputedStyle(n).backgroundColor);
-        await toggle.hover(); assert.equal(await toggle.evaluate(n=>getComputedStyle(n).backgroundColor),color);
-        await toggle.focus(); await page.keyboard.press('Space');
-        assert.equal(await toggle.getAttribute('aria-pressed'),'false');
+    ['swipe navigation remains available without a toolbar toggle after reloading old preferences', async page => {
+        await page.evaluate(()=>localStorage.setItem('test.gesture_navigation','false'));
         await page.reload(); await page.waitForFunction(()=>!!window.fixture);
-        assert.equal(await toggle.getAttribute('aria-pressed'),'false');
-        await toggle.focus(); await page.keyboard.press('Enter');
-        assert.equal(await toggle.getAttribute('aria-pressed'),'true');
+        assert.equal(await page.locator('.toolbar-gesture-action').count(),0);
+        await nativeWheel(page,0,120); assert.deepEqual(await calls(page),[2]);
         await page.evaluate(()=>fixture.setLang('en'));
-        assert.equal(await toggle.count(),0);
-        assert.equal(await page.getByRole('button',{name:'Swipe to switch apps',exact:true}).getAttribute('aria-pressed'),'true');
+        assert.equal(await page.getByRole('button',{name:'Swipe to switch apps',exact:true}).count(),0);
     }],
-    ['compact tools keep the swipe toggle visible outside the overflow menu', async page => {
+    ['compact tools have no swipe toggle in either toolbar or overflow menu', async page => {
         await page.setViewportSize({width:430,height:800});
-        const toggle=page.locator('.toolbar-gesture-action');
         await page.locator('.toolbar-more').click();
         assert(await page.locator('.toolbar-more-menu .fixture-tool').isVisible());
-        assert(await toggle.isVisible());
-        assert(await toggle.evaluate(n=>n.parentElement.classList.contains('toolbar-tools')));
-        await toggle.click();
-        assert.equal(await toggle.getAttribute('aria-pressed'),'false');
-        assert.equal(await page.locator('.toolbar-more-menu').isVisible(),false);
+        assert.equal(await page.locator('.toolbar-gesture-action').count(),0);
+    }],
+    ['direction queries use the pending navigation target without activating any app', async page => {
+        await localNavigation(page);
+        await page.evaluate(()=>{fixture.streams.update([]);fixture.render()});
+        assert.equal(await page.evaluate(()=>fixture.toolbar.canNavigate(-1)),false);
+        assert.equal(await page.evaluate(()=>fixture.toolbar.canNavigate(1)),true);
+        assert.deepEqual(await calls(page),[]);
+        await page.evaluate(()=>{fixture.toolbar.navigate(1);fixture.toolbar.navigate(1)});
+        assert.equal(await page.evaluate(()=>fixture.toolbar.canNavigate(1)),false);
+        assert.equal(await page.evaluate(()=>fixture.toolbar.canNavigate(-1)),true);
+        assert.deepEqual(await calls(page),[2,3]);
+    }],
+    ['native outward swipes at an edge and a single app scroll from their first sample', async page => {
+        await nativeWheel(page,0,-120);
+        assert.deepEqual(await calls(page),[]);
+        assert.deepEqual(await page.evaluate(()=>fixture.scrolls),[[-120,0]]);
+        await page.evaluate(()=>{fixture.streams.update([]);fixture.data.windows=fixture.data.windows.slice(0,1);fixture.render()});
+        await nativeWheel(page,400,120);
+        assert.deepEqual(await page.evaluate(()=>fixture.scrolls),[[-120,0],[120,0]]);
     }],
     ['rapid navigation advances from pending intent across delayed and intermediate focus updates', async page => {
         await localNavigation(page);
@@ -231,10 +234,11 @@ const cases = [
         assert(await page.evaluate(()=>originalShared.isConnected && originalRemote.isConnected));
         assert.deepEqual(await page.evaluate(()=>fixture.scrolls),[]);
     }],
-    ['native vertical scrolling and disabled horizontal scrolling do not switch apps', async page => {
+    ['native vertical scrolling and modified horizontal scrolling do not switch apps', async page => {
         await nativeWheel(page,0,0,80);
-        await page.locator('.toolbar-gesture-action').click();
-        await nativeWheel(page,160,120);
+        await page.keyboard.down('Shift');
+        await nativeWheel(page,400,120);
+        await page.keyboard.up('Shift');
         assert.deepEqual(await calls(page),[]);
         assert.deepEqual(await page.evaluate(()=>fixture.scrolls),[[0,80],[120,0]]);
     }],

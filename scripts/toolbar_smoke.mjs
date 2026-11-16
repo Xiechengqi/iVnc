@@ -164,23 +164,20 @@ try {
     };
     await call('Runtime.enable'); await call('Page.enable');
     await waitFor('production toolbar and data channel', () => evaluate(`!!document.querySelector('.ivnc-toolbar') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
-    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
-    await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
-    await evaluate(`window.__toolbarReloading = true`);
-    await call('Page.reload');
-    await waitFor('saved gesture preference after reload', () => evaluate(`!window.__toolbarReloading && !!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
-    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'false');
+    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action')`), null);
     await evaluate(`(() => {
-        for(const key of Object.keys(localStorage)) if(key.endsWith('_gesture_navigation')) localStorage.removeItem(key);
         const prefix=location.href.split('#')[0].replace(/[^a-zA-Z0-9.-_]/g,'_');
+        localStorage.setItem(prefix+'_gesture_navigation','false');
         localStorage.setItem(prefix+'_gesture_navigation_reverse','true');
+        window.__toolbarReloading=true;
     })()`);
-    await evaluate(`window.__toolbarReloading = true`);
     await call('Page.reload');
-    await waitFor('default gesture preference after reload', () => evaluate(`!window.__toolbarReloading && !!document.querySelector('.toolbar-gesture-action') && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    await waitFor('always-on navigation after reloading a saved off preference', () => evaluate(`!window.__toolbarReloading && window.__ivncGestureNavigation?.enabled() && window.__ivncWebRTC?._send_channel?.readyState === 'open'`), 60000);
+    await call('Page.navigate',{url:base+'?gesture_navigation=false'});
+    await waitFor('obsolete URL off preference is ignored',()=>evaluate(`location.search==='?gesture_navigation=false' && window.__ivncGestureNavigation?.enabled() && window.__ivncWebRTC?._send_channel?.readyState==='open'`),60000);
     await waitFor('decoded desktop after reload', () => evaluate(`(() => {const v=document.querySelector('#stream');return v?.videoWidth>0 && v.readyState>=2 && window.__ivncDisplayState?.protocol===1;})()`), 60000);
-    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
-    pass('swipe navigation defaults on, persists an explicit off and ignores the obsolete reverse preference');
+    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action')`),null);
+    pass('swipe navigation stays on without a toolbar toggle despite saved and URL off preferences');
     const rows = (await api('/api/apps')).apps;
     const fake = { windows: rows.filter(a => ids.slice(0, 20).includes(a.id)).map((a, i) => ({ id: i, window_key: `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, managed_app_id: a.id, managed_app_name:a.name, name_revision:a.name_revision, can_rename:a.can_rename, title: a.name, app_id: 'test.class', focused: false })),
         apps: rows.filter(a => ids.slice(20).includes(a.id)).map((a, i) => ({ id: a.id, name: a.name, name_revision:a.name_revision, can_rename:a.can_rename, kind: i % 2 ? 'shared' : 'remote', status: i % 2 ? 'starting' : 'connecting' })), ...before };
@@ -219,20 +216,18 @@ try {
     assert.deepEqual(await toolbarIds(), ids);
     pass('ordinary, shared and remote tabs share one application order');
 
-    assert.equal(await evaluate(`document.querySelector('.toolbar-gesture-action').getAttribute('aria-pressed')`), 'true');
+    assert.equal(await evaluate(`window.__ivncGestureNavigation.enabled()`), true);
     await evaluate(`(() => {
-        const button=document.querySelector('.toolbar-gesture-action');
-        if(document.querySelectorAll('.toolbar-gesture-action').length!==1 || !button.querySelector('svg') || !button.parentElement.classList.contains('toolbar-tools')) throw Error('expected one directly available swipe icon');
+        if(document.querySelector('.toolbar-gesture-action')) throw Error('unexpected swipe toggle');
         const target=document.querySelector('#overlayInput'),rect=target.getBoundingClientRect();
         for(const deltaX of [40,40,40,190]) target.dispatchEvent(new WheelEvent('wheel',{deltaX,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2,bubbles:true,cancelable:true}));
     })()`);
     assert.deepEqual(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,'))`), [`focus-key,${fake.windows[0].window_key}`]);
     assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), false);
-    await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
-    await delay(160);
-    await evaluate(`(() => {const target=document.querySelector('#overlayInput'),r=target.getBoundingClientRect();target.dispatchEvent(new WheelEvent('wheel',{deltaX:120,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));})()`);
+    await delay(300);
+    await evaluate(`(() => {const target=document.querySelector('#overlayInput'),r=target.getBoundingClientRect();target.dispatchEvent(new WheelEvent('wheel',{deltaX:120,shiftKey:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));})()`);
     assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), true);
-    pass('default-on horizontal wheel switches one ordered tab and leaves normal scrolling available when disabled');
+    pass('always-on horizontal navigation switches one tab and modified horizontal scrolling reaches the application');
 
     for (const count of [0, 1, 10, 30]) {
         await evaluate(`window.__synthetic = {...${JSON.stringify(fake)}, windows:${JSON.stringify(fake.windows)}.slice(0,Math.min(${count},20)), apps:${JSON.stringify(fake.apps)}.slice(0,Math.max(0,${count}-20))}; window.__ivncWebRTC.ontaskbarupdate(window.__synthetic)`);
@@ -513,17 +508,22 @@ try {
     pass('touch swipes on labels scroll naturally without changing order');
 
     await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+    // Previous sorting/touch checks can leave the last app selected. Start at
+    // a known native window with a neighbour, since outward swipes now yield.
+    const swipeWindows = await evaluate(`[...document.querySelectorAll('.toolbar-list [data-key^="window:"]')].map(n=>n.dataset.key)`);
+    assert(swipeWindows.length > 1);
+    await clickTab(`.toolbar-list [data-key="${swipeWindows[0]}"]`);
     const surfacePoint = await evaluate(`(() => {const r=document.querySelector('#overlayInput').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`);
     const twoFingers = (type, dx = 0, dy = 0, spread = 0) => call('Input.dispatchTouchEvent', { type,
         touchPoints: type === 'touchEnd' ? [] : [-1, 1].map((side, i) => ({
             x: surfacePoint.x + dx + side * (28 + spread), y: surfacePoint.y + dy,
             id: i + 1, radiusX: 1, radiusY: 1, force: 1,
         })) });
-    await evaluate(`window.__messages=[]; document.querySelector('.toolbar-gesture-action').click()`);
+    await evaluate(`window.__messages=[]; window.__ivncGestureNavigation.reset()`);
     await twoFingers('touchStart');
     for (const dx of [-30, -65, -110, -170]) await twoFingers('touchMove', dx);
     await twoFingers('touchEnd');
-    assert.equal(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`), 1);
+    assert.deepEqual(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,'))`), [`focus-key,${swipeWindows[1].slice('window:'.length)}`]);
     assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), false);
     await evaluate(`window.__messages=[]`);
     await twoFingers('touchStart');
@@ -538,7 +538,6 @@ try {
     await twoFingers('touchMove', -130, 0, 50);
     await twoFingers('touchEnd');
     assert.equal(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`), 0);
-    await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
     await call('Emulation.setTouchEmulationEnabled', { enabled: false });
     pass('two-finger touch switches once; vertical scrolling and pinch do not switch');
 
@@ -594,16 +593,17 @@ try {
     await waitFor('shared frame decoded', () => evaluate(`(() => {const frame=document.querySelector('.app-stream.active iframe'),v=frame?.contentDocument?.querySelector('#stream');return v?.videoWidth>0 && v.readyState>=2 && frame.contentWindow.__ivncDisplayState?.protocol===1;})()`),60000);
     await evaluate(`window.__frame = document.querySelector('.app-stream iframe'); window.__frameUrl = window.__frame.src`);
     await evaluate(`(() => {
-        document.querySelector('.toolbar-gesture-action').click();
+        window.__ivncGestureNavigation.reset();
         const frame=window.__frame;
+        const tabs=[...document.querySelectorAll('.toolbar-list .taskbar-item')];
+        window.__sharedSwipeDirection=tabs.findIndex(t=>t.dataset.key.startsWith('app:'))>0 ? -1 : 1;
         const target=frame.contentDocument.querySelector('#overlayInput'),r=target.getBoundingClientRect();
-        target.dispatchEvent(new frame.contentWindow.WheelEvent('wheel',{deltaX:120,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));
+        target.dispatchEvent(new frame.contentWindow.WheelEvent('wheel',{deltaX:120*window.__sharedSwipeDirection,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));
     })()`);
     await waitFor('iframe swipe switches to desktop window', () => evaluate(`document.querySelector('.app-stream.active')===null`));
     const swipeCount = await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`);
     await evaluate(`(() => {const target=window.__frame.contentDocument.querySelector('#overlayInput'),r=target.getBoundingClientRect();target.dispatchEvent(new window.__frame.contentWindow.WheelEvent('wheel',{deltaX:200,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));})()`);
     assert.equal(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`), swipeCount);
-    await evaluate(`document.querySelector('.toolbar-gesture-action').click()`);
     await clickTab(`.toolbar-list [data-key="app:${real[1]}"]`);
     await waitFor('shared iframe restored after swipe', () => evaluate(`document.querySelector('.app-stream.active')?.querySelector('iframe')===window.__frame`));
     pass('swiping inside a live shared iframe switches the parent tab once and retains its view');

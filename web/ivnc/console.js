@@ -42,7 +42,7 @@ let lastOverviewAt = 0;
 
 const I18N = {
     en: {
-        displayTitle: 'Desktop resolution', displayHint: 'Changes affect every connection to the selected desktop. Fit window and original size affect only this browser.',
+        displayTitle: 'Desktop resolution', displayHint: 'Changes affect every connection to the selected desktop. Fit window and fill screen affect only this browser.',
         displayScope: 'Desktop', displayMain: 'Main desktop', displayWidth: 'Width', displayHeight: 'Height', displayApply: 'Apply to selected desktop',
         displayLocked: 'Locked by server configuration', displayBusy: 'Applying…', displaySaved: 'Desktop resolution applied and saved',
         displayDimensions: (s) => `Desktop ${s.desktop.width}×${s.desktop.height} · Video ${s.encoded.width}×${s.encoded.height}`,
@@ -252,7 +252,7 @@ const I18N = {
         // runs
     },
     zh: {
-        displayTitle: '桌面分辨率', displayHint: '修改会影响所选桌面的所有连接。适应窗口和原始大小仅影响当前浏览器。',
+        displayTitle: '桌面分辨率', displayHint: '修改会影响所选桌面的所有连接。适应窗口和铺满屏幕仅影响当前浏览器。',
         displayScope: '桌面', displayMain: '主桌面', displayWidth: '宽度', displayHeight: '高度', displayApply: '应用到所选桌面',
         displayLocked: '服务器配置已锁定', displayBusy: '正在应用…', displaySaved: '桌面分辨率已应用并保存',
         displayDimensions: (s) => `桌面 ${s.desktop.width}×${s.desktop.height} · 视频 ${s.encoded.width}×${s.encoded.height}`,

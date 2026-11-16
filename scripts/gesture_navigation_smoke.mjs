@@ -5,25 +5,94 @@ import assert from 'node:assert/strict';
 import { createGestureNavigation } from '../web/ivnc/gesture-navigation.mjs';
 
 function fixture() {
-    let time = 0, active = 'desktop';
+    let time = 0, active = 'desktop', available = () => true;
     const selected = [];
     const nav = createGestureNavigation({ now: () => time,
-        navigate: direction => selected.push({ direction, time }),
-        canHandle: origin => origin === active });
+        navigate: direction => { if (!available(direction)) return null; selected.push({ direction, time }); return true; },
+        canHandle: origin => origin === active, canNavigate: direction => available(direction) });
     const wheel = (at, dx, dy = 0, origin = active, extras = {}) => {
         time = at;
         return nav.wheel({deltaX:dx,deltaY:dy,deltaMode:0,...extras},origin);
     };
     const touch = (at, dx, dy = 0, blocked = false) => { time = at; return nav.touch(dx,dy,active,blocked); };
-    return { nav, wheel, touch, selected, directions: () => selected.map(s => s.direction), activate: value => { active = value; } };
+    return { nav, wheel, touch, selected, directions: () => selected.map(s => s.direction), activate: value => { active = value; }, available: fn => { available = fn; } };
 }
 
-test('enabled by default; explicitly disabling preserves normal scrolling', () => {
+test('always enabled; a modified gesture keeps scrolling after its modifier is released', () => {
     const f = fixture();
     assert.equal(f.nav.enabled(),true);
-    f.nav.setEnabled(false); assert.equal(f.wheel(0,120),false);
-    f.nav.setEnabled(true); f.wheel(1,120);
+    assert.equal(f.wheel(0,120,0,'desktop',{shiftKey:true}),false);
+    assert.equal(f.wheel(16,120),false);
+    f.wheel(300,120);
     assert.deepEqual(f.directions(),[1]);
+});
+
+test('an unavailable direction yields its first sample and remains yielded until the next gesture', () => {
+    const f = fixture(); f.available(direction => direction < 0);
+    assert.equal(f.wheel(0,10),false);
+    f.available(() => true);
+    assert.equal(f.wheel(16,120),false);
+    assert.equal(f.wheel(32,-120),false);
+    f.wheel(300,120); assert.deepEqual(f.directions(),[1]);
+});
+
+test('a single selected app preserves both horizontal and vertical scrolling', () => {
+    const f = fixture(); f.available(() => false);
+    assert.equal(f.wheel(0,1),false);
+    assert.equal(f.wheel(16,120),false);
+    assert.equal(f.wheel(300,0,1),false);
+    assert.deepEqual(f.directions(),[]);
+});
+
+test('reaching the final app cannot leak the original inertia into its content', () => {
+    const f = fixture(); f.wheel(0,120); f.available(() => false);
+    for(const [t,dx] of [[16,60],[32,20],[48,5],[64,1]]) assert.equal(f.wheel(t,dx),true);
+    assert.equal(f.wheel(400,120),false);
+    assert.deepEqual(f.directions(),[1]);
+});
+
+test('a new outward burst at the edge yields, while a later inward gesture switches', () => {
+    const f = fixture(); f.wheel(0,120); f.available(direction => direction < 0);
+    for(const [t,dx] of [[16,60],[32,20],[48,5],[64,1]]) f.wheel(t,dx);
+    assert.equal(f.wheel(160,55),true);
+    assert.equal(f.wheel(176,55),false);
+    assert.equal(f.wheel(192,30),false);
+    assert.equal(f.wheel(500,-120),true);
+    assert.deepEqual(f.directions(),[1,-1]);
+});
+
+test('pressing a modifier during consumed inertia cannot scroll the new app', () => {
+    const f = fixture(); f.wheel(0,120);
+    assert.equal(f.wheel(16,70,0,'desktop',{shiftKey:true}),true);
+    assert.equal(f.wheel(32,20),true);
+    assert.equal(f.wheel(400,120,0,'desktop',{shiftKey:true}),false);
+    assert.deepEqual(f.directions(),[1]);
+});
+
+test('modifying a reserved gesture cancels its switch without scrolling a partial gesture', () => {
+    const f = fixture(); assert.equal(f.wheel(0,40),true);
+    assert.equal(f.wheel(16,40,0,'desktop',{shiftKey:true}),true);
+    assert.equal(f.wheel(32,140),true);
+    assert.deepEqual(f.directions(),[]);
+    f.wheel(400,120); assert.deepEqual(f.directions(),[1]);
+});
+
+test('touch scrolling at an edge remains yielded until all fingers release', () => {
+    const f = fixture(); f.available(() => false);
+    assert.equal(f.touch(0,-10),false); f.available(() => true);
+    assert.equal(f.touch(1000,-120),false);
+    f.nav.endTouch(); assert.equal(f.touch(1001,-120),true);
+    assert.deepEqual(f.directions(),[1]);
+});
+
+test('a target removed after reservation cancels navigation without passing the partial gesture through', () => {
+    const f = fixture(); f.wheel(0,50); f.available(() => false);
+    // The toolbar may reject the final navigation request. Its gesture remains
+    // consumed; availability is checked afresh only for a new gesture.
+    assert.equal(f.wheel(16,60),true);
+    assert.equal(f.wheel(32,20),true);
+    assert.equal(f.wheel(400,120),false);
+    assert.deepEqual(f.directions(),[]);
 });
 
 test('horizontal distance is accumulated and a large early peak cannot switch twice', () => {
@@ -129,10 +198,10 @@ test('unrelated touch cleanup cannot clear wheel momentum suppression', () => {
     assert.deepEqual(f.directions(),[1]);
 });
 
-test('reset and toggle clear stale input, zero and invalid deltas cannot switch', () => {
+test('reset clears stale input, zero and invalid deltas cannot switch', () => {
     const f = fixture(); f.wheel(0,60); f.nav.reset(); f.wheel(16,60);
     f.wheel(32,NaN); f.wheel(48,Infinity); f.wheel(64,0);
     assert.deepEqual(f.directions(),[]);
-    f.nav.setEnabled(false); f.nav.setEnabled(true); f.wheel(80,60);
+    f.nav.reset(); f.wheel(80,60);
     assert.deepEqual(f.directions(),[]);
 });
