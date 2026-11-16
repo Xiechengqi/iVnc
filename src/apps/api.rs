@@ -951,6 +951,15 @@ fn app_json(
         "sort_order": app.sort_order,
     });
 
+    if app.id == datadir::BUILTIN_CHROME_ID {
+        // Lets the console render the selective clear dialog without
+        // hardcoding the built-in Chrome id.
+        obj["clear_categories"] = json!(datadir::ClearCategory::ALL
+            .iter()
+            .map(|category| category.as_str())
+            .collect::<Vec<_>>());
+    }
+
     if app.id == BUILTIN_MIAO_ID {
         obj["autostart"] = json!(state.proxy_panel.autostart(app.autostart));
         let proxy = state.proxy_panel.status();
@@ -1721,7 +1730,54 @@ async fn data_size(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
     )
 }
 
-async fn clear_data(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+#[derive(Debug, Default, serde::Deserialize)]
+struct ClearDataRequest {
+    /// Chrome only: selected data categories. Absent means the default set
+    /// (everything except extensions).
+    #[serde(default)]
+    categories: Option<Vec<String>>,
+    /// Chrome only: remove the whole profile and sidecar data.
+    #[serde(default)]
+    full_reset: bool,
+}
+
+fn clear_selection(body: Option<ClearDataRequest>) -> Result<datadir::ClearSelection, ApiError> {
+    let body = body.unwrap_or_default();
+    if body.full_reset {
+        return Ok(datadir::ClearSelection {
+            categories: Vec::new(),
+            full_reset: true,
+        });
+    }
+    let Some(names) = body.categories else {
+        return Ok(datadir::ClearSelection::default_chrome());
+    };
+    let mut categories = Vec::with_capacity(names.len());
+    for name in names {
+        categories.push(datadir::ClearCategory::parse(&name).ok_or_else(|| {
+            ApiError::new(
+                "invalid_clear_category",
+                format!("Unknown clear category: {name}"),
+            )
+        })?);
+    }
+    if categories.is_empty() {
+        return Err(ApiError::new(
+            "no_clear_category",
+            "At least one clear category is required",
+        ));
+    }
+    Ok(datadir::ClearSelection {
+        categories,
+        full_reset: false,
+    })
+}
+
+async fn clear_data(
+    State(state): State<Arc<AppsState>>,
+    Path(id): Path<String>,
+    body: Option<axum::Json<ClearDataRequest>>,
+) -> Response {
     if id == BUILTIN_MIAO_ID {
         return err_response(
             StatusCode::FORBIDDEN,
@@ -1744,10 +1800,27 @@ async fn clear_data(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
             ),
         );
     }
+    let selection = match clear_selection(body.map(|body| body.0)) {
+        Ok(selection) => selection,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
     // Stop app before clearing data
     let _ = state.stop_app_processes(&app).await;
-    match datadir::clear(&app) {
-        Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
+    let before = datadir::durable_size(&app);
+    match datadir::clear(&app, &selection) {
+        Ok(()) => {
+            let freed = before.saturating_sub(datadir::durable_size(&app));
+            json_response(
+                StatusCode::OK,
+                json!({
+                    "ok": true,
+                    "categories": selection.categories.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+                    "full_reset": selection.full_reset,
+                    "freed_bytes": freed,
+                    "freed_human": datadir::size_human(freed),
+                }),
+            )
+        }
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
@@ -1961,6 +2034,63 @@ mod tests {
         AppsState::for_test(proxy_ip, autostart_override)
     }
 
+    #[test]
+    fn clear_selection_defaults_to_everything_except_extensions() {
+        let selection = clear_selection(None).unwrap();
+        assert!(!selection.full_reset);
+        assert_eq!(
+            selection.categories.len(),
+            datadir::ClearCategory::ALL.len() - 2
+        );
+        assert!(!selection
+            .categories
+            .contains(&datadir::ClearCategory::Extensions));
+        assert!(!selection
+            .categories
+            .contains(&datadir::ClearCategory::SiteStorage));
+
+        let selection = clear_selection(Some(ClearDataRequest {
+            categories: None,
+            full_reset: true,
+        }))
+        .unwrap();
+        assert!(selection.full_reset);
+
+        let selection = clear_selection(Some(ClearDataRequest {
+            categories: Some(vec!["cache".into(), "site_storage".into()]),
+            full_reset: false,
+        }))
+        .unwrap();
+        assert_eq!(selection.categories.len(), 2);
+        assert!(selection
+            .categories
+            .contains(&datadir::ClearCategory::SiteStorage));
+
+        for body in [
+            ClearDataRequest {
+                categories: Some(vec!["cache".into(), "typo".into()]),
+                full_reset: false,
+            },
+            ClearDataRequest {
+                categories: Some(vec![]),
+                full_reset: false,
+            },
+        ] {
+            assert!(clear_selection(Some(body)).is_err());
+        }
+    }
+
+    #[test]
+    fn chrome_json_advertises_clear_categories() {
+        let state = state(None, None);
+        ensure_builtin_chrome(&state.store, "google-chrome").unwrap();
+        let app = state.store.get("builtin-chrome").unwrap();
+        let json = app_json(&state, &app, "stopped", None, 0);
+        let categories = json["clear_categories"].as_array().unwrap();
+        assert_eq!(categories.len(), datadir::ClearCategory::ALL.len());
+        assert!(categories.iter().any(|c| c == "extensions"));
+    }
+
     #[tokio::test]
     async fn chrome_autostart_edits_survive_registration_and_command_refresh() {
         let state = state(None, None);
@@ -2058,7 +2188,7 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            clear_data(State(state.clone()), id()).await.status(),
+            clear_data(State(state.clone()), id(), None).await.status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(

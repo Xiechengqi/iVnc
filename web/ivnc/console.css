@@ -960,6 +960,80 @@ tr:hover { background-color: #f8f9fa; }
   overflow-y: auto;
 }
 
+/* Selective clear-data dialog */
+.clear-modal {
+  width: 520px;
+  max-width: min(95vw, 520px);
+  padding: 24px;
+  border-radius: 12px;
+}
+.clear-desc {
+  margin: 0 0 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.clear-categories {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.clear-category {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #d1d8e0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.clear-category:hover,
+.clear-category:focus-within {
+  background: #f8fafc;
+  border-color: var(--primary);
+}
+.clear-category input {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.clear-category > span:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.clear-category input:checked + span .clear-category-name { color: var(--primary); }
+.clear-category-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.clear-category-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.clear-modal .modal-actions .btn {
+  min-width: 76px;
+  height: 34px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.clear-modal .btn-cancel.danger.armed {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+.clear-modal .btn-cancel.danger.armed:hover { opacity: 0.9; }
+
 @media (max-width: 760px) {
   .console-topbar { padding: 8px; gap: 8px; }
   .nav-item { padding: 0 10px; }
@@ -973,6 +1047,12 @@ tr:hover { background-color: #f8f9fa; }
     max-width: 95vw;
     padding: 20px;
   }
+  .clear-modal {
+    width: auto;
+    max-width: 95vw;
+    padding: 20px;
+  }
+  .clear-modal .modal-actions { flex-wrap: wrap; }
 
   .split-row {
     grid-template-columns: 1fr;

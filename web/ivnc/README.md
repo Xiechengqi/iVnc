@@ -23,6 +23,8 @@ The browser signs in at `/auth/login` and resumes with an HttpOnly session cooki
 
 The toolbar gear opens Settings. Password changes, restart/upgrade and sign out are in its top-right action group. When console management is disabled, the same entry opens an account/service-only settings page without loading console management APIs. See [Settings](../../docs/SETTINGS.md).
 
+The console app table's clear-data action opens a selective category dialog for the built-in Chrome app (extensions kept by default); other apps keep the original confirmation flow. See [selective data clearing](../../docs/CLEAR_DATA.md).
+
 ## 1. Window Messaging API (Dashboard → Client)
 
 The client listens for messages sent via `window.postMessage`. To ensure security, the client only accepts messages from the same origin (`event.origin === window.location.origin`).

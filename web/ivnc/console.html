@@ -446,6 +446,23 @@
         </div>
     </div>
 
+    <!-- 模态框：清理数据 -->
+    <div class="modal-bg" id="clear-modal">
+        <div class="modal clear-modal">
+            <div class="modal-header">
+                <h2 id="clear-title">清理数据</h2>
+                <button class="modal-close" id="clear-close" type="button" aria-label="关闭">×</button>
+            </div>
+            <p class="clear-desc" id="clear-desc"></p>
+            <div class="clear-categories" id="clear-categories"></div>
+            <div class="modal-actions">
+                <button class="btn btn-cancel danger" id="clear-reset-btn" type="button">完全重置</button>
+                <button class="btn btn-cancel" id="clear-cancel-btn" type="button">取消</button>
+                <button class="btn btn-save" id="clear-confirm-btn" type="button">清理所选</button>
+            </div>
+        </div>
+    </div>
+
     <script type="module" src="./console.js"></script>
 </body>
 </html>

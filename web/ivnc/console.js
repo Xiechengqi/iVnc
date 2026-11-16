@@ -202,7 +202,27 @@ const I18N = {
         deleteFailed: 'Delete failed',
         confirmClear: (name) => `Clear cached data for "${name}"?\nThis removes cookies, local storage, and cache.`,
         cleared: 'Cleared',
+        clearedFreed: (size) => `Cleared, freed ${size}`,
         clearFailed: 'Clear failed',
+        clearTitle: (name) => `Clear data: ${name}`,
+        clearDesc: 'Choose what to clear; unchecked data is kept.',
+        clearCatCache: 'Cached data',
+        clearCatCacheDesc: 'Pages, images, scripts and GPU caches; sign-ins are kept.',
+        clearCatCookies: 'Cookies & site identifiers',
+        clearCatCookiesDesc: 'Signs you out of websites. Extension logins and local storage are kept.',
+        clearCatHistory: 'Browsing history',
+        clearCatHistoryDesc: 'History, downloads and site icons.',
+        clearCatPasswords: 'Passwords & autofill',
+        clearCatPasswordsDesc: 'Saved passwords, forms and payment info.',
+        clearCatBookmarks: 'Bookmarks',
+        clearCatBookmarksDesc: 'Bookmark bar and other bookmarks.',
+        clearCatExtensions: 'Extensions & their data',
+        clearCatExtensionsDesc: 'Kept by default; when checked, installed extensions are removed.',
+        clearCatSiteStorage: 'Site local storage',
+        clearCatSiteStorageDesc: 'Off by default: clears localStorage/sessionStorage. This also deletes extension localStorage and cannot be undone.',
+        clearConfirm: 'Clear selected',
+        clearReset: 'Full reset',
+        clearResetArmed: 'Click again to confirm reset',
         logsFor: (name) => `Logs: ${name}`,
         logLoadFailed: 'Load failed: ',
         backgroundOption: 'Background App',
@@ -412,7 +432,27 @@ const I18N = {
         deleteFailed: '删除失败',
         confirmClear: (name) => `确认清理 "${name}" 的缓存数据？\n将清除所有Cookie、LocalStorage和缓存。`,
         cleared: '已清理',
+        clearedFreed: (size) => `已清理，释放 ${size}`,
         clearFailed: '清理失败',
+        clearTitle: (name) => `清理数据：${name}`,
+        clearDesc: '勾选要清理的数据类型；未勾选的类型会保留。',
+        clearCatCache: '缓存数据',
+        clearCatCacheDesc: '网页、图片、脚本与 GPU 缓存，不影响登录状态。',
+        clearCatCookies: 'Cookie 与网站标识',
+        clearCatCookiesDesc: '退出已登录的网站；扩展的本地存储与登录状态保留。',
+        clearCatHistory: '浏览历史',
+        clearCatHistoryDesc: '历史记录、下载记录与网站图标。',
+        clearCatPasswords: '密码与自动填充',
+        clearCatPasswordsDesc: '已保存的密码、表单与银行卡信息。',
+        clearCatBookmarks: '书签',
+        clearCatBookmarksDesc: '书签栏与其他书签。',
+        clearCatExtensions: '扩展插件及其数据',
+        clearCatExtensionsDesc: '默认保留；勾选后已安装的扩展将被移除。',
+        clearCatSiteStorage: '网站本地存储',
+        clearCatSiteStorageDesc: '默认不勾选：清理 localStorage/sessionStorage。会同时删除扩展的 localStorage，无法恢复。',
+        clearConfirm: '清理所选',
+        clearReset: '完全重置',
+        clearResetArmed: '再次点击确认重置',
         logsFor: (name) => `日志: ${name}`,
         logLoadFailed: '加载失败: ',
         backgroundOption: '后台应用',
@@ -885,7 +925,7 @@ async function load() {
 
             const editBtn = createBtn(t('edit'), 'btn-edit btn-sm', () => showEdit(a.id));
             const logBtn = createBtn(t('log'), 'btn-log btn-sm', () => showLogs(a.id, a.name));
-            const clearBtn = createBtn(t('clear'), 'btn-clear btn-sm', () => clearData(a.id, a.name));
+            const clearBtn = createBtn(t('clear'), 'btn-clear btn-sm', () => clearData(a));
             const delBtn = createBtn(t('delete'), 'btn-delete btn-sm', () => del(a.id, a.name));
 
             actionsCell.append(editBtn);
@@ -2046,10 +2086,17 @@ async function del(id, name) {
     }
 }
 
-async function clearData(id, name) {
-    if (!confirm(t('confirmClear')(name))) return;
+const CLEAR_DEFAULT_UNCHECKED = new Set(['extensions', 'site_storage']);
+let clearTarget = null;
+
+async function clearData(app) {
+    if (Array.isArray(app.clear_categories) && app.clear_categories.length) {
+        openClearDialog(app);
+        return;
+    }
+    if (!confirm(t('confirmClear')(app.name))) return;
     try {
-        const r = await fetch(`${API}/${id}/clear-data`, { method: 'POST' });
+        const r = await fetch(`${API}/${app.id}/clear-data`, { method: 'POST' });
         const d = await r.json();
         if (d.error) {
             toast(serverErrorText(d), 'err');
@@ -2061,6 +2108,101 @@ async function clearData(id, name) {
         toast(t('clearFailed'), 'err');
     }
 }
+
+function openClearDialog(app) {
+    const modal = document.getElementById('clear-modal');
+    const session = dialogs.open(modal, () => { clearTarget = null; });
+    if (!session) return;
+    clearTarget = app;
+    document.getElementById('clear-title').textContent = t('clearTitle')(app.name);
+    document.getElementById('clear-desc').textContent = t('clearDesc');
+    const list = document.getElementById('clear-categories');
+    list.innerHTML = '';
+    for (const id of app.clear_categories) {
+        const label = document.createElement('label');
+        label.className = 'clear-category';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.value = id;
+        input.checked = !CLEAR_DEFAULT_UNCHECKED.has(id);
+        const textWrap = document.createElement('span');
+        const name = document.createElement('span');
+        name.className = 'clear-category-name';
+        const key = id.charAt(0).toUpperCase() + id.slice(1);
+        name.textContent = t(`clearCat${key}`);
+        const desc = document.createElement('span');
+        desc.className = 'clear-category-desc';
+        desc.textContent = t(`clearCatDesc${key}`);
+        textWrap.append(name, desc);
+        label.append(input, textWrap);
+        list.append(label);
+    }
+    const resetBtn = document.getElementById('clear-reset-btn');
+    resetBtn.classList.remove('armed');
+    resetBtn.textContent = t('clearReset');
+    const confirmBtn = document.getElementById('clear-confirm-btn');
+    confirmBtn.textContent = t('clearConfirm');
+    updateClearConfirm();
+}
+
+function updateClearConfirm() {
+    const anyChecked = !!document.querySelector('#clear-categories input:checked');
+    document.getElementById('clear-confirm-btn').disabled = !anyChecked;
+}
+
+async function submitClear(fullReset) {
+    const app = clearTarget;
+    const session = dialogs.current;
+    if (!app || !session) return;
+    const categories = [...document.querySelectorAll('#clear-categories input:checked')].map(i => i.value);
+    if (!fullReset && !categories.length) return;
+    const confirmBtn = document.getElementById('clear-confirm-btn');
+    const resetBtn = document.getElementById('clear-reset-btn');
+    confirmBtn.disabled = true;
+    resetBtn.disabled = true;
+    session.setLocked(true);
+    try {
+        const r = await fetch(`${API}/${app.id}/clear-data`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(fullReset ? { full_reset: true } : { categories }),
+        });
+        const d = await r.json();
+        if (d.error) {
+            toast(serverErrorText(d), 'err');
+            return;
+        }
+        session.setLocked(false);
+        dialogs.close();
+        toast(d.freed_human ? t('clearedFreed')(d.freed_human) : t('cleared'), 'ok');
+        load();
+    } catch (e) {
+        toast(t('clearFailed'), 'err');
+    } finally {
+        if (session.isCurrent()) {
+            session.setLocked(false);
+            confirmBtn.disabled = false;
+            resetBtn.disabled = false;
+        }
+    }
+}
+
+function initClearDialog() {
+    document.getElementById('clear-categories').addEventListener('change', updateClearConfirm);
+    document.getElementById('clear-cancel-btn').addEventListener('click', () => dialogs.close());
+    document.getElementById('clear-close').addEventListener('click', () => dialogs.close());
+    document.getElementById('clear-confirm-btn').addEventListener('click', () => submitClear(false));
+    const resetBtn = document.getElementById('clear-reset-btn');
+    resetBtn.addEventListener('click', () => {
+        if (!resetBtn.classList.contains('armed')) {
+            resetBtn.classList.add('armed');
+            resetBtn.textContent = t('clearResetArmed');
+            return;
+        }
+        submitClear(true);
+    });
+}
+initClearDialog();
 
 function toast(msg, type = 'info') {
     const tEl = document.getElementById('toast');
