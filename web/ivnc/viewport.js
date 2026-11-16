@@ -7,7 +7,7 @@ export function normalizeDisplayMode(value) {
 // One work area for the desktop, input surface and embedded application views.
 export function createViewport({ root, container, video, overlay, toolbar, isPinned, isToolbarReserved = isPinned, embedded, onChange }) {
     let disposed = false, frame = 0, mode = 'fit', previousSize = '', pixelRatioQuery;
-    let occlusion = { top: 0, inset: 0 };
+    let occlusion = { top: 0, inset: 0, left: 0, right: 0 };
     const set = (element, property, value) => {
         if (element.style[property] !== value) element.style[property] = value;
     };
@@ -23,9 +23,11 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
             occlusion = {
                 top: Math.max(0, visual.offsetTop),
                 inset: Math.max(0, window.innerHeight - visual.height - visual.offsetTop),
+                left: Math.max(0, visual.offsetLeft || 0),
+                right: Math.max(0, window.innerWidth - (visual.width || window.innerWidth) - (visual.offsetLeft || 0)),
             };
         } else if (!visual) {
-            occlusion = { top: 0, inset: 0 };
+            occlusion = { top: 0, inset: 0, left: 0, right: 0 };
         }
         // Pinch zoom alone cannot identify keyboard occlusion. Keep only the
         // known occluded edges, not a cached work-area height: the layout
@@ -33,9 +35,16 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
         const top = Math.min(occlusion.top, window.innerHeight);
         const inset = Math.min(occlusion.inset, window.innerHeight - top);
         const height = window.innerHeight - top - inset;
+        const visibleLeft = Math.min(occlusion.left, window.innerWidth);
+        const right = Math.min(occlusion.right, window.innerWidth - visibleLeft);
+        const visibleWidth = window.innerWidth - visibleLeft - right;
         root.style.setProperty('--ivnc-visible-height', `${height}px`);
         root.style.setProperty('--ivnc-visible-top', `${top}px`);
+        root.style.setProperty('--ivnc-visible-width', `${visibleWidth}px`);
+        root.style.setProperty('--ivnc-visible-left', `${visibleLeft}px`);
         toolbar.style.setProperty('--ivnc-keyboard-inset', `${inset}px`);
+        toolbar.style.setProperty('--ivnc-visible-width', `${visibleWidth}px`);
+        toolbar.style.setProperty('--ivnc-visible-left', `${visibleLeft}px`);
         const reservesToolbar = !embedded && isToolbarReserved() && toolbar.isConnected
             && (!fullscreen || fullscreen.contains(toolbar));
         const reserved = reservesToolbar ? Math.min(height, toolbar.getBoundingClientRect().height) : 0;
@@ -43,16 +52,30 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
         const width = container.clientWidth, areaHeight = container.clientHeight;
         let left = 0, videoTop = 0, videoWidth = width, videoHeight = areaHeight;
         const frameWidth = video.videoWidth || Math.max(1, width), frameHeight = video.videoHeight || Math.max(1, areaHeight);
+        const scale = Math.min(width / frameWidth, areaHeight / frameHeight);
+        const sourceWidth = frameWidth * scale, sourceHeight = frameHeight * scale;
         if (mode === 'fit') {
-            const scale = Math.min(width / frameWidth, areaHeight / frameHeight);
-            videoWidth = frameWidth * scale; videoHeight = frameHeight * scale;
+            videoWidth = sourceWidth; videoHeight = sourceHeight;
             left = (width - videoWidth) / 2; videoTop = (areaHeight - videoHeight) / 2;
         }
         for (const element of [video, overlay]) {
             set(element, 'left', `${left}px`); set(element, 'top', `${videoTop}px`);
-            set(element, 'width', `${videoWidth}px`); set(element, 'height', `${videoHeight}px`);
         }
+        set(overlay, 'width', `${videoWidth}px`); set(overlay, 'height', `${videoHeight}px`);
+        set(video, 'width', `${sourceWidth}px`); set(video, 'height', `${sourceHeight}px`);
         set(video, 'objectFit', mode === 'fill' ? 'fill' : 'contain');
+        // Safari's native MediaStream layer can preserve the source aspect
+        // despite object-fit:fill, cropping a wide stream on a portrait iPad.
+        // Keep the media box proportional, then stretch the whole layer. Its
+        // bounding rect still matches the overlay, including input/caret math.
+        // The untransformed box also fits inside the area, so it adds no scroll.
+        if (mode === 'fill' && sourceWidth > 0 && sourceHeight > 0) {
+            set(video, 'transformOrigin', '0 0');
+            set(video, 'transform', `scale(${width / sourceWidth}, ${areaHeight / sourceHeight})`);
+        } else {
+            set(video, 'transform', 'none');
+            set(video, 'transformOrigin', '');
+        }
         // Both modes show the complete picture. Focus/legacy scroll offsets
         // must never move its bottom edge underneath the toolbar.
         container.scrollLeft = container.scrollTop = 0;
@@ -111,7 +134,11 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
             root.style.removeProperty('--ivnc-toolbar-height');
             root.style.removeProperty('--ivnc-visible-height');
             root.style.removeProperty('--ivnc-visible-top');
+            root.style.removeProperty('--ivnc-visible-width');
+            root.style.removeProperty('--ivnc-visible-left');
             toolbar.style.removeProperty('--ivnc-keyboard-inset');
+            toolbar.style.removeProperty('--ivnc-visible-width');
+            toolbar.style.removeProperty('--ivnc-visible-left');
         },
     };
 }

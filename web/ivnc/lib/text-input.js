@@ -17,8 +17,6 @@ export class TextInput {
         this.composing = false;
         this.generation = 0;
         this.remote = null;
-        this.lastTap = null;
-        this.dismissed = false;
         this.listeners = new AbortController();
         const el = this.element = document.createElement('textarea');
         el.className = 'ivnc-text-input';
@@ -38,8 +36,13 @@ export class TextInput {
         listen('compositionstart', this.compositionStart);
         listen('compositionupdate', e => { if (this.composing && this.available()) this.onComposition(true, e.data || ''); });
         listen('compositionend', this.compositionEnd);
-        listen('focus', () => { this.dismissed = false; this.onChange(); });
-        listen('blur', () => { this.cancel(); this.onChange(); });
+        listen('focus', () => this.onChange());
+        listen('blur', () => {
+            // A mobile editing session ends with focus. Only the keyboard
+            // button may start another one; an ordinary picture tap may not.
+            if (usesTouchKeyboard()) this.enabled = false;
+            this.cancel(); this.onChange();
+        });
         window.visualViewport?.addEventListener('resize', () => this.viewportChanged(), { signal: this.listeners.signal });
         window.visualViewport?.addEventListener('scroll', () => this.position(), { signal: this.listeners.signal });
         document.addEventListener('visibilitychange', () => { if (document.hidden) this.hide(false); }, { signal: this.listeners.signal });
@@ -96,7 +99,6 @@ export class TextInput {
     show(point) {
         if (!this.canInput()) return false;
         this.enabled = true;
-        this.dismissed = false;
         if (!this.focused()) {
             this.focusHeight = window.visualViewport?.height || innerHeight;
             this.focusWidth = innerWidth;
@@ -110,11 +112,9 @@ export class TextInput {
         return this.focused();
     }
     hide(manual = true) {
-        this.dismissed = manual;
         // Desktop mode is a user preference. Suspending an inactive view or
         // cancelling a composition must not turn that preference off.
         if (manual || usesTouchKeyboard()) this.enabled = false;
-        this.lastTap = null;
         this.cancel(); // Invalidate late composition events before blur.
         this.element.blur();
         this.onChange();
@@ -135,8 +135,8 @@ export class TextInput {
     }
     touch(point) {
         this.clearTail();
-        this.lastTap = { clientX: point.clientX, clientY: point.clientY, time: performance.now() };
-        if (this.enabled || (usesTouchKeyboard() && this.remote?.enabled && !this.dismissed)) this.show(point);
+        this.position(point);
+        if (!usesTouchKeyboard() && this.enabled) this.show(point);
     }
     remoteState(state) {
         const previous = this.remote;
@@ -149,12 +149,8 @@ export class TextInput {
         const purpose = this.remote?.purpose;
         this.element.inputMode = ({ 2: 'decimal', 3: 'numeric', 4: 'tel', 5: 'url', 6: 'email', 9: 'numeric' })[purpose] || 'text';
         this.position();
-        // No surrounding text or password is copied into this proxy.
-        if (!this.remote?.enabled) return;
-        if (usesTouchKeyboard() && !this.dismissed && this.lastTap
-            && performance.now() - this.lastTap.time < 500 && navigator.userActivation?.isActive) {
-            this.show(this.lastTap);
-        }
+        // Metadata only describes the remote editor; it must never open the
+        // mobile keyboard. No surrounding text or password is copied here.
     }
     keydown(event) {
         if (!this.owns(event.target)) return false;

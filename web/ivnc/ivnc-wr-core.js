@@ -252,7 +252,8 @@ function InitUI() {
 		height: calc(var(--ivnc-visible-height, 100dvh) - var(--ivnc-toolbar-height, 0px));
 		position: relative;
 		top: var(--ivnc-visible-top, 0px);
-		width: 100%;
+		left: var(--ivnc-visible-left, 0px);
+		width: min(100%, var(--ivnc-visible-width, 100%));
 	}
 
 	.video-container {

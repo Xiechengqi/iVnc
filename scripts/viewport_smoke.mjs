@@ -221,7 +221,7 @@ try {
     await message({type:'setDisplayMode',value:'native'}); // Legacy requests migrate to fill.
     await waitFor('complete stretched picture without scrolling',()=>local.evaluate(`(() => {
         const c=document.querySelector('.video-container'),v=document.getElementById('stream'),r=v.getBoundingClientRect();
-        return v.style.objectFit==='fill' && r.width===c.clientWidth && r.height===c.clientHeight && c.scrollHeight===c.clientHeight && c.scrollWidth===c.clientWidth;
+        return v.style.objectFit==='fill' && Math.abs(r.width-c.clientWidth)<0.1 && Math.abs(r.height-c.clientHeight)<0.1 && c.scrollHeight===c.clientHeight && c.scrollWidth===c.clientWidth;
     })()`));
     b=await local.evaluate(bounds);
     assert(matches(b.video,b.input)); assert(matches(b.video,b.area)); await clickBottom(local,false); await assertStable(initial,native);

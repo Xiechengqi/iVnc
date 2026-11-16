@@ -1750,8 +1750,9 @@ export class Input {
         if (!document.pointerLockElement && !this._insideContent(event.clientX, event.clientY) && !this.buttonMask) return;
         if (event.type === 'mousedown' || event.type === 'pointerdown') {
             if (this.isComposing) this.textInput.cancel();
-            if (this._imeModeActive) {
-                this.textInput.show(event);
+            if (this._imeModeActive && (!usesTouchKeyboard() || this.textInput.focused())) {
+                if (usesTouchKeyboard()) this.textInput.position(event);
+                else this.textInput.show(event);
                 // The readonly picture overlay must not take focus back after
                 // the synchronous IME focus. Remote mouse events still flow.
                 event.preventDefault();

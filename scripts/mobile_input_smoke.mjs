@@ -9,6 +9,8 @@ import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 const root=path.resolve(new URL('..',import.meta.url).pathname);
 const engines=createRequire(new URL('../web/ivnc/package.json',import.meta.url))('playwright');
+const deviceName=process.env.MOBILE_DEVICE||'iPhone 13',device=engines.devices[deviceName];
+assert(device,`Unknown Playwright mobile device: ${deviceName}`);
 const work=mkdtempSync(path.join(tmpdir(),'ivnc-mobile-e2e-'));
 const electron=process.env.ELECTRON_BIN;
 assert(electron,'Set ELECTRON_BIN to an installed Electron 38+ runtime');
@@ -32,10 +34,10 @@ try{
         await api(`/api/apps/${id}/start`,'POST');
         await wait('Electron editor',()=>control('!!document.getElementById("text")'));
         for(const name of (process.env.BROWSERS||'chromium,webkit').split(',')){
-            const label=`${name}/${shared?'shared':'desktop'}`;
+            const label=`${name}/${deviceName}/${shared?'shared':'desktop'}`;
             const browser=await engines[name].launch({headless:true,...(name==='chromium'&&process.env.CHROME_BIN?{executablePath:process.env.CHROME_BIN}:{})});
             try{
-                const page=await browser.newPage({...engines.devices['iPhone 13'],viewport:{width:390,height:844}}),errors=[];
+                const page=await browser.newPage({...device,viewport:process.env.MOBILE_DEVICE?device.viewport:{width:390,height:844}}),errors=[];
                 page.on('pageerror',e=>errors.push(e.message));
                 await page.goto(base);
                 await page.waitForFunction(()=>window.__ivncInput?.inputAttached,{timeout:60000});
@@ -62,6 +64,20 @@ try{
                 assert.equal(metadata.protocol,1);assert(metadata.focus);assert(!('surrounding_text' in metadata));
                 pass(`${label}: editor state reaches the mobile viewer without surrounding text`);
                 assert.equal(await page.locator('#keyboard-toggle').getAttribute('aria-pressed'),'false');
+                if(await view.evaluate(()=>document.querySelector('video')?.videoWidth>0)) {
+                    const point=await view.evaluate(()=>{
+                        const input=window.__ivncInput;input._windowMath();
+                        const m=input.m,overlay=input.element.getBoundingClientRect();
+                        return {x:m.elementClientX-overlay.left+m.mouseOffsetX+120/m.frameW*m.contentW,
+                            y:m.elementClientY-overlay.top+m.mouseOffsetY+100/m.frameH*m.contentH};
+                    });
+                    await view.locator('#overlayInput').tap({position:point});
+                    await control('document.getElementById("text").focus();true');
+                }
+                await view.waitForFunction(()=>window.__ivncInput.textInput.remote?.enabled===true);
+                assert.equal(await view.evaluate(()=>window.__ivncInput.textInput.focused()),false);
+                assert.equal(await view.evaluate(()=>window.__ivncInput.textInput.enabled),false);
+                pass(`${label}: real editor state keeps mobile input closed before the keyboard button`);
                 await page.locator('#keyboard-toggle').tap();
                 assert(await view.evaluate(()=>window.__ivncInput.textInput.focused()));
                 await page.keyboard.insertText('Mobile-中文🙂');

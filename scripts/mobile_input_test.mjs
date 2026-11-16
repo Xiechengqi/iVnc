@@ -131,11 +131,67 @@ const cases = [
         assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
         assert((await page.evaluate(()=>fixture.messages)).some(m=>m.startsWith('m,')));
     }],
-    ['known editor taps open the keyboard and select the reported input mode', async page => {
+    ['known editor taps only move the remote cursor; the button opens the reported keyboard layout', async page => {
         await page.evaluate(()=>fixture.input.setTextInputState({protocol:1,enabled:true,focus:'a',purpose:6}));
         await page.touchscreen.tap(190,380);
-        assert(await page.evaluate(()=>fixture.input.textInput.focused()));
+        assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
+        assert.deepEqual(await page.evaluate(()=>fixture.focusTrace),[]);
+        await open(page);
         assert.equal(await page.evaluate(()=>fixture.input._imeTextarea.inputMode),'email');
+    }],
+    ['late editor metadata after a tap never opens the keyboard, even with user activation', async page => {
+        await page.touchscreen.tap(190,380);
+        await page.evaluate(()=>{
+            if (!navigator.userActivation.isActive) throw Error('The tap must still have user activation');
+            fixture.input.setTextInputState({protocol:1,enabled:true,focus:'a',purpose:3});
+        });
+        assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
+        assert.deepEqual(await page.evaluate(()=>fixture.focusTrace),[]);
+        await open(page);
+        assert.equal(await page.evaluate(()=>fixture.input._imeTextarea.inputMode),'numeric');
+    }],
+    ['blurred or manually dismissed mobile input stays closed through touch, mouse and metadata', async page => {
+        for (const dismiss of ['blur','button']) {
+            await open(page);
+            if(dismiss==='blur') await page.evaluate(()=>fixture.input._imeTextarea.blur());
+            else await page.locator('#keyboard-toggle').tap();
+            assert.equal(await page.evaluate(()=>fixture.input.textInput.enabled),false);
+            await page.touchscreen.tap(190,380);
+            await page.mouse.click(190,380);
+            await page.evaluate(()=>fixture.input.setTextInputState({protocol:1,enabled:true,focus:'a'}));
+            assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
+        }
+    }],
+    ['app reactivation, reconnect and refresh require another keyboard-button click', async page => {
+        await open(page);
+        await page.evaluate(()=>{fixture.input.setViewActive(false);fixture.input.setViewActive(true)});
+        await page.touchscreen.tap(190,380);
+        assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
+        await open(page);
+        await page.evaluate(()=>{fixture.input.detach();fixture.input.attach();fixture.input.setTextInputState({protocol:1,enabled:true,focus:'a'})});
+        assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
+        await open(page);
+        await page.reload();await page.waitForFunction(()=>!!window.fixture);
+        await page.touchscreen.tap(190,380);
+        assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
+    }],
+    ['iPad desktop identity with a mouse still requires the manual keyboard button', async page => {
+        await page.evaluate(()=>{
+            Object.defineProperties(navigator,{
+                userAgent:{configurable:true,value:'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15'},
+                platform:{configurable:true,value:'MacIntel'},maxTouchPoints:{configurable:true,value:5},
+            });
+            fixture.input.setTextInputState({protocol:1,enabled:true,focus:'ipad',purpose:3});
+        });
+        await page.touchscreen.tap(190,380);await page.mouse.click(190,380);
+        assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
+        await open(page);
+        await page.touchscreen.tap(190,380);await page.mouse.click(190,380);
+        assert(await page.evaluate(()=>fixture.input.textInput.focused()));
+        assert.equal(await page.evaluate(()=>fixture.input._imeTextarea.inputMode),'numeric');
+        await page.locator('#keyboard-toggle').tap();
+        await page.touchscreen.tap(190,380);await page.mouse.click(190,380);
+        assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
     }],
     ['application switch invalidates composition and late input', async page => {
         await open(page); await page.evaluate(()=>{
@@ -167,7 +223,6 @@ const cases = [
     }],
     ['inactive views cannot steal focus from a late remote editor update', async page => {
         await page.evaluate(()=>{
-            fixture.input.textInput.lastTap={clientX:100,clientY:200,time:performance.now()};
             fixture.input.setViewActive(false);
             fixture.input.setTextInputState({protocol:1,enabled:true,focus:'a'});
             fixture.input.toggleImeMode(true);
@@ -177,8 +232,11 @@ const cases = [
     ['embedded stream keyboard uses the original toolbar gesture', async page => {
         await page.evaluate(()=>fixture.streams.activate('a'));
         await page.waitForFunction(()=>fixture.streams.frames()[0]?.contentWindow?.fixture?.input._viewActive);
-        await page.locator('#keyboard-toggle').tap();
         const child=page.frames().find(f=>f.url().includes('/__mobile-frame/'));
+        await child.evaluate(()=>fixture.input.setTextInputState({protocol:1,enabled:true,focus:'a',purpose:6}));
+        await child.locator('#overlayInput').tap();
+        assert.equal(await child.evaluate(()=>fixture.input.textInput.focused()),false);
+        await page.locator('#keyboard-toggle').tap();
         assert(await child.evaluate(()=>fixture.input.textInput.focused()));
         assert.deepEqual(await child.evaluate(()=>fixture.focusTrace),[true]);
         await page.keyboard.insertText('stream🙂');

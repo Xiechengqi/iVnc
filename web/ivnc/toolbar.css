@@ -1,5 +1,7 @@
 .taskbar.ivnc-toolbar {
     bottom: var(--ivnc-keyboard-inset, 0px);
+    left: var(--ivnc-visible-left, 0px);
+    width: min(100%, var(--ivnc-visible-width, 100%));
     height: calc(36px + env(safe-area-inset-bottom, 0px));
     padding-bottom: env(safe-area-inset-bottom, 0px);
     display: grid;

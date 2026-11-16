@@ -13,12 +13,12 @@ const root = fileURLToPath(new URL('../web/ivnc/', import.meta.url));
 // An independent inset-only fixture can hide stale --ivnc-visible-height bugs.
 const desktopStyles = readFileSync(path.join(root, 'ivnc-wr-core.js'), 'utf8')
     .match(/function InitUI\(\) \{[\s\S]*?style\.textContent = `([\s\S]*?)`;/)[1];
-const fixture = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+const fixture = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/toolbar.css">
 <style>
 ${desktopStyles}
-#toolbar{position:fixed;bottom:var(--ivnc-keyboard-inset,0px);height:36px;width:100%;background:#333}
+#toolbar{height:36px;background:#333}
 </style>
-<div id="app"><div class="video-container"><video id="stream"></video><div id="overlayInput"></div></div></div><div id="toolbar" class="taskbar pinned"></div>
+<div id="app"><div class="video-container"><video id="stream"></video><div id="overlayInput"></div></div></div><div id="toolbar" class="taskbar ivnc-toolbar pinned"></div>
 <script type="module">
 import { createViewport } from '/viewport.js';
 import { createToolbarVisibility } from '/toolbar-visibility.js';
@@ -48,6 +48,9 @@ const bounds = page => page.evaluate(() => fixture.bounds());
 const nextLayout = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 const hiddenToolbar = page => page.waitForFunction(()=>!fixture.visibility.isReserved());
 const shownToolbar = page => page.waitForFunction(()=>new DOMMatrixReadOnly(getComputedStyle(document.querySelector('#toolbar')).transform).m42===0);
+const sameRect = (actual, expected) => {
+    for (const key of Object.keys(expected)) assert(Math.abs(actual[key]-expected[key])<0.1, `${key}: ${actual[key]} vs ${expected[key]}`);
+};
 const cases = [
     ['proportional fit, measured toolbar and portrait reflow', async page => {
         let b=await bounds(page); assert.equal(b.area.height,764); assert.equal(b.video.width,1280); assert.equal(b.video.height,720); assert.equal(b.video.top,22); assert.deepEqual(b.video,b.input);
@@ -128,8 +131,45 @@ const cases = [
         for(const [height,bar] of [[400,52],[340,70],[900,36]]) {
             await page.setViewportSize({width:500,height});
             await page.evaluate(bar=>document.querySelector('#toolbar').style.height=bar+'px',bar);await nextLayout(page);
-            const b=await bounds(page);assert.deepEqual(b.video,b.area);assert.equal(b.video.bottom,b.bar.top);assert.deepEqual(b.scroll,[0,0]);
+            const b=await bounds(page);sameRect(b.video,b.area);sameRect(b.video,b.input);assert(Math.abs(b.video.bottom-b.bar.top)<0.1);assert.deepEqual(b.scroll,[0,0]);
         }
+    }],
+    ['fill presents an uncropped source-aspect video box before stretching both axes', async page => {
+        // iOS media layers may preserve the source aspect even for object-fit:
+        // fill. Preserve it ourselves before the CSS transform, so every source
+        // edge survives whether the media layer uses fill, contain or cover.
+        for(const [width,height] of [[834,1194],[1194,834],[1024,768]]) {
+            await page.setViewportSize({width,height});await nextLayout(page);
+            for(const mode of ['fill','fit','fill']) {
+                await page.evaluate(mode=>fixture.viewport.mode(mode),mode);await nextLayout(page);
+                const b=await bounds(page);
+                const sourceBox=await page.locator('#stream').evaluate(video=>{
+                    const style=getComputedStyle(video);
+                    return {width:parseFloat(style.width),height:parseFloat(style.height)};
+                });
+                assert(Math.abs(sourceBox.width/sourceBox.height-1280/720)<0.001);
+                assert(b.video.left>=b.area.left-0.1 && b.video.left+b.video.width<=b.area.left+b.area.width+0.1);
+                assert(b.video.bottom<=b.bar.top+0.1);assert.deepEqual(b.scroll,[0,0]);
+                assert(await page.evaluate(()=>fixture.container.scrollWidth===fixture.container.clientWidth && fixture.container.scrollHeight===fixture.container.clientHeight));
+            }
+        }
+    }],
+    ['unzoomed visual viewport width bounds the picture and touch mapping after iPad reflow', async page => {
+        await page.evaluate(()=>{
+            const visual=Object.assign(new EventTarget(),{width:1000,height:innerHeight,offsetLeft:12,offsetTop:0,scale:1});
+            Object.defineProperty(window,'visualViewport',{configurable:true,value:visual});
+            fixture.visual=visual;fixture.viewport.mode('fill');
+        });await nextLayout(page);
+        let b=await bounds(page);
+        assert.equal(b.area.left,12);assert.equal(b.area.width,1000);assert.equal(b.bar.left,12);assert.equal(b.bar.width,1000);assert.equal(b.video.bottom,b.bar.top);
+        await page.touchscreen.tap(13,b.video.bottom-2);
+        const press=(await pointer(page)).filter(m=>m.endsWith(',1,0')).at(-1).split(',').map(Number);
+        assert.equal(press[3],2);assert(press[4]>1070);
+        await page.setViewportSize({width:834,height:1194});
+        await page.evaluate(()=>{Object.assign(fixture.visual,{width:834,height:1194,offsetLeft:0});fixture.visual.dispatchEvent(new Event('resize'));fixture.viewport.layout()});await nextLayout(page);
+        b=await bounds(page);assert.equal(b.area.width,834);assert.equal(b.area.left,0);assert.equal(b.video.bottom,b.bar.top);
+        await page.evaluate(()=>fixture.viewport.destroy());
+        assert.equal(await page.locator('#app').evaluate(root=>root.style.getPropertyValue('--ivnc-visible-width')),'');
     }],
     ['legacy original-size requests select fill and caret updates never scroll the picture', async page => {
         await page.setViewportSize({width:500,height:400});await nextLayout(page);

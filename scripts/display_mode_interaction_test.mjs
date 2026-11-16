@@ -160,7 +160,9 @@ const cases=[
         await page.evaluate(()=>fixture.legacyMode());
         await page.reload();await page.waitForFunction(()=>!!window.fixture);
         let state=await page.evaluate(()=>fixture.snapshot());assert.equal(state.mode,'fill');assert.equal(state.stored,'fill');
-        assert.deepEqual(state.video,state.area);assert.deepEqual(state.scroll,[0,0]);
+        // Transformed bounds include fractional layout-pixel rounding.
+        for(const key of Object.keys(state.area))assert(Math.abs(state.video[key]-state.area[key])<0.1,key);
+        assert.deepEqual(state.scroll,[0,0]);
         await mode(page,'fit');await settled(page);await mode(page,'native');await settled(page);
         assert.equal((await page.evaluate(()=>fixture.snapshot())).mode,'fill');
         await page.goto(url+'/__display-test?is_manual_resolution_mode=true&scaleLocallyManual=false');await page.waitForFunction(()=>!!window.fixture);
