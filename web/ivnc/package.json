@@ -17,6 +17,7 @@
     "test:ime": "node --test ../../scripts/ime_input_test.mjs ../../scripts/text_commit_test.mjs",
     "test:viewport": "node --test ../../scripts/viewport_interaction_test.mjs ../../scripts/display_mode_interaction_test.mjs",
     "test:clear-data": "node --test ../../scripts/clear_data_interaction_test.mjs",
+    "test:proxy-url": "node --test ../../scripts/proxy_url_interaction_test.mjs",
     "test:auth": "node ../../scripts/auth_smoke.mjs"
   },
   "author": "Selkies",

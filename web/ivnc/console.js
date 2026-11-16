@@ -11,6 +11,7 @@ const CONSOLE_API = '/api/console';
 const CAP_API = '/api/capabilities';
 let editId = null;
 let editBuiltin = false;
+let proxyConfigurable = false;  // built-in Chrome exposes an editable proxy URL
 let editApp = null;        // record of the app being edited
 let sharingState = null;   // persisted sharing settings, or the initial disabled draft
 let appSignature = '';     // launch settings as last saved; a change on a running app needs a restart
@@ -141,6 +142,10 @@ const I18N = {
         envDefault: '(Optional, default: none)',
         launchCommandHelp: 'Command to run when the app starts',
         execHelp: 'Enter a program name or path. Recognized Electron apps automatically adapt to the desktop session.',
+        proxyUrl: 'Proxy URL',
+        proxyUrlHelp: 'Proxy address for the built-in browser, e.g. socks5://127.0.0.1:1080. Leave empty for no proxy; restart the browser after changing it.',
+        proxyUrlPlaceholder: 'e.g. socks5://127.0.0.1:1080',
+        proxyUrlInvalid: 'Enter a valid proxy URL (socks5://, socks4://, http:// or https://) or leave it empty.',
         nameInputPlaceholder: 'App display name',
         backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: 'e.g. amp-desktop or /path/to/app',
@@ -371,6 +376,10 @@ const I18N = {
         envDefault: '（可选，默认值：无）',
         launchCommandHelp: '应用启动时要执行的命令',
         execHelp: '输入程序名或路径，可识别的 Electron 应用会自动适配桌面环境。',
+        proxyUrl: '代理地址',
+        proxyUrlHelp: '内置浏览器使用的代理地址，例如 socks5://127.0.0.1:1080。留空表示不使用代理；修改后需重启浏览器生效。',
+        proxyUrlPlaceholder: '例如：socks5://127.0.0.1:1080',
+        proxyUrlInvalid: '请输入有效的代理地址（socks5://、socks4://、http:// 或 https://），或留空。',
         nameInputPlaceholder: '应用显示名称',
         backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: '例如：amp-desktop 或 /path/to/app',
@@ -671,6 +680,9 @@ function applyTranslations() {
     setText('label-launch-env-default', 'envDefault');
     setText('label-exec', 'exec');
     setText('label-exec-help', 'execHelp');
+    setText('label-proxy-url', 'proxyUrl');
+    setText('label-proxy-url-help', 'proxyUrlHelp');
+    setPlaceholderById('f-proxy-url', t('proxyUrlPlaceholder'));
     setText('label-env', 'env');
     setText('label-env-default', 'envDefault');
     setText('label-cli-binary', 'cliBinary');
@@ -1363,7 +1375,7 @@ async function copyText(text) {
 // ---------- App dialog ----------
 
 const APP_FIELDS = ['f-name', 'f-url', 'f-launch-command', 'f-launch-cwd', 'f-launch-timeout', 'f-launch-env',
-    'f-exec', 'f-env', 'f-cli-binary', 'f-cli-env', 'f-skill-paths', 'f-remote-url', 'f-remote-password'];
+    'f-exec', 'f-env', 'f-proxy-url', 'f-cli-binary', 'f-cli-env', 'f-skill-paths', 'f-remote-url', 'f-remote-password'];
 
 // Clears per-open state so nothing leaks between apps.
 function resetModal() {
@@ -1376,6 +1388,7 @@ function resetModal() {
     renderLaunchContext();
     editId = null;
     editBuiltin = false;
+    proxyConfigurable = false;
     editApp = null;
     sharingState = null;
     appSignature = '';
@@ -1492,6 +1505,7 @@ async function showEdit(id) {
         editId = id;
         editApp = a;
         editBuiltin = a.builtin === true && a.managed_by === 'ivnc';
+        proxyConfigurable = a.proxy_configurable === true;
         modal.querySelector('#modal-title').textContent = t('editModal');
         modal.querySelector('#modal-save').textContent = t('editSave');
 
@@ -1507,6 +1521,7 @@ async function showEdit(id) {
         } else if (appType === 'desktop') {
             document.getElementById('f-exec').value = a.exec_command || '';
             document.getElementById('f-env').value = envToText(a.env_vars);
+            document.getElementById('f-proxy-url').value = a.proxy_url || '';
             setValue('f-desktop-compat', a.desktop_launch?.compatibility || 'auto');
             setValue('f-desktop-sandbox', a.desktop_launch?.sandbox || 'auto');
         } else if (appType === 'cli') {
@@ -1806,6 +1821,16 @@ function validateUrl(url) {
     }
 }
 
+function validateProxyUrl(url) {
+    if (!url) return true; // empty means no proxy
+    try {
+        const parsed = new URL(url);
+        return ['socks5:', 'socks4:', 'socks5h:', 'http:', 'https:'].includes(parsed.protocol);
+    } catch {
+        return false;
+    }
+}
+
 function envToText(envVars) {
     return envVars ? Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join('\n') : '';
 }
@@ -1853,6 +1878,9 @@ function readAppBody(appType) {
     } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
+        if (proxyConfigurable) {
+            body.proxy_url = document.getElementById('f-proxy-url').value.trim() || null;
+        }
         body.desktop_launch = {
             compatibility: document.getElementById('f-desktop-compat').value,
             sandbox: document.getElementById('f-desktop-sandbox').value,
@@ -1883,6 +1911,7 @@ function validateAppBody(body) {
         }
     } else if (body.app_type === 'desktop') {
         if (!body.exec_command) return fieldError('f-exec', t('missingExec'));
+        if (proxyConfigurable && !validateProxyUrl(body.proxy_url)) return fieldError('f-proxy-url', t('proxyUrlInvalid'));
     } else if (body.app_type === 'cli') {
         if (!body.cli_binary_path) return fieldError('f-cli-binary', t('missingCliBinary'));
     } else {
@@ -1937,6 +1966,7 @@ function adoptCreatedApp(app, session) {
     if (app.app_type === 'desktop') {
         setValue('f-exec', app.exec_command || '');
         setValue('f-env', envToText(app.env_vars));
+        if (proxyConfigurable) setValue('f-proxy-url', app.proxy_url || '');
         document.getElementById('f-autostart').checked = !!app.autostart;
         setValue('f-desktop-compat', app.desktop_launch?.compatibility || 'auto');
         setValue('f-desktop-sandbox', app.desktop_launch?.sandbox || 'auto');
@@ -2263,6 +2293,7 @@ function updateAppTypeVisibility() {
     // A remote app with autostart is started (connected) when iVnc starts.
     autostartControl.style.display = type === 'cli' ? 'none' : '';
     document.getElementById('remote-config').hidden = type !== 'remote';
+    document.getElementById('proxy-url-line').hidden = !(type === 'desktop' && proxyConfigurable);
     document.getElementById('f-skill-paths').closest('.form-line').hidden = type === 'remote';
     document.getElementById('name-required-mark').hidden = type === 'remote';
     document.getElementById('remote-password-required-mark').hidden = !!editId;

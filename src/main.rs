@@ -242,14 +242,6 @@ fn main() {
         error!("Invalid configuration: {}", e);
         std::process::exit(1);
     }
-    env::set_var(
-        "IVNC_PROXY_PANEL_ENABLED",
-        if config.ui_features.proxy_enabled {
-            "1"
-        } else {
-            "0"
-        },
-    );
     let width = config.display.width;
     let height = config.display.height;
     info!("Display: {}x{}", width, height);

@@ -528,7 +528,6 @@ pub fn prepare(path: &Path) -> Result<Config, String> {
     fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
     fs::create_dir_all(&launch.config.input.upload_dir).map_err(|e| e.to_string())?;
-    std::env::set_var("IVNC_PROXY_PANEL_ENABLED", "0");
     if launch.config.audio.enabled {
         start_private_audio(Path::new(&runtime_dir))?;
     }

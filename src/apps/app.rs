@@ -68,6 +68,10 @@ pub struct ManagedApp {
     pub env_vars: Option<HashMap<String, String>>,
     #[serde(default)]
     pub desktop_launch: super::compat::LaunchOptions,
+    /// Optional proxy URL for the built-in Chrome app (e.g. socks5://127.0.0.1:1080).
+    /// Empty means no proxy is injected into the launch command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 
     // CliApp fields
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +103,7 @@ impl ManagedApp {
             exec_command: (app_type == AppType::DesktopApp).then(|| "true".into()),
             env_vars: None,
             desktop_launch: Default::default(),
+            proxy_url: None,
             cli_binary_path: None,
             cli_env_vars: None,
             created_at: String::new(),

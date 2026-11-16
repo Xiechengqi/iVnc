@@ -97,6 +97,7 @@ impl AppStore {
         Self::ensure_column(&conn, "cli_env_vars", "TEXT")?;
         Self::ensure_column(&conn, "name_revision", "INTEGER NOT NULL DEFAULT 0")?;
         Self::ensure_column(&conn, "desktop_launch", "TEXT NOT NULL DEFAULT '{}'")?;
+        Self::ensure_column(&conn, "proxy_url", "TEXT")?;
 
         // Adding the column and backfilling are one migration. Later opens must
         // never reset positions saved by the user (including timestamp ties).
@@ -183,14 +184,15 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, desktop_launch, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, (SELECT COALESCE(MAX(sort_order), -1)+1 FROM apps))",
+            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, desktop_launch, sort_order, proxy_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, (SELECT COALESCE(MAX(sort_order), -1)+1 FROM apps), ?16)",
             params![
                 app.id, app.name, app.app_type.as_str(), url,
                 app.autostart as i32, exec_command, env_vars_json, app.created_at,
                 app.launch_command.as_deref(), launch_env_vars_json,
                 app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64),
                 app.cli_binary_path.as_deref(), cli_env_vars_json, serde_json::to_string(&app.desktop_launch).unwrap(),
+                app.proxy_url.as_deref(),
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -244,8 +246,8 @@ impl AppStore {
             .unwrap_or_default();
 
         let changed = tx.execute(
-            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11, desktop_launch=?13 WHERE id=?12",
-            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, serde_json::to_string(&app.desktop_launch).unwrap()],
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11, desktop_launch=?13, proxy_url=?14 WHERE id=?12",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, serde_json::to_string(&app.desktop_launch).unwrap(), app.proxy_url.as_deref()],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(ApiError::new(
@@ -341,7 +343,7 @@ impl AppStore {
     pub fn get_optional(&self, id: &str) -> Result<Option<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch, proxy_url FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).optional().map_err(|e| format!("Failed to read app: {}", e))
@@ -354,7 +356,7 @@ impl AppStore {
 
     fn read_apps(conn: &Connection, order: &str) -> Result<Vec<ManagedApp>, String> {
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch FROM apps ORDER BY {order}"
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch, proxy_url FROM apps ORDER BY {order}"
         )).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -479,6 +481,7 @@ impl AppStore {
         let cli_binary_path: Option<String> = row.get(12).ok().filter(|s: &String| !s.is_empty());
         let cli_env_vars_json: Option<String> = row.get(13).ok().filter(|s: &String| !s.is_empty());
         let cli_env_vars = cli_env_vars_json.and_then(|json| serde_json::from_str(&json).ok());
+        let proxy_url: Option<String> = row.get(17).ok().filter(|s: &String| !s.is_empty());
 
         ManagedApp {
             id: row.get(0).unwrap_or_default(),
@@ -498,6 +501,7 @@ impl AppStore {
                 .ok()
                 .and_then(|v| serde_json::from_str(&v).ok())
                 .unwrap_or_default(),
+            proxy_url,
             cli_binary_path,
             cli_env_vars,
             created_at: row.get(7).unwrap_or_default(),
@@ -534,6 +538,32 @@ mod tests {
         );
         assert_eq!(store.list().unwrap()[0].desktop_launch, app.desktop_launch);
         assert_eq!(store.get("legacy").unwrap().exec_command, app.exec_command);
+    }
+
+    #[test]
+    fn proxy_url_migrates_and_survives_configuration_edits_and_reopening() {
+        let store = AppStore::in_memory();
+        let mut app = ManagedApp::for_test("legacy", AppType::DesktopApp);
+        app.exec_command = Some("google-chrome".into());
+        store.add(&app).unwrap();
+        // Simulate a database created before proxy_url existed.
+        let conn = store.conn.into_inner().unwrap();
+        conn.execute_batch("ALTER TABLE apps DROP COLUMN proxy_url")
+            .unwrap();
+        let store = AppStore::from_connection(conn).unwrap();
+        let mut app = store.get("legacy").unwrap();
+        assert_eq!(app.proxy_url, None);
+        app.proxy_url = Some("socks5://127.0.0.1:1080".into());
+        store.update(&app).unwrap();
+        let store = AppStore::from_connection(store.conn.into_inner().unwrap()).unwrap();
+        assert_eq!(
+            store.get("legacy").unwrap().proxy_url.as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+        assert_eq!(
+            store.list().unwrap()[0].proxy_url.as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
     }
 
     fn seed(store: &AppStore, ids: &[&str]) {

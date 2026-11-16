@@ -42,12 +42,11 @@ Docker 镜像名后可直接放 iVnc 启动参数；同时运行自定义前台�
 | `$IVNC_HOME/miao/miao-rust-linux-amd64` | iVnc 提取的配套 Miao 可执行文件 |
 | `$IVNC_HOME/miao/miao.log` | 面板和内核日志，应用列表提供末尾日志 |
 | `$IVNC_HOME/miao/runtime` | 此 iVnc 实例的 sing-box 及临时配置 |
-| `$IVNC_HOME/miao/chrome-proxy` | 根据实时内核状态生成的 Chrome 启动代理参数 |
 | `IVNC_MIAO_PORT` | 面板内部回环端口，默认 6161；不改写 Miao 已保存的面板端口 |
 
 同一份 `$HOME/.miao` 只能由一个 iVnc 实例管理。部署多个实例时，应分别设置 HOME、IVNC_HOME 和端口。Miao 原有配置路径兼容规则保持有效，旧的二进制目录配置或 `/etc/miao/config.yaml` 可继续被识别。
 
-嵌入面板仅监听 `127.0.0.1`，浏览器经 `/proxy/` 访问，外部访问由 iVnc 的认证配置控制。网页自动建立 Miao 会话，保留 Cookie、同源、CSRF 和 WebSocket 校验；隐藏修改密码和退出登录按钮，初始化及改密接口禁用，只读状态接口不创建会话。嵌入模式允许同源 iframe，独立运行仍使用 `DENY`。嵌入模式不打开首次配置浏览器，升级随 iVnc 分发；面板自身的升级入口被禁用。Chrome 新启动时读取实际运行内核的 SOCKS 地址，支持用户自定义端口；已有 Chrome 进程需重启才会应用新地址。
+嵌入面板仅监听 `127.0.0.1`，浏览器经 `/proxy/` 访问，外部访问由 iVnc 的认证配置控制。网页自动建立 Miao 会话，保留 Cookie、同源、CSRF 和 WebSocket 校验；隐藏修改密码和退出登录按钮，初始化及改密接口禁用，只读状态接口不创建会话。嵌入模式允许同源 iframe，独立运行仍使用 `DENY`。嵌入模式不打开首次配置浏览器，升级随 iVnc 分发；面板自身的升级入口被禁用。内置 Chrome 不再自动读取 Miao 的实时 SOCKS 地址：在控制台“编辑应用”中通过独立的“代理地址”字段显式指定（例如 `socks5://127.0.0.1:1080`），留空则不使用代理。该值会写入 Chrome 启动命令的 `--proxy-server`，修改后需重启浏览器生效；Miao 的 SOCKS 端口若变化，需相应更新此字段。详见 [内置浏览器代理配置](CHROME_PROXY.md)。
 
 VPS 部署调用运行环境中的 OpenSSH 客户端。Docker 运行时已安装 `openssh-client` 并在构建时执行 `ssh -V`；直接部署二进制时也需安装该软件包。若旧镜像出现 `SSH client unavailable`，需更新或重建镜像，仅更新嵌入二进制不会补齐系统依赖。
 

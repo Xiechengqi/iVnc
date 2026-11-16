@@ -528,6 +528,7 @@ mod tests {
             exec_command: None,
             env_vars: None,
             desktop_launch: Default::default(),
+            proxy_url: None,
             cli_binary_path: None,
             cli_env_vars: None,
             created_at: String::new(),

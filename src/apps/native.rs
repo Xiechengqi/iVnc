@@ -24,7 +24,7 @@ fn reserved_env(key: &str) -> bool {
 /// The environment of a desktop application apart from its session, built from
 /// the manager's environment `inherited`. It is the same whether the application
 /// runs in the main desktop or in its own runtime. The manager's own settings
-/// are left out, except the one that tells Chrome whether to use the proxy.
+/// are left out; applications only receive their own configured variables.
 pub fn app_environment(
     app: &ManagedApp,
     home: &Path,
@@ -33,10 +33,8 @@ pub fn app_environment(
     let mut env: BTreeMap<OsString, OsString> = inherited
         .into_iter()
         .filter(|(key, _)| {
-            key.to_str().is_some_and(|key| {
-                !reserved_env(key)
-                    && (!key.starts_with("IVNC_") || key == "IVNC_PROXY_PANEL_ENABLED")
-            })
+            key.to_str()
+                .is_some_and(|key| !reserved_env(key) && !key.starts_with("IVNC_"))
         })
         .collect();
     for (key, value) in app.env_vars.iter().flatten() {
@@ -191,7 +189,6 @@ mod tests {
             [
                 ("LANG", "zh_CN.UTF-8"),
                 ("GDK_BACKEND", "x11"),
-                ("IVNC_PROXY_PANEL_ENABLED", "0"),
                 ("HOME", "/elsewhere"),
                 ("XDG_CONFIG_HOME", "/elsewhere"),
                 ("PULSE_SERVER", "unix:/elsewhere"),
@@ -203,7 +200,6 @@ mod tests {
             ("PATH", "/usr/bin"),
             ("GTK_CSD", "0"),
             ("IVNC_HOME", "/data/ivnc"),
-            ("IVNC_PROXY_PANEL_ENABLED", "1"),
             ("IVNC_CHROME_DEBUG_PORT", "9333"),
             ("LD_PRELOAD", "/lib/nocsd.so"),
             ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/bus"),
@@ -262,9 +258,9 @@ mod tests {
         assert_eq!(get("GDK_BACKEND"), Some("x11"));
         assert_eq!(get("QT_QPA_PLATFORM"), Some("wayland"));
         assert_eq!(get("XDG_SESSION_TYPE"), Some("wayland"));
-        assert_eq!(get("IVNC_PROXY_PANEL_ENABLED"), Some("0"));
         for key in [
             "IVNC_HOME",
+            "IVNC_PROXY_PANEL_ENABLED",
             "IVNC_CHROME_DEBUG_PORT",
             "LD_PRELOAD",
             "DBUS_SESSION_BUS_ADDRESS",
@@ -278,16 +274,13 @@ mod tests {
         ] {
             assert_eq!(get(key), None, "{key}");
         }
-        // Without its own setting, the manager's decides whether Chrome uses the proxy.
+        // Manager IVNC_ variables are never forwarded to applications.
         app.env_vars = None;
         let env = app_environment(
             &app,
             home,
             [("IVNC_PROXY_PANEL_ENABLED".into(), "0".into())],
         );
-        assert_eq!(
-            env.get(&OsString::from("IVNC_PROXY_PANEL_ENABLED")),
-            Some(&OsString::from("0"))
-        );
+        assert_eq!(env.get(&OsString::from("IVNC_PROXY_PANEL_ENABLED")), None);
     }
 }

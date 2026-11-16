@@ -74,10 +74,6 @@ struct Health {
     embedded: bool,
     integration_version: u32,
     password_required: bool,
-    initializing: bool,
-    proxy_running: bool,
-    socks_listen: String,
-    socks_port: u16,
 }
 
 #[derive(Debug)]
@@ -150,9 +146,6 @@ impl ProxyPanelManager {
     fn runtime_dir(&self) -> PathBuf {
         self.dir.join("runtime")
     }
-    fn chrome_proxy_path(&self) -> PathBuf {
-        self.dir.join("chrome-proxy")
-    }
 
     /// Build the command used both to spawn Miao and to display its managed configuration.
     pub fn launch_command(&self) -> Command {
@@ -193,7 +186,7 @@ impl ProxyPanelManager {
                     continue;
                 }
                 if manager.status().running {
-                    match manager.refresh_chrome_proxy().await {
+                    match manager.verify_health().await {
                         Ok(()) => {
                             failures = 0;
                             continue;
@@ -261,7 +254,6 @@ impl ProxyPanelManager {
         if self.status().running || self.desired_running.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let _ = fs::remove_file(self.chrome_proxy_path());
         let data = self.data_path();
         let bin = self.binary_path();
         let runtime = self.runtime_dir();
@@ -339,9 +331,8 @@ impl ProxyPanelManager {
                     return Err("miao startup cancelled".into());
                 }
                 if self.status().pid != Some(pid) { return Err(format!("miao pid {pid} exited before becoming ready")); }
-                if let Ok(health) = self.health(pid).await {
+                if self.health(pid).await.is_ok() {
                     self.runtime.lock().unwrap().ready = true;
-                    self.write_chrome_proxy(&health)?;
                     return Ok(Some(pid));
                 }
                 if tokio::time::Instant::now() >= deadline {
@@ -432,7 +423,6 @@ impl ProxyPanelManager {
             state.ready = false;
             state.process.take()
         };
-        let _ = fs::remove_file(self.chrome_proxy_path());
         if let Some(process) = process {
             let _ = tokio::task::spawn_blocking(move || terminate_owned_group(process)).await;
         }
@@ -469,61 +459,18 @@ impl ProxyPanelManager {
         Ok(response.data)
     }
 
-    async fn refresh_chrome_proxy(&self) -> Result<(), String> {
+    /// Health probe used by the watchdog to detect a dead or incompatible Miao
+    /// process and restart it. The built-in Chrome proxy is now configured
+    /// explicitly through the app's proxy URL, so no runtime proxy file is
+    /// written here.
+    async fn verify_health(&self) -> Result<(), String> {
         let pid = self.status().pid.ok_or("miao is stopped")?;
-        self.write_chrome_proxy(&self.health(pid).await?)?;
+        self.health(pid).await?;
         // A disconnected start request can leave a live child awaiting its first probe.
         let mut runtime = self.runtime.lock().unwrap();
         runtime.ready = true;
         runtime.error = None;
         Ok(())
-    }
-
-    /// Chrome inspects the live kernel, not just the panel's listening port.
-    pub async fn prepare_chrome_proxy(&self) {
-        let _guard = self.operation.lock().await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        while let Some(pid) = self.status().pid {
-            match self.health(pid).await {
-                Ok(health) => {
-                    let _ = self.write_chrome_proxy(&health);
-                    if !health.initializing || tokio::time::Instant::now() >= deadline {
-                        return;
-                    }
-                }
-                Err(_) => break,
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        let _ = fs::remove_file(self.chrome_proxy_path());
-    }
-
-    fn write_chrome_proxy(&self, health: &Health) -> Result<(), String> {
-        if !health.proxy_running {
-            let _ = fs::remove_file(self.chrome_proxy_path());
-            return Ok(());
-        }
-        let address = health
-            .socks_listen
-            .parse::<IpAddr>()
-            .map_err(|e| e.to_string())?;
-        let address = match address {
-            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-            address => address,
-        };
-        let address = match address {
-            IpAddr::V6(ip) => format!("[{ip}]"),
-            address => address.to_string(),
-        };
-        if health.socks_port == 0 {
-            return Err("invalid Miao SOCKS port".into());
-        }
-        write_atomic(
-            &self.chrome_proxy_path(),
-            format!("socks5://{}:{}\n", address, health.socks_port).as_bytes(),
-            0o600,
-        )
     }
 
     fn log_tail(&self) -> String {
@@ -760,10 +707,6 @@ http.server.HTTPServer(('127.0.0.1', int(os.environ['MIAO_PORT'])), Panel).serve
             .unwrap(),
             ["--nopasswd"]
         );
-        assert_eq!(
-            fs::read_to_string(manager.chrome_proxy_path()).unwrap(),
-            "socks5://[::1]:19081\n"
-        );
         unsafe {
             libc::kill(pid as i32, libc::SIGKILL);
         }
@@ -780,7 +723,6 @@ http.server.HTTPServer(('127.0.0.1', int(os.environ['MIAO_PORT'])), Panel).serve
         .expect("watchdog should recover a crashed Miao");
         manager.stop().await.unwrap();
         assert!(manager.require_running().is_err());
-        assert!(!manager.chrome_proxy_path().exists());
         tokio::time::sleep(Duration::from_millis(3300)).await;
         assert!(!manager.status().running);
         assert!(!manager.status().desired_running);

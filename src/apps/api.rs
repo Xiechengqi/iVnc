@@ -356,9 +356,6 @@ impl AppsState {
         if app.id == BUILTIN_MIAO_ID {
             return Ok(self.proxy_panel.start().await?);
         }
-        if app.id == "builtin-chrome" {
-            self.proxy_panel.prepare_chrome_proxy().await;
-        }
         match app.app_type {
             AppType::DesktopApp => {
                 // Building a command opens databases.
@@ -561,6 +558,7 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                proxy_url: None,
                 cli_binary_path: None,
                 cli_env_vars: None,
                 created_at: chrono_now(),
@@ -573,7 +571,14 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
-    let chrome_command = builtin_chrome_command()?;
+    // Use the saved proxy setting when regenerating the managed Chrome
+    // command so a registration refresh never drops the user's proxy choice.
+    let chrome_proxy_url = store
+        .get_optional("builtin-chrome")
+        .ok()
+        .flatten()
+        .and_then(|app| app.proxy_url);
+    let chrome_command = builtin_chrome_command(chrome_proxy_url.as_deref())?;
 
     for app in store.list()? {
         let is_builtin_terminal = app.id == "builtin-terminal"
@@ -626,6 +631,7 @@ fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), S
                 exec_command: Some(chrome_command.to_string()),
                 env_vars: None,
                 desktop_launch: Default::default(),
+                proxy_url: None,
                 cli_binary_path: None,
                 cli_env_vars: None,
                 created_at: chrono_now(),
@@ -694,6 +700,7 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                proxy_url: None,
                 cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
                 cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
                 created_at: chrono_now(),
@@ -734,7 +741,11 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn builtin_chrome_command() -> Result<String, String> {
+/// Build the built-in Chrome launch command. When `proxy_url` is set it is
+/// injected directly as `--proxy-server=<url>`; an empty value means no proxy.
+/// Proxy configuration is a user setting stored on the app, not read from a
+/// runtime file, so Chrome no longer follows the built-in proxy dynamically.
+fn builtin_chrome_command(proxy_url: Option<&str>) -> Result<String, String> {
     let data_dir = builtin_chrome_data_dir()?;
     let crash_dir = crate::paths::chrome_crash_dumps_dir();
     std::fs::create_dir_all(&crash_dir).map_err(|err| {
@@ -747,21 +758,15 @@ fn builtin_chrome_command() -> Result<String, String> {
     let data_dir = shell_quote(&data_dir.to_string_lossy());
     let crash_dir = shell_quote(&crash_dir.to_string_lossy());
     let debug_port = chrome_devtools_port();
-    let proxy_file = shell_quote(
-        &crate::paths::miao_dir()
-            .join("chrome-proxy")
-            .to_string_lossy(),
-    );
+    let proxy_arg = proxy_url
+        .filter(|url| !url.is_empty())
+        .map(|url| format!(" --proxy-server={}", shell_quote(url)))
+        .unwrap_or_default();
     Ok(format!(
         r#"profile_dir={data_dir};
 crash_dir={crash_dir};
 rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonSocket" "$profile_dir/SingletonCookie";
-set --;
-if [ "${{IVNC_PROXY_PANEL_ENABLED:-1}}" != '0' ] && [ -s {proxy_file} ]; then
-  IFS= read -r proxy_server < {proxy_file};
-  set -- "--proxy-server=$proxy_server";
-fi;
-exec google-chrome "$@" --user-data-dir="$profile_dir" --crash-dumps-dir="$crash_dir" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
+exec google-chrome{proxy_arg} --user-data-dir="$profile_dir" --crash-dumps-dir="$crash_dir" --remote-debugging-host=0.0.0.0 --remote-debugging-port={debug_port} --ozone-platform=wayland --class=ivnc-chrome-windowed --test-type --no-first-run --no-default-browser-check --disable-features=MediaRouter --disable-background-networking --disable-process-singleton --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
 "#
     ).replace('\n', " "))
 }
@@ -958,6 +963,10 @@ fn app_json(
             .iter()
             .map(|category| category.as_str())
             .collect::<Vec<_>>());
+        // The built-in Chrome app exposes an editable proxy URL; other apps do
+        // not manage the launch command, so the field is only advertised here.
+        obj["proxy_url"] = json!(app.proxy_url);
+        obj["proxy_configurable"] = json!(true);
     }
 
     if app.id == BUILTIN_MIAO_ID {
@@ -1271,8 +1280,9 @@ async fn add_app(
         env_vars,
         cli_binary_path,
         cli_env_vars,
+        proxy_url,
     ) = match app_type {
-        AppType::RemoteApp => (None, None, None, None, None, None, None, None, None),
+        AppType::RemoteApp => (None, None, None, None, None, None, None, None, None, None),
         AppType::BackgroundApp => {
             let url = parse_optional_string(body.get("url"));
             let launch_command = match body
@@ -1312,6 +1322,7 @@ async fn add_app(
                 None,
                 None,
                 None,
+                None,
             )
         }
         AppType::DesktopApp => {
@@ -1338,6 +1349,7 @@ async fn add_app(
                 env_vars,
                 None,
                 None,
+                parse_optional_string(body.get("proxy_url")),
             )
         }
         AppType::CliApp => {
@@ -1361,6 +1373,7 @@ async fn add_app(
                 None,
                 cli_binary_path,
                 cli_env_vars,
+                None,
             )
         }
     };
@@ -1391,6 +1404,7 @@ async fn add_app(
         exec_command,
         env_vars,
         desktop_launch,
+        proxy_url,
         cli_binary_path,
         cli_env_vars,
         created_at: chrono_now(),
@@ -1587,6 +1601,20 @@ async fn update_app(
                 Ok(Some(options)) => app.desktop_launch = options,
                 Ok(None) => {}
                 Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+            }
+            // The built-in Chrome app keeps its proxy setting as a separate,
+            // user-editable field. Regenerate the managed command whenever the
+            // proxy URL is submitted so the change takes effect on next launch.
+            if body.get("proxy_url").is_some() {
+                app.proxy_url = parse_optional_string(body.get("proxy_url"));
+                if app.id == datadir::BUILTIN_CHROME_ID {
+                    match builtin_chrome_command(app.proxy_url.as_deref()) {
+                        Ok(command) => app.exec_command = Some(command),
+                        Err(error) => {
+                            return err_response(StatusCode::INTERNAL_SERVER_ERROR, error)
+                        }
+                    }
+                }
             }
         }
         AppType::CliApp => {
@@ -2144,6 +2172,97 @@ mod tests {
             assert!(app.launch_command.is_none());
             assert!(app.url.is_none());
         }
+    }
+
+    #[test]
+    fn chrome_command_injects_proxy_only_when_configured() {
+        let plain = builtin_chrome_command(None).unwrap();
+        assert!(!plain.contains("--proxy-server"));
+        assert!(plain.contains("exec google-chrome"));
+
+        let with_proxy = builtin_chrome_command(Some("socks5://127.0.0.1:1080")).unwrap();
+        assert!(with_proxy.contains("--proxy-server='socks5://127.0.0.1:1080'"));
+        assert!(!with_proxy.contains("chrome-proxy"));
+        assert!(!with_proxy.contains("IVNC_PROXY_PANEL_ENABLED"));
+
+        // The URL must be shell-quoted so it cannot inject extra commands:
+        // the embedded single quote is escaped, keeping the whole value quoted.
+        let injection = builtin_chrome_command(Some("socks5://x' ; touch /tmp/pwned #")).unwrap();
+        assert!(injection.contains("--proxy-server='socks5://x'\\'' ; touch /tmp/pwned #'"));
+    }
+
+    #[test]
+    fn chrome_proxy_url_survives_registration_command_refresh() {
+        let state = state(None, None);
+        let id = "builtin-chrome";
+        ensure_builtin_chrome(&state.store, "google-chrome --original").unwrap();
+        let mut app = state.store.get(id).unwrap();
+        app.proxy_url = Some("socks5://127.0.0.1:1080".into());
+        app.exec_command = Some(builtin_chrome_command(app.proxy_url.as_deref()).unwrap());
+        state.store.update(&app).unwrap();
+
+        // A managed command refresh regenerates the command from the saved
+        // proxy URL (as ensure_builtin_apps does) and must not drop the setting.
+        let refreshed = builtin_chrome_command(app.proxy_url.as_deref()).unwrap();
+        ensure_builtin_chrome(&state.store, &refreshed).unwrap();
+        let after = state.store.get(id).unwrap();
+        assert_eq!(after.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
+        assert_eq!(after.exec_command.as_deref(), Some(refreshed.as_str()));
+
+        // Even an unrelated forced command refresh keeps the user's proxy URL.
+        ensure_builtin_chrome(&state.store, "google-chrome --forced").unwrap();
+        let forced = state.store.get(id).unwrap();
+        assert_eq!(forced.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
+    }
+
+    #[tokio::test]
+    async fn chrome_update_persists_proxy_url_and_regenerates_command() {
+        let state = state(None, None);
+        let id = "builtin-chrome";
+        ensure_builtin_chrome(&state.store, "google-chrome --original").unwrap();
+        let response = update_app(
+            State(state.clone()),
+            Path(id.to_string()),
+            axum::Json(json!({"proxy_url": "socks5://127.0.0.1:1080"})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let app = state.store.get(id).unwrap();
+        assert_eq!(app.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
+        assert_eq!(
+            app.exec_command.as_deref(),
+            Some(
+                builtin_chrome_command(app.proxy_url.as_deref())
+                    .unwrap()
+                    .as_str()
+            )
+        );
+
+        // Clearing the proxy removes the argument again.
+        let response = update_app(
+            State(state.clone()),
+            Path(id.to_string()),
+            axum::Json(json!({"proxy_url": null})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let app = state.store.get(id).unwrap();
+        assert_eq!(app.proxy_url, None);
+        assert!(!app
+            .exec_command
+            .as_deref()
+            .unwrap()
+            .contains("--proxy-server"));
+    }
+
+    #[test]
+    fn chrome_json_advertises_proxy_url_and_configurable_flag() {
+        let state = state(None, None);
+        ensure_builtin_chrome(&state.store, "google-chrome").unwrap();
+        let app = state.store.get("builtin-chrome").unwrap();
+        let json = app_json(&state, &app, "stopped", None, 0);
+        assert_eq!(json["proxy_url"], serde_json::Value::Null);
+        assert_eq!(json["proxy_configurable"], true);
     }
 
     #[test]

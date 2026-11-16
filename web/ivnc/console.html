@@ -328,6 +328,17 @@
                     </div>
                     <div class="field-hint field-error" id="err-f-exec"></div>
                 </div>
+                <div class="form-line" id="proxy-url-line" hidden>
+                    <label class="form-label info-label">
+                        <span id="label-proxy-url">代理地址</span>
+                        <span class="info-tip">
+                            <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
+                            <span class="default-text" id="label-proxy-url-help">内置浏览器使用的代理地址，例如 socks5://127.0.0.1:1080。留空表示不使用代理；修改后需重启浏览器生效。</span>
+                        </span>
+                    </label>
+                    <input type="text" id="f-proxy-url" placeholder="例如：socks5://127.0.0.1:1080">
+                    <div class="field-hint field-error" id="err-f-proxy-url"></div>
+                </div>
                 <details id="desktop-launch-advanced" class="launch-advanced">
                     <summary id="desktop-launch-advanced-label">高级启动设置</summary>
                     <div class="form-line">
