@@ -179,7 +179,7 @@ impl Compositor {
             }
         }
         serde_json::json!({"type":"text_input", "data": {
-            "protocol":1, "enabled":enabled, "focus":key, "purpose":purpose, "cursor":cursor
+            "protocol":1, "commit":1, "enabled":enabled, "focus":key, "purpose":purpose, "cursor":cursor
         }})
         .to_string()
     }

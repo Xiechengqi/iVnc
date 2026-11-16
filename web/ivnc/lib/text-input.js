@@ -11,8 +11,8 @@ export function usesTouchKeyboard() {
 }
 
 export class TextInput {
-    constructor({ sendText, sendKey, canInput, onChange = () => {}, onComposition = () => {} }) {
-        Object.assign(this, { sendText, sendKey, canInput, onChange, onComposition });
+    constructor({ sendText, sendKey, canInput, getPoint = () => null, onChange = () => {}, onComposition = () => {}, onCancel = () => {} }) {
+        Object.assign(this, { sendText, sendKey, canInput, getPoint, onChange, onComposition, onCancel });
         this.enabled = false;
         this.composing = false;
         this.generation = 0;
@@ -54,6 +54,7 @@ export class TextInput {
         this.element.setSelectionRange(1, 1);
     }
     cancel() {
+        this.onCancel();
         this.generation++;
         this.cancelledComposition ||= this.composing;
         this.composing = false;
@@ -78,6 +79,15 @@ export class TextInput {
                 && ['insertText', 'insertFromComposition', 'insertCompositionText'].includes(event.inputType)));
     }
     position(point) {
+        if (point && Number.isFinite(point.clientX) && Number.isFinite(point.clientY)) {
+            this.anchor = { clientX: point.clientX, clientY: point.clientY };
+        }
+        // Recompute a reported caret on every layout/viewport change. Without
+        // metadata keep the last click for this target, rather than jumping to
+        // the default corner whenever the visual viewport scrolls.
+        const caret = point ? null : this.getPoint();
+        if (caret) this.anchor = { clientX: caret.clientX, clientY: caret.clientY };
+        point = point || caret || this.anchor;
         const v = window.visualViewport;
         const left = v?.offsetLeft || 0, top = v?.offsetTop || 0;
         this.element.style.left = `${Math.max(left + 4, Math.min(point?.clientX ?? left + 12, left + (v?.width || innerWidth) - 8))}px`;
@@ -101,7 +111,9 @@ export class TextInput {
     }
     hide(manual = true) {
         this.dismissed = manual;
-        this.enabled = false;
+        // Desktop mode is a user preference. Suspending an inactive view or
+        // cancelling a composition must not turn that preference off.
+        if (manual || usesTouchKeyboard()) this.enabled = false;
         this.lastTap = null;
         this.cancel(); // Invalidate late composition events before blur.
         this.element.blur();
@@ -131,10 +143,12 @@ export class TextInput {
         this.remote = state?.protocol === 1 ? state : null;
         const changedFocus = previous?.focus && previous.focus !== this.remote?.focus;
         const closedEditor = previous?.enabled && !this.remote?.enabled;
+        if (previous?.focus !== this.remote?.focus || closedEditor) this.anchor = null;
         if (usesTouchKeyboard() && (changedFocus || closedEditor)) this.hide(false);
         else if (changedFocus || closedEditor) this.cancel();
         const purpose = this.remote?.purpose;
         this.element.inputMode = ({ 2: 'decimal', 3: 'numeric', 4: 'tel', 5: 'url', 6: 'email', 9: 'numeric' })[purpose] || 'text';
+        this.position();
         // No surrounding text or password is copied into this proxy.
         if (!this.remote?.enabled) return;
         if (usesTouchKeyboard() && !this.dismissed && this.lastTap

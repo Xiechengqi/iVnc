@@ -78,6 +78,23 @@ test('rapid identical pastes and A/B pastes retain distinct operations and order
     } finally { t.controller.destroy(); }
 });
 
+test('queued text reports actual send or cancellation without losing paste ordering', async () => {
+    const t = setup();
+    try {
+        t.controller.beginPaste(t.event(), 'ctrl-v'); t.paste('PASTE');
+        let delivered = null;
+        const queued = t.controller.sendInput('ti,{"type":"commit","id":1}');
+        queued.then(result => { delivered = result; });
+        await tick(); assert.equal(delivered, null);
+        t.ack(); await tick(); assert.equal(delivered, true);
+        assert.equal(t.sent.at(-1), 'ti,{"type":"commit","id":1}');
+        t.controller.beginPaste(t.event(), 'ctrl-v'); t.paste('SECOND');
+        const cancelled = t.controller.sendInput('ti,{"type":"commit","id":2}');
+        t.controller.cancel(); assert.equal(await cancelled, false);
+        assert.equal(t.sent.includes('ti,{"type":"commit","id":2}'), false);
+    } finally { t.controller.destroy(); }
+});
+
 test('local rename and native form inputs are left alone', () => {
     const t = setup();
     try {

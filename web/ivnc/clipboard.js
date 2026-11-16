@@ -39,7 +39,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     const open = () => webrtc._send_channel?.readyState === 'open';
     const send = message => {
         if (!open()) throw Error('disconnected');
-        webrtc.sendDataChannelMessage(message);
+        return webrtc.sendDataChannelMessage(message);
     };
     const command = message => send('paste,' + JSON.stringify(message));
     const remoteTarget = target => !!target && !target.closest?.(NATIVE_INPUT)
@@ -117,6 +117,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         if (capture) { clearTimeout(capture.timer); restore(capture); }
         current?.reject?.(Error('cancelled'));
         for (const copy of copies) { clearTimeout(copy.timer); copy.reject(Error('cancelled')); }
+        for (const item of queue) item.sent?.(false);
         copies.clear(); remoteCopy = null;
         capture = current = null;
         queue = []; queuedBytes = 0; pumping = false;
@@ -233,7 +234,11 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
                 const item = queue[0];
                 if (item.kind === 'paste' && !item.bytes) break;
                 queue.shift();
-                if (item.kind === 'input') { send(item.message); continue; }
+                if (item.kind === 'input') {
+                    try { const sent = send(item.message); item.sent?.(sent !== false); }
+                    catch (error) { item.sent?.(false); throw error; }
+                    continue;
+                }
                 if (item.kind === 'copy') { startCopy(item.copy); continue; }
                 if (!isActive()) { cancel(); break; }
                 current = item;
@@ -428,11 +433,13 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     }
 
     function sendInput(message) {
-        if (!isActive() || disposed || !open()) return;
+        if (!isActive() || disposed || !open()) return false;
         if (capture || pumping || queue.length) {
-            if (queue.length >= 512) { fail('limit'); cancel(); return; }
-            queue.push({ kind: 'input', message });
-        } else send(message);
+            if (queue.length >= 512) { fail('limit'); cancel(); return false; }
+            // A text receipt timeout starts when it actually leaves this
+            // ordered queue, not while a preceding paste is still uploading.
+            return new Promise(sent => queue.push({ kind: 'input', message, sent }));
+        } else return send(message);
     }
 
     document.addEventListener('paste', paste);

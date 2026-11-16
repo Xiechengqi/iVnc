@@ -154,6 +154,7 @@ export class WebRTCDemo {
 		 */
 		this.oncursorchange = null;
 		this.ontextinputstate = null;
+		this.ontextinputresult = null;
 
 			/**
 			* @type {Map}
@@ -661,6 +662,8 @@ export class WebRTCDemo {
 			this.ondisplaystate?.(msg.data);
 		} else if (msg.type === 'text_input') {
 			this.ontextinputstate?.(msg.data);
+		} else if (msg.type === 'text_input_result') {
+			this.ontextinputresult?.(msg.data);
 		} else if (msg.type === 'server_settings') {
 			if (this.onserversettings !== null) {
 				this.onserversettings(msg.data);

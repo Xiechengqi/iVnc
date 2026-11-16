@@ -1224,7 +1224,13 @@ fn drain_input_events(
                         state.last_user_serial = Some((serial, Instant::now(), surface));
                     }
                 }
-                if !ev.text.is_empty() && !state.inject_committed_text(&ev.text, &mut ev.paste) {
+                if !ev.text.is_empty()
+                    && !state.inject_committed_text(
+                        &ev.text,
+                        &mut ev.paste,
+                        ev.text_commit.as_ref(),
+                    )
+                {
                     state.deferred_input.push_front(ev);
                     break;
                 }

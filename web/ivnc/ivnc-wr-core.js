@@ -2352,8 +2352,8 @@ export default function webrtc() {
     function syncDisplayModeButton() {
         if (!displayModeButton) return;
         const english = getLang() === 'en';
-        const current = english ? (displayMode === 'fit' ? 'Fit window' : 'Fill screen') : (displayMode === 'fit' ? '适应窗口' : '铺满屏幕');
-        const next = english ? (displayMode === 'fit' ? 'Fill screen' : 'Fit window') : (displayMode === 'fit' ? '铺满屏幕' : '适应窗口');
+        const current = english ? (displayMode === 'fit' ? 'Fit window' : 'Fill window') : (displayMode === 'fit' ? '适应窗口' : '铺满窗口');
+        const next = english ? (displayMode === 'fit' ? 'Fill window' : 'Fit window') : (displayMode === 'fit' ? '铺满窗口' : '适应窗口');
         displayModeButton.title = english ? `Current: ${current}; switch to ${next}` : `当前：${current}；点击切换为${next}`;
         displayModeButton.setAttribute('aria-label', displayModeButton.title);
         const label = displayModeButton.querySelector('.toolbar-tool-label');
@@ -3044,6 +3044,21 @@ export default function webrtc() {
 			remote_copy_timeout: zh ? '未收到远端复制文本，请重新复制。' : 'No remote copied text was received. Copy again.',
 		};
 		const message = messages[reason] || (zh ? '本次粘贴未能确认完成，请检查连接和输入焦点。' : 'Paste could not be confirmed. Check the connection and input focus.');
+        showInputNotice(message);
+    }
+    function reportTextInputError(reason) {
+        const zh = getLang() === 'zh';
+        const messages = {
+            disconnected: zh ? '文字未发送：应用连接已断开，请重新连接后输入。' : 'Text was not sent. Reconnect the application and try again.',
+            no_focus: zh ? '文字未输入：请先点击应用中的编辑框。' : 'Click an editable field in the application before typing.',
+            focus_changed: zh ? '输入目标已变化，本次文字已取消，请在当前编辑框重新输入。' : 'The input target changed. Enter the text again in the current field.',
+            limit: zh ? '本次文字过长或待处理输入过多，请缩短内容后重试。' : 'Too much text or pending input. Use a smaller edit.',
+            timeout: zh ? '未能确认文字输入，请检查连接及应用是否支持粘贴，再确认内容后重试。' : 'Text delivery could not be confirmed. Check the connection and application paste support before retrying.',
+            delivery_failed: zh ? '应用未能接收文字，请检查编辑框及应用的粘贴支持。' : 'The application could not receive the text. Check its edit field and paste support.',
+        };
+        showInputNotice(messages[reason] || (zh ? '本次文字输入未完成，请检查连接及编辑框后重试。' : 'Text input did not complete. Check the connection and edit field.'));
+    }
+    function showInputNotice(message) {
 		if (!clipboardNotice) {
 			clipboardNotice = document.createElement('div');
 			clipboardNotice.className = 'upload-toast error';
@@ -3065,6 +3080,7 @@ export default function webrtc() {
 	return {
 		initialize() {
 			InitUI();
+            if (window.__IVNC_EMBED__ && window.__ivncViewActive === undefined) window.__ivncViewActive = false;
 			// Create the nodes and configure its attributes
 			const appDiv = document.getElementById('app');
 			let videoContainer = document.createElement("div");
@@ -3133,6 +3149,7 @@ export default function webrtc() {
 				activateWindow: (id, key) => {
 					if (!webrtc.sendDataChannelMessage(key ? `focus-key,${key}` : `focus,${id}`)) return false;
 					if (appStreams?.activeId()) appStreams.activate(null);
+					input?.restoreImeFocus(true);
 					return true;
 				},
 				onInteraction: (active) => active ? showTaskbar() : hideTaskbar(),
@@ -3190,11 +3207,11 @@ export default function webrtc() {
                 setDisplayMode(displayMode === 'fit' ? 'fill' : 'fit');
             });
             syncDisplayModeButton();
-            toolbarController.addTool(displayModeButton);
+            toolbarController.addTool(displayModeButton, true);
 
 
 			// IME toggle button
-			let imeModeActive = !usesTouchKeyboard() && getBoolParam('ime_mode', false);
+			let imeModeActive = !usesTouchKeyboard() && !window.__IVNC_EMBED__ && getBoolParam('ime_mode', false);
 			const imeSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="16" text-anchor="middle" font-size="11" fill="currentColor" stroke="none" font-weight="bold">中</text></svg>`;
 			const imeBtn = document.createElement('button');
 			imeBtn.type = 'button';
@@ -3203,17 +3220,29 @@ export default function webrtc() {
 			imeBtn.innerHTML = usesTouchKeyboard() ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M5 9h2m2 0h2m2 0h2m2 0h2M5 12h2m2 0h2m2 0h2m2 0h2M7 16h10"/></svg>' : imeSvg;
 			setLiveTitle(imeBtn, usesTouchKeyboard() ? 'keyboardShow' : (imeModeActive ? 'imeOff' : 'imeOn'));
             const syncImeButton = () => {
-                const active = appStreams?.imeState() ?? (usesTouchKeyboard() ? !!input?.textInput.focused() : !!input?._imeModeActive);
+                const active = usesTouchKeyboard() ? (appStreams?.imeState() ?? !!input?.textInput.focused()) : imeModeActive;
                 imeBtn.classList.toggle('active', active);
                 setLiveTitle(imeBtn, usesTouchKeyboard() ? (active ? 'keyboardHide' : 'keyboardShow') : (active ? 'imeOff' : 'imeOn'));
                 imeBtn.setAttribute('aria-label', imeBtn.title);
                 imeBtn.setAttribute('aria-pressed', String(active));
             };
+            const setImePreference = (enabled, persist = false, focus = false) => {
+                if (usesTouchKeyboard()) return;
+                imeModeActive = !!enabled;
+                if (persist) {
+                    if (window.__IVNC_EMBED__) postToParent({ type: 'ivnc-ime-preference', enabled: imeModeActive });
+                    else setBoolParam('ime_mode', imeModeActive);
+                }
+                input?.setImeMode(imeModeActive, false);
+                if (focus) input?.restoreImeFocus(true);
+                appStreams?.syncImeMode(focus);
+                syncImeButton();
+            };
             // Remember intent before native button focus blurs the editor.
             // Cancelling pointerdown suppresses Safari's subsequent touch click.
             let keyboardWasActive;
             imeBtn.addEventListener('pointerdown', () => {
-                keyboardWasActive = appStreams?.imeState() ?? (usesTouchKeyboard() ? !!input?.textInput.focused() : !!input?._imeModeActive);
+                keyboardWasActive = usesTouchKeyboard() ? (appStreams?.imeState() ?? !!input?.textInput.focused()) : imeModeActive;
             });
             imeBtn.addEventListener('pointercancel', () => { keyboardWasActive = undefined; });
             imeBtn.addEventListener('keydown', () => { keyboardWasActive = undefined; });
@@ -3221,6 +3250,7 @@ export default function webrtc() {
                 e.stopPropagation();
                 const desired = keyboardWasActive === undefined ? undefined : !keyboardWasActive;
                 keyboardWasActive = undefined;
+                if (!usesTouchKeyboard()) { setImePreference(desired ?? !imeModeActive, true, true); return; }
                 if (appStreams?.toggleIme(desired)) return;
                 input?.toggleImeMode(desired);
                 syncImeButton();
@@ -3358,6 +3388,9 @@ export default function webrtc() {
 				appStreams = createAppStreams({
 					viewport: videoContainer,
                     displayMode: () => displayMode,
+                    imeMode: () => usesTouchKeyboard() ? null : imeModeActive,
+                    onImePreference: enabled => setImePreference(enabled, true),
+                    onImeError: reportTextInputError,
 					onFrameReady: doc => doc?.documentElement?.classList.toggle('ivnc-gesture-navigation', !!gestureController?.enabled()),
 					onChange: () => {
 						renderTaskbar();
@@ -3461,6 +3494,7 @@ export default function webrtc() {
 				window.addEventListener('message', (event) => {
 					if (event.origin !== window.location.origin || event.source !== window.parent) return;
 					const message = event.data || {};
+					if (message.view && message.view !== window.location.pathname) return;
 					const open = webrtc._send_channel?.readyState === 'open';
 					if (message.type === 'ivnc-view-active') {
 						window.__ivncViewActive = !!message.active;
@@ -3469,24 +3503,36 @@ export default function webrtc() {
 						// Release held keys when the tab is switched away.
 						if (!message.active) clipboardController?.cancel();
 						sendClientActivity('view-switch');
-						if (message.active) window.focus();
+                        // The parent owns focus. Repeated ready/active messages
+                        // must not pull it out of a local settings/terminal UI.
 					} else if (message.type === 'ivnc-unmute') {
 						webrtc.unmuteAudio();
 					} else if (message.type === 'ivnc-upload' && Array.isArray(message.files)) {
 						if (open) uploadFiles(message.files);
-					} else if (message.type === 'ivnc-ime' && input) {
-						input.onimetoggle(input.toggleImeMode());
+					} else if (message.type === 'ivnc-ime-mode' && typeof message.enabled === 'boolean'
+                        && message.view === window.location.pathname) {
+                        setImePreference(message.enabled);
+                        input?.restoreImeFocus();
 					}
 				});
 				// Messages the parent sent on iframe load may predate the listener above.
 				postToParent({ type: 'ivnc-view-ready' });
 			}
 			const send = (data) => {
-				if (clipboardController) clipboardController.sendInput(data);
-				else webrtc.sendDataChannelMessage(data);
+				if (clipboardController) return clipboardController.sendInput(data);
+				return webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, false, 0, useCssScaling);
+            // Releases and cancellation must reach the old connection even
+            // after it becomes inactive; they must not wait behind a paste.
+            input.sendControl = data => webrtc._send_channel?.readyState === 'open' && webrtc.sendDataChannelMessage(data);
 			window.__ivncInput = input;
+			input.onimepreferencechange = enabled => setImePreference(enabled, true);
+            input.ontextinputerror = reason => {
+                if (window.__IVNC_EMBED__) postToParent({ type: 'ivnc-ime-error', reason });
+                else reportTextInputError(reason);
+            };
+            if (!usesTouchKeyboard()) input.setImeMode(imeModeActive, false);
 			input.setViewActive(window.__ivncViewActive !== false && !appStreams?.activeId());
 			input.gestureNavigation = () => {
 				if (!window.__IVNC_EMBED__) return gestureController;
@@ -3600,10 +3646,13 @@ export default function webrtc() {
 				sendClientBrowserFeatures();
 				startClientActivityReporting();
 
-				// Restore IME mode from localStorage
-				if (imeModeActive && input) {
-					postToParent({ type: 'ivnc-ime-state', active: input.toggleImeMode() });
-				}
+                // Restore desired state, never toggle on reconnect. Embedded
+                // views inherit the parent's latest preference, not storage.
+                if (!usesTouchKeyboard()) {
+                    input.setImeMode(imeModeActive, false);
+                    input.restoreImeFocus();
+                }
+                postToParent({ type: 'ivnc-view-ready' });
 
 				// Enable upload button
 				const uploadBtn = document.getElementById('upload-btn');
@@ -3643,7 +3692,6 @@ export default function webrtc() {
 
             input.onimetoggle = active => {
                 syncImeButton();
-                if (!usesTouchKeyboard()) setBoolParam('ime_mode', active);
                 viewportController?.caret(input.textInput.remote?.cursor, input.displayState?.desktop, usesTouchKeyboard() && active);
                 postToParent({ type: 'ivnc-ime-state', active });
             };
@@ -3740,6 +3788,7 @@ export default function webrtc() {
                 input?.setTextInputState(state);
                 viewportController?.caret(state?.cursor, input?.displayState?.desktop, usesTouchKeyboard() && !!input?.textInput.focused());
             };
+            webrtc.ontextinputresult = data => input?.textInputResult(data);
             webrtc.ondisplaystate = state => {
                 if (state?.protocol !== 1) return;
                 window.__ivncDisplayState = state;

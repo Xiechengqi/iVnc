@@ -3,6 +3,8 @@
 //! Defines the input event data structures used by the data channel
 //! and compositor input injection.
 
+pub mod text_commit;
+
 /// Input event types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
@@ -42,6 +44,7 @@ pub struct InputEventData {
     pub window_id: u32,
     pub window_key: Option<uuid::Uuid>,
     pub paste: Option<crate::clipboard::paste::PasteCommand>,
+    pub text_commit: Option<text_commit::TextCommit>,
 }
 
 impl Default for InputEventData {
@@ -64,6 +67,7 @@ impl Default for InputEventData {
             window_id: 0,
             window_key: None,
             paste: None,
+            text_commit: None,
         }
     }
 }

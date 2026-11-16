@@ -167,7 +167,7 @@ const cases=[
         assert.equal((await page.evaluate(()=>fixture.snapshot())).mode,'fill');
     }],
     ['mode hints distinguish current state and the next action in both languages',async page=>{
-        for(const [language,current,next] of [['zh','适应窗口','铺满屏幕'],['en','Fit window','Fill screen']]) {
+        for(const [language,current,next] of [['zh','适应窗口','铺满窗口'],['en','Fit window','Fill window']]) {
             await page.evaluate(language=>fixture.setLang(language),language);await mode(page,'fit');await settled(page);
             const title=await page.locator('#mode').getAttribute('title');assert(title.includes(current) && title.includes(next));
             assert.equal(await page.locator('#mode').getAttribute('aria-label'),title);

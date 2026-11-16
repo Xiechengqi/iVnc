@@ -25,6 +25,7 @@
 import { Queue } from './util.js?v=1';
 import { pasteShortcut } from '../clipboard.js';
 import { TextInput, usesTouchKeyboard } from './text-input.js';
+import { TextCommitter } from './text-commit.js';
 
 /**
  * Class used by frontend to whitelist elements for input
@@ -1118,11 +1119,12 @@ export class Input {
         this._geometryMetadataPending = false;
         this._relativeRemainder = { x: 0, y: 0 };
         this.send = message => {
+            if (message === 'kr' && this.sendControl) return this.sendControl(message);
             if (/^(m|m2|b|w),/.test(message) && this.displayState) {
                 if (!this._geometryReady()) return;
                 message = `i,${this.displayState.revision},${message}`;
             }
-            send(message);
+            return send(message);
         };
         this._isSidebarOpen = false;
         this.isSharedMode = isSharedMode;
@@ -1181,7 +1183,9 @@ export class Input {
         this.textInput = new TextInput({
             canInput: () => this.inputAttached && this._viewActive && !document.hidden && document.hasFocus()
                 && !document.documentElement.hasAttribute('data-ivnc-modal-blocked'),
+            getPoint: () => this._textInputPoint(),
             sendText: text => this._sendCommittedText(text),
+            onCancel: () => this.textCommits?.cancel(),
             sendKey: keysym => { this.send('kd,' + keysym); this.send('ku,' + keysym); },
             onComposition: (active, text) => { this.isComposing = active; this.compositionString = text; },
             onChange: () => {
@@ -1190,6 +1194,12 @@ export class Input {
             },
         });
         this._imeTextarea = this.textInput.element;
+        this.textCommits = new TextCommitter({
+            send: message => this.send(message),
+            sendControl: message => this.sendControl ? this.sendControl(message) : this.send(message),
+            isCurrent: focus => this.textInput.available() && this.textInput.remote?.focus === focus,
+            onError: reason => this.ontextinputerror?.(reason),
+        });
 
         this._activeTouches = new Map();
         this._activeTouchIdentifier = null;
@@ -1221,26 +1231,60 @@ export class Input {
 
     toggleImeMode(desired) {
         const active = usesTouchKeyboard() ? this.textInput.focused() : this.textInput.enabled;
-        if (!(desired ?? !active)) this.textInput.hide();
-        else {
-            this._windowMath();
-            const rect = this.textInput.remote?.cursor;
-            const point = rect && this.m ? {
-                clientX: this.m.elementClientX + this.m.mouseOffsetX + rect[0] / this.m.mouseMultiX,
-                clientY: this.m.elementClientY + this.m.mouseOffsetY + (rect[1] + rect[3]) / this.m.mouseMultiY,
-            } : undefined;
-            this.textInput.show(point);
-        }
+        const enabled = desired ?? !active;
+        this.setImeMode(enabled);
+        if (!usesTouchKeyboard()) this.onimepreferencechange?.(enabled);
         return usesTouchKeyboard() ? this.textInput.focused() : this.textInput.enabled;
     }
 
+    // Idempotent preference synchronization. Background/disconnected views
+    // remember desktop mode but cannot focus or submit text until activated.
+    setImeMode(enabled, focus = true) {
+        if (usesTouchKeyboard()) {
+            if (!enabled) this.textInput.hide();
+            else if (focus) this.textInput.show();
+            return;
+        }
+        if (!enabled) this.textInput.hide();
+        else {
+            this.textInput.enabled = true;
+            if (focus) this.restoreImeFocus(true);
+            this.textInput.onChange();
+        }
+    }
+
+    restoreImeFocus(force = false) {
+        if (usesTouchKeyboard() || !this.textInput.enabled || !this.textInput.canInput()) return false;
+        const target = document.activeElement;
+        if (!force && target !== document.body && target !== document.documentElement
+            && target !== this.element && target !== this._imeTextarea && !target?.closest?.('.taskbar-item')) return false;
+        if (this.textInput.focused()) { this.textInput.position(); return true; }
+        return this.textInput.show();
+    }
+
+    _textInputPoint() {
+        const rect = this.textInput?.remote?.cursor;
+        if (!this.textInput?.remote?.enabled || !Array.isArray(rect) || rect.length !== 4 || !rect.every(Number.isFinite)) return null;
+        this._windowMath();
+        const m = this.m;
+        if (!m) return null;
+        const left = m.elementClientX + m.mouseOffsetX, top = m.elementClientY + m.mouseOffsetY;
+        return {
+            clientX: Math.max(left + 4, Math.min(left + rect[0] / m.mouseMultiX, left + m.contentW - 8)),
+            clientY: Math.max(top + 4, Math.min(top + (rect[1] + rect[3]) / m.mouseMultiY, top + m.contentH - 24)),
+        };
+    }
+
     setViewActive(active) {
+        window.__ivncViewActive = !!active;
         if (this._viewActive === !!active) return;
         this._viewActive = !!active;
         if (!active) { this.textInput.hide(false); this.send('kr'); this.resetKeyboard(); }
+        else this.restoreImeFocus();
     }
 
     setTextInputState(state) { this.textInput.remoteState(state); }
+    textInputResult(data) { this.textCommits.result(data); }
 
     _sendCommittedText(text) {
         // Legacy editors that do not enable text-input-v3 can still receive
@@ -1253,7 +1297,7 @@ export class Input {
             this.send('kd,' + text.codePointAt(0));
             this.send('ku,' + text.codePointAt(0));
             if (shift) this.send('ku,65505');
-        } else this.send('t,' + text);
+        } else this.textCommits.commit(text, this.textInput.remote);
     }
 
     destroy() {
@@ -1515,8 +1559,7 @@ export class Input {
         }
         // Ctrl+Shift+Space toggles IME mode
         if (event.code === 'Space' && event.ctrlKey && event.shiftKey) {
-            const active = this.toggleImeMode();
-            if (this.onimetoggle) this.onimetoggle(active);
+            this.toggleImeMode();
             _stopEvent(event);
             return;
         }
@@ -2422,6 +2465,7 @@ export class Input {
             else this._geometryFrameReady = true; // Metadata check below still gates old-sized frames.
         }
         this._windowMath();
+        this.textInput.position();
     }
 
     _geometryReady() {
@@ -2548,6 +2592,7 @@ export class Input {
 
     resize() {
         this._windowMath();
+        this.textInput.position();
     }
 
     isInputAttached() {
@@ -2559,7 +2604,11 @@ export class Input {
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
         this.listeners.push(addListener(document, 'fullscreenchange', this._onFullscreenChange, this));
         this.listeners.push(addListener(window, 'ivnc-overlay-interaction', this._onOverlayInteraction, this));
-        this.listeners.push(addListener(window, 'resize', this._windowMath, this));
+        this.listeners.push(addListener(window, 'resize', this.resize, this));
+        this.listeners.push(addListener(window, 'focus', this._resumeIme, this));
+        this.listeners.push(addListener(document, 'visibilitychange', this._resumeIme, this));
+        const video = document.getElementById('stream');
+        if (video) this.listeners.push(addListener(video, 'resize', this.resize, this));
         this.listeners.push(addListener(window, 'message', this._handleVisibilityMessage, this));
 
         if (!this.isSharedMode) {
@@ -2623,7 +2672,10 @@ export class Input {
         }
         this._windowMath();
         this.inputAttached = true;
+        this.restoreImeFocus();
     }
+
+    _resumeIme() { this.restoreImeFocus(); }
 
     detach() {
         removeListeners(this.listeners);

@@ -452,6 +452,10 @@ pub async fn drive_session(
     let paste = Mutex::new(crate::clipboard::paste::PasteReceiver::new(
         shared_state.config.input.enable_clipboard,
         input_tx.clone(),
+        paste_reply_tx.clone(),
+    ));
+    let text_commits = Mutex::new(crate::input::text_commit::TextCommitReceiver::new(
+        input_tx.clone(),
         paste_reply_tx,
     ));
     let ctx = EventContext {
@@ -462,6 +466,7 @@ pub async fn drive_session(
         shared_state: &shared_state,
         last_pong: &last_pong,
         paste: &paste,
+        text_commits: &text_commits,
     };
 
     let mut decoder = TcpFrameDecoder::new();
@@ -498,6 +503,10 @@ pub async fn drive_session(
     let auth_cancelled = auth.cancelled();
     tokio::pin!(auth_cancelled);
     loop {
+        text_commits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expire();
         let delay = next_timeout.saturating_duration_since(Instant::now());
         let mut fatal = false;
 
@@ -740,6 +749,7 @@ struct EventContext<'a> {
     shared_state: &'a Arc<SharedState>,
     last_pong: &'a Arc<AtomicU64>,
     paste: &'a Mutex<crate::clipboard::paste::PasteReceiver>,
+    text_commits: &'a Mutex<crate::input::text_commit::TextCommitReceiver>,
 }
 
 /// Handle a str0m event.
@@ -851,6 +861,17 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .allow_binary(ctx.shared_state.runtime_settings.binary_clipboard_enabled())
+        .handle(text)
+    {
+        ctx.shared_state
+            .record_connection_input_activity(&session.id);
+        return;
+    }
+
+    if ctx
+        .text_commits
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
         .handle(text)
     {
         ctx.shared_state

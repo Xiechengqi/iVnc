@@ -47,6 +47,7 @@ pub struct PasteCommand {
     pub valid: Arc<AtomicBool>,
     pub started: Instant,
     pub reply: mpsc::UnboundedSender<String>,
+    pub text_commit: Option<crate::input::text_commit::TextCommit>,
 }
 
 impl PasteCommand {
@@ -69,6 +70,10 @@ impl PasteCommand {
     }
 
     pub fn respond(&self, status: &str, revision: Option<u64>) {
+        if let Some(commit) = &self.text_commit {
+            commit.respond(status);
+            return;
+        }
         respond(&self.reply, self.id, status, revision);
     }
 }
@@ -260,6 +265,7 @@ impl PasteReceiver {
                         valid: Arc::new(AtomicBool::new(true)),
                         started: Instant::now(),
                         reply: self.reply.clone(),
+                        text_commit: None,
                     },
                     bytes: Vec::new(),
                     size,

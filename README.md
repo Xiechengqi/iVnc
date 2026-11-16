@@ -379,7 +379,8 @@ ICE-TCP 连接也复用同一端口，通过首字节分类自动区分。
 | `b,{button},{pressed}` | 鼠标按键 |
 | `w,{dx},{dy}` | 鼠标滚轮 |
 | `k,{keysym},{pressed}` | 键盘事件（X11 KeySym） |
-| `t,{text}` | IME 文本输入（zwp_text_input_v3） |
+| `t,{text}` | 兼容 IME 文本输入（优先 zwp_text_input_v3） |
+| `ti,{json}` | 带目标窗口与回执的 IME 提交／取消（协商 `commit:1` 后使用，见 [中文输入](docs/IME_INPUT.md)） |
 | `cw,{base64}` | 剪贴板内容 |
 | `_display,1` | 请求权威桌面/视频尺寸及几何版本 |
 | `_viewport,{json}` | 当前客户端工作区报告，不调整桌面 |

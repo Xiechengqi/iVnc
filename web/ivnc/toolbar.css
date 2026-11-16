@@ -10,6 +10,9 @@
 .ivnc-toolbar button.taskbar-pin { font: inherit; padding: 0; color: inherit; }
 .ivnc-toolbar #keyboard-toggle.active,
 .ivnc-toolbar #keyboard-toggle.active:hover { color: #8abbff; background: rgba(76, 134, 230, .25); }
+.ivnc-toolbar .toolbar-display-mode.active,
+.ivnc-toolbar .toolbar-display-mode.active:hover,
+.ivnc-toolbar .toolbar-display-mode.active:focus-visible { color: #8abbff; background: rgba(76, 134, 230, .25); border-color: rgba(76, 134, 230, .4); }
 .ivnc-toolbar .toolbar-tools,
 .ivnc-toolbar .toolbar-status {
     display: flex;

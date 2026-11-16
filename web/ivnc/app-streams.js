@@ -26,12 +26,12 @@ export function notifyAppStarted(id) {
 	}
 }
 
-const post = (stream, message) => stream.frame?.contentWindow?.postMessage(message, window.location.origin);
+const post = (stream, message) => stream.frame?.contentWindow?.postMessage({ ...message, view: stream.url }, window.location.origin);
 const closeView = (url) => fetch(`${url}close`, { method: 'POST', keepalive: true }).catch(() => {});
 const fromConsole = (source) => Array.from(document.querySelectorAll('iframe.web-console-frame'))
 	.some((frame) => frame.contentWindow === source);
 
-export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady = () => {}, displayMode = () => 'fit' }) {
+export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady = () => {}, displayMode = () => 'fit', imeMode = () => null, onImePreference = () => {}, onImeError = () => {} }) {
 	const streams = new Map();
 	let order = [];
 	let activeId = null;
@@ -129,11 +129,33 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 	// ivnc-view-ready, since the view's listener may not exist at load yet.
 	function sync(s) {
 		sendDisplayMode(s);
+		sendImeMode(s);
 		post(s, { type: 'ivnc-view-active', active: s.id === activeId });
 		// unlocked: the user has activated this tab, so audio may play.
 		if (s.unlocked) post(s, { type: 'ivnc-unmute' });
-		if (s.id === activeId) s.frame.contentWindow.focus();
+		if (s.id === activeId) focusFrame(s);
 	}
+
+    function focusFrame(s) {
+        if (document.hidden || !document.hasFocus() || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
+        const target = document.activeElement;
+        if (target?.closest?.('.web-terminal-modal, .clipboard-assist, .pwd-overlay, .update-overlay, .toolbar-rename')) return;
+        s.frame?.contentWindow?.focus();
+    }
+
+    function sendImeMode(s, focus = false) {
+        const enabled = imeMode();
+        if (typeof enabled !== 'boolean') return; // Mobile keyboards need a tap.
+        if (focus && s.id === activeId) focusFrame(s);
+        try {
+            const view = s.frame?.contentWindow;
+            if (view?.location.pathname === s.url) {
+                view.__ivncInput?.setImeMode(enabled, false);
+                if (s.id === activeId) view.__ivncInput?.restoreImeFocus();
+            }
+        } catch (_) {}
+        post(s, { type: 'ivnc-ime-mode', enabled, view: s.url });
+    }
 
 	// Display changes must also reach background views, without activation,
 	// audio or focus side effects. Load/ready repair messages sent too early.
@@ -199,6 +221,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		}
 		if (next) {
 			sendDisplayMode(next);
+			sendImeMode(next);
 			// Activation follows a user gesture, so the view may play audio.
 			next.unlocked = true;
 			if (next.state === null || next.state === 'ended') {
@@ -207,9 +230,13 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 				open(next);
 			}
 			post(next, { type: 'ivnc-unmute' });
-			next.frame?.contentWindow?.focus();
+			focusFrame(next);
 		} else if (document.activeElement?.closest?.('.app-streams')) {
+            const hadFocus = !document.hidden && document.hasFocus();
 			document.activeElement.blur();
+            // WebKit can leave keyboard focus in a now-hidden iframe after
+            // blur(). Return it to the desktop before restoring its proxy.
+            if (hadFocus) window.focus();
 		}
 		refresh();
 	}
@@ -301,9 +328,16 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 				end(s, 'expired');
 				break;
 			case 'ivnc-ime-state':
+				if (message.view !== s.url) break;
 				s.ime = !!message.active;
 				if (s.id === activeId) onChange();
 				break;
+            case 'ivnc-ime-preference':
+                if (message.view === s.url && s.id === activeId && typeof message.enabled === 'boolean') onImePreference(message.enabled);
+                break;
+            case 'ivnc-ime-error':
+                if (message.view === s.url && s.id === activeId && typeof message.reason === 'string') onImeError(message.reason);
+                break;
 			case 'ivnc-edge-hover':
 				if (s.id === activeId) onEdgeHover();
 				break;
@@ -338,6 +372,9 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		syncDisplayMode() {
 			if (!disposed) for (const s of streams.values()) sendDisplayMode(s);
 		},
+        syncImeMode(focus = false) {
+            if (!disposed) for (const s of streams.values()) sendImeMode(s, focus);
+        },
 		activeId: () => activeId,
 		isActiveFrame: (frame) => !!activeId && streams.get(activeId)?.frame?.contentWindow === frame,
 		frames: () => Array.from(streams.values()).map(s => s.frame).filter(Boolean),

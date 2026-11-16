@@ -4,6 +4,7 @@ use crate::clipboard::paste::{FormatSpec, PasteCommand, Shortcut};
 use smithay::{
     backend::input::KeyState,
     input::keyboard::{FilterResult, Keycode},
+    reexports::wayland_server::Resource,
     utils::SERIAL_COUNTER,
     wayland::selection::data_device::set_data_device_selection,
 };
@@ -86,25 +87,50 @@ impl Compositor {
         &mut self,
         text: &str,
         pending: &mut Option<PasteCommand>,
+        commit: Option<&crate::input::text_commit::TextCommit>,
     ) -> bool {
+        if let Some(commit) = commit {
+            if !commit.is_valid() {
+                commit.respond("timeout");
+                return true;
+            }
+            let focus = self.seat.get_keyboard().and_then(|kb| kb.current_focus());
+            let key = focus
+                .as_ref()
+                .and_then(|s| self.window_keys.get(&self.toplevel_surface(s).id()));
+            if key != Some(&commit.focus) {
+                commit.respond(if focus.is_none() {
+                    "no_focus"
+                } else {
+                    "focus_changed"
+                });
+                return true;
+            }
+        }
         if pending.is_none() && self.text_input.commit_text(text) {
+            if let Some(commit) = commit {
+                commit.respond("dispatched");
+            }
             return true;
         }
         if pending.is_none() {
             let (reply, _) = tokio::sync::mpsc::unbounded_channel();
             let command = PasteCommand {
-                id: 0,
+                id: commit.map_or(0, |c| c.id),
                 text: Arc::from(text.as_bytes()),
                 formats: Vec::new(),
                 shortcut: Shortcut::CtrlV,
                 target: None,
                 focus: Arc::new(Mutex::new(None)),
-                valid: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                valid: commit
+                    .map(|c| c.valid.clone())
+                    .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(true))),
                 // An editor that does not accept paste must not hold input for the
                 // full browser upload timeout. There is no upload for IME commits.
-                started: std::time::Instant::now()
+                started: commit.map_or_else(std::time::Instant::now, |c| c.started)
                     - (crate::clipboard::paste::TRANSFER_TIMEOUT - Duration::from_secs(2)),
                 reply,
+                text_commit: commit.cloned(),
             };
             self.reserve_paste(&command);
             *pending = Some(command);
@@ -116,6 +142,7 @@ impl Compositor {
             }
             Err("busy") => false,
             Err(reason) => {
+                pending.as_ref().unwrap().respond(reason, None);
                 log::debug!("IME paste cancelled: {reason}");
                 true
             }
@@ -461,6 +488,7 @@ mod tests {
             valid: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             started: std::time::Instant::now(),
             reply,
+            text_commit: None,
         };
         let snapshot = Snapshot {
             bytes: command.text.clone(),
@@ -509,6 +537,7 @@ mod tests {
             valid: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             started: std::time::Instant::now(),
             reply,
+            text_commit: None,
         };
         let snapshot = Snapshot {
             bytes: current.clone(),

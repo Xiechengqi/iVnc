@@ -24,6 +24,7 @@ npm --prefix web/ivnc exec -- playwright install chromium webkit
 npm --prefix web/ivnc run test:toolbar
 npm --prefix web/ivnc run test:viewport
 npm --prefix web/ivnc run test:mobile-input
+npm --prefix web/ivnc run test:ime
 npm --prefix web/ivnc run test:settings
 npm --prefix web/ivnc run test:app-sharing
 node --test scripts/video_playback_test.mjs scripts/viewport_test.mjs scripts/clipboard_test.mjs

@@ -389,9 +389,13 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
 
     function layout() {
         const compact = element.clientWidth <= 700;
-        for (const tool of toolEntries) {
+        let toolCursor = more, menuCursor = null;
+        for (const tool of [...toolEntries].reverse()) {
             const parent = compact && !tool.primary ? menu : tools;
-            if (tool.node.parentNode !== parent) parent.insertBefore(tool.node, parent === tools ? more : null);
+            const cursor = parent === tools ? toolCursor : menuCursor;
+            if (tool.node.parentNode !== parent || tool.node.nextElementSibling !== cursor) parent.insertBefore(tool.node, cursor);
+            if (parent === tools) toolCursor = tool.node;
+            else menuCursor = tool.node;
             tool.label.textContent = tool.node.dataset.toolLabel || tool.node.title;
         }
         more.hidden = !menu.children.length;
