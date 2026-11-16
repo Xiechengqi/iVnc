@@ -10,6 +10,7 @@
 
 use crate::web::auth::{self, AuthContext, TransportSecurity};
 use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
+use crate::web::github_update::{self, DownloadEvent};
 use crate::web::shared::SharedState;
 use axum::extract::Path;
 use axum::{
@@ -1761,12 +1762,6 @@ struct UpgradeLogEntry {
     progress: Option<u8>, // 0-100
 }
 
-/// GitHub Release response
-#[derive(Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-}
-
 /// GET /version - Public build version information
 async fn public_version_handler() -> axum::Json<PublicVersionInfo> {
     let git_commit = option_env!("IVNC_BUILD_GIT_COMMIT")
@@ -1806,11 +1801,7 @@ async fn get_version_handler() -> axum::Json<VersionInfo> {
     };
 
     // Fetch latest version from GitHub
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("ivnc-updater")
-        .build()
-    {
+    let client = match github_update::client() {
         Ok(c) => c,
         Err(_) => {
             return axum::Json(VersionInfo {
@@ -1822,23 +1813,16 @@ async fn get_version_handler() -> axum::Json<VersionInfo> {
         }
     };
 
-    let latest_version = match client
-        .get("https://api.github.com/repos/Xiechengqi/iVnc/releases/latest")
-        .send()
-        .await
-    {
-        Ok(resp) => match resp.json::<GitHubRelease>().await {
-            Ok(release) => release.tag_name.trim_start_matches('v').to_string(),
-            Err(_) => current.clone(),
-        },
-        Err(_) => current.clone(),
+    let latest_version = match github_update::latest_version(&client).await {
+        Ok(version) => version,
+        Err(error) => {
+            warn!("All GitHub release sources failed: {}", error);
+            current.clone()
+        }
     };
 
     let has_update = latest_version != current;
-    let download_url = format!(
-        "https://github.com/Xiechengqi/iVnc/releases/download/latest/ivnc-linux-{}",
-        arch
-    );
+    let download_url = github_update::binary_url(arch);
 
     axum::Json(VersionInfo {
         current,
@@ -1973,19 +1957,12 @@ async fn perform_upgrade_with_logs(
 
     // Step 2: Build download URL
     send_log(2, "准备下载最新版本...", "info", None).await;
-    let download_url = format!(
-        "https://github.com/Xiechengqi/iVnc/releases/download/latest/ivnc-linux-{}",
-        arch
-    );
+    let download_url = github_update::binary_url(arch);
     send_log(2, &format!("下载地址: {}", download_url), "success", None).await;
 
     // Step 3: Download new version
     send_log(3, "开始下载...", "info", None).await;
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .user_agent("ivnc-updater")
-        .build()
-    {
+    let client = match github_update::client() {
         Ok(c) => c,
         Err(e) => {
             send_log(3, &format!("创建 HTTP 客户端失败: {}", e), "error", None).await;
@@ -1993,21 +1970,6 @@ async fn perform_upgrade_with_logs(
         }
     };
 
-    let mut response = match client.get(&download_url).send().await {
-        Ok(r) => {
-            if !r.status().is_success() {
-                send_log(3, &format!("下载失败: HTTP {}", r.status()), "error", None).await;
-                return;
-            }
-            r
-        }
-        Err(e) => {
-            send_log(3, &format!("下载失败: {}", e), "error", None).await;
-            return;
-        }
-    };
-
-    let total_size = response.content_length().unwrap_or(0);
     let temp_path = match upgrade_temp_path(&install_path) {
         Ok(path) => path,
         Err(e) => {
@@ -2016,63 +1978,26 @@ async fn perform_upgrade_with_logs(
         }
     };
 
-    let mut file = match tokio::fs::File::create(&temp_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            send_log(3, &format!("创建临时文件失败: {}", e), "error", None).await;
-            return;
-        }
-    };
-
-    let mut downloaded = 0u64;
-    let mut last_progress = 0u8;
-
-    while let Some(chunk_result) = response.chunk().await.transpose() {
-        let chunk = match chunk_result {
-            Ok(c) => c,
-            Err(e) => {
-                send_log(3, &format!("下载数据失败: {}", e), "error", None).await;
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return;
-            }
-        };
-
-        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-            .await
-            .is_err()
-        {
-            send_log(3, "写入文件失败", "error", None).await;
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return;
-        }
-
-        downloaded += chunk.len() as u64;
-        if total_size > 0 {
-            let progress = ((downloaded as f64 / total_size as f64) * 100.0) as u8;
-            if progress != last_progress && (progress % 5 == 0 || progress == 100) {
-                send_log(
-                    3,
-                    &format!(
-                        "下载中... {}/{} MB",
-                        downloaded / 1024 / 1024,
-                        total_size / 1024 / 1024
-                    ),
-                    "progress",
-                    Some(progress),
-                )
+    if let Err(error) = github_update::download(&client, &download_url, &temp_path, |event| {
+        let (message, level, progress) = upgrade_download_log(event);
+        let tx = log_tx.clone();
+        async move {
+            let _ = tx
+                .send(UpgradeLogEntry {
+                    step: 3,
+                    total_steps: 10,
+                    message,
+                    level: level.to_string(),
+                    progress,
+                })
                 .await;
-                last_progress = progress;
-            }
-        } else {
-            // No content-length, show downloaded bytes only
-            let current_mb = downloaded / 1024 / 1024;
-            if current_mb > 0 && current_mb % 5 == 0 && current_mb as u8 != last_progress {
-                send_log(3, &format!("下载中... {} MB", current_mb), "info", None).await;
-                last_progress = current_mb as u8;
-            }
         }
+    })
+    .await
+    {
+        send_log(3, &format!("下载失败: {}", error), "error", None).await;
+        return;
     }
-    drop(file);
     send_log(3, "下载完成", "success", None).await;
 
     // Step 4: Verify download
@@ -2177,6 +2102,45 @@ async fn perform_upgrade_with_logs(
         }
         Err(err) => {
             send_log(10, &format!("重启失败: {}", err), "error", None).await;
+        }
+    }
+}
+
+fn upgrade_download_log(event: DownloadEvent) -> (String, &'static str, Option<u8>) {
+    match event {
+        DownloadEvent::Attempt { source } => {
+            (format!("正在通过 {} 下载...", source), "info", Some(0))
+        }
+        DownloadEvent::Fallback {
+            source,
+            next,
+            error,
+        } => (
+            format!(
+                "{} 下载失败: {}；正在切换到 {} 重试...",
+                source, error, next
+            ),
+            "warning",
+            Some(0),
+        ),
+        DownloadEvent::Progress {
+            source,
+            downloaded,
+            total,
+        } => {
+            let progress = total
+                .filter(|size| *size > 0)
+                .map(|size| (downloaded.saturating_mul(100) / size).min(100) as u8);
+            let message = match total {
+                Some(size) => format!(
+                    "{} 下载中... {}/{} MB",
+                    source,
+                    downloaded / 1024 / 1024,
+                    size / 1024 / 1024
+                ),
+                None => format!("{} 下载中... {} MB", source, downloaded / 1024 / 1024),
+            };
+            (message, "progress", progress)
         }
     }
 }
@@ -2330,7 +2294,41 @@ fn current_process_in_systemd_service(service_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_header_is_loopback, is_console_management_path, worker_path_allowed};
+    use super::{
+        host_header_is_loopback, is_console_management_path, upgrade_download_log,
+        worker_path_allowed, DownloadEvent,
+    };
+
+    #[test]
+    fn upgrade_proxy_retry_logs_are_warnings_and_reset_download_progress() {
+        let (message, level, progress) = upgrade_download_log(DownloadEvent::Fallback {
+            source: "GitHub",
+            next: "sina.dev",
+            error: "HTTP 503".to_string(),
+        });
+        assert!(
+            message.contains("GitHub") && message.contains("sina.dev") && message.contains("503")
+        );
+        assert_eq!(level, "warning");
+        assert_eq!(progress, Some(0));
+        let (message, level, progress) = upgrade_download_log(DownloadEvent::Attempt {
+            source: "httptunnel.top/gh",
+        });
+        assert!(message.contains("httptunnel.top/gh"));
+        assert_eq!((level, progress), ("info", Some(0)));
+        let (_, level, progress) = upgrade_download_log(DownloadEvent::Progress {
+            source: "sina.dev",
+            downloaded: 50,
+            total: Some(100),
+        });
+        assert_eq!((level, progress), ("progress", Some(50)));
+        let (_, _, progress) = upgrade_download_log(DownloadEvent::Progress {
+            source: "sina.dev",
+            downloaded: 50,
+            total: None,
+        });
+        assert_eq!(progress, None);
+    }
 
     #[test]
     fn worker_exposes_only_display_management_to_its_authenticated_owner() {

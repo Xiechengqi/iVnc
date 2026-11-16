@@ -8,5 +8,6 @@ pub use shared::SharedState;
 
 pub mod embedded_assets;
 
+mod github_update;
 pub mod http_server;
 pub use http_server::run_http_server_with_webrtc;
