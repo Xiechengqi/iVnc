@@ -4,7 +4,7 @@ import styles from './settings-actions.css?inline';
 
 const STRINGS = {
     zh: {
-        settings: '设置', password: '修改密码', update: '重启或升级', language: '切换为英文',
+        settings: '设置', password: '修改密码', update: '重启或升级', shutdown: '关机', language: '切换为英文',
         newPassword: '新密码', confirmPassword: '确认新密码', passwordHint: '至少 4 个字符',
         passwordShort: '密码至少需要 4 个字符', passwordLong: '密码不能超过 4096 个 UTF-8 字节',
         mismatch: '两次输入的密码不一致', passwordFailed: '修改密码失败',
@@ -18,9 +18,13 @@ const STRINGS = {
         recovered: '服务已恢复，即将刷新页面…', notRecovered: '服务尚未恢复，请稍后刷新页面。',
         networkError: '请求失败，请检查网络后重试。', upgradeFailed: '升级连接中断，无法确认升级结果，请检查服务状态。',
         failed: '操作失败', minimalHint: '账户与服务操作',
+        shutdownNotice: '确认关闭 iVnc？系统将保存应用运行状态、关闭当前连接并退出 iVnc。再次使用时需要手动启动服务。',
+        shutdownConfirm: '确认关机', shutdownPending: '正在发送关机请求…',
+        shutdownAccepted: '关机请求已接受，iVnc 正在退出。',
+        shutdownUncertain: '连接中断，无法确认关机结果，请检查服务状态。',
     },
     en: {
-        settings: 'Settings', password: 'Change password', update: 'Restart or upgrade', language: 'Switch to Chinese',
+        settings: 'Settings', password: 'Change password', update: 'Restart or upgrade', shutdown: 'Shut down', language: 'Switch to Chinese',
         newPassword: 'New password', confirmPassword: 'Confirm new password', passwordHint: 'At least 4 characters',
         passwordShort: 'Use at least 4 characters', passwordLong: 'Password cannot exceed 4096 UTF-8 bytes',
         mismatch: 'Passwords do not match', passwordFailed: 'Could not change password',
@@ -34,6 +38,10 @@ const STRINGS = {
         recovered: 'Service recovered. Reloading…', notRecovered: 'The service has not recovered. Refresh the page later.',
         networkError: 'Request failed. Check your network and retry.', upgradeFailed: 'Upgrade connection closed unexpectedly. Check the service status before retrying.',
         failed: 'Operation failed', minimalHint: 'Account and service actions',
+        shutdownNotice: 'Shut down iVnc? Running application state will be saved, connections will close, and iVnc will exit. Start the service manually to use it again.',
+        shutdownConfirm: 'Confirm shutdown', shutdownPending: 'Sending shutdown request…',
+        shutdownAccepted: 'Shutdown accepted. iVnc is exiting.',
+        shutdownUncertain: 'Connection interrupted. The shutdown result could not be confirmed. Check the service status.',
     },
 };
 export const settingsText = key => STRINGS[getLang()][key];
@@ -51,14 +59,16 @@ export function createSettingsActions(element, dialogs) {
     element.innerHTML = `
         <button id="settings-password" class="settings-action" type="button" hidden>${icon('<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>')}<span></span></button>
         <button id="settings-update" class="settings-action" type="button">${icon('<path d="M21 3v6h-6M3 21v-6h6M3 10a9 9 0 0 1 15-5l3 4M21 14A9 9 0 0 1 6 19l-3-4"/>')}<span></span></button>
+        <button id="settings-shutdown" class="settings-action settings-shutdown" type="button">${icon('<path d="M12 2v10M6.3 5.6a9 9 0 1 0 11.4 0"/>')}<span></span></button>
         <button id="lang-toggle" class="settings-action settings-language" type="button"></button>
         <button id="signout-btn" class="settings-action settings-signout" type="button" hidden>${icon('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>')}</button>`;
     const password = element.querySelector('#settings-password');
     const update = element.querySelector('#settings-update');
+    const shutdown = element.querySelector('#settings-shutdown');
     const language = element.querySelector('#lang-toggle');
     bindLogoutButton(element.querySelector('#signout-btn'));
     const translate = () => {
-        for (const [button, key] of [[password, 'password'], [update, 'update']]) {
+        for (const [button, key] of [[password, 'password'], [update, 'update'], [shutdown, 'shutdown']]) {
             button.title = settingsText(key); button.setAttribute('aria-label', settingsText(key));
             button.querySelector('span').textContent = settingsText(key);
         }
@@ -71,6 +81,7 @@ export function createSettingsActions(element, dialogs) {
     language.addEventListener('click', () => setLang(getLang() === 'zh' ? 'en' : 'zh'));
     password.addEventListener('click', () => openPassword(dialogs));
     update.addEventListener('click', () => openUpdate(dialogs));
+    shutdown.addEventListener('click', () => openShutdown(dialogs));
     window.addEventListener('pagehide', event => { if (!event.persisted) { untranslate(); unauth(); } });
 }
 
@@ -79,7 +90,7 @@ function openDialog(dialogs, type, contents, onClose = () => {}) {
     const overlay = document.createElement('div');
     overlay.className = `modal-bg settings-dialog-bg ${type}-overlay allow-native-input`;
     overlay.innerHTML = `<form class="modal settings-dialog ${type}-dialog">
-        <h2 id="settings-dialog-title">${settingsText(type === 'pwd' ? 'password' : 'update')}</h2>${contents}</form>`;
+        <h2 id="settings-dialog-title">${settingsText({ pwd: 'password', update: 'update', shutdown: 'shutdown' }[type])}</h2>${contents}</form>`;
     document.body.appendChild(overlay);
     const viewport = window.visualViewport;
     const layout = () => {
@@ -100,13 +111,47 @@ function openDialog(dialogs, type, contents, onClose = () => {}) {
     return { overlay, session, form: overlay.querySelector('form'), find: selector => overlay.querySelector(selector) };
 }
 
-async function request(url, options, session, timeout = 15000) {
+async function request(url, options, session, timeout = 15000, readResponse = response => response) {
     const controller = new AbortController();
     const abort = () => controller.abort();
     session.abort.signal.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(abort, timeout);
-    try { return await fetch(url, { ...options, cache: 'no-store', signal: controller.signal }); }
+    try { return await readResponse(await fetch(url, { ...options, cache: 'no-store', signal: controller.signal })); }
     finally { clearTimeout(timer); session.abort.signal.removeEventListener('abort', abort); }
+}
+
+function openShutdown(dialogs) {
+    const view = openDialog(dialogs, 'shutdown', `
+        <p class="settings-hint">${settingsText('shutdownNotice')}</p>
+        <p id="shutdown-msg" class="settings-message" role="status" aria-live="polite"></p>
+        <div class="settings-dialog-buttons"><button id="shutdown-cancel" type="button" autofocus>${settingsText('cancel')}</button><button id="shutdown-ok" class="settings-danger" type="submit">${settingsText('shutdownConfirm')}</button></div>`);
+    if (!view) return;
+    const { session, form, find } = view;
+    const message = find('#shutdown-msg'), ok = find('#shutdown-ok'), cancel = find('#shutdown-cancel');
+    let accepted = false;
+    cancel.addEventListener('click', () => dialogs.close());
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (accepted || session.locked || !session.isCurrent()) return;
+        session.setLocked(true); ok.disabled = cancel.disabled = true;
+        ok.textContent = settingsText('pending'); message.textContent = settingsText('shutdownPending');
+        try {
+            const { response, data } = await request('/api/shutdown', { method: 'POST' }, session, 15000,
+                async response => ({ response, data: await response.json().catch(() => null) }));
+            if (!session.isCurrent()) return;
+            if (!response.ok) throw Error(data?.error || `HTTP ${response.status}`);
+            if (response.status !== 202 || data?.ok !== true || data?.mode !== 'shutdown') throw Error(settingsText('shutdownUncertain'));
+            accepted = true;
+            message.classList.add('success'); message.textContent = settingsText('shutdownAccepted');
+            ok.hidden = true; cancel.textContent = settingsText('close');
+        } catch (error) {
+            if (!session.isCurrent()) return;
+            message.textContent = error.name === 'AbortError' || error instanceof TypeError
+                ? settingsText('shutdownUncertain') : error.message;
+            ok.disabled = false; ok.textContent = settingsText('shutdownConfirm');
+        }
+        session.setLocked(false); cancel.disabled = false;
+    });
 }
 
 function openPassword(dialogs) {

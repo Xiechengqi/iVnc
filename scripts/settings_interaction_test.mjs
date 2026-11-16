@@ -1,5 +1,5 @@
 // Production settings controller, console, actions and modal input guard in
-// Chromium/WebKit. Privileged operations are intercepted; no service restarts.
+// Chromium/WebKit. Privileged operations are intercepted; no service restarts or shutdowns.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -30,6 +30,7 @@ document.getElementById('underlay').onclick=()=>fixture.clicks++;
 const wait = (frame, fn) => frame.waitForFunction(fn);
 const openPassword = async frame => { await frame.locator('#settings-password').click(); await frame.locator('#pwd-new').waitFor(); };
 const openUpdate = async frame => { await frame.locator('#settings-update').click(); await frame.locator('#update-ok').waitFor(); };
+const openShutdown = async frame => { await frame.locator('#settings-shutdown').click(); await frame.locator('#shutdown-ok').waitFor(); };
 const closed = frame => wait(frame, () => !document.querySelector('.settings-dialog-bg'));
 const locked = frame => wait(frame, () => window.__ivncConsoleDialogState.locked);
 const unlocked = frame => wait(frame, () => !window.__ivncConsoleDialogState.locked);
@@ -39,8 +40,9 @@ const cases = [
         assert.equal(await frame.locator('.nav-item').count(), 3);
         assert(await frame.locator('#settings-password').isVisible());
         assert(await frame.locator('#settings-update').isVisible());
+        assert(await frame.locator('#settings-shutdown').isVisible());
         assert(await frame.locator('#signout-btn').isVisible());
-        const positions = await frame.evaluate(() => ['.nav-list','#settings-password','#settings-update','#lang-toggle','#signout-btn'].map(s => {
+        const positions = await frame.evaluate(() => ['.nav-list','#settings-password','#settings-update','#settings-shutdown','#lang-toggle','#signout-btn'].map(s => {
             const r=document.querySelector(s).getBoundingClientRect(); return {left:r.left,right:r.right,top:r.top};
         }));
         assert(positions.every((r,i) => i===0 || r.left>=positions[i-1].right));
@@ -54,6 +56,8 @@ const cases = [
         await frame.locator('#settings-password').waitFor();
         assert((await page.locator('#settings-frame').getAttribute('src')).endsWith('/settings.html'));
         await frame.locator('#settings-update').click(); await frame.locator('#update-cancel').click();
+        await openShutdown(frame); await frame.locator('#shutdown-cancel').click();
+        assert(!calls.some(c=>c.url==='/api/shutdown'));
         assert(!calls.slice(count).some(c => ['/console','/console.css','/console.js'].includes(c.url) || c.url.startsWith('/api/console/') || c.url.startsWith('/api/apps')));
         assert.equal(await frame.locator('.nav-item').count(), 0);
     }],
@@ -135,6 +139,107 @@ const cases = [
         assert.equal(calls.find(c=>c.url==='/api/restart').csrf,'fixture-csrf');
         await frame.locator('#update-cancel').click(); await closed(frame);
     }],
+    ['shutdown cancellation never sends a request and dismisses only the confirmation', async ({ page, frame, calls }) => {
+        for (const method of ['cancel','escape','backdrop','parent']) {
+            await openShutdown(frame);
+            assert(await frame.locator('#shutdown-cancel').evaluate(el=>document.activeElement===el));
+            assert.match(await frame.locator('.shutdown-dialog').textContent(),/保存应用运行状态/);
+            if(method==='cancel') await frame.locator('#shutdown-cancel').click();
+            else if(method==='escape') await frame.locator('#shutdown-cancel').press('Escape');
+            else if(method==='backdrop') await frame.locator('.shutdown-overlay').click({position:{x:2,y:2}});
+            else await page.mouse.click(2,2);
+            await closed(frame);
+            assert(await page.locator('.web-settings-modal').isVisible());
+            assert(await frame.locator('#settings-shutdown').evaluate(el=>document.activeElement===el));
+            assert.equal(calls.filter(c=>c.url==='/api/shutdown').length,0);
+        }
+        await frame.locator('#lang-toggle').click(); await openShutdown(frame);
+        assert.equal(await frame.locator('#settings-dialog-title').textContent(),'Shut down');
+        assert.equal(await frame.locator('#shutdown-ok').textContent(),'Confirm shutdown');
+    }],
+    ['shutdown confirms once, locks pending operations and never polls for a restart', async ({ page, frame, calls }) => {
+        let release;const gate=new Promise(resolve=>{release=resolve});
+        await page.route('**/api/shutdown',async route=>{await gate;await route.fulfill({status:202,json:{ok:true,mode:'shutdown'}})});
+        try {
+            await openShutdown(frame);
+            assert.equal(calls.filter(c=>c.url==='/api/shutdown').length,0);
+            await frame.locator('#shutdown-ok').click();await locked(frame);
+            await frame.evaluate(()=>document.querySelector('form.shutdown-dialog').requestSubmit());
+            await page.mouse.click(2,2);await page.keyboard.press('Escape');
+            await page.evaluate(()=>fixture.controller.minimize());
+            assert(await page.locator('.web-settings-modal').isVisible());
+            assert(await frame.locator('#shutdown-cancel').isDisabled());
+            assert.equal(calls.filter(c=>c.url==='/api/shutdown').length,1);
+            assert.equal(calls.find(c=>c.url==='/api/shutdown').csrf,'fixture-csrf');
+            assert.equal(calls.find(c=>c.url==='/api/shutdown').method,'POST');
+            release();await unlocked(frame);
+            assert.match(await frame.locator('#shutdown-msg').textContent(),/请求已接受/);
+            assert(await frame.locator('#shutdown-ok').isHidden());
+            await frame.evaluate(()=>document.querySelector('form.shutdown-dialog').requestSubmit());
+            assert.equal(calls.filter(c=>c.url==='/api/shutdown').length,1);
+            assert.equal(calls.filter(c=>['/health','/api/restart','/api/upgrade/ws'].includes(c.url)).length,0);
+            await frame.locator('#shutdown-cancel').click();await closed(frame);
+        } finally { release(); }
+    }],
+    ['shutdown HTTP and connection failures unlock without claiming success', async ({ page, frame, calls }) => {
+        for (const mode of ['http','connection']) {
+            await page.route('**/api/shutdown',route=>mode==='http'?route.fulfill({status:503,json:{error:'<b>shutdown unavailable</b>'}}):route.abort('failed'));
+            await openShutdown(frame);await frame.locator('#shutdown-ok').click();
+            await wait(frame,()=>!window.__ivncConsoleDialogState.locked && !!document.querySelector('#shutdown-msg').textContent);
+            assert.match(await frame.locator('#shutdown-msg').textContent(),mode==='http'?/shutdown unavailable/:/无法确认关机结果/);
+            assert.equal(await frame.locator('#shutdown-msg b').count(),0);
+            assert.equal(await frame.locator('#shutdown-msg').evaluate(el=>el.classList.contains('success')),false);
+            assert.equal(await frame.locator('#shutdown-ok').isDisabled(),false);
+            await frame.locator('#shutdown-cancel').click();await closed(frame);
+        }
+        assert.equal(calls.filter(c=>c.url==='/api/shutdown').length,2);
+    }],
+    ['shutdown requires a complete and valid acknowledgment before displaying acceptance', async ({ page, frame }) => {
+        for (const reply of [
+            {status:200,json:{ok:true,mode:'shutdown'}},
+            {status:202,json:{ok:false}},
+            {status:202,contentType:'application/json',body:'{"ok":true'},
+        ]) {
+            await page.route('**/api/shutdown',route=>route.fulfill(reply));
+            await openShutdown(frame);await frame.locator('#shutdown-ok').click();await unlocked(frame);
+            assert.match(await frame.locator('#shutdown-msg').textContent(),/无法确认关机结果/);
+            assert.equal(await frame.locator('#shutdown-msg').evaluate(el=>el.classList.contains('success')),false);
+            assert.equal(await frame.locator('#shutdown-ok').isDisabled(),false);
+            await frame.locator('#shutdown-cancel').click();await closed(frame);
+        }
+    }],
+    ['shutdown timeout and page teardown release the request and modal shield', async ({ page, frame }) => {
+        await page.route('**/api/shutdown',()=>{});
+        await page.clock.install();await openShutdown(frame);await frame.locator('#shutdown-ok').click();await locked(frame);
+        await page.clock.runFor(15001);await unlocked(frame);
+        assert.match(await frame.locator('#shutdown-msg').textContent(),/无法确认关机结果/);
+        await frame.locator('#shutdown-cancel').click();await closed(frame);
+        await openShutdown(frame);await frame.locator('#shutdown-ok').click();await locked(frame);
+        await frame.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false})));
+        assert.equal(await frame.locator('.settings-dialog-bg').count(),0);
+        assert.equal(await page.evaluate(()=>document.documentElement.hasAttribute('data-ivnc-modal-blocked')),false);
+    }],
+    ['shutdown response body remains covered by timeout and page teardown', async ({ page, frame }) => {
+        await frame.evaluate(()=>{
+            const previous=window.fetch;
+            window.fetch=(url,options)=>{
+                if(url!=='/api/shutdown')return previous(url,options);
+                return Promise.resolve(new Response(new ReadableStream({
+                    start(controller){options.signal.addEventListener('abort',()=>{window.shutdownBodyAborted=true;controller.error(new DOMException('Aborted','AbortError'))},{once:true})},
+                }),{status:202,headers:{'Content-Type':'application/json'}}));
+            };
+        });
+        await page.clock.install();await openShutdown(frame);await frame.locator('#shutdown-ok').click();await locked(frame);
+        await page.clock.runFor(15001);await unlocked(frame);
+        assert.match(await frame.locator('#shutdown-msg').textContent(),/无法确认关机结果/);
+        assert.equal(await frame.evaluate(()=>window.shutdownBodyAborted),true);
+        await frame.locator('#shutdown-cancel').click();await closed(frame);
+        await frame.evaluate(()=>{window.shutdownBodyAborted=false});
+        await openShutdown(frame);await frame.locator('#shutdown-ok').click();await locked(frame);
+        await frame.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false})));
+        assert.equal(await frame.evaluate(()=>window.shutdownBodyAborted),true);
+        assert.equal(await frame.locator('.settings-dialog-bg').count(),0);
+    }],
     ['upgrade starts only after confirmation and final restart error is not success', async ({ frame, calls, handleUpgrade }) => {
         let socket,opened=0;
         handleUpgrade(ws=>{socket=ws;opened++});
@@ -197,12 +302,14 @@ const cases = [
         assert.deepEqual(await page.locator('.web-settings-modal').boundingBox(),bounds);
         assert.equal(await page.evaluate(()=>fixture.layoutEvents),0,'keyboard layout must not cancel terminal dragging');
     }],
-    ['disabled authentication hides account actions while preserving restart', async ({ page, url, state }) => {
+    ['disabled authentication hides account actions while preserving service controls', async ({ page, url, state }) => {
         state.enabled=false; await page.goto(url+'?console=0');
         const frame=page.frameLocator('#settings-frame'); await frame.locator('#settings-update').waitFor();
         assert.equal(await frame.locator('#settings-password').isVisible(),false);
         assert.equal(await frame.locator('#signout-btn').isVisible(),false);
         await frame.locator('#settings-update').click(); await frame.locator('#update-cancel').click();
+        assert(await frame.locator('#settings-shutdown').isVisible());
+        await openShutdown(frame);await frame.locator('#shutdown-cancel').click();
     }],
     ['password success immediately redirects the top document and other tabs', async ({ page, frame, context, url }) => {
         const other=await context.newPage();

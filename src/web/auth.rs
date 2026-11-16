@@ -480,7 +480,7 @@ pub async fn middleware(
             if unsafe_method && !miao && !csrf_matches(&context, req.headers()) {
                 return failure(StatusCode::FORBIDDEN, "csrf_invalid");
             }
-        } else if state.config.http.basic_auth_enabled
+        } else if (state.config.http.basic_auth_enabled || req.uri().path() == "/api/shutdown")
             && (websocket || unsafe_method)
             && !same_origin(req.headers(), secure, false)
         {

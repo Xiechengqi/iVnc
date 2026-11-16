@@ -143,6 +143,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/api/change-password", post(change_password_handler))
         .route("/api/version", get(get_version_handler))
         .route("/api/restart", post(restart_handler))
+        .route("/api/shutdown", post(shutdown_handler))
         .route("/api/upgrade/ws", get(upgrade_ws_handler))
         .route("/api/connections", get(connections_handler))
         .route("/api/connections/{id}/disconnect", post(disconnect_handler))
@@ -1843,6 +1844,27 @@ async fn restart_handler(State(state): State<Arc<SharedState>>) -> Response {
     }
 }
 
+/// POST /api/shutdown - Use the normal main-loop cleanup, then exit successfully.
+async fn shutdown_handler(State(state): State<Arc<SharedState>>) -> Response {
+    if !state.has_shutdown_flag() {
+        return proxy_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ok": false, "error": "shutdown flag is not initialized"}),
+        );
+    }
+    info!("Graceful shutdown requested through web settings");
+    tokio::spawn(async move {
+        // Give the accepted response time to reach the browser before the main
+        // loop begins closing applications and the async runtime.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        state.request_shutdown();
+    });
+    proxy_json_response(
+        StatusCode::ACCEPTED,
+        json!({"ok": true, "mode": "shutdown"}),
+    )
+}
+
 /// GET /api/upgrade/ws - WebSocket upgrade endpoint
 async fn upgrade_ws_handler(
     State(state): State<Arc<SharedState>>,
@@ -2295,9 +2317,55 @@ fn current_process_in_systemd_service(service_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        host_header_is_loopback, is_console_management_path, upgrade_download_log,
-        worker_path_allowed, DownloadEvent,
+        host_header_is_loopback, is_console_management_path, shutdown_handler,
+        upgrade_download_log, worker_path_allowed, DownloadEvent, SharedState, State, StatusCode,
     };
+
+    fn shutdown_test_state() -> std::sync::Arc<SharedState> {
+        let config = crate::config::Config::default();
+        let (input_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        std::sync::Arc::new(SharedState::new(
+            config.clone(),
+            crate::config::ui::UiConfig::from_env(&config),
+            input_tx,
+            std::sync::Arc::new(crate::runtime_settings::RuntimeSettings::new(&config)),
+            None,
+            Some(false),
+        ))
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_an_uninitialized_main_loop() {
+        let response = shutdown_handler(State(shutdown_test_state())).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn shutdown_acknowledges_before_requesting_normal_main_loop_exit() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let state = shutdown_test_state();
+        let running = Arc::new(AtomicBool::new(true));
+        state.set_shutdown_flag(Arc::clone(&running));
+        let response = shutdown_handler(State(Arc::clone(&state))).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(running.load(Ordering::SeqCst));
+        let body = super::to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"ok": true, "mode": "shutdown"})
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while running.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!running.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn upgrade_proxy_retry_logs_are_warnings_and_reset_download_progress() {
@@ -2338,6 +2406,9 @@ mod tests {
             "/api/console/display/",
             "/api/console/settings",
             "/api/apps",
+            "/api/shutdown",
+            "/api/restart",
+            "/api/upgrade/ws",
             "/terminal/ws",
         ] {
             assert!(!worker_path_allowed(path), "{path}");
@@ -2373,6 +2444,7 @@ mod tests {
             "/api/console",
             "/api/apps-status",
             "/api/capabilities-extra",
+            "/api/shutdown",
             "/terminal/ws",
         ] {
             assert!(!is_console_management_path(path), "{path}");

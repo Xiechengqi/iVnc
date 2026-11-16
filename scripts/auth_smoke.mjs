@@ -4,7 +4,7 @@
 // IVNC_TEST_HTTP_HOST=<local LAN IP> also exercises an untrusted HTTP origin.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, openSync, closeSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, openSync, closeSync, rmSync } from 'node:fs';
 import { tmpdir, networkInterfaces } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -29,6 +29,14 @@ async function waitFor(name, check, timeout = 30000) {
     const end = Date.now() + timeout; let last;
     while (Date.now() < end) { try { const value = await check(); if (value) return value; } catch (e) { last = e; } await delay(50); }
     throw Error(`Timed out: ${name}${last ? ` (${last.message})` : ''}`);
+}
+async function withTimeout(name, operation, timeout = 15000) {
+    let timer;
+    try {
+        return await Promise.race([operation, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(Error(`Timed out: ${name}`)), timeout);
+        })]);
+    } finally { clearTimeout(timer); }
 }
 function request(server, target, { method = 'GET', headers = {}, body } = {}) {
     const payload = body === undefined ? undefined : JSON.stringify(body);
@@ -100,6 +108,26 @@ async function formLogin(page, server, next = '/') {
     await page.waitForURL(server.origin + next);
     await page.locator(next === '/console' ? '#nav-overview' : '#taskbar').waitFor();
 }
+async function confirmShutdown(page, scope, server) {
+    page.setDefaultTimeout(15000);
+    await scope.locator('#settings-shutdown').click();
+    await scope.locator('#shutdown-cancel').click();
+    assert.equal((await request(server, '/health')).status, 200, 'cancelling must leave the service running');
+    await scope.locator('#settings-shutdown').click();
+    const accepted = page.waitForResponse(response=>new URL(response.url()).pathname==='/api/shutdown' && response.request().method()==='POST', {timeout:15000});
+    await scope.locator('#shutdown-ok').click();
+    const response = await accepted;
+    assert.equal(response.status(), 202);
+    assert.deepEqual(await withTimeout('shutdown response body', response.json()), {ok:true,mode:'shutdown'});
+    await scope.locator('#shutdown-msg').filter({hasText:/关机请求已接受|Shutdown accepted/}).waitFor();
+    await waitFor('graceful web shutdown', ()=>server.child.exitCode!==null || server.child.signalCode!==null, 20000);
+    assert.equal(server.child.exitCode, 0);
+    assert.equal(server.child.signalCode, null);
+    const log = readFileSync(path.join(server.dir, 'server.log'), 'utf8');
+    assert(log.includes('Graceful shutdown requested through web settings'));
+    assert(log.includes('ivnc stopped'));
+    assert(!readdirSync(server.env.XDG_RUNTIME_DIR).some(name=>/^wayland-\d+(\.lock)?$/.test(name)), 'Wayland socket and lock must be cleaned');
+}
 try {
     const plain = await startServer('http'), secure = await startServer('https', { tls: true });
     for (const server of [plain, secure]) {
@@ -116,6 +144,12 @@ try {
         assert.equal((await request(server, '/manifest.json')).status, 200);
         pass(`${tag}: browser navigation, explicit Basic compatibility, login origin and shipped public assets`);
         const credentials = await loginApi(server), cookieOnly = { Cookie: credentials.Cookie };
+        assert.equal((await request(server, '/api/shutdown', {method:'POST'})).status, 401);
+        assert.equal((await request(server, '/api/shutdown', {method:'POST',headers:{...cookieOnly,Origin:server.origin}})).status, 403);
+        assert.equal((await request(server, '/api/shutdown', {method:'POST',headers:{...credentials,Origin:'http://foreign.test'}})).status, 403);
+        assert.equal((await request(server, '/api/shutdown', {headers:credentials})).status, 405);
+        assert.equal((await request(server, '/health')).status, 200);
+        pass(`${tag}: shutdown requires authentication, same origin, CSRF and explicit POST`);
         assert.equal((await request(server, '/api/apps', { headers: cookieOnly })).status, 200);
         assert.equal((await request(server, '/api/console/keyframe', { method: 'POST', headers: { ...cookieOnly, Origin: server.origin } })).status, 403);
         assert.equal((await request(server, '/api/console/keyframe', { method: 'POST', headers: { ...credentials, Origin: 'http://foreign.test' } })).status, 403);
@@ -297,6 +331,9 @@ try {
     restricted.password = 'new-settings-password';
     await formLogin(settingsPage, restricted);
     pass('console-disabled settings retains real password changes and cross-tab session revocation');
+    await settingsPage.locator('.toolbar-tools > #console-btn').click();
+    await confirmShutdown(settingsPage, settingsPage.frameLocator('#settings-frame'), restricted);
+    pass('console-disabled settings confirms shutdown and the isolated process exits cleanly');
     await settingsContext.close(); await settingsBrowser.close();
     const open = await startServer('disabled', { enabled: false });
     assert.equal((await request(open, '/api/apps')).status, 200);
@@ -306,14 +343,41 @@ try {
     await noAuthPage.locator('#settings-update').waitFor();
     assert.equal(await noAuthPage.locator('#settings-password').isVisible(), false);
     assert.equal(await noAuthPage.locator('#signout-btn').isVisible(), false);
+    assert.equal((await request(open, '/api/shutdown', {method:'POST',headers:{Origin:'http://foreign.test'}})).status, 403);
+    await confirmShutdown(noAuthPage, noAuthPage, open);
     await noAuthBrowser.close();
-    pass('authentication-disabled installations retain API and terminal access');
+    pass('authentication-disabled installations retain service controls and reject cross-origin shutdown');
+
+    // A managed application records SIGTERM, proving that web shutdown uses
+    // app-state persistence and the ordinary process cleanup, not a hard exit.
+    const ready = path.join(plain.dir, 'shutdown-app.pid'), stopped = path.join(plain.dir, 'shutdown-app.stopped');
+    const fixture = path.join(plain.dir, 'shutdown-app.py');
+    writeFileSync(fixture, `import os, signal, sys, time\nfrom pathlib import Path\ndef stop(*_):\n    Path(${JSON.stringify(stopped)}).write_text('SIGTERM')\n    sys.exit(0)\nsignal.signal(signal.SIGTERM, stop)\nPath(${JSON.stringify(ready)}).write_text(str(os.getpid()))\nwhile True:\n    time.sleep(0.05)\n`);
+    const quote = text => "'"+text.replaceAll("'", "'\\''")+"'";
+    const managed = await request(plain, '/api/apps', {method:'POST',headers:basic(plain),body:{name:'Graceful shutdown fixture',app_type:'desktop',autostart:false,exec_command:`python3 ${quote(fixture)}`}});
+    assert.equal(managed.status, 201);
+    const managedId = managed.json.app.id;
+    assert.equal((await request(plain, `/api/apps/${managedId}/start`, {method:'POST',headers:basic(plain)})).status, 200);
+    await waitFor('managed shutdown fixture', ()=>existsSync(ready));
+    const managedPid = Number(readFileSync(ready,'utf8'));
+    for (const [engine,server] of [['chromium',plain],['webkit',secure]]) {
+        const browser = await engines[engine].launch({...(engine==='chromium'?{executablePath:process.env.CHROME_BIN || '/usr/bin/google-chrome'}:{})});browsers.push(browser);
+        const context = await browser.newContext({locale:'zh-CN',ignoreHTTPSErrors:true}), page = await context.newPage();
+        await formLogin(page,server,'/console');
+        await confirmShutdown(page,page,server);
+        pass(`${engine} ${server.tls?'HTTPS':'HTTP'}: full settings acknowledges web shutdown before normal exit and socket cleanup`);
+        await browser.close();
+    }
+    assert.equal(readFileSync(stopped,'utf8'),'SIGTERM');
+    assert.throws(()=>process.kill(managedPid,0),error=>error.code==='ESRCH');
+    assert(JSON.parse(readFileSync(path.join(plain.env.IVNC_HOME,'app_running_state.json'),'utf8')).app_ids.includes(managedId));
+    pass('web shutdown saves managed application state and stops its process with SIGTERM');
     console.log(`${passed} authentication smoke checks passed. Artifacts: ${work}`);
 } catch (error) {
     let screenshot = 0;
     for (const browser of browsers) for (const context of browser.contexts()) for (const page of context.pages()) {
         await page.screenshot({ path: path.join(work, `failure-${screenshot++}.png`) }).catch(() => {});
-        console.error('Failed page:', new URL(page.url()).pathname, await page.locator('#error').textContent().catch(() => ''));
+        console.error('Failed page:', new URL(page.url()).pathname, await page.locator('#error').textContent({timeout:1000}).catch(() => ''));
     }
     console.error(`Authentication smoke failed. Artifacts: ${work}`); throw error;
 } finally {

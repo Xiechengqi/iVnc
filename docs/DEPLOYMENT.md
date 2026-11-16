@@ -281,7 +281,7 @@ After=network.target pipewire.service
 Type=simple
 User=root
 ExecStart=/usr/local/bin/ivnc -c /etc/ivnc.toml
-Restart=always
+Restart=on-failure
 RestartSec=5
 RuntimeDirectory=ivnc-root
 RuntimeDirectoryMode=0700
@@ -290,6 +290,8 @@ Environment="XDG_RUNTIME_DIR=/run/ivnc-root"
 [Install]
 WantedBy=multi-user.target
 ```
+
+`Restart=on-failure` 允许设置中的“关机”操作正常停止服务。已有服务若使用 `Restart=always`，应调整此策略，否则正常退出后也会被 systemd 再次启动。
 
 启用并启动：
 

@@ -8,7 +8,8 @@
 .settings-actions .settings-action:hover { background: #eef6ff; border-color: #8fc2ee; }
 .settings-actions .settings-action:focus-visible,
 .settings-dialog :focus-visible { outline: 2px solid #0984e3; outline-offset: 2px; }
-.settings-actions .settings-signout { color: #b52b2b; }
+.settings-actions .settings-signout, .settings-actions .settings-shutdown { color: #b52b2b; }
+.settings-actions .settings-shutdown:hover { background: #fff1f1; border-color: #e7aaaa; }
 .settings-actions [hidden], .settings-dialog [hidden] { display: none !important; }
 .settings-dialog-bg {
     display: none; position: fixed; inset: 0; z-index: 100;
@@ -40,6 +41,7 @@
     background: #f4f7f9; color: #2d3436; font: inherit; cursor: pointer;
 }
 .settings-dialog-buttons .settings-primary { background: #0984e3; color: #fff; border-color: #0984e3; }
+.settings-dialog-buttons .settings-danger { background: #b52b2b; color: #fff; border-color: #b52b2b; }
 .settings-dialog button:disabled { opacity: .55; cursor: default; }
 .settings-dialog .settings-upgrade-option { display: flex; align-items: center; gap: 8px; min-height: 36px; }
 .settings-upgrade-option input { width: 18px; height: 18px; flex: 0 0 auto; }
@@ -56,7 +58,7 @@
 @media (max-width: 760px) {
     .settings-actions { gap: 4px; }
     .settings-actions .settings-action { min-width: 40px; min-height: 44px; padding: 6px; }
-    .settings-actions #settings-password span, .settings-actions #settings-update span { display: none; }
+    .settings-actions .settings-action span { display: none; }
     .settings-actions .settings-language { font-size: 12px; }
     .settings-dialog-bg .settings-dialog { padding: 16px; }
 }
