@@ -4,13 +4,17 @@ iVnc 默认在启动应用命令和 Web Terminal 时自动加载用户 HOME 下�
 
 ## 行为
 
-- **应用启动**：在原有命令执行前，按顺序 source 两个位置的 `.profile` 和 `.bashrc`：
+- **应用启动**（桌面应用与后台应用均适用）：在原有命令执行前，按顺序 source 两个位置的 `.profile` 和 `.bashrc`：
   1. iVnc 运行用户的**真实 HOME**（manager 进程继承的 `HOME`）；
   2. 应用的**隔离 HOME**（`$IVNC_HOME/apps/<id>/home`）。
   后加载的文件在冲突时覆盖先加载的文件；应用隔离 HOME 通常没有 rc 文件，仅作为补充。
 - **Web Terminal**：每次新建终端会话（首次打开以及之后每次新建）都加载真实 HOME 的这两个文件。终端没有应用隔离 HOME，因此只读真实 HOME。
 
-由于 `.bashrc` 的 guard（`case $- in *i*) ;; *) return;; esac`）在非交互 shell 中会直接返回，应用启动使用一个**交互式 bash** 来 source 文件（`--noprofile --norc -i`），保证带 guard 的 `.bashrc` 真正执行。原始启动命令随后仍由 `/bin/sh -c` 执行，命令文本不会被包装层重新解析。
+由于 `.bashrc` 的 guard（`case $- in *i*) ;; *) return;; esac`）在非交互 shell 中会直接返回，应用启动使用一个**交互式 bash** 来 source 文件（`--noprofile --norc -i`），保证带 guard 的 `.bashrc` 真正执行。
+
+source 每个文件时会**临时把 `HOME` 设为该文件所属的 HOME**，因此 rc 中类似 `export NVM_DIR="$HOME/.nvm"` 的写法会正确展开为真实 HOME（而非应用的隔离 HOME）；source 完成后 `HOME` 恢复为隔离 HOME。
+
+原始启动命令最终在**同一个 bash 中以 `eval` 执行**，而不是交给 `/bin/sh`。这带来两个好处：rc 加载后的 `PATH` 对命令生效；命令本身可以使用 `source` 等 bash 专有内置命令（dash 没有 `source`，这正是此前 `source: not found` 的原因）。命令文本作为单个 `$0` 参数传入，不会被包装层提前解析。
 
 终端在 pty 内使用 `bash --rcfile <bootstrap> -i`（或 `sh` 的 `ENV` 机制），rc 文件在**同一个交互式 shell** 中执行，因此其中定义的函数和别名会保留。
 
@@ -23,7 +27,7 @@ source 完成后，iVnc 会重新导出它负责的变量，防止用户 rc 意�
 - `XDG_RUNTIME_DIR`、`WAYLAND_DISPLAY`、`PULSE_SERVER` 恢复为 source 前的值；
 - `DISPLAY`、`WAYLAND_SOCKET`、`LD_PRELOAD` 被清除。
 
-PATH 等普通变量保留 rc 修改后的值——这正是加载 rc 的目的（如 nvm、conda）。
+PATH 等普通变量保留 rc 修改后的值——这正是加载 rc 的目的（如 nvm、conda）。`NVM_DIR` 等基于 `$HOME` 的变量按真实 HOME 展开，不指向隔离目录。
 
 ## 关闭
 

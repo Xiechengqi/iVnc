@@ -3,6 +3,7 @@ use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -217,6 +218,22 @@ pub fn service_log_path(app_id: &str) -> std::path::PathBuf {
     dir.join("service.log")
 }
 
+/// Build the raw command for a background app: either the legacy `sh -c`, or
+/// the shell-profile bootstrap when profile loading is enabled. Kept separate
+/// from the filesystem/log setup so it can be tested without touching `$HOME`.
+fn service_command(launch_command: &str, profile_homes: &[PathBuf]) -> Command {
+    if profile_homes.is_empty() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(launch_command);
+        cmd
+    } else {
+        // Loads $HOME/.profile and $HOME/.bashrc (real home first, app home
+        // second) in a bash that has `source`, then runs the launch command in
+        // that same shell with the loaded PATH.
+        crate::shell_profile::app_command(launch_command, profile_homes)
+    }
+}
+
 fn build_service_command(app: &ManagedApp) -> Result<Command, String> {
     let launch_command = app
         .launch_command
@@ -225,8 +242,14 @@ fn build_service_command(app: &ManagedApp) -> Result<Command, String> {
         .filter(|cmd| !cmd.is_empty())
         .ok_or("missing launch_command")?;
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(launch_command);
+    // The manager's HOME is the real user home; apply_std_command_isolation
+    // below replaces it with the app's isolated HOME. Compute both before that
+    // so the bootstrap can source the right files in the right order.
+    let real_home = std::env::var_os("HOME").map(PathBuf::from);
+    let app_home = crate::paths::prepare_app_home(&app.id)?;
+    let profile_homes = crate::shell_profile::app_profile_homes(real_home.as_deref(), &app_home);
+
+    let mut cmd = service_command(launch_command, &profile_homes);
     unsafe {
         cmd.pre_exec(|| {
             if libc::setpgid(0, 0) != 0 {
@@ -310,5 +333,46 @@ fn terminate_process_group(app_id: &str, pid: u32) {
                 pgid, app_id, err
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMMAND: &str = "ls /root/.nvm/versions/node/v26.13.1/bin/node; source /root/.bashrc; which node; which dsh; sleep 1000";
+
+    #[test]
+    fn no_profile_homes_uses_legacy_sh() {
+        let cmd = service_command(COMMAND, &[]);
+        assert_eq!(cmd.get_program(), "sh");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], COMMAND);
+    }
+
+    #[test]
+    fn profile_homes_use_bash_bootstrap_with_real_home_first() {
+        let homes = vec![
+            PathBuf::from("/root"),
+            PathBuf::from("/root/.ivnc/apps/x/home"),
+        ];
+        let cmd = service_command(COMMAND, &homes);
+        assert!(cmd.get_program().to_string_lossy().ends_with("/bash"));
+        let args: Vec<_> = cmd.get_args().collect();
+        // $0 is the original command (with `source`), homes follow in order.
+        assert_eq!(args[5], COMMAND);
+        assert_eq!(args[6], "/root");
+        assert_eq!(args[7], "/root/.ivnc/apps/x/home");
+        let script = args[4].to_str().unwrap();
+        assert!(script.contains("eval \"$0\""));
+    }
+
+    #[test]
+    fn app_home_is_resolved_for_profile_homes() {
+        // prepare_app_home returns the per-app isolated HOME under $IVNC_HOME.
+        let home = crate::paths::prepare_app_home("svc-test").unwrap();
+        assert!(home.is_absolute());
+        assert!(home.to_string_lossy().contains("apps/svc-test/home"));
     }
 }

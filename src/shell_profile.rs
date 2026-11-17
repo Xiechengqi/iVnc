@@ -77,10 +77,14 @@ pub fn terminal_profile_script(homes: &[PathBuf]) -> String {
 ///   `~/.bashrc` checks before it exports anything. Without it a sourced
 ///   `.bashrc` would just `return`.
 /// - The original command is `$0` (passed as a single argument, never parsed)
-///   and the homes are `$@`. After sourcing, the variables iVnc owns are
-///   re-applied so a user's rc cannot switch the app to X11 or point it at the
-///   host's session bus, then the original command runs under `/bin/sh` as
-///   before.
+///   and the homes are `$@`. While each home's files are sourced `HOME` is
+///   temporarily set to that home, so rc files that expand `$HOME/.nvm` (nvm,
+///   pyenv, …) resolve against the home they belong to. After sourcing, the
+///   variables iVnc owns are re-applied so a user's rc cannot switch the app to
+///   X11 or point it at the host's session bus.
+/// - The original command is finally `eval`-ed in this same bash, not handed to
+///   `/bin/sh`. That keeps the loaded PATH and makes bash-only builtins such as
+///   `source` usable in the launch command itself (dash has no `source`).
 pub fn app_command(original: &str, homes: &[PathBuf]) -> Command {
     const SCRIPT: &str = r#"
 ivnc_app_home=$HOME
@@ -89,6 +93,7 @@ ivnc_display=${WAYLAND_DISPLAY-}
 ivnc_pulse=${PULSE_SERVER-}
 for ivnc_h in "$@"; do
   [ -n "$ivnc_h" ] || continue
+  HOME="$ivnc_h"
   if [ -r "$ivnc_h/.profile" ]; then . "$ivnc_h/.profile"; fi
   if [ -r "$ivnc_h/.bashrc" ]; then . "$ivnc_h/.bashrc"; fi
 done
@@ -96,7 +101,7 @@ export HOME="$ivnc_app_home" XDG_SESSION_TYPE=wayland GDK_BACKEND=wayland QT_QPA
 export XDG_RUNTIME_DIR="$ivnc_runtime" WAYLAND_DISPLAY="$ivnc_display" PULSE_SERVER="$ivnc_pulse"
 unset DISPLAY WAYLAND_SOCKET LD_PRELOAD
 cd "$ivnc_app_home" 2>/dev/null || :
-exec /bin/sh -c "$0"
+eval "$0"
 "#;
     // The reaper's PATH comes from the filtered application environment; use
     // an absolute bash path when available so the bootstrap cannot go missing.
@@ -166,7 +171,8 @@ mod tests {
         assert!(script.contains("/.profile"));
         assert!(script.contains("/.bashrc"));
         assert!(script.contains("XDG_SESSION_TYPE=wayland"));
-        assert!(script.contains("exec /bin/sh -c \"$0\""));
+        assert!(script.contains("HOME=\"$ivnc_h\""));
+        assert!(script.contains("eval \"$0\""));
         assert_eq!(args[5], "exec google-chrome --flag");
         assert_eq!(args[6], "/home/user");
         assert_eq!(args[7], "/data/apps/a/home");
@@ -181,6 +187,40 @@ mod tests {
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args[5], original);
         assert_eq!(args.len(), 6);
+    }
+
+    #[test]
+    fn bootstrap_expands_home_per_file_and_allows_source_in_command() {
+        let root = std::env::temp_dir().join(format!("ivnc-profile-home-{}", std::process::id()));
+        let real = root.join("real");
+        let app = root.join("app");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        // NVM_DIR-style expansion must resolve against the home being sourced,
+        // not the app's isolated HOME passed in the environment.
+        std::fs::write(real.join(".bashrc"), "export REAL_HOME_SEEN=$HOME\n").unwrap();
+        std::fs::write(app.join(".bashrc"), "export APP_HOME_SEEN=$HOME\n").unwrap();
+        std::fs::write(real.join("extra.sh"), "export SOURCE_WORKED=1\n").unwrap();
+        let out = root.join("result");
+        // The launch command itself uses `source`, which dash does not have.
+        let command = format!(
+            "source '{}'; printf '%s|%s|%s|%s' \"$REAL_HOME_SEEN\" \"$APP_HOME_SEEN\" \"$SOURCE_WORKED\" \"$HOME\" > '{}'",
+            real.join("extra.sh").display(),
+            out.display()
+        );
+
+        let status = app_command(&command, &[real.clone(), app.clone()])
+            .env("HOME", &app) // the app's isolated HOME, as set in real launches
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let result = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            result,
+            format!("{}|{}|1|{}", real.display(), app.display(), app.display())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -211,6 +251,7 @@ mod tests {
         );
 
         let status = app_command(&command, &[real.clone(), app.clone()])
+            .env("HOME", &app)
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap();
