@@ -6,7 +6,7 @@ use log::{debug, error, info, warn};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -72,13 +72,31 @@ impl TerminalSession {
         let master = Arc::new(Mutex::new(pair.master));
 
         let mut command = CommandBuilder::new(&shell);
-        configure_interactive_shell(&mut command, &shell);
         command.env("TERM", &state.config.terminal.term);
         command.env("SHELL", &shell);
         command.env_remove("PROMPT_COMMAND");
         command.env_remove("BASH_ENV");
         command.env_remove("ENV");
         command.env("PS1", "\\u@\\h:\\w\\$ ");
+        // Each new terminal session sources the user's profile files before
+        // dropping into the interactive shell. Fall back to the plain shell if
+        // the bootstrap file cannot be written.
+        if crate::shell_profile::terminal_enabled() {
+            let real_home = std::env::var_os("HOME").map(PathBuf::from);
+            let homes = real_home
+                .as_deref()
+                .map(|home| vec![home.to_path_buf()])
+                .unwrap_or_default();
+            match crate::shell_profile::write_terminal_profile(&homes) {
+                Ok(rc) => configure_profile_shell(&mut command, &shell, &rc),
+                Err(error) => {
+                    warn!("Cannot prepare terminal shell profile: {error}");
+                    configure_interactive_shell(&mut command, &shell);
+                }
+            }
+        } else {
+            configure_interactive_shell(&mut command, &shell);
+        }
         command.cwd(cwd);
 
         let mut child = pair
@@ -322,6 +340,30 @@ fn resolve_shell(configured: &str) -> Result<String, String> {
         }
     }
     Err("no usable shell found".to_string())
+}
+
+/// Start an interactive shell that sources the profile bootstrap in the same
+/// shell the user types into, so functions and aliases from rc files survive.
+fn configure_profile_shell(command: &mut CommandBuilder, shell: &str, rc: &Path) {
+    let shell_name = Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell);
+    match shell_name {
+        "bash" => {
+            // --rcfile must precede -i; bash reads this instead of ~/.bashrc,
+            // and the script itself sources both .profile and .bashrc.
+            command.arg("--rcfile");
+            command.arg(rc);
+            command.arg("-i");
+        }
+        "sh" | "dash" => {
+            // POSIX sh reads ENV at startup for interactive shells.
+            command.env("ENV", rc);
+            command.arg("-i");
+        }
+        _ => configure_interactive_shell(command, shell),
+    }
 }
 
 fn configure_interactive_shell(command: &mut CommandBuilder, shell: &str) {

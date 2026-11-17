@@ -80,6 +80,30 @@ pub struct Config {
     /// Browser toolbar and local management feature gates
     #[serde(default)]
     pub ui_features: UiFeaturesConfig,
+
+    /// Loading of $HOME/.profile and $HOME/.bashrc for apps and the terminal
+    #[serde(default)]
+    pub shell_profile: ShellProfileConfig,
+}
+
+/// Source the user's shell profile files before managed commands. Both flags
+/// are on by default; setting either to false restores the previous isolated,
+/// deterministic behaviour for that surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellProfileConfig {
+    #[serde(default = "default_shell_profile")]
+    pub apps: bool,
+    #[serde(default = "default_shell_profile")]
+    pub terminal: bool,
+}
+
+impl Default for ShellProfileConfig {
+    fn default() -> Self {
+        Self {
+            apps: default_shell_profile(),
+            terminal: default_shell_profile(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -749,5 +773,9 @@ fn default_terminal_term() -> String {
 }
 
 fn default_ui_feature_enabled() -> bool {
+    true
+}
+
+fn default_shell_profile() -> bool {
     true
 }

@@ -17,6 +17,7 @@ pub mod paths;
 pub mod proxy_panel;
 pub mod remote;
 pub mod runtime_settings;
+pub mod shell_profile;
 pub mod terminal;
 pub mod transport;
 pub mod web;

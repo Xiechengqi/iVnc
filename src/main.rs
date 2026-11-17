@@ -18,6 +18,7 @@ mod paths;
 mod proxy_panel;
 mod remote;
 mod runtime_settings;
+mod shell_profile;
 mod terminal;
 mod transport;
 mod web;
@@ -236,6 +237,7 @@ fn main() {
         apply_cli_overrides(&mut config, &args);
     }
     remote::worker::set_parent_config(config.clone());
+    shell_profile::configure(&config);
 
     if let Err(e) = config.validate() {
         eprintln!("Invalid configuration: {}", e);

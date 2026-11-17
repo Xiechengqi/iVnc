@@ -398,6 +398,10 @@ pub struct Plan {
     pub diagnostic_log: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_path: Option<PathBuf>,
+    /// Homes whose .profile/.bashrc are sourced before the command runs. The
+    /// real user home comes first, the app's isolated home second.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_homes: Vec<PathBuf>,
 }
 
 fn switch<'a>(args: &'a [Word], name: &str) -> Option<&'a str> {
@@ -498,6 +502,7 @@ pub fn plan(
         retried: false,
         diagnostic_log: None,
         report_path: None,
+        profile_homes: Vec::new(),
     };
     if plan.options.compatibility == Compatibility::Raw {
         return Ok(plan);
@@ -535,9 +540,16 @@ pub fn plan(
 
 impl Plan {
     pub fn command(&self) -> std::process::Command {
-        let mut command = std::process::Command::new("/bin/sh");
-        command.args(["-c", &self.effective_command]);
-        command
+        if self.profile_homes.is_empty() {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", &self.effective_command]);
+            command
+        } else {
+            // Source the user's profile files in a bash that is interactive
+            // enough to honour a guarded .bashrc, then run the unchanged
+            // original command under /bin/sh with the bootstrapped environment.
+            crate::shell_profile::app_command(&self.effective_command, &self.profile_homes)
+        }
     }
 
     pub fn write_report(&self) {
@@ -704,6 +716,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn profile_homes_switch_the_launch_command_to_the_bash_bootstrap() {
+        let f = Fixture::new();
+        let mut plan = f.plan("'desktop app'", 0);
+        let plain = plan.command();
+        assert_eq!(plain.get_program(), "/bin/sh");
+
+        plan.profile_homes = vec![PathBuf::from("/home/user"), f.0.join("home")];
+        let bootstrapped = plan.command();
+        assert!(bootstrapped
+            .get_program()
+            .to_string_lossy()
+            .ends_with("/bash"));
+        let args: Vec<_> = bootstrapped.get_args().collect();
+        assert_eq!(args[5], plan.effective_command.as_str());
+        assert_eq!(args[6], "/home/user");
+        assert_eq!(args[7], f.0.join("home").as_os_str());
     }
 
     #[test]

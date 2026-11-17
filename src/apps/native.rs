@@ -68,9 +68,11 @@ pub fn application_command(
     app: &ManagedApp,
     env: impl IntoIterator<Item = (OsString, OsString)>,
     session: impl IntoIterator<Item = (OsString, OsString)>,
+    profile_homes: Vec<std::path::PathBuf>,
 ) -> Result<Command, super::error::ApiError> {
     let env: BTreeMap<OsString, OsString> = env.into_iter().collect();
     let mut plan = super::compat::plan(app, &env, unsafe { libc::geteuid() })?;
+    plan.profile_homes = profile_homes;
     // A worker has its own IVNC_HOME. The app's HOME is the common durable
     // directory supplied by the manager; logs/reports live beside that HOME.
     let log_dir = env
@@ -147,10 +149,15 @@ fn build_desktop_command(app: &ManagedApp) -> Result<Command, super::error::ApiE
     let home = crate::paths::prepare_app_home(&app.id)?;
     let session = session_environment();
     super::launch::validate_session(&home, &session)?;
+    // The manager's HOME is the user's real home; the app's HOME is isolated.
+    // Capture it here, before application_command clears the environment.
+    let real_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let profile_homes = crate::shell_profile::app_profile_homes(real_home.as_deref(), &home);
     let mut cmd = application_command(
         app,
         app_environment(app, &home, std::env::vars_os()),
         session,
+        profile_homes,
     )?;
 
     let log_file = log_path(&app.id);
@@ -212,6 +219,7 @@ mod tests {
         ]
         .map(|(k, v)| (OsString::from(k), OsString::from(v)));
         let home = Path::new("/data/ivnc/apps/app/home");
+        let profile_homes = vec![std::path::PathBuf::from("/home/user"), home.to_path_buf()];
         let env = app_environment(&app, home, manager);
         // A runtime receives the environment through its launch description.
         let launch: Vec<(OsString, OsString)> = serde_json::from_slice(
@@ -232,8 +240,13 @@ mod tests {
                 .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
                 .collect()
         };
-        let main =
-            application_command(&app, env.clone(), session("wayland-0", "/run/user/0")).unwrap();
+        let main = application_command(
+            &app,
+            env.clone(),
+            session("wayland-0", "/run/user/0"),
+            profile_homes.clone(),
+        )
+        .unwrap();
         assert_eq!(main.get_current_dir(), Some(home));
         let plan: super::super::compat::Plan =
             serde_json::from_str(main.get_args().nth(2).unwrap().to_str().unwrap()).unwrap();
@@ -245,8 +258,14 @@ mod tests {
             plan.report_path,
             Some(home.parent().unwrap().join("launch-info.json"))
         );
-        let runtime =
-            application_command(&app, launch, session("wayland-1", "/tmp/ivnc-1")).unwrap();
+        assert_eq!(plan.profile_homes, profile_homes);
+        let runtime = application_command(
+            &app,
+            launch,
+            session("wayland-1", "/tmp/ivnc-1"),
+            profile_homes,
+        )
+        .unwrap();
         assert_eq!(main.get_envs().count(), runtime.get_envs().count());
         assert_eq!(envs(main), envs(runtime));
 

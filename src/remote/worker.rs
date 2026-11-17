@@ -59,6 +59,7 @@ pub fn failure(id: &str) -> Option<Failure> {
 }
 
 pub fn set_parent_config(config: Config) {
+    crate::shell_profile::configure(&config);
     let _ = PARENT_CONFIG.set(config);
 }
 pub fn is_worker() -> bool {
@@ -77,6 +78,10 @@ pub struct Launch {
     /// The application's environment apart from its session, as the manager
     /// builds it for the main desktop too; see `native::app_environment`.
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// The manager user's real HOME, captured before it is replaced with the
+    /// application's isolated HOME. Used to load shell profile files.
+    #[serde(default)]
+    pub profile_home: Option<PathBuf>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Endpoint {
@@ -157,6 +162,9 @@ pub fn command(app: &ManagedApp) -> Result<Command, crate::apps::error::ApiError
     config.webrtc.public_candidate = None;
     config.webrtc.candidate_from_host_header = false;
     config.server.pidfile = root.join("worker.pid");
+    // This runs in the manager, where HOME is still the user's real home. The
+    // worker supervisor below already has the app's isolated HOME instead.
+    let real_home = std::env::var_os("HOME").map(PathBuf::from);
     let launch = Launch {
         app: app.clone(),
         config,
@@ -165,6 +173,7 @@ pub fn command(app: &ManagedApp) -> Result<Command, crate::apps::error::ApiError
         env: crate::apps::native::app_environment(app, &home, std::env::vars_os())
             .into_iter()
             .collect(),
+        profile_home: real_home,
     };
     private_write(
         &root.join("launch.json"),
@@ -627,9 +636,15 @@ fn start_application_inner() -> Result<(), String> {
         .ok_or("Missing application HOME")?;
     crate::apps::launch::validate_session(home, &session).map_err(String::from)?;
     // The worker's own helpers are not part of the application's process tree.
-    let mut command =
-        crate::apps::native::application_command(&launch.app, launch.env.iter().cloned(), session)
-            .map_err(String::from)?;
+    let profile_homes =
+        crate::shell_profile::app_profile_homes(launch.profile_home.as_deref(), &home);
+    let mut command = crate::apps::native::application_command(
+        &launch.app,
+        launch.env.iter().cloned(),
+        session,
+        profile_homes,
+    )
+    .map_err(String::from)?;
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot launch application: {e}"))?;
@@ -839,6 +854,7 @@ mod tests {
             root: root.clone(),
             generation: super::super::token(),
             env: Vec::new(),
+            profile_home: Some(PathBuf::from("/home/user")),
         };
         private_write(&path, &serde_json::to_vec(&launch).unwrap()).unwrap();
         assert_eq!(read_launch(&path).unwrap().generation, launch.generation);
