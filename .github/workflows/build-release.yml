@@ -308,6 +308,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # The release step force-pushes the `latest` tag. A shallow clone
+          # (fetch-depth: 1) can lack the objects needed to update an existing
+          # tag and makes GitHub reject it with "missing necessary objects".
+          # Fetch the full history so the tag push always has a complete graph.
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
