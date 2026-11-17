@@ -286,9 +286,9 @@ pub async fn supervise(path: &Path) -> Result<(), String> {
     // Handled from here on, so that the supervisor outlives its own process group.
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| e.to_string())?;
-    // The runtime is the supervisor's process group, which the manager is never
-    // part of; the manager normally makes the supervisor its leader already.
-    unsafe { libc::setpgid(0, 0) };
+    // The manager starts this supervisor in a detached session, with its PID
+    // also the process group ID. Runtime/reaper children stay in that group;
+    // do not detach them individually or group-based shutdown would miss them.
     // Processes the application leaves behind become the supervisor's children.
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
         return Err("Cannot track application processes".into());

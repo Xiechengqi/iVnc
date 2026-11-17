@@ -1037,6 +1037,7 @@ fn app_json(
         }
         AppType::BackgroundApp => {
             obj["url"] = json!(app.url);
+            obj["launch_error"] = json!(state.service.failure(&app.id).map(|e| e.body()));
             obj["launch_command"] = json!(app.launch_command);
             obj["launch_env_vars"] = json!(app.launch_env_vars);
             obj["launch_cwd"] = json!(app.launch_cwd);

@@ -29,6 +29,31 @@ async function saved(page) {
     await page.waitForFunction(() => !!document.querySelector('#f-share-url').value && !document.querySelector('#modal-save').disabled);
 }
 const cases = [
+    ['suspended desktop, shared and background processes show a live warning with stop/restart available', async ({ page, apps, seed }) => {
+        const fixtures = [
+            seed({ name: 'Suspended desktop', status: 'running', window_ready: false }),
+            seed({ name: 'Suspended shared app', status: 'starting', window_ready: null }),
+            seed({ name: 'Suspended service', app_type: 'background', status: 'running' }),
+        ];
+        for (const app of fixtures) app.launch_error = { code: 'app_process_stopped', error: 'Application process is suspended.' };
+        await page.locator('#nav-apps').click();
+        for (const app of fixtures) {
+            const row = page.locator(`tr[data-app-id="${app.id}"]`);
+            await row.locator('.status-warning').waitFor();
+            assert.match(await row.textContent(), /进程已暂停/);
+            assert.match(await row.locator('.launch-error').textContent(), /恢复进程或重新启动/);
+            assert(await row.locator('.btn-stop').isVisible());
+            assert(await row.locator('.btn-restart').isVisible());
+        }
+        await page.evaluate(async () => (await import('/lib/i18n.js?v=1')).setLang('en'));
+        await page.getByText('Process suspended', { exact: true }).first().waitFor();
+        for (const app of fixtures) assert.match(await page.locator(`tr[data-app-id="${app.id}"]`).textContent(), /Process suspended/);
+        for (const app of fixtures) apps.set(app.id, { ...app, launch_error: null, status: 'running', window_ready: true });
+        await page.locator('#nav-apps').click();
+        await page.waitForFunction(() => !document.querySelector('#app-list .launch-error'));
+        assert.equal(await page.locator('#app-list .status-warning').count(), 0);
+        assert.match(await page.locator(`tr[data-app-id="${fixtures[0].id}"]`).textContent(), /Window available/);
+    }],
     ['new desktop shows sharing off by default; switching types preserves the draft only within this dialog', async ({ page, calls }) => {
         await add(page);
         assert(await page.locator('#sharing-section').isVisible());

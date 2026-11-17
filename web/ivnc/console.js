@@ -180,6 +180,7 @@ const I18N = {
         },
         desktopWindowReady: 'Window available',
         desktopWaitingWindow: 'Process running · waiting for window',
+        processStopped: 'Process suspended',
         cwdPlaceholder: 'Enter working directory, e.g. /workspace/app',
         timeoutPlaceholder: 'Enter timeout, e.g. 30',
         accessUrlPlaceholder: 'Enter access address, e.g. http://127.0.0.1:7860',
@@ -414,6 +415,7 @@ const I18N = {
         },
         desktopWindowReady: '窗口已出现',
         desktopWaitingWindow: '进程运行中 · 等待窗口',
+        processStopped: '进程已暂停',
         cwdPlaceholder: '请输入工作目录，例如： /workspace/app',
         timeoutPlaceholder: '请输入超时时间，例如： 30',
         accessUrlPlaceholder: '请输入访问地址，例如： http://127.0.0.1:7860',
@@ -826,6 +828,9 @@ function appStatus(a) {
     if (a.app_type === 'cli') {
         const key = a.install_status || 'missing';
         return { text: t(key) || key, cls: a.installed ? 'running' : 'stopped', detail: a.install_error || '' };
+    }
+    if (a.launch_error?.code === 'app_process_stopped') {
+        return { text: t('processStopped'), cls: 'warning', detail: serverErrorText(a.launch_error) };
     }
     let text = a.enabled === false ? t('disabledByAdmin') : (t(a.status) || a.status);
     if (a.app_type === 'desktop' && a.status === 'running' && typeof a.window_ready === 'boolean') {

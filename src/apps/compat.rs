@@ -547,7 +547,7 @@ impl Plan {
         } else {
             // Source the user's profile files in a bash that is interactive
             // enough to honour a guarded .bashrc, then run the unchanged
-            // original command under /bin/sh with the bootstrapped environment.
+            // original command in that same bash with the bootstrapped environment.
             crate::shell_profile::app_command(&self.effective_command, &self.profile_homes)
         }
     }

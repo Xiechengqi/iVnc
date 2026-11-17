@@ -2,7 +2,6 @@ use super::app::{AppStatus, ManagedApp};
 use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -155,6 +154,18 @@ impl ServiceProcessManager {
         procs.get(app_id).map(|running| running.pid)
     }
 
+    pub fn failure(&self, app_id: &str) -> Option<super::error::ApiError> {
+        self.processes
+            .lock()
+            .unwrap()
+            .get_mut(app_id)
+            .and_then(|r| {
+                matches!(r.child.try_wait(), Ok(None))
+                    .then(|| super::launch::stopped_failure(r.pid))
+                    .flatten()
+            })
+    }
+
     fn is_running(&self, app_id: &str) -> bool {
         self.status(app_id) == AppStatus::Running
     }
@@ -222,7 +233,7 @@ pub fn service_log_path(app_id: &str) -> std::path::PathBuf {
 /// the shell-profile bootstrap when profile loading is enabled. Kept separate
 /// from the filesystem/log setup so it can be tested without touching `$HOME`.
 fn service_command(launch_command: &str, profile_homes: &[PathBuf]) -> Command {
-    if profile_homes.is_empty() {
+    let mut cmd = if profile_homes.is_empty() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(launch_command);
         cmd
@@ -231,7 +242,9 @@ fn service_command(launch_command: &str, profile_homes: &[PathBuf]) -> Command {
         // second) in a bash that has `source`, then runs the launch command in
         // that same shell with the loaded PATH.
         crate::shell_profile::app_command(launch_command, profile_homes)
-    }
+    };
+    super::native::configure_app_session(&mut cmd);
+    cmd
 }
 
 fn build_service_command(app: &ManagedApp) -> Result<Command, String> {
@@ -250,15 +263,6 @@ fn build_service_command(app: &ManagedApp) -> Result<Command, String> {
     let profile_homes = crate::shell_profile::app_profile_homes(real_home.as_deref(), &app_home);
 
     let mut cmd = service_command(launch_command, &profile_homes);
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
     if let Some(cwd) = app
         .launch_cwd
         .as_deref()

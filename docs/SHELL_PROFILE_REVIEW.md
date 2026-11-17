@@ -2,6 +2,8 @@
 
 日期：2026-11-17。使用说明见 [Shell 启动文件加载](SHELL_PROFILE.md)。
 
+后续带控制终端的启动暂停修复及补充验证见 [应用启动会话 Review](APP_SESSION_REVIEW.md)。
+
 ## 背景
 
 此前 iVnc 的应用环境由 `app_environment` 从 manager 环境过滤重建，`application_command` 用 `env_clear()` 丢弃继承环境，最终由 `Plan::command()` 以 `/bin/sh -c` 执行——非交互、非登录 shell 不读取 `.profile` / `.bashrc`；`HOME` 也已被替换为应用隔离目录。Web Terminal 则显式使用 `bash --noprofile --norc -i`。随后按用户选择实现**全局默认开启**、**真实 HOME 优先、隔离 HOME 补充**的 rc 加载（第一版）。

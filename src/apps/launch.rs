@@ -118,6 +118,22 @@ pub fn validate_session(home: &Path, session: &[(OsString, OsString)]) -> Result
     Ok(())
 }
 
+/// A stopped supervisor is alive but cannot launch or manage its application.
+/// Read the state without waitpid(WUNTRACED), which would consume child events.
+/// This is a live diagnostic: resuming the process clears it automatically.
+pub(super) fn stopped_failure(pid: u32) -> Option<ApiError> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // comm may contain spaces or parentheses. Uppercase T means job-control
+    // suspension; lowercase t is a debugger stop and is not a launch failure.
+    let state = stat.rsplit_once(')')?.1.split_whitespace().next()?;
+    (state == "T").then(|| {
+        ApiError::new(
+            "app_process_stopped",
+            "Application process is suspended. Resume it or restart the application.",
+        )
+    })
+}
+
 /// Marks the start of this generation, after log rotation and before spawning.
 pub struct LogCursor {
     path: PathBuf,

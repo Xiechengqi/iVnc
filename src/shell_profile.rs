@@ -76,6 +76,10 @@ pub fn terminal_profile_script(homes: &[PathBuf]) -> String {
 /// - `-i` sets the interactive flag in `$-`, which is what Debian's default
 ///   `~/.bashrc` checks before it exports anything. Without it a sourced
 ///   `.bashrc` would just `return`.
+/// - The outer app supervisor/service must already be detached from the
+///   manager's controlling terminal (native::configure_app_session). Otherwise
+///   bash job-control initialization can suspend its whole group with SIGTTIN.
+///   Do not detach here: a worker's reaper and app must share its outer group.
 /// - The original command is `$0` (passed as a single argument, never parsed)
 ///   and the homes are `$@`. While each home's files are sourced `HOME` is
 ///   temporarily set to that home, so rc files that expand `$HOME/.nvm` (nvm,

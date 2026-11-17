@@ -351,12 +351,10 @@ impl ProcessManager {
             .lock()
             .unwrap()
             .get_mut(app_id)
-            .and_then(|r| {
-                r.child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .and_then(|_| r.log.failure())
+            .and_then(|r| match r.child.try_wait() {
+                Ok(None) => launch::stopped_failure(r.pid),
+                Ok(Some(_)) => r.log.failure(),
+                Err(_) => None,
             })
     }
 
@@ -461,6 +459,56 @@ impl ProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_supervisor_is_reported_without_restarting_and_clears_on_resume() {
+        let manager = ProcessManager::new(Arc::new(RemoteStore::in_memory()), PathBuf::new());
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        native::configure_app_session(&mut command);
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        manager.processes.lock().unwrap().insert(
+            "paused".into(),
+            RunningApp {
+                child,
+                pid,
+                started: Instant::now(),
+                worker: false,
+                log: LogCursor::new(PathBuf::new()),
+                window_ready: false,
+            },
+        );
+        struct Cleanup(ProcessManager, u32);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                unsafe { libc::kill(-(self.1 as i32), libc::SIGCONT) };
+                let _ = self.0.stop("paused");
+            }
+        }
+        let _cleanup = Cleanup(manager.clone(), pid);
+        assert!(manager.failure("paused").is_none());
+        assert_eq!(unsafe { libc::kill(-(pid as i32), libc::SIGSTOP) }, 0);
+        let until = Instant::now() + Duration::from_secs(2);
+        while manager.failure("paused").is_none() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            manager.failure("paused").unwrap().code,
+            "app_process_stopped"
+        );
+        manager.watchdog_tick(&super::super::store::AppStore::in_memory());
+        assert_eq!(manager.pid("paused"), Some(pid));
+        assert_eq!(manager.status("paused"), AppStatus::Running);
+        assert!(manager.restarts.lock().unwrap().is_empty());
+
+        assert_eq!(unsafe { libc::kill(-(pid as i32), libc::SIGCONT) }, 0);
+        let until = Instant::now() + Duration::from_secs(2);
+        while manager.failure("paused").is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(manager.failure("paused").is_none());
+    }
 
     #[test]
     fn failed_preflight_cannot_be_overwritten_by_an_uncollected_old_exit() {

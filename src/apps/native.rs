@@ -117,16 +117,23 @@ pub fn build_command(app: &ManagedApp, worker: bool) -> Result<Command, super::e
     } else {
         build_desktop_command(app)?
     };
-    configure_process_group(&mut cmd);
+    configure_app_session(&mut cmd);
     Ok(cmd)
 }
 
-fn configure_process_group(cmd: &mut Command) {
+/// Detach the outermost app supervisor/service from the manager's controlling
+/// terminal. setsid also makes PID == PGID, preserving group-based shutdown.
+/// Apply this only at the outer boundary: a worker's reaper and application
+/// must remain in the supervisor's process group.
+pub(super) fn configure_app_session(cmd: &mut Command) {
+    cmd.stdin(Stdio::null());
     unsafe {
         cmd.pre_exec(|| {
             // The supervisor watches its parent process itself: PR_SET_PDEATHSIG
             // follows the spawning thread, and spawns may run on pooled threads.
-            if libc::setpgid(0, 0) != 0 {
+            // A process group alone still shares the manager's controlling TTY:
+            // interactive bash then suspends the entire group with SIGTTIN.
+            if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -175,6 +182,40 @@ fn build_desktop_command(app: &ManagedApp) -> Result<Command, super::error::ApiE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_supervisor_has_a_detached_session_and_null_stdin() {
+        if std::env::var_os("IVNC_SESSION_TEST_CHILD").is_some() {
+            let pid = unsafe { libc::getpid() };
+            assert_eq!(unsafe { libc::getsid(0) }, pid);
+            assert_eq!(unsafe { libc::getpgrp() }, pid);
+            assert_eq!(
+                fs::read_link("/proc/self/fd/0").unwrap(),
+                Path::new("/dev/null")
+            );
+            let tty = unsafe { libc::open(c"/dev/tty".as_ptr(), libc::O_RDONLY | libc::O_NOCTTY) };
+            if tty >= 0 {
+                unsafe { libc::close(tty) };
+                panic!("application supervisor still has a controlling terminal");
+            }
+            return;
+        }
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "apps::native::tests::app_supervisor_has_a_detached_session_and_null_stdin",
+            "--test-threads=1",
+        ])
+        .env("IVNC_SESSION_TEST_CHILD", "1");
+        configure_app_session(&mut cmd);
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn only_apps_with_remote_access_run_in_a_worker() {

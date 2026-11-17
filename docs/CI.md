@@ -30,6 +30,8 @@ npm --prefix web/ivnc run test:app-sharing
 node --test scripts/video_playback_test.mjs scripts/viewport_test.mjs scripts/clipboard_test.mjs
 node scripts/gesture_navigation_smoke.mjs
 npm --prefix web/ivnc run build
+# 本地构建后：带控制终端的真实 Chrome、后台服务、独立会话回归
+python3 scripts/app_session_smoke.py
 ```
 
 可设置 `CHROME_BIN` 使用本地 Chrome。实际服务、终端、认证和应用窗口的验证继续使用已有 smoke 脚本，运行时要求见各功能文档。远程应用的本地 Docker 验证见 [远程应用](REMOTE_APPS.md)。
