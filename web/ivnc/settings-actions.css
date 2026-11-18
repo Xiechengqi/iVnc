@@ -33,6 +33,13 @@
     border: 1px solid #aebdc6; border-radius: 4px; background: #fff;
     color: #2d3436; font: 16px/1.4 system-ui, sans-serif;
 }
+.settings-dialog .settings-proxy-options { margin-top: 8px; padding-left: 12px; border-left: 2px solid #dfe6e9; }
+.settings-dialog .settings-proxy-fields { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.settings-dialog .settings-proxy-fields select, .settings-dialog .settings-proxy-fields input {
+    width: 100%; min-width: 0; min-height: 44px; padding: 8px 10px; box-sizing: border-box;
+    border: 1px solid #aebdc6; border-radius: 6px; background: #fff;
+    color: #2d3436; font: 16px/1.4 system-ui, sans-serif;
+}
 .settings-dialog .settings-message { min-height: 20px; color: #b52b2b; font-size: 13px; overflow-wrap: anywhere; margin: 0; }
 .settings-dialog .settings-message.success { color: #087f5b; }
 .settings-dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }

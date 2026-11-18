@@ -13,6 +13,10 @@ const STRINGS = {
         cancel: '取消', confirm: '确定', close: '关闭', pending: '处理中…',
         updateNotice: '将重启 iVnc 服务，当前连接会断开，恢复后需要重新登录。',
         upgrade: '升级到最新版本', upgradeHint: '勾选后会先更新 iVnc 程序，再重启服务。',
+        useGithubProxy: '使用 GitHub 中国代理', githubProxy: 'GitHub 代理', customProxy: '自定义代理',
+        proxyAddress: '代理地址', proxyHint: '优先使用所选代理下载，失败时自动尝试其他来源。',
+        proxyAddressHint: '填写代理地址前缀，如 https://example.com/gh/；省略协议时默认使用 HTTPS。',
+        proxyInvalid: '请输入有效的 HTTP(S) 代理地址前缀，不含账号、密码、查询参数或片段。',
         restart: '重启服务', upgradeRestart: '升级并重启', preparing: '正在处理…',
         restartSent: '重启请求已发送，等待服务恢复…', upgradeDone: '升级完成，等待服务恢复…',
         recovered: '服务已恢复，即将刷新页面…', notRecovered: '服务尚未恢复，请稍后刷新页面。',
@@ -33,6 +37,10 @@ const STRINGS = {
         cancel: 'Cancel', confirm: 'Confirm', close: 'Close', pending: 'Working…',
         updateNotice: 'The iVnc service will restart. Connections will close and require a new sign-in after recovery.',
         upgrade: 'Upgrade to latest', upgradeHint: 'Update the iVnc program before restarting the service.',
+        useGithubProxy: 'Use a GitHub proxy for China', githubProxy: 'GitHub proxy', customProxy: 'Custom proxy',
+        proxyAddress: 'Proxy address', proxyHint: 'Download through the selected proxy first, then try other sources if it fails.',
+        proxyAddressHint: 'Enter a proxy URL prefix, such as https://example.com/gh/. HTTPS is used when the scheme is omitted.',
+        proxyInvalid: 'Enter a valid HTTP(S) proxy URL prefix without credentials, query parameters or fragments.',
         restart: 'Restart service', upgradeRestart: 'Upgrade and restart', preparing: 'Working…',
         restartSent: 'Restart requested. Waiting for the service…', upgradeDone: 'Upgrade complete. Waiting for the service…',
         recovered: 'Service recovered. Reloading…', notRecovered: 'The service has not recovered. Refresh the page later.',
@@ -206,7 +214,25 @@ function openUpdate(dialogs) {
     const view = openDialog(dialogs, 'update', `
         <div id="update-info"><p class="settings-hint">${settingsText('updateNotice')}</p>
             <label class="settings-upgrade-option"><input id="upgrade-latest" type="checkbox">${settingsText('upgrade')}</label>
-            <p class="settings-hint">${settingsText('upgradeHint')}</p></div>
+            <p class="settings-hint">${settingsText('upgradeHint')}</p>
+            <div id="upgrade-proxy-options" class="settings-proxy-options" hidden>
+                <label class="settings-upgrade-option"><input id="upgrade-use-proxy" type="checkbox" disabled>${settingsText('useGithubProxy')}</label>
+                <div id="upgrade-proxy-settings" class="settings-proxy-fields" hidden>
+                    <label for="upgrade-proxy">${settingsText('githubProxy')}</label>
+                    <select id="upgrade-proxy" disabled>
+                        <option value="https://sina.dev/">sina.dev</option>
+                        <option value="https://httptunnel.top/gh/">httptunnel.top/gh</option>
+                        <option value="custom">${settingsText('customProxy')}</option>
+                    </select>
+                    <div id="upgrade-custom-proxy-field" class="settings-proxy-fields" hidden>
+                        <label for="upgrade-custom-proxy">${settingsText('proxyAddress')}</label>
+                        <input id="upgrade-custom-proxy" type="text" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="2048" placeholder="https://example.com/gh/" aria-describedby="upgrade-proxy-address-hint" disabled>
+                        <p id="upgrade-proxy-address-hint" class="settings-hint">${settingsText('proxyAddressHint')}</p>
+                    </div>
+                    <p class="settings-hint">${settingsText('proxyHint')}</p>
+                    <p id="upgrade-proxy-message" class="settings-message" role="alert" hidden></p>
+                </div>
+            </div></div>
         <div id="update-progress" hidden><progress id="progress-fill" max="100" value="0"></progress><p id="progress-text" role="status" aria-live="polite"></p></div>
         <div id="update-logs" class="settings-logs" role="log" aria-label="${settingsText('update')}" hidden></div>
         <div class="settings-dialog-buttons"><button id="update-cancel" type="button">${settingsText('cancel')}</button><button id="update-ok" class="settings-primary" type="submit">${settingsText('restart')}</button></div>`,
@@ -217,6 +243,8 @@ function openUpdate(dialogs) {
     if (!view) return;
     const { session, form, find } = view;
     const ok = find('#update-ok'), cancel = find('#update-cancel'), upgrade = find('#upgrade-latest');
+    const useProxy = find('#upgrade-use-proxy'), proxySelect = find('#upgrade-proxy'), customProxy = find('#upgrade-custom-proxy');
+    const proxyMessage = find('#upgrade-proxy-message');
     const progress = find('#progress-fill'), status = find('#progress-text'), logs = find('#update-logs');
     function log(text, level = 'info') {
         const entry = document.createElement('div');
@@ -271,12 +299,41 @@ function openUpdate(dialogs) {
         pollTimer = setTimeout(poll, 1500);
     }
     cancel.addEventListener('click', () => dialogs.close());
-    upgrade.addEventListener('change', () => { ok.textContent = settingsText(upgrade.checked ? 'upgradeRestart' : 'restart'); });
+    function syncProxyOptions() {
+        ok.textContent = settingsText(upgrade.checked ? 'upgradeRestart' : 'restart');
+        find('#upgrade-proxy-options').hidden = !upgrade.checked;
+        useProxy.disabled = !upgrade.checked;
+        const enabled = upgrade.checked && useProxy.checked;
+        find('#upgrade-proxy-settings').hidden = !enabled;
+        proxySelect.disabled = !enabled;
+        const custom = enabled && proxySelect.value === 'custom';
+        find('#upgrade-custom-proxy-field').hidden = !custom;
+        customProxy.disabled = !custom; customProxy.required = custom;
+        proxyMessage.hidden = true;
+    }
+    for (const control of [upgrade, useProxy, proxySelect]) control.addEventListener('change', syncProxyOptions);
+    customProxy.addEventListener('input', () => { proxyMessage.hidden = true; });
     form.addEventListener('submit', async event => {
         event.preventDefault();
         if (running || failed || !session.isCurrent()) return;
+        let proxy;
+        if (upgrade.checked && useProxy.checked) {
+            try {
+                const input = (proxySelect.value === 'custom' ? customProxy.value : proxySelect.value).trim();
+                if (!input || new TextEncoder().encode(input).length > 2048 || /[\s\\\u0000-\u001f\u007f-\u009f]/u.test(input)) throw Error();
+                const url = new URL(input.includes('://') ? input : `https://${input}`);
+                if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.href.includes('?') || url.href.includes('#')) throw Error();
+                proxy = `${url.href.replace(/\/+$/, '')}/`;
+                if (proxy.length > 2048) throw Error();
+            } catch {
+                proxyMessage.textContent = settingsText('proxyInvalid'); proxyMessage.hidden = false;
+                if (proxySelect.value === 'custom') customProxy.focus();
+                return;
+            }
+        }
         running = true; session.setLocked(true);
         ok.disabled = cancel.disabled = true; upgrade.disabled = true;
+        useProxy.disabled = proxySelect.disabled = customProxy.disabled = true;
         find('#update-info').hidden = true; find('#update-progress').hidden = logs.hidden = false;
         progress.value = 5; status.textContent = settingsText('preparing');
         if (!upgrade.checked) {
@@ -292,7 +349,10 @@ function openUpdate(dialogs) {
             return;
         }
         try {
-            socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/upgrade/ws`);
+            const url = new URL('/api/upgrade/ws', location.href);
+            url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            if (proxy) url.searchParams.set('github_proxy', proxy);
+            socket = new WebSocket(url.href);
             watchActivity();
             socket.onmessage = event => {
                 if (!session.isCurrent() || failed) return;

@@ -15,6 +15,50 @@ struct Source {
     url: String,
 }
 
+/// A URL prefix wrapping the fixed GitHub asset URL, not a forward HTTP proxy.
+#[derive(Clone, Debug)]
+pub(super) struct GithubProxy(String);
+
+impl GithubProxy {
+    pub(super) fn parse(input: &str) -> Result<Self, String> {
+        let input = input.trim();
+        if input.is_empty()
+            || input.len() > 2048
+            || input
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        {
+            return Err("GitHub 代理地址为空、过长或包含无效字符".to_string());
+        }
+        let address = if input.contains("://") {
+            input.to_string()
+        } else {
+            format!("https://{input}")
+        };
+        let url = reqwest::Url::parse(&address).map_err(|_| "GitHub 代理地址无效".to_string())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "GitHub 代理须为 HTTP(S) 地址前缀，不能包含账号、密码、查询参数或片段".to_string(),
+            );
+        }
+        let prefix = format!("{}/", url.as_str().trim_end_matches('/'));
+        if prefix.len() > 2048 {
+            return Err("GitHub 代理地址过长".to_string());
+        }
+        Ok(Self(prefix))
+    }
+
+    pub(super) fn prefix(&self) -> &str {
+        &self.0
+    }
+}
+
 fn sources(url: &str) -> [Source; 3] {
     [
         Source {
@@ -30,6 +74,33 @@ fn sources(url: &str) -> [Source; 3] {
             url: format!("https://httptunnel.top/gh/{url}"),
         },
     ]
+}
+
+fn download_sources(url: &str, proxy: Option<&GithubProxy>) -> Vec<Source> {
+    let Some(proxy) = proxy else {
+        return sources(url).to_vec();
+    };
+    let [direct, sina, tunnel] = sources(url);
+    let preferred_url = format!("{}{url}", proxy.prefix());
+    let preferred_name = [&sina, &tunnel]
+        .into_iter()
+        .find(|source| source.url == preferred_url)
+        .map_or("自定义代理", |source| source.name);
+    let mut candidates = vec![Source {
+        name: preferred_name,
+        url: preferred_url,
+    }];
+    // Explicit selection bypasses a slow but reachable origin. Keep the origin
+    // as the final fallback and never retry the same proxy twice.
+    for source in [sina, tunnel, direct] {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.url == source.url)
+        {
+            candidates.push(source);
+        }
+    }
+    candidates
 }
 
 #[derive(Clone, Copy)]
@@ -141,13 +212,21 @@ pub(super) async fn download<F, Fut>(
     client: &Client,
     url: &str,
     path: &Path,
+    proxy: Option<&GithubProxy>,
     on_event: F,
 ) -> Result<u64, String>
 where
     F: FnMut(DownloadEvent) -> Fut,
     Fut: Future<Output = ()>,
 {
-    download_from(client, &sources(url), path, TIMEOUTS, on_event).await
+    download_from(
+        client,
+        &download_sources(url, proxy),
+        path,
+        TIMEOUTS,
+        on_event,
+    )
+    .await
 }
 
 async fn download_from<F, Fut>(
@@ -354,7 +433,17 @@ mod tests {
         ) -> impl IntoResponse {
             assert_eq!(request.method(), "GET");
             assert_eq!(request.headers()["user-agent"], "ivnc-updater");
-            let name = request.uri().path().trim_start_matches('/').to_string();
+            let route = request.uri().path().trim_start_matches('/');
+            let name = ["GitHub", "sina.dev", "httptunnel.top/gh"]
+                .into_iter()
+                .find(|name| {
+                    route == *name
+                        || route
+                            .strip_prefix(name)
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+                .unwrap_or_else(|| panic!("unexpected path: {route}"))
+                .to_string();
             calls.lock().unwrap().push(name.clone());
             let index = match name.as_str() {
                 "GitHub" => 0,
@@ -461,6 +550,128 @@ mod tests {
                 candidates[2].url,
                 format!("https://httptunnel.top/gh/{url}")
             );
+        }
+    }
+
+    #[test]
+    fn proxy_prefixes_are_normalized_and_reject_ambiguous_or_unsafe_urls() {
+        for (input, expected) in [
+            ("sina.dev", "https://sina.dev/"),
+            (" https://SINA.DEV/// ", "https://sina.dev/"),
+            ("httptunnel.top/gh", "https://httptunnel.top/gh/"),
+            (
+                "https://proxy.example/custom/",
+                "https://proxy.example/custom/",
+            ),
+            ("http://127.0.0.1:8080/gh", "http://127.0.0.1:8080/gh/"),
+        ] {
+            assert_eq!(GithubProxy::parse(input).unwrap().prefix(), expected);
+        }
+        for input in [
+            "",
+            " ",
+            "ftp://proxy.example/",
+            "file:///tmp/",
+            "https://",
+            "https://user:secret@proxy.example/",
+            "https://user@proxy.example/",
+            "https://proxy.example/?token=secret",
+            "https://proxy.example/?",
+            "https://proxy.example/#fragment",
+            "https://proxy.example/#",
+            "https://proxy.example/some path",
+            "https://proxy.example/\npath",
+            "https://proxy.example\\path",
+        ] {
+            assert!(GithubProxy::parse(input).is_err(), "{input:?}");
+        }
+        assert!(GithubProxy::parse(&"a".repeat(2049)).is_err());
+        assert!(
+            GithubProxy::parse(&format!("https://proxy.example/{}", "代".repeat(230))).is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_proxy_is_first_and_origin_is_last_without_duplicates_or_nesting() {
+        let url = binary_url("amd64");
+        for (prefix, names) in [
+            ("sina.dev", vec!["sina.dev", "httptunnel.top/gh", "GitHub"]),
+            (
+                "httptunnel.top/gh",
+                vec!["httptunnel.top/gh", "sina.dev", "GitHub"],
+            ),
+            (
+                "https://proxy.example/gh",
+                vec!["自定义代理", "sina.dev", "httptunnel.top/gh", "GitHub"],
+            ),
+        ] {
+            let proxy = GithubProxy::parse(prefix).unwrap();
+            let candidates = download_sources(&url, Some(&proxy));
+            assert_eq!(candidates.iter().map(|s| s.name).collect::<Vec<_>>(), names);
+            assert_eq!(candidates[0].url, format!("{}{url}", proxy.prefix()));
+            assert_eq!(candidates.last().unwrap().url, url);
+            assert!(candidates
+                .iter()
+                .all(|s| s.url.matches("https://github.com/").count() == 1));
+        }
+        assert_eq!(
+            download_sources(&url, None)
+                .iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>(),
+            ["GitHub", "sina.dev", "httptunnel.top/gh"]
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_custom_proxy_downloads_the_asset_without_contacting_the_origin_first() {
+        let expected = binary(77);
+        let server = fixture([unavailable(), Reply::body(expected.clone()), unavailable()]).await;
+        let proxy = GithubProxy::parse(&format!("{}/sina.dev/", server.base)).unwrap();
+        let path = TempPath::new();
+        download(
+            &test_client(),
+            &binary_url("amd64"),
+            &path.0,
+            Some(&proxy),
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.calls(), ["sina.dev"]);
+        assert_eq!(tokio::fs::read(&path.0).await.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn selected_proxy_failure_tries_other_proxy_before_the_available_origin() {
+        for prefix in ["sina.dev", "httptunnel.top/gh"] {
+            let expected = binary(77);
+            let server =
+                fixture([Reply::body(expected.clone()), unavailable(), unavailable()]).await;
+            let proxy = GithubProxy::parse(prefix).unwrap();
+            let mut candidates = download_sources(&binary_url("amd64"), Some(&proxy));
+            for source in &mut candidates {
+                source.url = format!("{}/{}", server.base, source.name);
+            }
+            let path = TempPath::new();
+            download_from(
+                &test_client(),
+                &candidates,
+                &path.0,
+                timeouts(),
+                |_| async {},
+            )
+            .await
+            .unwrap();
+            let mut expected_order = vec![prefix];
+            expected_order.push(if prefix == "sina.dev" {
+                "httptunnel.top/gh"
+            } else {
+                "sina.dev"
+            });
+            expected_order.push("GitHub");
+            assert_eq!(server.calls(), expected_order);
+            assert_eq!(tokio::fs::read(&path.0).await.unwrap(), expected);
         }
     }
 

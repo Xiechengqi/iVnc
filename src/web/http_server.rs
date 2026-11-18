@@ -10,7 +10,7 @@
 
 use crate::web::auth::{self, AuthContext, TransportSecurity};
 use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
-use crate::web::github_update::{self, DownloadEvent};
+use crate::web::github_update::{self, DownloadEvent, GithubProxy};
 use crate::web::proxy_cookies::MiaoCookieScope;
 use crate::web::shared::SharedState;
 use axum::extract::Path;
@@ -1945,13 +1945,27 @@ async fn shutdown_handler(State(state): State<Arc<SharedState>>) -> Response {
 }
 
 /// GET /api/upgrade/ws - WebSocket upgrade endpoint
+#[derive(Default, Deserialize)]
+struct UpgradeOptions {
+    github_proxy: Option<String>,
+}
+
 async fn upgrade_ws_handler(
     State(state): State<Arc<SharedState>>,
     Extension(auth): Extension<AuthContext>,
+    Query(options): Query<UpgradeOptions>,
     ws: WebSocketUpgrade,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
+    // Validate before accepting the socket or starting any upgrade side effects.
+    let proxy = options
+        .github_proxy
+        .as_deref()
+        .map(GithubProxy::parse)
+        .transpose()
+        .map_err(|error| proxy_json_response(StatusCode::BAD_REQUEST, json!({"error": error})))?;
     Ok(ws.on_upgrade(move |socket| async move {
-        auth.run(handle_upgrade_websocket(socket, state)).await;
+        auth.run(handle_upgrade_websocket(socket, state, proxy))
+            .await;
     }))
 }
 
@@ -1959,6 +1973,7 @@ async fn upgrade_ws_handler(
 async fn handle_upgrade_websocket(
     mut socket: axum::extract::ws::WebSocket,
     state: Arc<SharedState>,
+    proxy: Option<GithubProxy>,
 ) {
     use futures::SinkExt;
     use tokio::sync::mpsc;
@@ -1967,7 +1982,7 @@ async fn handle_upgrade_websocket(
 
     // Spawn upgrade task
     let mut upgrade_task =
-        tokio::spawn(async move { perform_upgrade_with_logs(log_tx, state).await });
+        tokio::spawn(async move { perform_upgrade_with_logs(log_tx, state, proxy).await });
 
     // Forward logs to WebSocket
     loop {
@@ -1999,6 +2014,7 @@ async fn handle_upgrade_websocket(
 async fn perform_upgrade_with_logs(
     log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>,
     state: Arc<SharedState>,
+    proxy: Option<GithubProxy>,
 ) {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -2060,6 +2076,15 @@ async fn perform_upgrade_with_logs(
     send_log(2, "准备下载最新版本...", "info", None).await;
     let download_url = github_update::binary_url(arch);
     send_log(2, &format!("下载地址: {}", download_url), "success", None).await;
+    if let Some(proxy) = &proxy {
+        send_log(
+            2,
+            &format!("优先使用 GitHub 代理: {}", proxy.prefix()),
+            "info",
+            None,
+        )
+        .await;
+    }
 
     // Step 3: Download new version
     send_log(3, "开始下载...", "info", None).await;
@@ -2079,21 +2104,27 @@ async fn perform_upgrade_with_logs(
         }
     };
 
-    if let Err(error) = github_update::download(&client, &download_url, &temp_path, |event| {
-        let (message, level, progress) = upgrade_download_log(event);
-        let tx = log_tx.clone();
-        async move {
-            let _ = tx
-                .send(UpgradeLogEntry {
-                    step: 3,
-                    total_steps: 10,
-                    message,
-                    level: level.to_string(),
-                    progress,
-                })
-                .await;
-        }
-    })
+    if let Err(error) = github_update::download(
+        &client,
+        &download_url,
+        &temp_path,
+        proxy.as_ref(),
+        |event| {
+            let (message, level, progress) = upgrade_download_log(event);
+            let tx = log_tx.clone();
+            async move {
+                let _ = tx
+                    .send(UpgradeLogEntry {
+                        step: 3,
+                        total_steps: 10,
+                        message,
+                        level: level.to_string(),
+                        progress,
+                    })
+                    .await;
+            }
+        },
+    )
     .await
     {
         send_log(3, &format!("下载失败: {}", error), "error", None).await;
@@ -2444,6 +2475,79 @@ mod tests {
         .await
         .unwrap();
         assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn upgrade_proxy_validation_preserves_auth_and_rejects_before_any_upgrade() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let state = shutdown_test_state();
+        let running = std::sync::Arc::new(AtomicBool::new(true));
+        state.set_shutdown_flag(std::sync::Arc::clone(&running));
+        let app = super::Router::new()
+            .route("/api/upgrade/ws", super::get(super::upgrade_ws_handler))
+            .layer(super::middleware::from_fn_with_state(
+                std::sync::Arc::clone(&state),
+                super::auth::middleware,
+            ))
+            .with_state(std::sync::Arc::clone(&state));
+        let listener = super::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let request = |proxy: &str| {
+            client
+                .get(format!("{origin}/api/upgrade/ws"))
+                .query(&[("github_proxy", proxy)])
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        };
+        assert_eq!(
+            request("ftp://proxy.example/")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let authorize = |request: reqwest::RequestBuilder| {
+            request.basic_auth(
+                &state.config.http.basic_auth_user,
+                Some(&state.config.http.basic_auth_password),
+            )
+        };
+        assert_eq!(
+            authorize(request("ftp://proxy.example/"))
+                .header("origin", "http://foreign.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for proxy in [
+            "",
+            "ftp://proxy.example/",
+            "https://user:secret@proxy.example/",
+            "https://proxy.example/?key=value",
+        ] {
+            let response = authorize(request(proxy))
+                .header("origin", &origin)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert!(body["error"].as_str().unwrap().contains("GitHub"));
+            assert!(running.load(Ordering::SeqCst));
+        }
+        server.abort();
     }
 
     #[test]

@@ -309,6 +309,103 @@ const cases = [
         assert.equal(calls.filter(c=>c.url==='/health').length,0);
         await frame.locator('#update-cancel').click(); await closed(frame);
     }],
+    ['upgrade proxy controls appear on demand and inactive custom input cannot block restart', async ({ page, frame, calls }) => {
+        await openUpdate(frame);
+        assert.equal(await frame.locator('#upgrade-use-proxy').isVisible(),false);
+        await frame.locator('#upgrade-latest').check();
+        assert(await frame.locator('#upgrade-use-proxy').isVisible());
+        assert.equal(await frame.locator('#upgrade-use-proxy').isChecked(),false);
+        assert.equal(await frame.locator('#upgrade-proxy').isVisible(),false);
+        await frame.locator('#upgrade-use-proxy').check();
+        assert.equal(await frame.locator('#upgrade-proxy').inputValue(),'https://sina.dev/');
+        assert.equal(await frame.locator('#upgrade-custom-proxy').isVisible(),false);
+        await frame.locator('#upgrade-proxy').selectOption('custom');
+        assert(await frame.locator('#upgrade-custom-proxy').isVisible());
+        assert.equal(await frame.locator('#upgrade-custom-proxy').evaluate(el=>el.required),true);
+        await frame.locator('#upgrade-use-proxy').uncheck();
+        assert(await frame.locator('#upgrade-custom-proxy').isDisabled());
+        await frame.locator('#upgrade-use-proxy').check();
+        await frame.locator('#upgrade-latest').uncheck();
+        assert(await frame.locator('#upgrade-custom-proxy').isDisabled());
+        assert.equal(calls.filter(c=>c.method==='WS'||c.url==='/api/restart').length,0);
+        await page.route('**/api/restart',route=>route.fulfill({status:500,json:{error:'restart-only'}}));
+        await frame.locator('#update-ok').click(); await unlocked(frame);
+        assert.match(await frame.locator('#update-logs').textContent(),/restart-only/);
+        assert.equal(calls.filter(c=>c.url==='/api/restart').length,1);
+        assert.equal(calls.filter(c=>c.method==='WS').length,0);
+    }],
+    ['upgrade uses the chosen proxy and safely encodes normalized custom addresses', async ({ frame, calls, handleUpgrade }) => {
+        for (const [choice,address,expected] of [
+            ['https://sina.dev/',null,'https://sina.dev/'],
+            ['https://httptunnel.top/gh/',null,'https://httptunnel.top/gh/'],
+            ['custom',' proxy.example:8443/gh ','https://proxy.example:8443/gh/'],
+            ['custom','http://127.0.0.1:8080/代理/','http://127.0.0.1:8080/%E4%BB%A3%E7%90%86/'],
+        ]) {
+            let requestUrl;
+            handleUpgrade((ws,request)=>{
+                requestUrl=new URL(request.url,'http://localhost');
+                ws.send(JSON.stringify({step:3,total_steps:10,level:'error',message:'fixture download stopped'})); ws.close(1000);
+            });
+            await openUpdate(frame); await frame.locator('#upgrade-latest').check(); await frame.locator('#upgrade-use-proxy').check();
+            await frame.locator('#upgrade-proxy').selectOption(choice);
+            if(address) await frame.locator('#upgrade-custom-proxy').fill(address);
+            await frame.locator('#update-ok').click();
+            await wait(frame,()=>document.querySelector('#update-logs').textContent.includes('fixture download stopped')); await unlocked(frame);
+            assert.equal(requestUrl.searchParams.get('github_proxy'),expected);
+            await frame.locator('#update-cancel').click(); await closed(frame);
+        }
+        assert.equal(calls.filter(c=>c.method==='WS').length,4);
+        assert.equal(calls.filter(c=>c.url==='/api/restart').length,0);
+    }],
+    ['invalid custom proxies stay editable and never start an upgrade', async ({ frame, calls }) => {
+        await openUpdate(frame); await frame.locator('#upgrade-latest').check(); await frame.locator('#upgrade-use-proxy').check();
+        await frame.locator('#upgrade-proxy').selectOption('custom');
+        for(const value of ['ftp://proxy.example/','https://user:password@proxy.example/','https://proxy.example/?token=secret','https://proxy.example/#part','https://proxy.example/some path','https://proxy.example/'+'代'.repeat(230)]) {
+            await frame.locator('#upgrade-custom-proxy').fill(value); await frame.locator('#update-ok').click();
+            assert(await frame.locator('#upgrade-proxy-message').isVisible());
+            assert.match(await frame.locator('#upgrade-proxy-message').textContent(),/HTTP\(S\)/);
+            await unlocked(frame); assert(await frame.locator('#update-info').isVisible());
+        }
+        assert.equal(calls.filter(c=>c.method==='WS'||c.url==='/api/restart').length,0);
+        await frame.locator('#upgrade-use-proxy').uncheck();
+        assert.equal(await frame.locator('#upgrade-proxy-message').isVisible(),false);
+    }],
+    ['unchecked proxy uses the existing automatic route even after entering a custom proxy', async ({ frame, handleUpgrade }) => {
+        let requestUrl;
+        handleUpgrade((ws,request)=>{
+            requestUrl=new URL(request.url,'http://localhost');
+            ws.send(JSON.stringify({step:3,total_steps:10,level:'error',message:'automatic route'})); ws.close(1000);
+        });
+        await openUpdate(frame); await frame.locator('#upgrade-latest').check(); await frame.locator('#upgrade-use-proxy').check();
+        await frame.locator('#upgrade-proxy').selectOption('custom'); await frame.locator('#upgrade-custom-proxy').fill('https://proxy.example/');
+        await frame.locator('#upgrade-use-proxy').uncheck(); await frame.locator('#update-ok').click();
+        await wait(frame,()=>document.querySelector('#update-logs').textContent.includes('automatic route')); await unlocked(frame);
+        assert.equal(requestUrl.search,'');
+    }],
+    ['upgrade proxy form fits narrow screens and both settings pages', async ({ page, frame, url }) => {
+        for(const minimal of [false,true]) {
+            if(minimal) {
+                await page.goto(url+'?console=0'); await page.frameLocator('#settings-frame').locator('#settings-update').waitFor();
+                frame=page.frames().find(f=>new URL(f.url()).pathname==='/settings.html');
+            }
+            if(await frame.locator('#lang-toggle').textContent()==='中文') await frame.locator('#lang-toggle').click();
+            await page.setViewportSize({width:320,height:600});
+            await openUpdate(frame); await frame.locator('#upgrade-latest').check(); await frame.locator('#upgrade-use-proxy').check();
+            await frame.locator('#upgrade-proxy').selectOption('custom');
+            const bounds=await frame.evaluate(()=>{
+                const dialog=document.querySelector('.update-dialog');
+                return {width:dialog.clientWidth,scroll:dialog.scrollWidth};
+            });
+            assert(bounds.scroll<=bounds.width,JSON.stringify(bounds));
+            await frame.locator('#update-ok').scrollIntoViewIfNeeded();
+            const button=await frame.locator('#update-ok').boundingBox();
+            assert(button.x>=0 && button.x+button.width<=320 && button.y>=0 && button.y+button.height<=600,JSON.stringify(button));
+            await frame.locator('#update-cancel').click(); await closed(frame);
+            await frame.locator('#lang-toggle').click(); await openUpdate(frame); await frame.locator('#upgrade-latest').check();
+            assert.match(await frame.locator('#upgrade-proxy-options').textContent(),/Use a GitHub proxy/);
+            await frame.locator('#update-cancel').click(); await closed(frame);
+        }
+    }],
     ['an incomplete upgrade socket cannot be reported as successful', async ({ frame, calls, handleUpgrade }) => {
         handleUpgrade(ws=>{ws.send(JSON.stringify({step:2,total_steps:10,level:'info',message:'downloading'}));ws.close(1000)});
         await openUpdate(frame); await frame.locator('#upgrade-latest').check(); await frame.locator('#update-ok').click();
@@ -396,8 +493,8 @@ await test('settings actions',async t=>{
     try {
         await server.listen();const url=`http://127.0.0.1:${server.httpServer.address().port}/__settings`;
         server.httpServer.on('upgrade',(request,socket,head)=>{
-            if(request.url!=='/api/upgrade/ws')return;
-            sockets.handleUpgrade(request,socket,head,ws=>{ws.on('error',()=>{});upgradeHandler(ws)});
+            if(new URL(request.url,'http://localhost').pathname!=='/api/upgrade/ws')return;
+            sockets.handleUpgrade(request,socket,head,ws=>{ws.on('error',()=>{});upgradeHandler(ws,request)});
         });
         for(const name of (process.env.BROWSERS||'chromium,webkit').split(',')) await t.test(name,async t=>{
             const browser=await engines[name].launch({headless:true,...(name==='chromium'&&process.env.CHROME_BIN?{executablePath:process.env.CHROME_BIN}:{})});
