@@ -12,6 +12,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
+import { runAccessChecks } from './access_auth_checks.mjs';
 const require = createRequire(new URL('../web/ivnc/package.json', import.meta.url));
 const engines = require('playwright'), { WebSocket } = require('ws');
 const root = path.resolve(new URL('..', import.meta.url).pathname);
@@ -50,13 +51,13 @@ function request(server, target, { method = 'GET', headers = {}, body } = {}) {
         req.on('error', reject); req.on('timeout', () => req.destroy(Error('HTTP timeout'))); req.end(payload);
     });
 }
-async function startServer(name, { tls = false, idle = 600, maximum = 3600, enabled = true, consoleEnabled = true, host: httpHost } = {}) {
+async function startServer(name, { tls = false, idle = 600, maximum = 3600, enabled = true, consoleEnabled = true, trustedProxies = [], host: httpHost } = {}) {
     const dir = path.join(work, name); mkdirSync(dir);
     const env = { ...process.env, IVNC_HOME: path.join(dir, 'home'), XDG_RUNTIME_DIR: path.join(dir, 'run'),
         XDG_CONFIG_HOME: path.join(dir, 'config'), XDG_DATA_HOME: path.join(dir, 'data'), XDG_CACHE_HOME: path.join(dir, 'cache'), IVNC_MIAO_PORT: String(await freePort()) };
     for (const key of ['IVNC_HOME','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME']) mkdirSync(env[key], { mode: 0o700 });
     const port = await freePort(), config = path.join(dir, 'ivnc.toml');
-    writeFileSync(config, `[http]\nport=${port}\nbasic_auth_enabled=${enabled}\nbasic_auth_user=${JSON.stringify(username)}\nbasic_auth_password=${JSON.stringify(originalPassword)}\nauth_session_idle_seconds=${idle}\nauth_session_max_seconds=${maximum}\n[ui_features]\nconsole_enabled=${consoleEnabled}\n[audio]\nenabled=false\nsample_rate=48000\nchannels=2\nbitrate=128000\n`, { mode: 0o600 });
+    writeFileSync(config, `[http]\nport=${port}\nbasic_auth_enabled=${enabled}\nbasic_auth_user=${JSON.stringify(username)}\nbasic_auth_password=${JSON.stringify(originalPassword)}\nauth_session_idle_seconds=${idle}\nauth_session_max_seconds=${maximum}\ntrusted_proxy_cidrs=${JSON.stringify(trustedProxies)}\n[ui_features]\nconsole_enabled=${consoleEnabled}\n[audio]\nenabled=false\nsample_rate=48000\nchannels=2\nbitrate=128000\n`, { mode: 0o600 });
     const host = tls ? '127.0.0.1' : (httpHost || process.env.IVNC_TEST_HTTP_HOST || '127.0.0.1');
     const server = { tls, port, dir, config, env, password: originalPassword, origin: `${tls ? 'https' : 'http'}://${host}:${port}` };
     servers.push(server);
@@ -347,6 +348,8 @@ try {
     await confirmShutdown(noAuthPage, noAuthPage, open);
     await noAuthBrowser.close();
     pass('authentication-disabled installations retain service controls and reject cross-origin shutdown');
+
+    await runAccessChecks({ startServer, stopServer, launchServer, request, loginApi, basic, terminal, refusedSocket, waitFor, pass, engines, browsers, work });
 
     // A managed application records SIGTERM, proving that web shutdown uses
     // app-state persistence and the ordinary process cleanup, not a hard exit.

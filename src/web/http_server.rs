@@ -21,7 +21,7 @@ use axum::{
     http::{header, HeaderMap, Method, Request, StatusCode, Uri},
     middleware,
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, get, post, put},
     Extension, Router,
 };
 
@@ -133,7 +133,17 @@ pub async fn run_http_server_with_webrtc(
         )
         .route("/login.html", get(auth::login_page))
         .route("/auth/session", get(auth::status))
+        .route(
+            "/auth/auto-login",
+            post(auth::auto_login).layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/auth/logout", post(auth::logout))
+        .route(
+            "/api/settings/access",
+            get(auth::access_get)
+                .put(auth::access_put)
+                .layer(DefaultBodyLimit::max(32768)),
+        )
         .route("/health", get(health_handler))
         .route("/version", get(public_version_handler))
         .route("/metrics", get(metrics_handler))
@@ -167,6 +177,10 @@ pub async fn run_http_server_with_webrtc(
         .route(
             "/api/console/display",
             get(console_display_get_handler).put(console_display_put_handler),
+        )
+        .route(
+            "/api/console/clipboard-policy",
+            put(worker_clipboard_policy_handler),
         )
         .route("/api/console/keyframe", post(console_keyframe_handler))
         .route("/api/capabilities", get(capabilities_handler))
@@ -464,6 +478,7 @@ fn worker_path_allowed(path: &str) -> bool {
             | "/ws-config"
             | "/api/render-status"
             | "/api/console/display"
+            | "/api/console/clipboard-policy"
     )
 }
 
@@ -1031,28 +1046,81 @@ async fn console_settings_put_handler(
     State(state): State<Arc<SharedState>>,
     axum::extract::Json(body): axum::extract::Json<crate::console_config::RuntimeConsoleConfig>,
 ) -> Response {
-    if let Some(fps) = body.target_fps {
-        state.runtime_settings.set_target_fps(fps);
-    }
-    if let Some(bitrate) = body.video_bitrate_kbps {
-        state.runtime_settings.set_video_bitrate_kbps(bitrate);
-    }
-    if let Some(bitrate) = body.audio_bitrate {
-        state.runtime_settings.set_audio_bitrate(bitrate);
-    }
-    if let Some(interval) = body.keyframe_interval {
-        state.runtime_settings.set_keyframe_interval(interval);
-    }
-    if let Some(enabled) = body.binary_clipboard_enabled {
-        state
-            .runtime_settings
-            .apply_settings_json(&json!({"enable_binary_clipboard": enabled}).to_string());
-    }
+    let _update = state.runtime_settings.console_update_lock().await;
+    match crate::console_config::update(|config| {
+        let saved = &mut config.runtime;
+        if body.target_fps.is_some() {
+            saved.target_fps = body.target_fps;
+        }
+        if body.video_bitrate_kbps.is_some() {
+            saved.video_bitrate_kbps = body.video_bitrate_kbps;
+        }
+        if body.audio_bitrate.is_some() {
+            saved.audio_bitrate = body.audio_bitrate;
+        }
+        if body.keyframe_interval.is_some() {
+            saved.keyframe_interval = body.keyframe_interval;
+        }
+        if body.binary_clipboard_enabled.is_some() {
+            saved.binary_clipboard_enabled = body.binary_clipboard_enabled;
+        }
+    }) {
+        Ok(()) => {
+            if let Some(fps) = body.target_fps {
+                state.runtime_settings.set_target_fps(fps);
+            }
+            if let Some(bitrate) = body.video_bitrate_kbps {
+                state.runtime_settings.set_video_bitrate_kbps(bitrate);
+            }
+            if let Some(bitrate) = body.audio_bitrate {
+                state.runtime_settings.set_audio_bitrate(bitrate);
+            }
+            if let Some(interval) = body.keyframe_interval {
+                state.runtime_settings.set_keyframe_interval(interval);
+            }
+            if let Some(enabled) = body.binary_clipboard_enabled {
+                state.runtime_settings.set_binary_clipboard_enabled(enabled);
+            }
 
-    match crate::console_config::update(|config| config.runtime = body) {
-        Ok(()) => json_response(StatusCode::OK, json!({"ok": true, "applied": "runtime"})),
+            let pending = if body.binary_clipboard_enabled.is_some() {
+                if let Some(apps) = state.apps_state() {
+                    let pending = apps.sync_worker_clipboards().await;
+                    apps.refresh_window_apps();
+                    pending
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            json_response(
+                StatusCode::OK,
+                json!({"ok": true, "applied": "runtime", "pending_workers":pending}),
+            )
+        }
         Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": err})),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClipboardPolicy {
+    enabled: bool,
+}
+
+/// Only the manager's authenticated loopback request can reach this path; it
+/// is absent from both app-view and source sharing proxy allowlists.
+async fn worker_clipboard_policy_handler(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Json(body): axum::extract::Json<ClipboardPolicy>,
+) -> Response {
+    if !crate::remote::worker::is_worker() {
+        return json_response(StatusCode::NOT_FOUND, json!({"error":"Not found"}));
+    }
+    state
+        .runtime_settings
+        .set_binary_clipboard_enabled(body.enabled);
+    json_response(StatusCode::OK, json!({"ok":true,"enabled":body.enabled}))
 }
 
 #[derive(Default, Deserialize)]
@@ -1431,6 +1499,7 @@ pub(super) fn is_miao_request(path: &str, headers: &HeaderMap) -> bool {
         || (path.starts_with("/api/")
             && referer_from_proxy
             && !is_console_management_path(path)
+            && !path.starts_with("/api/settings/")
             && !path.starts_with("/api/proxy/"))
 }
 
@@ -2409,20 +2478,35 @@ mod tests {
     }
 
     #[test]
-    fn worker_exposes_only_display_management_to_its_authenticated_owner() {
+    fn worker_exposes_only_display_and_clipboard_policy_to_its_authenticated_owner() {
         assert!(worker_path_allowed("/api/console/display"));
+        assert!(worker_path_allowed("/api/console/clipboard-policy"));
         assert!(is_console_management_path("/api/console/display"));
         for path in [
             "/api/console/display/",
+            "/api/console/clipboard-policy/",
             "/api/console/settings",
             "/api/apps",
             "/api/shutdown",
             "/api/restart",
             "/api/upgrade/ws",
+            "/api/settings/access",
             "/terminal/ws",
         ] {
             assert!(!worker_path_allowed(path), "{path}");
         }
+    }
+
+    #[test]
+    fn access_settings_never_use_the_miao_proxy_or_its_csrf_exception() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::REFERER,
+            "http://localhost:8008/proxy/".parse().unwrap(),
+        );
+        assert!(!super::is_miao_request("/api/settings/access", &headers));
+        assert!(super::is_miao_request("/api/config", &headers));
+        assert!(!is_console_management_path("/api/settings/access"));
     }
 
     #[test]

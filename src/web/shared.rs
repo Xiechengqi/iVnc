@@ -72,6 +72,18 @@ impl<T> Subscriber<T> {
     }
 }
 
+// Clipboard chunks must enter a subscriber queue as a complete batch. Media
+// queues can drop frames; a missing clipboard chunk corrupts the whole selection.
+const TEXT_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+pub struct TextDelivery {
+    pub messages: Arc<[String]>,
+    _budget: tokio::sync::OwnedSemaphorePermit,
+}
+struct TextSubscriber {
+    tx: mpsc::Sender<TextDelivery>,
+    budget: Arc<tokio::sync::Semaphore>,
+}
+
 /// Delivers an item to every subscriber; returns whether any recovered from congestion.
 fn deliver<T: Clone>(subs: &mut Vec<Subscriber<T>>, item: &T) -> bool {
     let mut recovered = false;
@@ -188,7 +200,7 @@ pub struct SharedState {
     /// Per-session mpsc senders for audio
     pub audio_subscribers: Arc<Mutex<Vec<Subscriber<AudioPacket>>>>,
     /// Per-session mpsc senders for text
-    pub text_subscribers: Arc<Mutex<Vec<Subscriber<String>>>>,
+    text_subscribers: Arc<Mutex<Vec<TextSubscriber>>>,
 
     /// Browser sessions, compatible Basic credentials and live revocation.
     pub auth: Arc<super::auth::AuthStore>,
@@ -382,19 +394,20 @@ impl SharedState {
         if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&base64_text) {
             let total_size = decoded.len();
             if total_size > 8192 {
-                self.send_text(format!(
+                let mut messages = vec![format!(
                     "clipboard_start,{}",
                     serde_json::json!({
                         "mime": "text/plain", "revision": revision, "origin": origin
                     })
-                ));
+                )];
                 // Keep intermediate base64 chunks unpadded so legacy clients
                 // can join them before decoding, including split UTF-8 chars.
                 for chunk in decoded.chunks(4095) {
                     let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                    self.send_text(format!("clipboard_data,{}", encoded));
+                    messages.push(format!("clipboard_data,{}", encoded));
                 }
-                self.send_text("clipboard_finish".to_string());
+                messages.push("clipboard_finish".to_string());
+                self.broadcast_text_batch(messages.into());
                 return;
             }
         }
@@ -428,19 +441,20 @@ impl SharedState {
             .iter()
             .map(|(mime, bytes)| serde_json::json!({"mime": mime, "size": bytes.len()}))
             .collect();
-        self.send_text(format!(
+        let mut messages = vec![format!(
             "clipboard_start,{}",
             serde_json::json!({"formats":specs, "revision":revision, "origin":"remote"})
-        ));
+        )];
         // 4095 keeps intermediate base64 chunks unpadded.
         let bytes: Vec<_> = contents.into_iter().flat_map(|(_, bytes)| bytes).collect();
         for chunk in bytes.chunks(4095) {
-            self.send_text(format!(
+            messages.push(format!(
                 "clipboard_data,{}",
                 base64::engine::general_purpose::STANDARD.encode(chunk)
             ));
         }
-        self.send_text("clipboard_finish".into());
+        messages.push("clipboard_finish".into());
+        self.broadcast_text_batch(messages.into());
     }
 
     pub fn display_size(&self) -> (u32, u32) {
@@ -603,12 +617,12 @@ impl SharedState {
     }
 
     /// Subscribe to text messages via mpsc
-    pub fn subscribe_text_mpsc(&self) -> mpsc::Receiver<String> {
+    pub fn subscribe_text_mpsc(&self) -> mpsc::Receiver<TextDelivery> {
         let (tx, rx) = mpsc::channel(256);
-        self.text_subscribers
-            .lock()
-            .unwrap()
-            .push(Subscriber::new(tx));
+        self.text_subscribers.lock().unwrap().push(TextSubscriber {
+            tx,
+            budget: Arc::new(tokio::sync::Semaphore::new(TEXT_QUEUE_BYTES)),
+        });
         rx
     }
 
@@ -619,7 +633,27 @@ impl SharedState {
 
     /// Broadcast text to all subscribers
     pub fn broadcast_text(&self, msg: String) {
-        deliver(&mut self.text_subscribers.lock().unwrap(), &msg);
+        self.broadcast_text_batch(Arc::from(vec![msg]));
+    }
+
+    fn broadcast_text_batch(&self, messages: Arc<[String]>) {
+        let bytes = messages.iter().map(String::len).sum::<usize>();
+        self.text_subscribers.lock().unwrap().retain(|sub| {
+            let Ok(bytes) = u32::try_from(bytes) else {
+                return false;
+            };
+            let Ok(budget) = sub.budget.clone().try_acquire_many_owned(bytes) else {
+                return false;
+            };
+            // Disconnect a subscriber that cannot keep up. Never drop part of
+            // a control/clipboard message or grow memory without a bound.
+            sub.tx
+                .try_send(TextDelivery {
+                    messages: messages.clone(),
+                    _budget: budget,
+                })
+                .is_ok()
+        });
     }
 
     /// Update the keyframe cache with a new set of RTP packets
@@ -1113,17 +1147,21 @@ mod tests {
             None,
         );
         let mut rx = state.subscribe_text_mpsc();
-        let text = "中文😀\n".repeat(4000);
+        // More than 256 chunks: the old per-fragment queue silently lost its tail.
+        let text = "中文😀\n".repeat(120000);
         state.set_clipboard(
             base64::engine::general_purpose::STANDARD.encode(&text),
             8,
             "remote",
         );
-        let start = rx.try_recv().unwrap();
+        let delivery = rx.try_recv().unwrap();
+        assert!(delivery.messages.len() > 256);
+        let mut messages = delivery.messages.iter();
+        let start = messages.next().unwrap();
         assert!(start.starts_with("clipboard_start,"));
         assert!(start.contains("\"revision\":8"));
         let mut data = String::new();
-        while let Ok(message) = rx.try_recv() {
+        for message in messages {
             if message == "clipboard_finish" {
                 break;
             }
@@ -1135,6 +1173,39 @@ mod tests {
                 .unwrap(),
             text.as_bytes()
         );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn control_delivery_holds_its_byte_budget_and_closes_instead_of_dropping_data() {
+        let (input, _) = mpsc::unbounded_channel();
+        let config = Config::default();
+        let state = SharedState::new(
+            config.clone(),
+            UiConfig::from_env(&config),
+            input,
+            Arc::new(RuntimeSettings::new(&config)),
+            None,
+            None,
+        );
+        let mut rx = state.subscribe_text_mpsc();
+        let budget = Arc::new(tokio::sync::Semaphore::new(64));
+        state.text_subscribers.lock().unwrap()[0].budget = budget.clone();
+        state.send_text("a".repeat(40));
+        let first = rx.try_recv().unwrap();
+        assert_eq!(budget.available_permits(), 24);
+        drop(first);
+        assert_eq!(budget.available_permits(), 64);
+        state.send_text("b".repeat(40));
+        state.send_text("c".repeat(40));
+        let last = rx.try_recv().unwrap();
+        assert_eq!(last.messages.as_ref(), &["b".repeat(40)]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        drop(last);
+        assert_eq!(budget.available_permits(), 64);
     }
 
     #[test]

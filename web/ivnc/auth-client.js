@@ -4,6 +4,7 @@ import { getLang, onLangChange } from './lib/i18n.js?v=1';
 const nativeFetch = window.fetch.bind(window);
 const channelName = `ivnc-auth:${location.host}`;
 let csrf = null, state = null, checking = null, redirecting = false;
+let autoLoginFailed = false;
 const loginPage = location.pathname === '/auth/login' || location.pathname === '/login.html';
 let channel = null;
 try { if (typeof BroadcastChannel === 'function') channel = new BroadcastChannel(channelName); }
@@ -47,16 +48,41 @@ export function onAuthChange(listener) {
     return () => listeners.delete(listener);
 }
 
-export function checkAuthentication({ redirect = true } = {}) {
+async function readSession(signal) {
+    const response = await nativeFetch('/auth/session', { cache: 'no-store', credentials: 'same-origin', signal });
+    if (!response.ok || !(response.headers.get('content-type') || '').includes('application/json')) return null;
+    const value = await response.json();
+    return typeof value.enabled === 'boolean' ? value : null;
+}
+
+async function requestIpLogin(manual, signal) {
+    const response = await nativeFetch('/auth/auto-login', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store', signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manual }),
+    });
+    if (!response.ok) throw Error('auto_login_unavailable');
+}
+
+export function checkAuthentication({ redirect = true, allowAutoLogin = true } = {}) {
     if (checking) return checking;
     checking = (async () => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 4000);
         try {
-            const response = await nativeFetch('/auth/session', { cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
-            if (!response.ok || !(response.headers.get('content-type') || '').includes('application/json')) return null;
-            const next = await response.json();
-            if (typeof next.enabled !== 'boolean') return null;
+            let next = await readSession(controller.signal);
+            if (!next) return null;
+            if (allowAutoLogin && !autoLoginFailed && next.enabled && !(next.authenticated && next.kind === 'session')
+                && next.auto_login_available && !next.auto_login_suppressed) {
+                try {
+                    await requestIpLogin(false, controller.signal);
+                    next = await readSession(controller.signal);
+                    if (!next) return null;
+                    if (!(next.authenticated && next.kind === 'session')) { autoLoginFailed = true; next.auto_login_error = 'cookies'; }
+                } catch (error) {
+                    if (error.name === 'AbortError') throw error;
+                    autoLoginFailed = true;
+                }
+            }
             state = next; csrf = next.csrf || null;
             listeners.forEach(listener => listener(next));
             const authenticated = !next.enabled || (next.authenticated && next.kind === 'session');
@@ -66,6 +92,15 @@ export function checkAuthentication({ redirect = true } = {}) {
         finally { clearTimeout(timeout); checking = null; }
     })();
     return checking;
+}
+
+export async function loginByIp() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+        await requestIpLogin(true, controller.signal);
+        return await checkAuthentication({ redirect: false, allowAutoLogin: false });
+    } finally { clearTimeout(timeout); }
 }
 
 const ready = checkAuthentication({ redirect: !loginPage });

@@ -17,6 +17,7 @@
                 <button class="nav-item active" data-section="overview" id="nav-overview" type="button">概览</button>
                 <button class="nav-item" data-section="apps" id="nav-apps" type="button">应用</button>
                 <button class="nav-item" data-section="settings" id="nav-settings" type="button">连接质量</button>
+                <button class="nav-item" data-section="advanced" id="nav-advanced" type="button">高级</button>
             </nav>
             <div id="settings-actions"></div>
         </header>
@@ -29,6 +30,7 @@
                 </div>
             </div>
 
+            <section class="section" id="section-advanced"><div id="advanced-settings"></div></section>
             <section class="section active" id="section-overview">
                 <div class="summary-grid" id="overview-grid"></div>
                 <div class="overview-meta">
@@ -130,10 +132,10 @@
                             </div>
                             <div class="form-line param-check">
                                 <label class="form-label info-label">
-                                    <span id="label-binary-clipboard">Binary clipboard</span>
+                                    <span id="label-binary-clipboard">Sync images and rich text</span>
                                     <span class="info-tip">
                                         <span class="info-icon" tabindex="0" role="img" aria-label="说明">?</span>
-                                        <span class="default-text" id="help-binary-clipboard">允许剪贴板在纯文本之外同步 HTML 富文本和 PNG 图片。</span>
+                                        <span class="default-text" id="help-binary-clipboard">在纯文本之外同步图片和 HTML。HTTPS 支持直接复制图片，HTTP 可在图片预览中手动复制。</span>
                                     </span>
                                 </label>
                                 <label class="checkbox-row settings-checkbox"><input id="set-binary-clipboard" type="checkbox" data-dirty-group="settings"><span id="toggle-binary-clipboard">启用</span></label>

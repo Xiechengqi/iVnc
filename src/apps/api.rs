@@ -36,6 +36,7 @@ pub struct AppsState {
     wake: tokio::sync::Notify,
     /// Set when the application list may have changed; the monitor reads it again.
     apps_changed: std::sync::atomic::AtomicBool,
+    worker_clipboards: tokio::sync::Mutex<HashMap<String, (String, bool)>>,
 }
 
 impl AppsState {
@@ -63,6 +64,7 @@ impl AppsState {
             started: Mutex::new(HashSet::new()),
             wake: tokio::sync::Notify::new(),
             apps_changed: std::sync::atomic::AtomicBool::new(true),
+            worker_clipboards: Default::default(),
         })
     }
 
@@ -85,6 +87,7 @@ impl AppsState {
                 listed = tokio::task::spawn_blocking(move || state.publish_stream_apps(previous))
                     .await
                     .unwrap_or_default();
+                apps.sync_worker_clipboards().await;
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
                     _ = apps.wake.notified() => {}
@@ -104,6 +107,74 @@ impl AppsState {
 
     pub fn refresh_window_apps(&self) {
         self.wake.notify_one();
+    }
+
+    /// Owner policy reaches existing workers as well as new launches. Cache
+    /// only acknowledged generations; failed/starting workers are retried by
+    /// the monitor. Never change settings on a remote source instance.
+    pub async fn sync_worker_clipboards(&self) -> usize {
+        use futures::{stream, StreamExt};
+        let mut synced = self.worker_clipboards.lock().await;
+        let Some(shared) = self.shared.get().and_then(std::sync::Weak::upgrade) else {
+            return 0;
+        };
+        let enabled = shared.runtime_settings.binary_clipboard_enabled();
+        let ids = self.process.worker_ids();
+        synced.retain(|id, _| ids.contains(id));
+        let client = match reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return ids.len(),
+        };
+        let mut starting = 0;
+        let pending: Vec<_> = ids
+            .into_iter()
+            .filter_map(|id| {
+                let endpoint = match crate::remote::worker::endpoint(&id) {
+                    Ok(endpoint) => endpoint,
+                    Err(_) => {
+                        starting += 1;
+                        return None;
+                    }
+                };
+                if synced.get(&id) == Some(&(endpoint.generation.clone(), enabled)) {
+                    return None;
+                }
+                Some((id, endpoint))
+            })
+            .collect();
+        let results = stream::iter(pending.into_iter().map(|(id, endpoint)| {
+            let client = client.clone();
+            async move {
+                let ok = client
+                    .put(format!(
+                        "http://127.0.0.1:{}/api/console/clipboard-policy",
+                        endpoint.port
+                    ))
+                    .basic_auth("worker", Some(&endpoint.password))
+                    .json(&json!({"enabled":enabled}))
+                    .send()
+                    .await
+                    .is_ok_and(|r| r.status().is_success());
+                (id, endpoint.generation, ok)
+            }
+        }))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        let mut failures = starting;
+        for (id, generation, ok) in results {
+            if ok {
+                synced.insert(id, (generation, enabled));
+            } else {
+                failures += 1;
+            }
+        }
+        failures
     }
 
     /// Publishes the applications shown as taskbar tabs: local applications in
@@ -523,6 +594,7 @@ impl AppsState {
             started: Mutex::new(HashSet::new()),
             wake: tokio::sync::Notify::new(),
             apps_changed: std::sync::atomic::AtomicBool::new(true),
+            worker_clipboards: Default::default(),
         })
     }
 }

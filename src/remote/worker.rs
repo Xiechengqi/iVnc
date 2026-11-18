@@ -20,6 +20,8 @@ use std::{
 };
 
 static PARENT_CONFIG: OnceLock<Config> = OnceLock::new();
+static PARENT_RUNTIME: OnceLock<std::sync::Arc<crate::runtime_settings::RuntimeSettings>> =
+    OnceLock::new();
 static WORKER: OnceLock<Launch> = OnceLock::new();
 static READY_FD: OnceLock<RawFd> = OnceLock::new();
 static WINDOW_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -58,9 +60,13 @@ pub fn failure(id: &str) -> Option<Failure> {
     serde_json::from_slice(&fs::read(runtime_dir(id).join(FAILURE_FILE)).ok()?).ok()
 }
 
-pub fn set_parent_config(config: Config) {
+pub fn set_parent_config(
+    config: Config,
+    runtime: std::sync::Arc<crate::runtime_settings::RuntimeSettings>,
+) {
     crate::shell_profile::configure(&config);
     let _ = PARENT_CONFIG.set(config);
+    let _ = PARENT_RUNTIME.set(runtime);
 }
 pub fn is_worker() -> bool {
     WORKER.get().is_some()
@@ -139,6 +145,9 @@ pub fn command(app: &ManagedApp) -> Result<Command, crate::apps::error::ApiError
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(root.join(FAILURE_FILE));
     let mut config = PARENT_CONFIG.get().cloned().unwrap_or_default();
+    if let Some(runtime) = PARENT_RUNTIME.get() {
+        config.input.enable_binary_clipboard = runtime.binary_clipboard_enabled();
+    }
     // Preserve explicit display locks across the worker's clean environment.
     let ui = crate::config::ui::UiConfig::from_env(&config);
     if let Ok((size, true)) = crate::display::initial_size(&config, &ui) {

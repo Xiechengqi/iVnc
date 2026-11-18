@@ -17,6 +17,15 @@
         label { display: block; font-size: 14px; margin-bottom: 6px; }
         input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #cbd5df; border-radius: 6px; margin-bottom: 18px; font: inherit; }
         input:focus-visible { outline: 2px solid #0984e3; outline-offset: 2px; }
+        [hidden] { display: none !important; }
+        .password-field { position: relative; margin-bottom: 18px; }
+        .password-field input { margin-bottom: 0; padding-right: 48px; }
+        #password-toggle { position: absolute; right: 1px; top: 1px; width: 44px; height: calc(100% - 2px); min-height: 42px; border: 0; border-radius: 0 5px 5px 0; background: transparent; color: #52657b; display: grid; place-items: center; }
+        #password-toggle:hover { background: #eef6ff; color: #075fa8; }
+        #password-toggle:focus-visible { outline: 2px solid #0984e3; outline-offset: -3px; }
+        #password-toggle svg { width: 20px; height: 20px; pointer-events: none; }
+        #ip-login { width: 100%; min-height: 44px; border: 1px solid #8fc2ee; border-radius: 6px; background: #eef6ff; color: #075fa8; margin-bottom: 18px; }
+        #login-check { color: #52657b; font-size: 14px; }
         button { cursor: pointer; font: inherit; }
         #language { background: none; border: 0; padding: 6px 0 6px 12px; color: #52657b; font-size: 13px; }
         #submit { width: 100%; min-height: 44px; background: #0984e3; color: #fff; border: 0; border-radius: 6px; }
@@ -31,11 +40,18 @@
     <main>
         <header><h1>iVnc</h1><button id="language" type="button">English</button></header>
         <h2 id="heading">登录远程桌面</h2>
-        <form id="login-form" method="post">
+        <p id="login-check" role="status">正在检查登录状态…</p>
+        <button id="ip-login" type="button" hidden>免密进入</button>
+        <form id="login-form" method="post" hidden>
             <label for="username" id="username-label">用户名</label>
             <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="256">
             <label for="password" id="password-label">密码</label>
-            <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="4096">
+            <div class="password-field">
+                <input id="password" name="password" type="password" autocomplete="current-password" autocapitalize="none" spellcheck="false" required maxlength="4096">
+                <button id="password-toggle" type="button" aria-label="显示密码" title="显示密码" aria-controls="password" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path id="password-eye-slash" d="m3 3 18 18" hidden/></svg>
+                </button>
+            </div>
             <button id="submit" type="submit">登录</button>
             <p id="error" role="alert" aria-live="polite"></p>
         </form>

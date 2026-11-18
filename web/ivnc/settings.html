@@ -7,14 +7,19 @@
     <style>
         * { box-sizing: border-box; }
         body { margin: 0; background: #f4f7f9; color: #2d3436; font: 14px/1.5 system-ui, sans-serif; }
-        .settings-topbar { display: flex; align-items: center; justify-content: flex-end; padding: 10px 16px; background: #fff; border-bottom: 1px solid #dfe6e9; }
+        [hidden] { display: none !important; }
+        .settings-topbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #fff; border-bottom: 1px solid #dfe6e9; }
+        .settings-tabs { display: flex; gap: 6px; flex: 1; min-width: 0; overflow-x: auto; }
+        .settings-tab { flex: 0 0 auto; min-height: 38px; border: 0; border-radius: 6px; background: transparent; color: #536675; padding: 0 12px; font: inherit; cursor: pointer; }
+        .settings-tab.active { background: #e2f0ff; color: #075fa8; box-shadow: inset 0 -3px 0 #0984e3; }
+        .settings-tab:focus-visible { outline: 2px solid #0984e3; outline-offset: -2px; }
         main { padding: 24px; } h1 { font-size: 20px; margin: 0 0 8px; } p { color: #636e72; }
         @media (max-width: 760px) { .settings-topbar { padding: 8px; } main { padding: 16px; } }
     </style>
 </head>
 <body>
-    <header class="settings-topbar"><div id="settings-actions"></div></header>
-    <main><h1 id="settings-title">设置</h1><p id="settings-hint">账户与服务操作</p></main>
+    <header class="settings-topbar"><nav class="settings-tabs" aria-label="Settings sections"><button id="nav-general" class="settings-tab active" type="button" data-section="general" aria-current="page">常规</button><button id="nav-advanced" class="settings-tab" type="button" data-section="advanced">高级</button></nav><div id="settings-actions"></div></header>
+    <main><section id="section-general"><h1 id="settings-title">设置</h1><p id="settings-hint">账户与服务操作</p></section><section id="section-advanced" hidden><div id="advanced-settings"></div></section></main>
     <script type="module" src="./settings.js"></script>
 </body>
 </html>

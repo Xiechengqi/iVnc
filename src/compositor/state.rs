@@ -76,6 +76,7 @@ pub struct Compositor {
     /// Requests are deferred until Smithay has installed the client's source.
     pub clipboard_pending_mimes: Vec<String>,
     pub clipboard_readback: Option<super::clipboard::Readback>,
+    pub clipboard_notice: Option<(u64, &'static str, bool)>,
     pub binary_clipboard_enabled: bool,
 
     /// Hidden windows remain addressable by toolbar and activation requests.
@@ -172,6 +173,7 @@ impl Compositor {
             ime_paste_pending: false,
             deferred_input: Default::default(),
             clipboard_readback: None,
+            clipboard_notice: None,
             clipboard_pending_mimes: Vec::new(),
             binary_clipboard_enabled: false,
             minimized_windows: HashMap::new(),

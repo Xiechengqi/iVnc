@@ -1,6 +1,7 @@
 //! Browser sessions are independent of HTTP Basic's browser credential cache.
 //! Only token digests are retained, in memory; a restart ends every session.
 
+use super::access::{normalize_ip, AccessConfig, AccessPolicy, TrustedProxies};
 use super::{http_server::HttpPeerAddr, SharedState};
 use crate::config::HttpConfig;
 use axum::{
@@ -19,6 +20,7 @@ use std::{
     collections::HashMap,
     future::Future,
     net::IpAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -45,6 +47,13 @@ struct Session {
     created: Instant,
     used: Instant,
     csrf: String,
+    source: LoginSource,
+}
+
+#[derive(Clone, Copy)]
+enum LoginSource {
+    Password,
+    IpWhitelist(IpAddr),
 }
 struct Attempts {
     since: Instant,
@@ -55,6 +64,7 @@ struct Inner {
     revision: u64,
     sessions: HashMap<TokenDigest, Session>,
     attempts: HashMap<IpAddr, Attempts>,
+    access: AccessPolicy,
 }
 
 pub struct AuthStore {
@@ -65,6 +75,9 @@ pub struct AuthStore {
     maximum: Duration,
     inner: Mutex<Inner>,
     changes: watch::Sender<u64>,
+    trusted_proxies: TrustedProxies,
+    access_path: PathBuf,
+    access_writer: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -87,6 +100,11 @@ pub struct TransportSecurity(pub bool);
 
 impl AuthStore {
     pub fn new(config: &HttpConfig) -> Self {
+        Self::with_access_path(config, crate::paths::ivnc_home().join("access.json"))
+    }
+
+    fn with_access_path(config: &HttpConfig, access_path: PathBuf) -> Self {
+        let access = AccessPolicy::load(&access_path);
         Self {
             enabled: config.basic_auth_enabled,
             username: config.basic_auth_user.clone(),
@@ -98,9 +116,17 @@ impl AuthStore {
                 revision: 0,
                 sessions: HashMap::new(),
                 attempts: HashMap::new(),
+                access,
             }),
             changes: watch::channel(0).0,
+            trusted_proxies: TrustedProxies::new(&config.trusted_proxy_cidrs),
+            access_path,
+            access_writer: Mutex::new(()),
         }
+    }
+
+    fn client_ip(&self, peer: HttpPeerAddr, headers: &HeaderMap) -> Option<IpAddr> {
+        self.trusted_proxies.client_ip(peer.0.ip(), headers)
     }
 
     fn disabled(self: &Arc<Self>) -> AuthContext {
@@ -146,7 +172,11 @@ impl AuthStore {
         found
     }
 
-    fn authenticate(self: &Arc<Self>, headers: &HeaderMap) -> Option<AuthContext> {
+    fn authenticate(
+        self: &Arc<Self>,
+        headers: &HeaderMap,
+        client_ip: Option<IpAddr>,
+    ) -> Option<AuthContext> {
         if !self.enabled {
             return Some(self.disabled());
         }
@@ -162,6 +192,11 @@ impl AuthStore {
             if !self.session_valid(session) {
                 inner.sessions.remove(&key);
                 return None;
+            }
+            if let LoginSource::IpWhitelist(bound_ip) = session.source {
+                if client_ip.map(normalize_ip) != Some(bound_ip) {
+                    return None;
+                }
             }
             session.used = Instant::now();
             return Some(AuthContext {
@@ -214,6 +249,14 @@ impl AuthStore {
             return Err(StatusCode::UNAUTHORIZED);
         }
         inner.attempts.remove(&ip);
+        Ok(self.create_session(&mut inner, LoginSource::Password))
+    }
+
+    fn create_session(
+        self: &Arc<Self>,
+        inner: &mut Inner,
+        source: LoginSource,
+    ) -> (String, AuthContext) {
         inner.sessions.retain(|_, s| self.session_valid(s));
         if inner.sessions.len() >= SESSION_LIMIT {
             if let Some(oldest) = inner
@@ -234,15 +277,54 @@ impl AuthStore {
                 created: Instant::now(),
                 used: Instant::now(),
                 csrf: crate::remote::token(),
+                source,
             },
         );
-        Ok((
+        (
             token,
             AuthContext {
                 store: self.clone(),
                 identity: Identity::Session(key, inner.revision),
             },
+        )
+    }
+
+    fn ip_login(self: &Arc<Self>, ip: Option<IpAddr>) -> Result<(String, AuthContext), StatusCode> {
+        let mut inner = self.inner.lock().unwrap();
+        if !self.enabled || !inner.access.matches(ip) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        Ok(self.create_session(
+            &mut inner,
+            LoginSource::IpWhitelist(normalize_ip(ip.unwrap())),
         ))
+    }
+
+    fn access_status(&self, peer: HttpPeerAddr, headers: &HeaderMap) -> serde_json::Value {
+        let client_ip = self.client_ip(peer, headers);
+        let inner = self.inner.lock().unwrap();
+        json!({
+            "enabled": inner.access.config.enabled,
+            "ip_allowlist": inner.access.config.ip_allowlist,
+            "authentication_enabled": self.enabled,
+            "client_ip": client_ip,
+            "peer_ip": normalize_ip(peer.0.ip()),
+            "matches": inner.access.matches(client_ip),
+        })
+    }
+
+    fn apply_access(&self, policy: AccessPolicy) -> Result<(), String> {
+        // Serialize the durable commit and memory swap; failed saves leave both unchanged.
+        let _writer = self.access_writer.lock().unwrap();
+        policy.save(&self.access_path)?;
+        let mut inner = self.inner.lock().unwrap();
+        inner.sessions.retain(|_, session| match session.source {
+            LoginSource::Password => true,
+            LoginSource::IpWhitelist(ip) => policy.matches(Some(ip)),
+        });
+        inner.access = policy;
+        self.changes.send_modify(|v| *v = v.wrapping_add(1));
+        Ok(())
     }
 
     pub fn change_password(&self, password: &str) {
@@ -302,6 +384,22 @@ impl AuthStore {
 }
 
 impl AuthContext {
+    fn method(&self) -> Option<&'static str> {
+        let Identity::Session(key, _) = self.identity else {
+            return None;
+        };
+        self.store
+            .inner
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&key)
+            .map(|session| match session.source {
+                LoginSource::Password => "password",
+                LoginSource::IpWhitelist(_) => "ip_whitelist",
+            })
+    }
+
     pub fn csrf(&self) -> Option<String> {
         let Identity::Session(key, _) = self.identity else {
             return None;
@@ -406,6 +504,7 @@ fn public_path(path: &str) -> bool {
             | "/manifest.json"
             | "/sw.js"
             | "/auth/login"
+            | "/auth/auto-login"
             | "/auth/session"
             | "/auth/logout"
             | "/login.html"
@@ -465,7 +564,11 @@ pub async fn middleware(
         .copied()
         .unwrap_or_default()
         .0;
-    if let Some(context) = state.auth.authenticate(req.headers()) {
+    let client_ip = req
+        .extensions()
+        .get::<HttpPeerAddr>()
+        .and_then(|peer| state.auth.client_ip(*peer, req.headers()));
+    if let Some(context) = state.auth.authenticate(req.headers(), client_ip) {
         let websocket = req
             .headers()
             .get(header::UPGRADE)
@@ -556,10 +659,11 @@ pub(crate) async fn login(
     if body.username.len() > 256 || body.password.len() > 4096 {
         return failure(StatusCode::BAD_REQUEST, "credentials_too_long");
     }
-    match state
-        .auth
-        .login(peer.0.ip(), &body.username, &body.password)
-    {
+    match state.auth.login(
+        state.auth.client_ip(peer, &headers).unwrap_or(peer.0.ip()),
+        &body.username,
+        &body.password,
+    ) {
         Ok((token, context)) => {
             // Replace a previous browser session without allowing session fixation.
             state.auth.logout(&headers);
@@ -591,22 +695,113 @@ pub(crate) async fn login(
     }
 }
 
-pub async fn status(State(state): State<Arc<SharedState>>, headers: HeaderMap) -> Response {
-    let context = state.auth.authenticate(&headers);
+pub(crate) async fn status(
+    State(state): State<Arc<SharedState>>,
+    Extension(peer): Extension<HttpPeerAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let client_ip = state.auth.client_ip(peer, &headers);
+    let context = state.auth.authenticate(&headers, client_ip);
+    let auto_login_available =
+        state.auth.enabled && state.auth.inner.lock().unwrap().access.matches(client_ip);
     no_store(Json(json!({"enabled":state.config.http.basic_auth_enabled,"authenticated":context.is_some(),
         "kind":context.as_ref().map(|c| match c.identity { Identity::Disabled=>"disabled", Identity::Basic(_)=>"basic", Identity::Session(..)=>"session" }),
+        "method":context.as_ref().and_then(AuthContext::method),
+        "auto_login_available":auto_login_available,
+        "auto_login_suppressed":state.auth.cookie_token(&headers) == Some("signed-out"),
         "csrf":context.as_ref().and_then(AuthContext::csrf)})).into_response())
 }
 
-pub async fn logout(
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutoLogin {
+    manual: bool,
+}
+
+pub(crate) async fn auto_login(
     State(state): State<Arc<SharedState>>,
     Extension(transport): Extension<TransportSecurity>,
+    Extension(peer): Extension<HttpPeerAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AutoLogin>,
+) -> Response {
+    if !same_origin(&headers, transport.0, true) {
+        return failure(StatusCode::FORBIDDEN, "origin_invalid");
+    }
+    match state.auth.cookie_token(&headers) {
+        Some("") => return failure(StatusCode::BAD_REQUEST, "invalid_session_cookie"),
+        Some("signed-out") if !body.manual => {
+            return failure(StatusCode::CONFLICT, "auto_login_suppressed");
+        }
+        _ => {}
+    }
+    let ip = state.auth.client_ip(peer, &headers);
+    if let Some(context) = state
+        .auth
+        .authenticate(&headers, ip)
+        .filter(AuthContext::is_session)
+    {
+        return no_store(Json(json!({"ok":true,"csrf":context.csrf()})).into_response());
+    }
+    match state.auth.ip_login(ip) {
+        Ok((token, context)) => {
+            state.auth.logout(&headers);
+            let mut response =
+                no_store(Json(json!({"ok":true,"csrf":context.csrf()})).into_response());
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                state.auth.set_cookie(&token, transport.0, &headers),
+            );
+            response
+        }
+        Err(status) => failure(status, "auto_login_unavailable"),
+    }
+}
+
+pub(crate) async fn access_get(
+    State(state): State<Arc<SharedState>>,
+    Extension(peer): Extension<HttpPeerAddr>,
+    headers: HeaderMap,
+) -> Response {
+    no_store(Json(state.auth.access_status(peer, &headers)).into_response())
+}
+
+pub(crate) async fn access_put(
+    State(state): State<Arc<SharedState>>,
+    Extension(peer): Extension<HttpPeerAddr>,
+    headers: HeaderMap,
+    Json(config): Json<AccessConfig>,
+) -> Response {
+    let policy = match AccessPolicy::parse(config) {
+        Ok(policy) => policy,
+        Err(error) => return no_store((StatusCode::BAD_REQUEST, Json(error)).into_response()),
+    };
+    let auth = state.auth.clone();
+    match tokio::task::spawn_blocking(move || auth.apply_access(policy)).await {
+        Ok(Ok(())) => {
+            log::info!("IP login policy updated through web settings");
+            no_store(Json(state.auth.access_status(peer, &headers)).into_response())
+        }
+        result => {
+            log::warn!("Cannot save IP login policy: {result:?}");
+            failure(StatusCode::INTERNAL_SERVER_ERROR, "access_save_failed")
+        }
+    }
+}
+
+pub(crate) async fn logout(
+    State(state): State<Arc<SharedState>>,
+    Extension(transport): Extension<TransportSecurity>,
+    Extension(peer): Extension<HttpPeerAddr>,
     headers: HeaderMap,
 ) -> Response {
     if !same_origin(&headers, transport.0, true) {
         return failure(StatusCode::FORBIDDEN, "origin_invalid");
     }
-    if let Some(context) = state.auth.authenticate(&headers) {
+    if let Some(context) = state
+        .auth
+        .authenticate(&headers, state.auth.client_ip(peer, &headers))
+    {
         if context.is_session() && !csrf_matches(&context, &headers) {
             return failure(StatusCode::FORBIDDEN, "csrf_invalid");
         }
@@ -625,7 +820,15 @@ pub async fn logout(
 mod tests {
     use super::*;
     fn store() -> Arc<AuthStore> {
-        Arc::new(AuthStore::new(&HttpConfig::default()))
+        test_store(&HttpConfig::default())
+    }
+    fn test_store(config: &HttpConfig) -> Arc<AuthStore> {
+        Arc::new(AuthStore::with_access_path(
+            config,
+            std::env::temp_dir()
+                .join(format!("ivnc-auth-unit-{}", uuid::Uuid::new_v4()))
+                .join("access.json"),
+        ))
     }
     fn basic() -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -654,7 +857,7 @@ mod tests {
         let (token, c) = s
             .login("127.0.0.1".parse().unwrap(), "user", "mypasswd")
             .unwrap();
-        assert!(s.authenticate(&cookie(&s, &token)).is_some());
+        assert!(s.authenticate(&cookie(&s, &token), None).is_some());
         assert!(c.csrf().is_some());
         assert!(s
             .inner
@@ -662,12 +865,12 @@ mod tests {
             .unwrap()
             .sessions
             .contains_key(&digest(&token)));
-        assert!(s.authenticate(&HeaderMap::new()).is_none());
+        assert!(s.authenticate(&HeaderMap::new(), None).is_none());
     }
     #[tokio::test]
     async fn logout_and_password_changes_revoke_connections_and_block_basic_fallback() {
         let s = store();
-        let basic_context = s.authenticate(&basic()).unwrap();
+        let basic_context = s.authenticate(&basic(), None).unwrap();
         let (token, c) = s
             .login("127.0.0.1".parse().unwrap(), "user", "mypasswd")
             .unwrap();
@@ -680,13 +883,13 @@ mod tests {
             header::COOKIE,
             format!("{}=signed-out", s.cookie_name).parse().unwrap(),
         );
-        assert!(s.authenticate(&h).is_none());
-        assert!(s.authenticate(&basic()).is_some());
+        assert!(s.authenticate(&h, None).is_none());
+        assert!(s.authenticate(&basic(), None).is_some());
         s.change_password("new-password");
         tokio::time::timeout(Duration::from_millis(100), basic_context.cancelled())
             .await
             .unwrap();
-        assert!(s.authenticate(&basic()).is_none());
+        assert!(s.authenticate(&basic(), None).is_none());
         assert!(s
             .login("127.0.0.1".parse().unwrap(), "user", "new-password")
             .is_ok());
@@ -704,7 +907,7 @@ mod tests {
             .unwrap()
             .used = Instant::now() - s.idle;
         assert!(c.remaining().is_none());
-        assert!(s.authenticate(&cookie(&s, &old)).is_none());
+        assert!(s.authenticate(&cookie(&s, &old), None).is_none());
         let (old, c) = s.login(ip, "user", "mypasswd").unwrap();
         s.inner
             .lock()
@@ -777,9 +980,9 @@ mod tests {
             .login("127.0.0.1".parse().unwrap(), "user", "mypasswd")
             .unwrap();
         let mut h = cookie(&s, &token);
-        assert!(store().authenticate(&h).is_none());
+        assert!(store().authenticate(&h, None).is_none());
         h.append(header::COOKIE, h[header::COOKIE].clone());
-        assert!(s.authenticate(&h).is_none());
+        assert!(s.authenticate(&h, None).is_none());
     }
 
     #[test]
@@ -811,13 +1014,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ip_sessions_are_source_bound_and_policy_changes_revoke_only_removed_sources() {
+        let s = store();
+        let ip = Some("192.168.1.20".parse().unwrap());
+        assert!(s.ip_login(ip).is_err());
+        let enabled = |rule: &str| {
+            AccessPolicy::parse(AccessConfig {
+                enabled: true,
+                ip_allowlist: vec![rule.into()],
+            })
+            .unwrap()
+        };
+        s.apply_access(enabled("192.168.1.0/24")).unwrap();
+        let (token, context) = s.ip_login(ip).unwrap();
+        let headers = cookie(&s, &token);
+        assert_eq!(context.method(), Some("ip_whitelist"));
+        assert!(context.csrf().is_some());
+        assert!(s.authenticate(&headers, ip).is_some());
+        assert!(s
+            .authenticate(&headers, Some("::ffff:192.168.1.20".parse().unwrap()))
+            .is_some());
+        assert!(s
+            .authenticate(&headers, Some("192.168.1.21".parse().unwrap()))
+            .is_none());
+        assert!(s.authenticate(&headers, None).is_none());
+        assert!(s.authenticate(&headers, ip).is_some()); // a foreign source cannot revoke the owner
+        let (password, password_context) = s.login(ip.unwrap(), "user", "mypasswd").unwrap();
+        assert_eq!(password_context.method(), Some("password"));
+        s.apply_access(enabled("192.168.0.0/16")).unwrap();
+        assert!(context.remaining().is_some());
+        s.apply_access(enabled("192.168.2.0/24")).unwrap();
+        tokio::time::timeout(Duration::from_millis(100), context.cancelled())
+            .await
+            .unwrap();
+        assert!(s.authenticate(&headers, ip).is_none());
+        assert!(s.authenticate(&cookie(&s, &password), None).is_some());
+        assert!(password_context.remaining().is_some());
+        assert!(s.authenticate(&basic(), None).is_some());
+        assert!(s.ip_login(ip).is_err());
+        s.apply_access(AccessPolicy::default()).unwrap();
+        std::fs::remove_dir_all(s.access_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn failed_policy_save_does_not_change_authorization_or_create_a_session() {
+        let s = store();
+        std::fs::create_dir_all(&s.access_path).unwrap();
+        let enabled = AccessPolicy::parse(AccessConfig {
+            enabled: true,
+            ip_allowlist: vec!["192.168.1.0/24".into()],
+        })
+        .unwrap();
+        assert!(s.apply_access(enabled).is_err());
+        assert!(!s.inner.lock().unwrap().access.config.enabled);
+        assert!(s.ip_login(Some("192.168.1.20".parse().unwrap())).is_err());
+        assert!(s.inner.lock().unwrap().sessions.is_empty());
+        std::fs::remove_dir_all(s.access_path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
     async fn an_open_connection_expires_without_another_http_request() {
         let config = HttpConfig {
             auth_session_idle_seconds: 1,
             auth_session_max_seconds: 2,
             ..HttpConfig::default()
         };
-        let s = Arc::new(AuthStore::new(&config));
+        let s = test_store(&config);
         let (_, context) = s
             .login("127.0.0.1".parse().unwrap(), "user", "mypasswd")
             .unwrap();

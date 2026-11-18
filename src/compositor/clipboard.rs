@@ -156,10 +156,12 @@ impl Compositor {
             use smithay::wayland::selection::data_device::request_data_device_client_selection;
             use std::os::fd::FromRawFd;
             let mut pipes = Vec::new();
+            let mut request_failed = false;
             for mime in std::mem::take(&mut self.clipboard_pending_mimes) {
                 let mut fds = [-1; 2];
                 if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-                    continue;
+                    request_failed = true;
+                    break;
                 }
                 let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
                 let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
@@ -169,7 +171,8 @@ impl Compositor {
                         libc::fcntl(read.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
                     } < 0
                 {
-                    continue;
+                    request_failed = true;
+                    break;
                 }
                 if request_data_device_client_selection::<Self>(&self.seat, mime.clone(), write)
                     .is_ok()
@@ -184,23 +187,48 @@ impl Compositor {
                         file: Some(std::fs::File::from(read)),
                         bytes: Vec::new(),
                     });
+                } else {
+                    request_failed = true;
+                    break;
                 }
             }
-            if !pipes.is_empty() {
+            if request_failed || pipes.is_empty() {
+                self.clipboard_notice = Some((self.clipboard_revision, "read_failed", true));
+            } else {
                 self.clipboard_readback = Some(Readback {
                     revision: self.clipboard_revision,
                     started: std::time::Instant::now(),
                     pipes,
                     total: 0,
+                    decoding: None,
                 });
                 self.display_handle.flush_clients().ok();
             }
         }
         let mut readback = self.clipboard_readback.take()?;
-        if readback.revision != self.clipboard_revision
-            || readback.started.elapsed() > Duration::from_secs(10)
-        {
+        if readback.revision != self.clipboard_revision {
             return None;
+        }
+        if readback.started.elapsed() > Duration::from_secs(10) {
+            self.clipboard_notice = Some((readback.revision, "timeout", true));
+            return None;
+        }
+        if let Some(receiver) = &readback.decoding {
+            match receiver.try_recv() {
+                Ok(Ok(contents)) => return Some((readback.revision, contents)),
+                Ok(Err(reason)) => {
+                    self.clipboard_notice = Some((readback.revision, reason, true));
+                    return None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.clipboard_notice = Some((readback.revision, "read_failed", true));
+                    return None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.clipboard_readback = Some(readback);
+                    return None;
+                }
+            }
         }
         for pipe in &mut readback.pipes {
             if let Some(file) = &mut pipe.file {
@@ -214,30 +242,45 @@ impl Compositor {
                         Ok(n) => {
                             readback.total += n;
                             if readback.total > crate::clipboard::MAX_CLIPBOARD_BYTES {
+                                self.clipboard_notice = Some((readback.revision, "limit", true));
                                 return None;
                             }
                             pipe.bytes.extend_from_slice(&buffer[..n]);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(_) => return None,
+                        Err(_) => {
+                            self.clipboard_notice = Some((readback.revision, "read_failed", true));
+                            return None;
+                        }
                     }
                 }
             }
         }
         if readback.pipes.iter().all(|p| p.file.is_none()) {
-            let contents = readback
-                .pipes
+            let pipes = std::mem::take(&mut readback.pipes);
+            let has_image = pipes.iter().any(|p| p.mime.starts_with("image/"));
+            let contents = pipes
                 .into_iter()
-                .filter(|p| {
-                    if p.mime == "image/png" {
-                        p.bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-                    } else {
-                        std::str::from_utf8(&p.bytes).is_ok()
-                    }
-                })
                 .map(|p| (p.mime, p.bytes))
-                .collect();
-            Some((readback.revision, contents))
+                .collect::<Vec<_>>();
+            if !has_image {
+                if contents
+                    .iter()
+                    .any(|(_, bytes)| std::str::from_utf8(bytes).is_err())
+                {
+                    self.clipboard_notice = Some((readback.revision, "invalid_content", false));
+                    return None;
+                }
+                return Some((readback.revision, contents));
+            }
+            match crate::clipboard::image::convert(contents) {
+                Ok(receiver) => {
+                    readback.decoding = Some(receiver);
+                    self.clipboard_readback = Some(readback);
+                }
+                Err(reason) => self.clipboard_notice = Some((readback.revision, reason, true)),
+            }
+            None
         } else {
             self.clipboard_readback = Some(readback);
             None
@@ -582,6 +625,7 @@ pub struct Readback {
     started: std::time::Instant,
     pipes: Vec<ReadPipe>,
     total: usize,
+    decoding: Option<crate::clipboard::image::Receiver>,
 }
 struct ReadPipe {
     mime: String,

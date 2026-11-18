@@ -270,7 +270,7 @@ impl RtcSession {
     }
 
     /// Send a text message through the DataChannel.
-    pub fn send_datachannel_text(&mut self, text: &str) -> Result<(), WebRTCError> {
+    pub fn send_datachannel_text(&mut self, text: &str) -> Result<bool, WebRTCError> {
         let dc_id = match self.dc_id {
             Some(id) => id,
             None => {
@@ -281,12 +281,18 @@ impl RtcSession {
         };
 
         if let Some(mut channel) = self.rtc.channel(dc_id) {
-            channel
+            return channel
                 .write(false, text.as_bytes())
-                .map_err(|e| WebRTCError::DataChannelError(format!("DC write failed: {}", e)))?;
+                .map_err(|e| WebRTCError::DataChannelError(format!("DC write failed: {}", e)));
         }
 
-        Ok(())
+        Ok(false)
+    }
+
+    fn datachannel_writable(&mut self) -> bool {
+        self.dc_id
+            .and_then(|id| self.rtc.channel(id))
+            .is_some_and(|mut channel| channel.buffered_amount() < 256 * 1024)
     }
 }
 
@@ -479,6 +485,9 @@ pub async fn drive_session(
     let mut rtp_rx = shared_state.subscribe_rtp_mpsc();
     let mut audio_rx = shared_state.subscribe_audio_mpsc();
     let mut text_rx = shared_state.subscribe_text_mpsc();
+    let mut pending_text: Option<(crate::web::shared::TextDelivery, usize)> = None;
+    let mut pending_reply: Option<String> = None;
+    let mut text_retry_at = Instant::now();
 
     // Audio RTP state
     let mut audio_timestamp: u32 = 0;
@@ -555,6 +564,14 @@ pub async fn drive_session(
                                         fatal = true;
                                         break;
                                     }
+                                    // A TCP read can contain dozens of DTLS records. Drain
+                                    // each one before feeding the next; otherwise str0m's
+                                    // bounded DTLS receive queue overflows on clipboard bursts.
+                                    if let Err(e) = drain_outputs(&mut session, &mut tcp_stream, &ctx).await {
+                                        warn!("Session {} input drain error: {}", session_id, e);
+                                        fatal = true;
+                                        break;
+                                    }
                                 }
                                 Ok(None) => break,
                                 Err(e) => {
@@ -612,12 +629,13 @@ pub async fn drive_session(
                 }
             }
 
-            // Text messages (cursor, clipboard, stats) → DataChannel
-            result = text_rx.recv() => {
+            // Hold each complete batch until every chunk is accepted. The
+            // shared queue's byte permit remains owned throughout delivery.
+            result = text_rx.recv(), if pending_text.is_none() => {
                 match result {
                     Some(msg) => {
                         if session.connected {
-                            let _ = session.send_datachannel_text(&msg);
+                            pending_text = Some((msg, 0));
                         }
                     }
                     None => break,
@@ -625,8 +643,30 @@ pub async fn drive_session(
             }
 
             // Clipboard capabilities/results belong only to the requesting connection.
-            Some(reply) = paste_reply_rx.recv() => {
-                let _ = session.send_datachannel_text(&reply);
+            Some(reply) = paste_reply_rx.recv(), if pending_reply.is_none() => {
+                pending_reply = Some(reply);
+            }
+
+            _ = tokio::time::sleep_until(text_retry_at.into()),
+                if (pending_text.is_some() || pending_reply.is_some()) && session.datachannel_writable() => {
+                let message = pending_reply.as_deref().or_else(|| {
+                    pending_text.as_ref().map(|(batch, index)| batch.messages[*index].as_str())
+                }).unwrap();
+                match session.send_datachannel_text(message) {
+                    Ok(true) => {
+                        if pending_reply.take().is_none() {
+                            let (batch, index) = pending_text.as_mut().unwrap();
+                            *index += 1;
+                            if *index == batch.messages.len() { pending_text = None; }
+                        }
+                        text_retry_at = Instant::now();
+                    }
+                    Ok(false) => text_retry_at = Instant::now() + Duration::from_millis(5),
+                    Err(e) => {
+                        warn!("Session {} control write error: {}", session_id, e);
+                        fatal = true;
+                    }
+                }
             }
 
             // Keepalive ping

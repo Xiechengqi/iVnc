@@ -4,6 +4,7 @@ import { createOrderNotifications } from './app-order.js';
 import { createConsoleDialogs } from './console-dialogs.js';
 import { enhanceSelect } from './select-control.js';
 import { createSettingsActions } from './settings-actions.js';
+import { createAdvancedSettings } from './advanced-settings.js';
 
 const API = '/api/apps';
 let launchContext = null, launchInfo = null;
@@ -18,6 +19,7 @@ let appSignature = '';     // launch settings as last saved; a change on a runni
 let modalSaved = false;    // the open dialog has saved at least once
 const dialogs = createConsoleDialogs();
 createSettingsActions(document.getElementById('settings-actions'), dialogs);
+const advancedSettings = createAdvancedSettings(document.getElementById('advanced-settings'));
 const pendingAppWrites = new Map();
 let appDialog = null, appTypeControl = null, launchModeControl = null, sandboxControl = null;
 let lastDataHash = '';
@@ -53,6 +55,8 @@ const I18N = {
         navOverview: 'Overview',
         navApps: 'Apps',
         navSettings: 'Connection',
+        navAdvanced: 'Advanced',
+        sectionAdvancedDesc: 'Manage passwordless sign-in by client IP.',
         sectionOverviewDesc: 'Current iVnc status and quick checks.',
         sectionAppsDesc: 'Manage desktop, background, CLI and remote applications.',
         sectionSettingsDesc: 'Common runtime controls for stream quality.',
@@ -64,8 +68,8 @@ const I18N = {
         paramVideoBitrateHelp: 'Video encoding bitrate. Higher values improve clarity but use more bandwidth.',
         paramAudioBitrate: 'Audio bitrate',
         paramAudioBitrateHelp: 'Audio encoding bitrate. 128000 is a common default.',
-        paramBinaryClipboard: 'Binary clipboard',
-        paramBinaryClipboardHelp: 'Sync HTML rich text and PNG images together with plain text.',
+        paramBinaryClipboard: 'Sync images and rich text',
+        paramBinaryClipboardHelp: 'Sync images and HTML alongside text. HTTPS supports direct image copying; HTTP offers an image preview for manual copying.',
         paramKeyframe: 'Keyframe',
         paramKeyframeHelp: 'Request the next video keyframe immediately, useful after visual artifacts or reconnects.',
         paramAgentProvider: 'Default provider',
@@ -288,6 +292,8 @@ const I18N = {
         navOverview: '概览',
         navApps: '应用',
         navSettings: '连接质量',
+        navAdvanced: '高级',
+        sectionAdvancedDesc: '按客户端来源 IP 配置免密登录。',
         sectionOverviewDesc: '当前 iVnc 运行状态和快捷入口。',
         sectionAppsDesc: '管理桌面、后台、CLI 和远程应用。',
         sectionSettingsDesc: '调整常用的实时串流质量参数。',
@@ -299,8 +305,8 @@ const I18N = {
         paramVideoBitrateHelp: '视频码率，越高越清晰但占用更多带宽。',
         paramAudioBitrate: '音频码率',
         paramAudioBitrateHelp: '音频编码码率，常用值为 128000。',
-        paramBinaryClipboard: '二进制剪贴板',
-        paramBinaryClipboardHelp: '允许剪贴板在纯文本之外同步 HTML 富文本和 PNG 图片。',
+        paramBinaryClipboard: '同步图片和富文本',
+        paramBinaryClipboardHelp: '在纯文本之外同步图片和 HTML。HTTPS 支持直接复制图片，HTTP 可在图片预览中手动复制。',
         paramKeyframe: '关键帧',
         paramKeyframeHelp: '立即请求下一帧关键帧，画面花屏或恢复连接后可手动触发。',
         paramAgentProvider: '默认 Provider',
@@ -582,6 +588,7 @@ function applyTranslations() {
     setText('nav-overview', 'navOverview');
     setText('nav-apps', 'navApps');
     setText('nav-settings', 'navSettings');
+    setText('nav-advanced', 'navAdvanced');
     setText('overview-meta-auto', 'metaAutoRefresh');
 
     for (const [id,key] of [['display-title','displayTitle'],['display-hint','displayHint'],['display-scope-label','displayScope'],['display-width-label','displayWidth'],['display-height-label','displayHeight'],['display-apply','displayApply']]) setText(id,key);
@@ -769,12 +776,14 @@ function updateSectionHeader() {
     const titleMap = {
         overview: 'navOverview',
         apps: 'navApps',
-        settings: 'navSettings'
+        settings: 'navSettings',
+        advanced: 'navAdvanced'
     };
     const descMap = {
         overview: 'sectionOverviewDesc',
         apps: 'sectionAppsDesc',
-        settings: 'sectionSettingsDesc'
+        settings: 'sectionSettingsDesc',
+        advanced: 'sectionAdvancedDesc'
     };
     setTextById('section-title', t(titleMap[activeSection]));
     setTextById('section-description', t(descMap[activeSection]));
@@ -800,6 +809,7 @@ async function loadSection(section = activeSection) {
     if (section === 'overview') await loadOverview();
     if (section === 'apps') await load();
     if (section === 'settings') await loadSettings();
+    if (section === 'advanced') await advancedSettings.load();
 }
 
 // Dot colour for each remote_state of a remote app.
@@ -1207,8 +1217,8 @@ async function saveSettings() {
         audio_bitrate: numberValue('set-audio-bitrate'),
         binary_clipboard_enabled: document.getElementById('set-binary-clipboard').checked
     };
-    await putJson(`${CONSOLE_API}/settings`, body);
-    toast(t('settingsSaved'), 'ok');
+    const result = await putJson(`${CONSOLE_API}/settings`, body);
+    toast(result?.pending_workers ? (getLang() === 'en' ? 'Saved; retrying settings for unavailable apps' : '已保存，暂不可用应用的设置正在重试') : t('settingsSaved'), 'ok');
     snapshotDirtyGroup('settings');
     markDirty('settings', false);
     loadOverview();

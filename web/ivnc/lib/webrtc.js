@@ -541,7 +541,7 @@ export class WebRTCDemo {
 			}
 		}
 
-		if (msg.type === 'clipboard_caps' || msg.type === 'paste_ack') {
+		if (msg.type === 'clipboard_caps' || msg.type === 'paste_ack' || msg.type === 'clipboard_status') {
 			this.onclipboardmessage?.(msg.type, msg.data);
 		} else if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);

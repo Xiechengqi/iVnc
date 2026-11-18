@@ -1,0 +1,42 @@
+<!doctype html><meta charset="utf-8"><style>
+body{margin:0;background:#252a34;color:white}#remote{position:absolute;top:120px;left:20px;width:400px;height:240px}
+#local{position:absolute;top:410px;left:20px;width:400px;height:120px}</style>
+<div class="video-container"><textarea id="remote" readonly></textarea></div><textarea id="local" class="allow-native-input"></textarea>
+<script type="module">
+import {createClipboard,pasteShortcut} from '/clipboard.js';
+import {createClipboardUI} from '/clipboard-ui.js';
+import {installOverlayGuard} from '/overlay-manager.js';
+import {setLang} from '/lib/i18n.js?v=1';
+setLang('en');window.__IVNC_EMBED__=window.parent!==window;installOverlayGuard(()=>{});
+const remote=document.getElementById('remote');
+window.sent=[];window.errors=[];window.remoteClicks=0;window.active=true;let revision=0;
+window.ui=createClipboardUI({getController:()=>window.controller,restoreFocus:()=>remote.focus()});
+window.controller=createClipboard({webrtc:{_send_channel:{readyState:'open',bufferedAmount:0},sendDataChannelMessage:m=>{
+sent.push(m);if(m.startsWith('paste,')){const p=JSON.parse(m.slice(6));if(p.type==='commit')queueMicrotask(()=>controller.message('paste_ack',{id:p.id,status:'applied'}));}}},
+overlay:remote,imeTarget:()=>null,isActive:()=>window.active,getTarget:()=>1,report:e=>errors.push(e),onCopyState:s=>ui.update(s)});
+controller.message('clipboard_caps',{version:1,enabled:true,max_bytes:16777216,chunk_bytes:12288});
+remote.addEventListener('keydown',e=>{
+    const shortcut=pasteShortcut(e);if(shortcut){controller.beginPaste(e,shortcut);return;}
+    if((e.code==='KeyC'||e.code==='KeyX')&&(e.ctrlKey||e.metaKey)&&!e.altKey&&!e.shiftKey){
+        controller.noteCopy();controller.sendInput('kd,'+(e.code==='KeyC'?99:120));e.preventDefault();
+    }
+});
+remote.addEventListener('pointerdown',()=>window.remoteClicks++);
+window.addEventListener('blur',()=>controller.suspend());
+window.receive=text=>controller.receive(text,{revision:++revision,origin:'remote'});
+window.receiveImage=async(withText=false)=>{
+    const canvas=document.createElement('canvas');canvas.width=3;canvas.height=2;
+    const ctx=canvas.getContext('2d');ctx.fillStyle='#3355aa';ctx.fillRect(0,0,3,2);
+    const blob=await new Promise(r=>canvas.toBlob(r));
+    const records=[{mime:'image/png',data:new Uint8Array(await blob.arrayBuffer())}];
+    if(withText)records.push({mime:'text/plain',data:new TextEncoder().encode('IMAGE_LABEL')});
+    controller.receiveFormats(records,{revision:++revision,origin:'remote'});
+};
+document.getElementById('local').addEventListener('paste',async event=>{
+    const file=[...event.clipboardData.items].find(i=>i.type==='image/png')?.getAsFile();
+    if(!file)return;
+    const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas');canvas.width=bitmap.width;canvas.height=bitmap.height;
+    const ctx=canvas.getContext('2d');ctx.drawImage(bitmap,0,0);window.pastedImage={width:bitmap.width,height:bitmap.height,pixel:[...ctx.getImageData(0,0,1,1).data]};bitmap.close();
+});
+window.setLang=setLang;window.ready=true;
+</script>

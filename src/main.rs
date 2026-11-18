@@ -236,7 +236,6 @@ fn main() {
     if worker_config.is_none() {
         apply_cli_overrides(&mut config, &args);
     }
-    remote::worker::set_parent_config(config.clone());
     shell_profile::configure(&config);
 
     if let Err(e) = config.validate() {
@@ -273,10 +272,12 @@ fn main() {
     if let Some(v) = saved_runtime.keyframe_interval {
         runtime_settings.set_keyframe_interval(v);
     }
-    if let Some(v) = saved_runtime.binary_clipboard_enabled {
-        runtime_settings
-            .apply_settings_json(&serde_json::json!({"enable_binary_clipboard":v}).to_string());
+    if worker_config.is_none() {
+        if let Some(v) = saved_runtime.binary_clipboard_enabled {
+            runtime_settings.set_binary_clipboard_enabled(v);
+        }
     }
+    remote::worker::set_parent_config(config.clone(), runtime_settings.clone());
     let shared_state = Arc::new(web::SharedState::new(
         config.clone(),
         ui_config,
@@ -585,10 +586,26 @@ fn run(
         }
         comp.display_handle.flush_clients().ok(); // flush injected input events immediately
 
-        if let Some((revision, mut contents)) = comp.read_clipboard() {
+        let mut clipboard_contents = comp.read_clipboard();
+        if let Some((revision, contents)) = &mut clipboard_contents {
             if !runtime_settings.binary_clipboard_enabled() {
+                // Disabling sync may race a selection already being decoded.
+                // Explain a removed image before sending any remaining text.
+                if contents.iter().any(|(mime, _)| mime.starts_with("image/")) {
+                    comp.clipboard_notice = Some((*revision, "disabled", true));
+                }
                 contents.retain(|(mime, _)| mime == "text/plain");
             }
+        }
+        if let Some((revision, status, image)) = comp.clipboard_notice.take() {
+            if shared_state.config.input.enable_clipboard {
+                shared_state.send_text(format!(
+                    "clipboard_status,{}",
+                    serde_json::json!({"revision":revision,"status":status,"image":image})
+                ));
+            }
+        }
+        if let Some((revision, contents)) = clipboard_contents {
             if shared_state.config.input.enable_clipboard {
                 shared_state.set_clipboard_formats(contents, revision);
             }

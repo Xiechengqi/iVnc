@@ -10,12 +10,13 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function setup(options = {}) {
     const listeners = new Map(), captureListeners = new Map(), sent = [], errors = [], writes = [], states = [], diagnostics = [];
     const overlay = { readOnly: true, value: '', closest: () => null };
-    let active = true;
+    let active = true, focused = true;
+    delete globalThis.ClipboardItem;
     globalThis.isSecureContext = options.secure ?? true;
     globalThis.document = { activeElement: overlay, visibilityState: 'visible',
         documentElement: { hasAttribute: () => false },
         addEventListener: (type, fn, capture) => (capture ? captureListeners : listeners).set(type, fn),
-        removeEventListener: (type, fn, capture) => (capture ? captureListeners : listeners).delete(type), hasFocus: () => active };
+        removeEventListener: (type, fn, capture) => (capture ? captureListeners : listeners).delete(type), hasFocus: () => active && focused };
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
         permissions: options.permissions, clipboard: { writeText: options.write || (async text => writes.push(text)) } } });
     const rtc = { _send_channel: { readyState: 'open', bufferedAmount: 0 }, sendDataChannelMessage: message => { sent.push(message); return true; } };
@@ -34,7 +35,7 @@ function setup(options = {}) {
     const assist = { closest: selector => selector.includes('.clipboard-assist') || selector.includes('.allow-native-input') ? {} : null };
     const focus = target => { document.activeElement = target; listeners.get('focusin')({target}); };
     return { controller, overlay, assist, focus, rtc, sent, errors, writes, event, paste, requests, ack, listeners, captureListeners,
-        states, diagnostics, state: () => states.at(-1), setActive: value => { active = value; } };
+        states, diagnostics, state: () => states.at(-1), setActive: value => { active = value; }, setFocused: value => { focused = value; } };
 }
 
 test('actual keyboard path sends no V before clipboard capture and queues later keyup', async () => {
@@ -687,4 +688,177 @@ test('an unknown clipboard API failure uses a neutral explanation', async () => 
         assert.equal(t.state().reason, 'copy_failed');
         assert.equal(t.state().canRetry, true);
     } finally { t.controller.destroy(); }
+});
+
+
+const imageRecord = () => ({mime:'image/png', data:Uint8Array.from([137,80,78,71,13,10,26,10])});
+function enableImages(t, { reject = false, supported = true } = {}) {
+    globalThis.ClipboardItem = class {
+        static supports(mime) { return mime !== 'image/png' || supported; }
+        constructor(data) { this.data = data; }
+    };
+    navigator.clipboard.write = async items => {
+        if (reject) throw new DOMException('Blocked', 'NotAllowedError');
+        t.writes.push(Object.keys(items[0].data));
+    };
+}
+
+test('PNG-only and mixed copies use one modern clipboard item and preserve MIME types', async () => {
+    const t = setup(); enableImages(t);
+    try {
+        t.controller.receiveFormats([imageRecord()],{revision:1,origin:'remote'}); await tick();
+        assert.deepEqual(t.writes,[['image/png']]); assert.equal(t.state(),null);
+        t.controller.receiveFormats([imageRecord(),{mime:'text/plain',data:new TextEncoder().encode('label')}],{revision:2,origin:'remote'}); await tick();
+        assert.deepEqual(t.writes.at(-1),['image/png','text/plain']);
+    } finally { t.controller.destroy(); }
+});
+
+test('image write failure retains PNG for preview and retry without another remote shortcut', async () => {
+    const t = setup(); enableImages(t,{reject:true});
+    try {
+        t.controller.receiveFormats([imageRecord()],{revision:1,origin:'remote'}); await tick();
+        assert.equal(t.state().hasImage,true); assert.equal(t.state().canManual,false);
+        assert.deepEqual(t.controller.imageSnapshot().data,imageRecord().data);
+        enableImages(t);t.focus(t.assist);const sent=[...t.sent];
+        assert.equal(t.controller.retryCopy(),true);await tick();
+        assert.deepEqual(t.sent,sent);assert.equal(t.state().status,'copied');
+        assert.equal(t.controller.imageSnapshot(),null);
+    } finally { t.controller.destroy(); }
+});
+
+test('HTTP mixed PNG and text retains the image and reports that only text was copied', async () => {
+    const t = setup({secure:false}), legacy = enableLegacy(t);
+    try {
+        t.controller.receiveFormats([imageRecord(),{mime:'text/plain',data:new TextEncoder().encode('label')}],{revision:1,origin:'remote'});await tick();
+        assert.deepEqual(legacy.writes,[{'text/plain':'label'}]);assert.equal(t.state().reason,'copy_text_only');
+        assert.equal(t.state().hasImage,true);assert.equal(t.state().textOnly,true);
+        assert(t.controller.imageSnapshot());
+    } finally { t.controller.destroy(); }
+});
+
+test('unsupported PNG representation offers a preview and preserves partial success', async () => {
+    const t=setup();enableImages(t,{supported:false});
+    try {
+        t.controller.receiveFormats([imageRecord()],{revision:1,origin:'remote'});await tick();
+        assert.equal(t.state().canRetry,false);assert(t.controller.imageSnapshot());assert.deepEqual(t.writes,[]);
+        t.controller.receiveFormats([imageRecord(),{mime:'text/plain',data:new TextEncoder().encode('label')}],{revision:2,origin:'remote'});await tick();
+        assert.equal(t.state().reason,'copy_text_only');assert.equal(t.state().textOnly,true);
+    } finally { t.controller.destroy(); }
+});
+
+test('late image after window blur is retained for explicit copy and never automatically written', async () => {
+    const t=setup();enableImages(t);
+    try {
+        t.controller.noteCopy();t.setFocused(false);t.controller.suspend();
+        t.controller.message('clipboard_status',{revision:4,status:'receiving',image:true});
+        t.controller.receiveFormats([imageRecord()],{revision:4,origin:'remote'});await tick();
+        assert.deepEqual(t.writes,[]);assert.equal(t.state().reason,'copy_paused');
+        assert.equal(t.controller.imageSnapshot(),null);
+        t.setFocused(true);assert(t.controller.imageSnapshot());await tick();assert.deepEqual(t.writes,[]);
+        t.focus(t.assist);assert.equal(t.controller.retryCopy(),true);await tick();assert.deepEqual(t.writes,[['image/png']]);
+    } finally { t.controller.destroy(); }
+});
+
+test('menu image receiving before blur keeps only the in-progress result', async () => {
+    const t=setup();enableImages(t);
+    try {
+        t.controller.message('clipboard_status',{revision:7,status:'receiving',image:true});
+        assert.equal(t.state().status,'receiving');
+        t.setFocused(false);t.controller.suspend();
+        t.controller.receiveFormats([imageRecord()],{revision:7,origin:'remote'});await tick();
+        assert.equal(t.state().reason,'copy_paused');assert.deepEqual(t.writes,[]);
+        t.controller.receiveFormats([imageRecord()],{revision:8,origin:'remote'});await tick();
+        t.setFocused(true);assert.equal(t.controller.imageSnapshot().id,t.state().id);
+        assert.equal(t.state().reason,'copy_paused');
+    } finally { t.controller.destroy(); }
+});
+
+test('view changes, native local copies and external paste invalidate late image intents', async () => {
+    for (const action of ['view','copy','paste','disconnect']) {
+        const t=setup();enableImages(t);
+        try {
+            t.controller.noteCopy();t.setFocused(false);t.controller.suspend();
+            if(action==='view')t.controller.cancel();
+            if(action==='copy')t.listeners.get('copy')({target:{closest:()=>({})}});
+            if(action==='paste'){t.setFocused(true);t.paste('NEW_LOCAL');t.ack();await tick();t.setFocused(false);}
+            if(action==='disconnect')t.controller.disconnected();
+            t.controller.receiveFormats([imageRecord()],{revision:9,origin:'remote'});await tick();
+            assert.equal(t.state(),null,action);assert.deepEqual(t.writes,[],action);
+        } finally { t.controller.destroy(); }
+    }
+});
+
+test('typed image transfer errors are visible without unusable retry controls', () => {
+    for(const status of ['disabled','format','timeout','limit','image_limit','invalid_image','read_failed','busy']) {
+        const t=setup();
+        try {
+            t.controller.message('clipboard_status',{revision:1,status:'receiving',image:true});
+            t.controller.message('clipboard_status',{revision:1,status,image:true});
+            assert.equal(t.state().reason,'copy_'+status);assert.equal(t.state().canRetry,false);assert.equal(t.state().canManual,false);
+        } finally {t.controller.destroy();}
+    }
+});
+
+test('disabled image sync with a text representation never reports a full copy success', async () => {
+    const t=setup();
+    try {
+        t.controller.message('clipboard_status',{revision:2,status:'disabled',image:true});
+        t.controller.receive('label',{revision:2,origin:'remote'});await tick();
+        assert.deepEqual(t.writes,['label']);assert.equal(t.state().reason,'copy_disabled');
+    } finally {t.controller.destroy();}
+});
+
+test('a menu image still receiving replaces old fallback and an immediate paste waits for its PNG', async () => {
+    const t=setup({write:()=>Promise.reject(new DOMException('Blocked','NotAllowedError'))});enableImages(t);
+    try {
+        t.controller.receive('PREVIOUS_COPY',{revision:1,origin:'remote'});await tick();
+        t.controller.message('clipboard_status',{revision:2,status:'receiving',image:true});
+        t.controller.beginPaste(t.event(),'ctrl-v');t.paste('STALE_OS_COPY');await tick();
+        assert.equal(t.requests('start').length,0);
+        t.controller.receiveFormats([imageRecord()],{revision:2,origin:'remote'});await tick();
+        assert.deepEqual(t.requests('start')[0].formats,[{mime:'image/png',size:imageRecord().data.length}]);
+        t.ack();await tick();assert.deepEqual(t.errors,[]);
+    } finally {t.controller.destroy();}
+});
+
+test('a typed image failure rejects waiting and repeated pastes without replaying old OS text', async () => {
+    const t=setup();enableImages(t);
+    try {
+        t.controller.message('clipboard_status',{revision:1,status:'receiving',image:true});
+        t.controller.beginPaste(t.event(),'ctrl-v');t.paste('STALE_OS_COPY');
+        t.controller.message('clipboard_status',{revision:1,status:'invalid_image',image:true});await tick();
+        assert.deepEqual(t.errors,['remote_copy_failed']);assert.equal(t.state().reason,'copy_invalid_image');
+        t.controller.beginPaste(t.event(),'ctrl-v');t.paste('STALE_OS_COPY');await tick();
+        assert.deepEqual(t.errors,['remote_copy_failed','remote_copy_failed']);assert.equal(t.requests('start').length,0);
+    } finally {t.controller.destroy();}
+});
+
+test('a text representation after a disabled image remains usable for remote paste', async () => {
+    const t=setup({write:()=>Promise.reject(new DOMException('Blocked','NotAllowedError'))});
+    try {
+        t.controller.message('clipboard_status',{revision:1,status:'disabled',image:true});
+        t.controller.receive('CURRENT_LABEL',{revision:1,origin:'remote'});await tick();
+        t.controller.beginPaste(t.event(),'ctrl-v');t.paste('STALE_OS_COPY');await tick();
+        assert.equal(Buffer.from(t.requests('chunk')[0].data,'base64').toString(),'CURRENT_LABEL');
+        t.ack();await tick();assert.deepEqual(t.errors,[]);
+    } finally {t.controller.destroy();}
+});
+
+
+test('hidden document can retain its own late image while input activity remains disabled', async () => {
+    const t=setup();enableImages(t);
+    // Production distinguishes the active application from visible input activity.
+    const listeners=new Map(),states=[];
+    const originalAdd=document.addEventListener;
+    document.addEventListener=(type,fn)=>{listeners.set(type,fn);};
+    const c=createClipboard({webrtc:t.rtc,overlay:t.overlay,imeTarget:()=>null,
+        isActive:()=>document.visibilityState!=='hidden',isViewActive:()=>true,getTarget:()=>1,report:()=>{},onCopyState:s=>states.push(s)});
+    try {
+        c.message('clipboard_caps',{version:1,enabled:true,max_bytes:16777216,chunk_bytes:12288,mime_types:['text/plain','image/png']});
+        c.message('clipboard_status',{revision:1,status:'receiving',image:true});
+        document.visibilityState='hidden';t.setFocused(false);listeners.get('visibilitychange')();
+        c.receiveFormats([imageRecord()],{revision:1,origin:'remote'});await tick();
+        assert.equal(states.at(-1).reason,'copy_paused');assert.deepEqual(t.writes,[]);
+        document.visibilityState='visible';t.setFocused(true);assert(c.imageSnapshot());
+    } finally {c.destroy();document.addEventListener=originalAdd;t.controller.destroy();}
 });

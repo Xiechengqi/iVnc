@@ -105,6 +105,7 @@ impl SelectionHandler for Compositor {
         self.clipboard_revision += 1;
         self.clipboard_pending_mimes.clear();
         self.clipboard_readback = None;
+        self.clipboard_notice = None;
         let source = match source {
             Some(s) => s,
             None => {
@@ -122,12 +123,33 @@ impl SelectionHandler for Compositor {
             self.clipboard_pending_mimes.push(mime.to_owned());
         }
         if self.binary_clipboard_enabled {
-            for mime in ["text/html", "image/png"] {
-                if mime_types.iter().any(|t| t == mime) {
-                    self.clipboard_pending_mimes.push(mime.into());
-                }
+            if mime_types.iter().any(|mime| mime == "text/html") {
+                self.clipboard_pending_mimes.push("text/html".into());
+            }
+            if let Some(mime) = ["image/png", "image/jpeg", "image/webp"]
+                .into_iter()
+                .find(|mime| mime_types.iter().any(|t| t == mime))
+            {
+                self.clipboard_pending_mimes.push(mime.into());
             }
         }
+        let image = mime_types.iter().any(|mime| mime.starts_with("image/"));
+        self.clipboard_notice = if image {
+            let status = if !self.binary_clipboard_enabled {
+                "disabled"
+            } else if !self
+                .clipboard_pending_mimes
+                .iter()
+                .any(|mime| mime.starts_with("image/"))
+            {
+                "format"
+            } else {
+                "receiving"
+            };
+            Some((self.clipboard_revision, status, true))
+        } else {
+            None
+        };
     }
 
     fn send_selection(

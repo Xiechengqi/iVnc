@@ -158,7 +158,16 @@ try {
 
     for (const type of ['keyDown','keyUp']) await local.call('Input.dispatchKeyEvent',{
         type,key:'F',code:'KeyF',windowsVirtualKeyCode:70,modifiers:10});
-    await waitFor('fullscreen pointer lock', () => local.evaluate(`!!document.fullscreenElement&&!!document.pointerLockElement`));
+    await waitFor('fullscreen', () => local.evaluate(`!!document.fullscreenElement`));
+    // Swipe navigation now leaves the pointer unlocked by default. Establish
+    // a real lock with a trusted click to exercise clipboard UI unlock behavior.
+    await local.evaluate(`(() => {const button=document.createElement('button');button.id='clipboard-test-lock';
+        button.className='allow-native-input';button.textContent='Lock pointer';button.style.cssText='position:fixed;top:10px;left:10px;z-index:10000';
+        button.onclick=()=>document.getElementById('overlayInput').requestPointerLock();document.fullscreenElement.appendChild(button)})()`);
+    const lockPoint = await local.evaluate(`(() => {const r=document.getElementById('clipboard-test-lock').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    for (const type of ['mousePressed','mouseReleased']) await local.call('Input.dispatchMouseEvent',{type,...lockPoint,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1});
+    await waitFor('trusted fullscreen pointer lock', () => local.evaluate('!!document.pointerLockElement'));
+    await local.evaluate(`document.getElementById('clipboard-test-lock').remove();document.getElementById('overlayInput').focus()`);
     await local.call('Browser.grantPermissions', {origin:base,permissions:[]});
     await remote.evaluate(`(() => {const t=document.getElementById('text');t.value='REMOTE_DENIED_WRITE';t.focus();t.select()})()`);
     await copy('x');

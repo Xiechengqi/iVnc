@@ -37,7 +37,7 @@ const unlocked = frame => wait(frame, () => !window.__ivncConsoleDialogState.loc
 
 const cases = [
     ['desktop header keeps navigation and exposes all actions without requests', async ({ page, frame, calls }) => {
-        assert.equal(await frame.locator('.nav-item').count(), 3);
+        assert.equal(await frame.locator('.nav-item').count(), 4);
         assert(await frame.locator('#settings-password').isVisible());
         assert(await frame.locator('#settings-update').isVisible());
         assert(await frame.locator('#settings-shutdown').isVisible());
@@ -74,6 +74,58 @@ const cases = [
                 assert(b.right<=b.width+1 && b.scroll<=b.width && b.navRight<=b.actionsLeft,JSON.stringify(b));
                 assert(b.buttons.every(n=>n.label && (width>760 || n.height>=44)));
             }
+        }
+    }],
+    ['advanced settings loads on demand, preserves drafts and saves with CSRF', async ({ page, frame, calls }) => {
+        let saved={enabled:false,ip_allowlist:[],client_ip:'192.168.1.20',authentication_enabled:true,matches:false};
+        await page.route('**/api/settings/access',route=>{
+            if(route.request().method()==='PUT') saved={...saved,...route.request().postDataJSON(),matches:true};
+            return route.fulfill({json:saved});
+        });
+        assert(!calls.some(c=>c.url==='/api/settings/access'));
+        await frame.locator('#nav-advanced').click();
+        await frame.locator('#access-rules:enabled').waitFor();
+        assert.equal(await frame.locator('#access-client-ip').textContent(),'192.168.1.20');
+        await frame.locator('#access-enabled').check();
+        await frame.locator('#access-rules').fill('192.168.1.0/24\n2001:db8::/64');
+        await frame.locator('#nav-overview').click();await frame.locator('#nav-advanced').click();
+        await frame.locator('#lang-toggle').click();
+        assert.equal(await frame.locator('#access-rules').inputValue(),'192.168.1.0/24\n2001:db8::/64');
+        assert.equal(await frame.locator('#access-title').textContent(),'Passwordless sign-in by IP');
+        await frame.locator('#access-save').click();
+        await frame.locator('#access-message').filter({hasText:'Saved and applied'}).waitFor();
+        const request=calls.find(c=>c.url==='/api/settings/access'&&c.method==='PUT');
+        assert.equal(request.csrf,'fixture-csrf');
+        assert.deepEqual(request.body,{enabled:true,ip_allowlist:['192.168.1.0/24','2001:db8::/64']});
+        assert(await frame.locator('#access-save').isDisabled());
+    }],
+    ['advanced settings reports validation lines and failed saves preserve the draft', async ({ page, frame }) => {
+        await page.route('**/api/settings/access',route=>route.fulfill(route.request().method()==='GET'
+            ?{json:{enabled:false,ip_allowlist:[],client_ip:'192.168.1.20',authentication_enabled:true,matches:false}}
+            :{status:400,json:{error:'invalid_ip_rule',line:3}}));
+        await frame.locator('#nav-advanced').click();await frame.locator('#access-rules:enabled').waitFor();
+        await frame.locator('#access-enabled').check();
+        await frame.locator('#access-rules').fill('192.168.1.20\n\ninvalid');
+        await frame.locator('#access-save').click();
+        await frame.locator('#access-message').filter({hasText:'第 3 行'}).waitFor();
+        assert.equal(await frame.locator('#access-rules').inputValue(),'192.168.1.20\n\ninvalid');
+        await page.route('**/api/settings/access',route=>route.fulfill({status:500,json:{error:'access_save_failed'}}));
+        await frame.locator('#access-rules').fill('192.168.1.20');await frame.locator('#access-save').click();
+        await frame.locator('#access-message').filter({hasText:'原有白名单继续有效'}).waitFor();
+        assert.equal(await frame.locator('#access-rules').inputValue(),'192.168.1.20');
+        assert(await frame.locator('#access-enabled').isChecked());
+        assert.equal(await frame.locator('#access-save').isDisabled(),false);
+    }],
+    ['minimal settings shares advanced controls without console management requests', async ({ page, url, calls }) => {
+        await page.route('**/api/settings/access',route=>route.fulfill({json:{enabled:false,ip_allowlist:[],client_ip:'::1',authentication_enabled:true,matches:false}}));
+        const first=calls.length;
+        await page.goto(url+'?console=0');const frame=page.frameLocator('#settings-frame');
+        await frame.locator('#nav-advanced').click();await frame.locator('#access-rules:enabled').waitFor();
+        assert.equal(await frame.locator('#access-client-ip').textContent(),'::1');
+        assert(!calls.slice(first).some(c=>c.url.startsWith('/api/console/')||c.url.startsWith('/api/apps')));
+        for(const width of [320,375,768,1280]) {
+            await page.setViewportSize({width,height:720});
+            assert.equal(await frame.locator('#access-rules').evaluate(el=>document.documentElement.scrollWidth>innerWidth),false);
         }
     }],
     ['password validation and failed submission keep native input and CSRF', async ({ page, frame, calls }) => {

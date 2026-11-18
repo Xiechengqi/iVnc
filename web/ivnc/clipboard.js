@@ -29,12 +29,12 @@ function packFormats(records, limit = MAX_BYTES) {
 }
 
 export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarget, report,
-    onCopyState = () => {}, diagnostic = () => {} }) {
+    isViewActive = isActive, onCopyState = () => {}, diagnostic = () => {} }) {
     let disposed = false, epoch = 0, sequence = 0, caps = null;
     let queue = [], capture = null, current = null, pumping = false, queuedBytes = 0;
     let remoteRevision = 0, writeGeneration = 0, copySequence = 0;
     let offer = null, writing = null, scheduledWrite = null, permission = null;
-    let remoteCopy = null;
+    let remoteCopy = null, lateCopy = null, receiving = null, selectionStatus = null;
     const copies = new Set();
     const open = () => webrtc._send_channel?.readyState === 'open';
     const send = message => {
@@ -57,6 +57,9 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
 
     // Permission names and policy introspection are not supported by every browser.
     // Unknown means try the write; it is not evidence of a denied permission.
+    const supportsImage = () => globalThis.isSecureContext !== false && !!navigator.clipboard?.write && !!globalThis.ClipboardItem
+        && (!ClipboardItem.supports || ClipboardItem.supports('image/png'));
+
     function capability(ignorePermission = false) {
         // Apply a recognized policy to both modern and legacy writes, including
         // HTTP pages and browsers without the modern API.
@@ -66,7 +69,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         } catch (_) {}
         if (globalThis.isSecureContext === false) return 'copy_insecure';
         if (typeof navigator.clipboard?.writeText !== 'function' && !(offer?.formats && navigator.clipboard?.write && globalThis.ClipboardItem)) return 'copy_unsupported';
-        if (offer?.text === null && (!navigator.clipboard?.write || !globalThis.ClipboardItem)) return 'copy_unsupported';
+        if (offer?.text === null && !supportsImage()) return 'copy_unsupported';
         if (!ignorePermission && permission?.state === 'denied') return 'copy_permission';
         return null;
     }
@@ -83,7 +86,11 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         if (disposed) return;
         const reason = capability(true);
         onCopyState(offer ? { id: offer.id, status: offer.status, reason: offer.reason,
-            busy: !!writing, canManual: typeof offer.text === 'string', canRetry: !reason || canLegacyCopy(reason) } : null);
+            busy: !!writing, hasImage: offer.records.some(r => r.mime === 'image/png'),
+            canManual: typeof offer.text === 'string', canRetry: offer.records.length > 0 && (!reason || canLegacyCopy(reason)),
+            textOnly: offer.records.some(r => r.mime === 'image/png') && !supportsImage() }
+            : receiving ? { id: `receiving-${receiving.revision}`, status: 'receiving', reason: 'copy_receiving',
+                busy: false, canManual: false, canRetry: false, hasImage: false } : null);
     }
 
     function diagnose(reason, error, manual = false) {
@@ -94,7 +101,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     }
 
     function permissionChanged() {
-        if (offer?.status === 'ready') {
+        if (offer?.status === 'ready' && offer.records.length) {
             const reason = capability();
             offer.reason = (canLegacyCopy(reason) ? null : reason)
                 || (offer.reason === 'copy_permission' ? 'copy_blocked' : offer.reason);
@@ -118,7 +125,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         current?.reject?.(Error('cancelled'));
         for (const copy of copies) { clearTimeout(copy.timer); copy.reject(Error('cancelled')); }
         for (const item of queue) item.sent?.(false);
-        copies.clear(); remoteCopy = null;
+        copies.clear(); remoteCopy = lateCopy = receiving = selectionStatus = null;
         capture = current = null;
         queue = []; queuedBytes = 0; pumping = false;
         if (!preserveOffer) offer = null;
@@ -129,10 +136,18 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         if (notify && open()) { try { send('kr'); } catch (_) {} }
     }
 
-    function suspend() { cancel(true, { preserveOffer: true }); }
+    function suspend() {
+        // Retain only the result of a copy that started in this view. Never
+        // resume automatic writes after blur or admit unrelated background offers.
+        const intent = lateCopy || (([...copies].some(copy => copy.sent) || receiving) ? {
+            until: Date.now() + 30000, minimum: receiving?.revision ?? remoteRevision + 1, revision: receiving?.revision ?? null,
+        } : null);
+        cancel(true, { preserveOffer: true });
+        lateCopy = intent;
+    }
 
     function dismissCopy() {
-        ++writeGeneration; scheduledWrite = null; offer = null;
+        ++writeGeneration; scheduledWrite = null; offer = receiving = lateCopy = null;
         publishCopy();
     }
 
@@ -147,7 +162,10 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
                 diagnose(offer.reason, error, job.manual);
             } else {
                 if (remoteCopy === job.offer.copy) remoteCopy = null;
-                if (job.manual) { offer.text = ''; offer.status = 'copied'; }
+                if (job.partial || offer.imageMissing) {
+                    offer.status = 'ready';
+                    offer.reason = offer.imageMissing || 'copy_text_only';
+                } else if (job.manual) { offer.text = ''; offer.status = 'copied'; }
                 else offer = null;
             }
         }
@@ -185,13 +203,20 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         // enqueue the API call after a user clicks the copy button.
         let result;
         try {
-            if (legacy) legacyCopy(snapshot.text);
+            if (legacy) {
+                legacyCopy(snapshot.text);
+                job.partial = snapshot.records.some(r => r.mime === 'image/png');
+            }
             else if (snapshot.formats && navigator.clipboard?.write && globalThis.ClipboardItem) {
                 const data = Object.fromEntries(snapshot.records.filter(r => !ClipboardItem.supports || ClipboardItem.supports(r.mime))
                     .map(r => [r.mime, new Blob([r.data], { type: r.mime })]));
                 if (!Object.keys(data).length) throw Error('unsupported');
+                job.partial = snapshot.records.some(r => r.mime === 'image/png') && !data['image/png'];
                 result = navigator.clipboard.write([new ClipboardItem(data)]);
-            } else if (typeof snapshot.text === 'string') result = navigator.clipboard.writeText(snapshot.text);
+            } else if (typeof snapshot.text === 'string') {
+                job.partial = snapshot.records.some(r => r.mime === 'image/png');
+                result = navigator.clipboard.writeText(snapshot.text);
+            }
             else throw Error('unsupported');
         }
         catch (error) { finishWrite(job, error); return; }
@@ -219,6 +244,11 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         ++writeGeneration; scheduledWrite = null;
         write(offer, true, legacy);
         return true;
+    }
+
+    function imageSnapshot() {
+        const image = offer?.records.find(r => r.mime === 'image/png');
+        return image && offer.status !== 'copied' && live() ? { id: offer.id, data: image.data } : null;
     }
 
     function copySnapshot() {
@@ -279,13 +309,21 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
                 current = null;
             }
         } catch (error) {
-            if (generation === epoch) { fail(error.message); cancel(); }
+            if (generation === epoch) {
+                fail(error.message);
+                const failedCopy = error.message === 'remote_copy_failed' ? remoteCopy : null;
+                cancel(true, { preserveOffer: !!failedCopy });
+                // A failed new selection must not expose the previous OS
+                // clipboard on the next paste in the same remote context.
+                if (failedCopy) remoteCopy = failedCopy;
+            }
         } finally {
             if (generation === epoch) pumping = false;
         }
     }
 
     function newCapture(shortcut, element) {
+        lateCopy = null;
         if (capture) {
             clearTimeout(capture.timer); restore(capture);
             queue = queue.filter(item => item !== capture);
@@ -369,21 +407,29 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
             remoteRevision = metadata.revision;
         }
         // Browser writes are acknowledgements/state updates, never a remote copy.
-        if (metadata?.origin === 'browser' || caps?.enabled === false || !live() || !focusedRemote()) return;
+        if (metadata?.origin === 'browser' || caps?.enabled === false) return;
+        const foreground = live() && focusedRemote();
+        const late = !foreground && lateCopy && isViewActive() && open()
+            && Date.now() <= lateCopy.until && metadata?.revision >= lateCopy.minimum
+            && (lateCopy.revision === null || metadata.revision === lateCopy.revision);
+        if (!foreground && !late) return;
         const ownCopy = [...copies].find(copy => copy.sent);
         if (ownCopy) {
             clearTimeout(ownCopy.timer); copies.delete(ownCopy); ownCopy.resolve(snapshot);
         }
         if (!ownCopy && (current || capture || queue.length)) return;
-        // Menu copies also remain usable in the current remote input context
-        // when local clipboard writes are unavailable. Blur/local input cancels
-        // this intent independently of the manual-copy offer.
         const copy = ownCopy || { promise: Promise.resolve(snapshot) };
-        if (!ownCopy) remoteCopy = copy;
-        offer = { ...snapshot, id: ++copySequence, copy, status: 'pending', reason: null };
-        scheduledWrite = { offer, generation: ++writeGeneration };
+        if (!ownCopy && foreground && !lateCopy) remoteCopy = copy;
+        const paused = !!late || !!(lateCopy && Date.now() <= lateCopy.until
+            && (lateCopy.revision === null || metadata?.revision === lateCopy.revision));
+        const imageMissing = selectionStatus?.revision === metadata?.revision
+            && ['disabled', 'format'].includes(selectionStatus.status) ? 'copy_' + selectionStatus.status : null;
+        receiving = lateCopy = null;
+        offer = { ...snapshot, id: ++copySequence, copy, status: paused ? 'ready' : 'pending',
+            reason: paused ? 'copy_paused' : null, imageMissing };
+        scheduledWrite = paused ? null : { offer, generation: ++writeGeneration };
         publishCopy();
-        Promise.resolve().then(drainWrite);
+        if (!paused) Promise.resolve().then(drainWrite);
     }
 
     function startCopy(copy) {
@@ -397,11 +443,17 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         }, 30000);
     }
 
-    function noteCopy() {
-        if (!open() || caps?.enabled === false || !isActive() || copies.size >= 32) return;
+    function createCopy() {
         const copy = {};
         copy.promise = new Promise((resolve, reject) => { copy.resolve = resolve; copy.reject = reject; });
         copy.promise.catch(() => {});
+        return copy;
+    }
+
+    function noteCopy() {
+        if (!open() || caps?.enabled === false || !isActive() || copies.size >= 32) return;
+        lateCopy = receiving = selectionStatus = null;
+        const copy = createCopy();
         copies.add(copy); remoteCopy = copy;
         if (pumping || queue.length) queue.push({ kind: 'copy', copy });
         else startCopy(copy);
@@ -409,7 +461,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
 
     // Native local UI copy supersedes any remote-copy shortcut we were tracking.
     const localCopy = event => {
-        if (assistTarget(event.target)) remoteCopy = null;
+        if (assistTarget(event.target)) remoteCopy = lateCopy = null;
         else if (!remoteTarget(event.target)) cancel();
     };
     const focusChanged = event => {
@@ -418,11 +470,46 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     const visibilityChanged = () => { if (document.visibilityState === 'hidden') suspend(); };
 
     function message(type, data) {
-        if (type === 'clipboard_caps') {
+        if (type === 'clipboard_status') {
+            if (!Number.isSafeInteger(data?.revision) || data.revision <= remoteRevision
+                || data.revision < (selectionStatus?.revision || 0) || caps?.enabled === false
+                || !['receiving','disabled','format','timeout','limit','image_limit','invalid_image','invalid_content','read_failed','busy'].includes(data.status)) return;
+            const foreground = live() && focusedRemote();
+            const late = lateCopy && isViewActive() && open() && Date.now() <= lateCopy.until && data.revision >= lateCopy.minimum
+                && (lateCopy.revision === null || data.revision === lateCopy.revision);
+            if (!foreground && !late) return;
+            selectionStatus = data;
+            if (late && lateCopy.revision === null) lateCopy.revision = data.revision;
+            if (data.status === 'receiving') {
+                receiving = data;
+                offer = null; ++writeGeneration; scheduledWrite = null;
+                // Menu copies have no Ctrl+C intent. Bind an immediate paste
+                // to this in-progress selection, never to an earlier snapshot.
+                if (foreground && ![...copies].some(copy => copy.sent) && !current && !capture && !queue.length) {
+                    const copy = createCopy();
+                    copies.add(copy); remoteCopy = copy; startCopy(copy);
+                }
+            } else {
+                receiving = null; ++writeGeneration; scheduledWrite = null;
+                offer = { records: [], text: null, id: ++copySequence, status: 'ready', reason: 'copy_' + data.status };
+                for (const copy of copies) {
+                    if (!copy.sent) continue;
+                    clearTimeout(copy.timer); copies.delete(copy); copy.reject(Error('remote_copy_failed'));
+                }
+                if (foreground) {
+                    remoteCopy = createCopy();
+                    remoteCopy.reject(Error('remote_copy_failed'));
+                }
+            }
+            publishCopy();
+        } else if (type === 'clipboard_caps') {
             if (data?.version === 1 && Number.isInteger(data.chunk_bytes) && data.chunk_bytes > 0
                 && Number.isInteger(data.max_bytes) && data.max_bytes >= 0) {
                 caps = data;
                 if (caps.enabled === false) cancel();
+                else if (caps.mime_types && !caps.mime_types.includes('image/png')) {
+                    cancel();
+                }
             }
         } else if (type === 'paste_ack' && current?.id === data?.id) {
             if (data.status === 'applied') {
@@ -442,17 +529,20 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         } else return send(message);
     }
 
+    const pageFocus = () => publishCopy();
+    globalThis.window?.addEventListener('focus', pageFocus);
     document.addEventListener('paste', paste);
     document.addEventListener('copy', localCopy);
     document.addEventListener('cut', localCopy);
     document.addEventListener('focusin', focusChanged);
     document.addEventListener('visibilitychange', visibilityChanged);
     return {
-        beginPaste, sendInput, noteCopy, receive, receiveFormats, message, cancel, suspend, retryCopy, copySnapshot, dismissCopy,
+        beginPaste, sendInput, noteCopy, receive, receiveFormats, message, cancel, suspend, retryCopy, copySnapshot, imageSnapshot, dismissCopy,
         connected() { cancel(); caps = null; remoteRevision = 0; command({ type: 'hello' }); },
         disconnected() { cancel(false); caps = null; },
         destroy() {
             cancel(); disposed = true;
+            globalThis.window?.removeEventListener('focus', pageFocus);
             permission?.removeEventListener?.('change', permissionChanged);
             document.removeEventListener('paste', paste);
             document.removeEventListener('copy', localCopy);

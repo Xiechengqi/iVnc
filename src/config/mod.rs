@@ -199,6 +199,11 @@ pub struct HttpConfig {
     #[serde(default = "default_auth_session_max_seconds")]
     pub auth_session_max_seconds: u64,
 
+    /// Only these TCP peers may supply the client IP through X-Forwarded-For.
+    /// Empty by default; forwarded headers never affect Origin/TLS validation.
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
+
     /// Enable TLS with self-signed certificate (set via --tls CLI flag)
     #[serde(default)]
     pub tls: bool,
@@ -215,6 +220,7 @@ impl Default for HttpConfig {
             basic_auth_password: default_basic_auth_password(),
             auth_session_idle_seconds: default_auth_session_idle_seconds(),
             auth_session_max_seconds: default_auth_session_max_seconds(),
+            trusted_proxy_cidrs: Vec::new(),
             tls: false,
         }
     }
@@ -255,7 +261,7 @@ pub struct InputConfig {
     pub enable_clipboard: bool,
 
     /// Enable binary clipboard sync
-    #[serde(default)]
+    #[serde(default = "default_enable_clipboard")]
     pub enable_binary_clipboard: bool,
 
     /// Enable command execution from client messages
@@ -281,7 +287,7 @@ impl Default for InputConfig {
             enable_keyboard: default_enable_keyboard(),
             enable_mouse: default_enable_mouse(),
             enable_clipboard: default_enable_clipboard(),
-            enable_binary_clipboard: false,
+            enable_binary_clipboard: true,
             enable_commands: false,
             file_transfers: default_file_transfers(),
             upload_dir: default_upload_dir(),

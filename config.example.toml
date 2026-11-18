@@ -35,6 +35,9 @@ basic_auth_password = "mypasswd"
 # Browser-session idle and absolute lifetime; service restart ends all sessions
 auth_session_idle_seconds = 86400
 auth_session_max_seconds = 604800
+# Only these TCP peers may supply client IPs through X-Forwarded-For.
+# Leave empty for direct connections. This does not trust forwarded TLS/Origin.
+trusted_proxy_cidrs = []
 
 [encoding]
 # Target frames per second
@@ -50,7 +53,7 @@ enable_mouse = true
 # Enable clipboard sync
 enable_clipboard = true
 # Enable binary clipboard sync
-enable_binary_clipboard = false
+enable_binary_clipboard = true
 # Enable command execution from client messages
 enable_commands = false
 # Allowed file transfer directions (use [] or ["download"] to disable uploads)

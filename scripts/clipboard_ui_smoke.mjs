@@ -12,34 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const { WebSocket } = createRequire(new URL('../web/ivnc/package.json', import.meta.url))('ws');
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const work = mkdtempSync(path.join(tmpdir(), 'ivnc-copy-ui-'));
-const html = `<!doctype html><meta charset="utf-8"><style>
-body{margin:0;background:#252a34;color:white}#remote{position:absolute;top:120px;left:20px;width:400px;height:240px}
-#local{position:absolute;top:410px;left:20px;width:400px;height:120px}</style>
-<div class="video-container"><textarea id="remote" readonly></textarea></div><textarea id="local" class="allow-native-input"></textarea>
-<script type="module">
-import {createClipboard,pasteShortcut} from '/clipboard.js';
-import {createClipboardUI} from '/clipboard-ui.js';
-import {installOverlayGuard} from '/overlay-manager.js';
-import {setLang} from '/lib/i18n.js?v=1';
-setLang('en');window.__IVNC_EMBED__=window.parent!==window;installOverlayGuard(()=>{});
-const remote=document.getElementById('remote');
-window.sent=[];window.errors=[];window.remoteClicks=0;window.active=true;let revision=0;
-window.ui=createClipboardUI({getController:()=>window.controller,restoreFocus:()=>remote.focus()});
-window.controller=createClipboard({webrtc:{_send_channel:{readyState:'open',bufferedAmount:0},sendDataChannelMessage:m=>{
-sent.push(m);if(m.startsWith('paste,')){const p=JSON.parse(m.slice(6));if(p.type==='commit')queueMicrotask(()=>controller.message('paste_ack',{id:p.id,status:'applied'}));}}},
-overlay:remote,imeTarget:()=>null,isActive:()=>window.active,getTarget:()=>1,report:e=>errors.push(e),onCopyState:s=>ui.update(s)});
-controller.message('clipboard_caps',{version:1,enabled:true,max_bytes:16777216,chunk_bytes:12288});
-remote.addEventListener('keydown',e=>{
-    const shortcut=pasteShortcut(e);if(shortcut){controller.beginPaste(e,shortcut);return;}
-    if((e.code==='KeyC'||e.code==='KeyX')&&(e.ctrlKey||e.metaKey)&&!e.altKey&&!e.shiftKey){
-        controller.noteCopy();controller.sendInput('kd,'+(e.code==='KeyC'?99:120));e.preventDefault();
-    }
-});
-remote.addEventListener('pointerdown',()=>window.remoteClicks++);
-window.addEventListener('blur',()=>controller.suspend());
-window.receive=text=>controller.receive(text,{revision:++revision,origin:'remote'});
-window.setLang=setLang;window.ready=true;
-</script>`;
+const html = readFileSync(path.join(root,'scripts/fixtures/clipboard-ui.html'),'utf8');
 function serve(request, response) {
     const url = new URL(request.url, 'http://localhost');
     if (url.searchParams.has('policy')) response.setHeader('Permissions-Policy','clipboard-write=()');
@@ -188,10 +161,51 @@ try {
     await verifyClipboard('HTTP_LATE');pass('late remote delivery never assumes a fixed activation timeout and can be copied with one click');
 
     await visit(httpUrl);
-    await evaluate(`controller.receiveFormats([{mime:'image/png',data:new Uint8Array([137,80,78,71])}],{revision:1,origin:'remote'})`);
+    await evaluate('receiveImage()');
     await notice();assert.equal(await evaluate(`document.querySelector('.clipboard-copy').hidden&&document.querySelector('.clipboard-manual').hidden`),true);
-    assert.match(await evaluate(`document.querySelector('.clipboard-assist-message').textContent`),/content type.*HTTPS/);
-    pass('HTTP pure images explain the format limitation without offering an unusable text copy action');
+    assert.match(await evaluate(`document.querySelector('.clipboard-assist-message').textContent`),/cannot write images.*HTTPS/);
+    await wait('HTTP image preview',()=>evaluate(`document.querySelector('.clipboard-image').naturalWidth===3`));
+    assert.equal(await evaluate(`document.querySelector('.clipboard-download').download`),'ivnc-clipboard.png');
+    assert.equal(await evaluate(`document.querySelector('.clipboard-download').hidden`),false);
+    await call('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:path.join(work,'downloads')});
+    await click('.clipboard-download');
+    const downloaded=await wait('PNG download',()=>readFileSync(path.join(work,'downloads/ivnc-clipboard.png')));
+    assert.equal(downloaded.readUInt32BE(16),3);assert.equal(downloaded.readUInt32BE(20),2);
+    await evaluate(`window.previewMenuPrevented=null;document.addEventListener('contextmenu',e=>queueMicrotask(()=>window.previewMenuPrevented=e.defaultPrevented),{capture:true})`);
+    const imagePoint=await evaluate(`(()=>{const r=document.querySelector('.clipboard-image').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    for(const type of ['mousePressed','mouseReleased'])await call('Input.dispatchMouseEvent',{type,...imagePoint,button:'right',buttons:type==='mousePressed'?2:0,clickCount:1});
+    await wait('native image context menu',()=>evaluate('window.previewMenuPrevented===false'));
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    pass('HTTP images expose a full-resolution PNG preview, download and an unblocked native browser image menu');
+
+    await visit(httpUrl);await evaluate('receiveImage(true)');await notice();
+    await wait('partial image copy',()=>evaluate(`document.querySelector('.clipboard-assist-message').textContent.includes('Only text was copied')`));
+    assert.equal(await evaluate(`document.querySelector('.clipboard-copy').textContent`),'Copy text');
+    await wait('mixed content preview',()=>evaluate(`document.querySelector('.clipboard-image').naturalWidth===3`));
+    pass('HTTP mixed content reports text-only success and retains the actual image');
+
+    await visit(secureUrl);
+    await evaluate(`navigator.clipboard.write=()=>Promise.reject(new DOMException('Gesture required','NotAllowedError'))`);
+    await evaluate('receiveImage()');await notice();
+    await wait('HTTPS image preview',()=>evaluate(`document.querySelector('.clipboard-image').naturalWidth===3`));
+    await evaluate(`delete navigator.clipboard.write`);await click('.clipboard-copy');
+    await wait('image write success',()=>evaluate(`document.querySelector('.clipboard-assist-message').textContent.includes('Copied to')`));
+    await evaluate(`document.getElementById('local').focus()`);await shortcut('V');
+    await wait('native image paste outside the remote view',()=>evaluate('window.pastedImage'));
+    assert.deepEqual(await evaluate('window.pastedImage'),{width:3,height:2,pixel:[51,85,170,255]});
+    pass('HTTPS trusted image retry pastes the original dimensions and pixels into an independent native input');
+
+    await visit(httpUrl);
+    await evaluate(`window.revoked=[];const revoke=URL.revokeObjectURL.bind(URL);URL.revokeObjectURL=url=>{revoked.push(url);revoke(url)}`);
+    await evaluate('receiveImage()');await notice();
+    await wait('first preview',()=>evaluate(`document.querySelector('.clipboard-image').naturalWidth===3`));
+    const firstPreview=await evaluate(`document.querySelector('.clipboard-image').src`);
+    await evaluate('receiveImage()');await notice();
+    await wait('old blob released',()=>evaluate(`revoked.length===1`));
+    assert.equal(await evaluate(`revoked[0]`),firstPreview);
+    await click('.clipboard-close');assert.equal(await evaluate('revoked.length'),2);
+    assert.equal(await evaluate(`document.querySelector('.clipboard-image').hasAttribute('src')`),false);
+    pass('replacing and dismissing images revoke blob URLs and release the preview');
 
     await visit(httpUrl);await seedClipboard('OLD_BEFORE_AUTO_EMPTY');await receive('');
     await wait('HTTP empty copy',()=>evaluate('controller.copySnapshot()===null'));await verifyClipboard('');

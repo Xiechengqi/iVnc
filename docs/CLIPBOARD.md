@@ -6,7 +6,7 @@
 
 1. `input2.js` 识别 Ctrl/Cmd+V、Ctrl+Shift+V 和 Shift+Insert，交给 `clipboard.js` 捕获用户原生 `paste` 事件，不提前发送 V。本地 toolbar、表单和 Web 终端保持原生输入。
 2. 一次手势保存内容、快捷键类型和目标窗口。后续键盘/鼠标输入按顺序排在这次操作后；使用 `event.repeat` 抑制长按，不按时间吞掉独立粘贴。
-3. 同一有序输入 DataChannel 上协商能力，发送 `paste` 的 start/chunk/commit。文本按 UTF-8 字节分块，空文本合法。默认关闭的二进制开关启用后，同次传输也可保存 HTML 和 PNG。
+3. 同一有序输入 DataChannel 上协商能力，发送 `paste` 的 start/chunk/commit。文本按 UTF-8 字节分块，空文本合法。图片和富文本同步默认开启，显式关闭后仅传输纯文本；同次传输可保存 HTML 和 PNG。
 4. start 在合成器输入队列中绑定实际 `WlSurface`，commit 只在完整长度、UTF-8、期限和目标校验通过后执行。应用关闭、焦点改变、取消或连接结束后的操作不迁移到别的窗口。
 5. 合成器先建立独立 `Arc<[u8]>` selection，再派发对应快捷键，并恢复之前持有的修饰键。每份 Wayland offer 保留自己的内容，后来的粘贴不能改变旧 offer 的读取结果。
 6. 应用请求读取 offer 后，内容异步写入管道并关闭写端（EOF），才向请求连接返回 `paste_ack`。`applied` 确认 selection、按键派发和管道交付，**不表示 Chrome 的异步文本插入已经完成**。写入失败或超过 10 秒返回 `delivery_failed`；应用始终不读取时由 30 秒操作期限结束。客户端不自动重试。
@@ -36,11 +36,11 @@
 6. 面板中的文本在操作期间保持稳定。关闭按钮、Escape 或点击面板外只关闭本次复制面板；外部点击被消费，避免穿透到应用或其他弹窗。复制控件沿用本地输入白名单，快捷键不发送给远端。
 7. 全屏时出现复制提示会解除鼠标/键盘锁定，保留远端输入焦点，让用户能够点击复制控件；提示显示期间不重新锁定。嵌入视图将面板挂载到当前全屏视频容器，退出全屏后恢复挂载位置及面板内焦点。
 
-HTTP 兼容路径仅写入纯文本，多 MIME 快照使用其中的 `text/plain`。纯图片或没有纯文本表示的 HTML 不提供无效的文本复制按钮，提示使用支持现代剪贴板接口的浏览器通过 HTTPS 访问。`execCommand` 已弃用，浏览器仍可能拒绝；本方案不承诺 HTTP 在所有浏览器、任意回传时延或无用户操作时均可自动复制。HTTPS 继续作为现代文本、HTML 和 PNG 写入的首选路径。
+HTTP 兼容路径仅写入纯文本，多 MIME 快照使用其中的 `text/plain`。带图片时保留原图预览，并明确提示“仅复制了文本”；纯图片不提供无效的文本复制按钮，提供浏览器原生“复制图片”菜单和下载入口。没有纯文本表示的 HTML 提示通过 HTTPS 访问。图片预览在视图内使用 PNG Blob URL，右键菜单、长按和下载不转发到远端；替换、关闭、断线或销毁时撤销 URL。下载图片不会报告为已复制。`execCommand` 已弃用，浏览器仍可能拒绝；本方案不承诺 HTTP 在所有浏览器、任意回传时延或无用户操作时均可自动复制。HTTPS 继续作为现代文本、HTML 和 PNG 写入的首选路径。
 
-手动快照仅存于当前视图内存，单份不超过 16 MiB；不写入本地存储、日志或父 iframe。窗口失焦/页面隐藏会暂停自动写入并清除远端粘贴意图，但保留可供用户主动处理的快照，返回后不自动重试。进入复制控件保留快照；进入其他本地编辑器、关闭提示、切换视图、断线、重连或关闭同步则清理快照。外部新粘贴会清除旧提示。
+手动快照仅存于当前视图内存，单份不超过 16 MiB；不写入本地存储、日志或父 iframe。窗口失焦/页面隐藏会暂停自动写入并清除远端粘贴意图，但保留可供用户主动处理的快照，返回后不自动重试。已在该视图发起的复制快捷键，或已收到 receiving 状态的图片，允许在 30 秒内接纳对应 revision 的晚到回包，仅保存为手动快照；收到的 receiving 状态会绑定确切 revision，不接纳后续无关后台 selection。进入复制控件保留快照；进入其他本地编辑器、关闭提示、切换视图、断线、重连或关闭同步则清理快照。外部新粘贴会清除旧提示。
 
-复制回包超时使用独立的 `remote_copy_timeout`。依赖该内容的粘贴显示“未收到远端复制文本，请重新复制”；单独 Ctrl+C 没有回包时不主动报错，因为它也可能是应用的中断命令或没有选区。诊断仅记录写入阶段、原因、标准异常类型、安全上下文、焦点、用户激活和已知权限状态，不记录文本。
+复制回包超时使用独立的 `remote_copy_timeout`。依赖该内容的粘贴显示“未收到远端复制文本，请重新复制”；单独 Ctrl+C 没有回包时不主动报错，因为它也可能是应用的中断命令或没有选区。图片菜单复制的 receiving 状态同样建立本次复制等待关系，立即粘贴会等待这张图片；明确的接收失败使用 `remote_copy_failed` 终止等待，并保留失败提示，后续粘贴不会回放上一次 OS 剪贴板。诊断仅记录写入阶段、原因、标准异常类型、安全上下文、焦点、用户激活和已知权限状态，不记录文本。
 
 ## 兼容边界
 
@@ -85,8 +85,36 @@ HTTP 直接复制本轮验证：剪贴板事件/事务 39 项、viewport 3 项�
 
 ## HTML / PNG 扩展
 
-paste v1 的 `clipboard_caps` 可附带 `mime_types`。二进制开关打开时为 `text/plain`、`text/html`、`image/png`，关闭时只有纯文本；运行时切换会主动广播更新能力，无需重连。新前端只向声明此能力的服务器发送可选的 start `formats: [{mime, size}, ...]`，传输体按这个顺序拼接；旧文本请求不带 formats，保持兼容。服务器校验类型白名单、去重、总长度、文本 UTF-8 和 PNG 签名，所有表示共享一个 selection revision 和送达确认。总大小仍为 16 MiB，不接纳 `text/uri-list` 或任意文件路径。
+paste v1 的 `clipboard_caps` 可附带 `mime_types`。“同步图片和富文本”开关打开时为 `text/plain`、`text/html`、`image/png`，关闭时只有纯文本；运行时切换会主动广播更新能力，无需重连。新前端只向声明此能力的服务器发送可选的 start `formats: [{mime, size}, ...]`，传输体按这个顺序拼接；旧文本请求不带 formats，保持兼容。服务器校验类型白名单、去重、总长度、文本 UTF-8 和 PNG 签名，所有表示共享一个 selection revision 和送达确认。总大小仍为 16 MiB，不接纳 `text/uri-list` 或任意文件路径。
 
-远端复制会并行读取同一 revision 下的可用表示，所有非阻塞管道结束后一次回传。原有纯文本消息不变；多表示使用带 formats、revision、origin 的 clipboard_start 元数据，后接原有 data/finish 分块。任何新 selection、超时、超限或读取错误都会丢弃该次读取。二进制开关关闭时不回传 HTML/PNG。
+远端复制会并行读取同一 revision 下的可用表示，所有非阻塞管道结束后一次回传。图片优先使用 PNG；只有 JPEG 或 WebP 时在单个后台解码线程转换为 PNG，不阻塞合成器。PNG 校验通过后保留原始字节；图片最大边长 8192、最大像素数 16,777,216、解码分配上限 64 MiB，总传输体保持 16 MiB。转换器最多一个正在处理和一个排队任务。原有纯文本消息不变；多表示使用带 formats、revision、origin 的 clipboard_start 元数据，后接原有 data/finish 分块。任何新 selection、超时、超限或读取错误都会丢弃该次读取。开关关闭时不回传 HTML/PNG。
+
+服务端将同一 selection 的 start/data/finish 作为完整批次进入每个连接的控制消息队列，保持与状态消息的顺序，不再逐片使用可丢弃的媒体广播队列。批次以 Arc 共享，每个连接最多排队 256 个批次、32 MiB 编码内容；字节预算在整批交付期间保留，拥塞超限则结束该连接，不丢掉半份剪贴板。DataChannel 待发缓冲达到 256 KiB 时等待进度，write 返回未接收时保留当前分块和粘贴确认，后续重试。每个 TCP 帧输入后立即提取 str0m 输出，避免单次 TCP 读取包含多条 DTLS 消息时填满其接收队列。
 
 本机通过 `ClipboardItem` 一次写入受支持的 MIME；缺少相关 API 时保留可用纯文本回退。纯图片在权限受限时提供用户主动重试入口，不显示文本选择面板。旧 cb/cbs/cbd/cbe 入口同样经过输入队列直接设置合成器 selection，不再依赖 wl-copy；它们只更新 selection，不替代带粘贴意图的事务。
+
+
+## 图片复制与实例策略
+
+“设置 → 连接质量 → 同步图片和富文本”对未配置值默认开启，原有配置文件和 console.json 中明确保存的 false 继续生效。剪贴板总开关仍优先。旧浏览器在 SETTINGS 中发送的 enable_binary_clipboard 不再改变实例策略；控制台是设置写入入口。
+
+主进程通过已认证的 loopback `PUT /api/console/clipboard-policy` 将策略同步给本机独立应用 worker；该接口不经过 app-view 或远程共享 data 代理。运行中的 worker 收到设置即更新能力，不要求重连；失败或启动中的 worker 在监视循环中重试，控制台返回 pending_workers。新 worker 从主进程的当前运行时值启动，忽略自身旧私有目录中保存的图片策略。连接其他 iVnc 的远程应用使用来源实例的策略，接入实例不会修改来源配置。
+
+`clipboard_status,{revision,status,image}` 是兼容的输出状态消息。receiving 表示图片读取正在进行；disabled、format、timeout、limit、image_limit、invalid_image、invalid_content、read_failed、busy 提供可操作原因。状态消息不包含图片或文字内容。PNG/HTML/文本的传输体及 paste v1 确认语义不变。部分 MIME 无法读取时整份快照失败，不悄悄丢掉图片并报告文本复制成功。
+
+HTTPS/可信 localhost 优先使用 ClipboardItem 写入本机图片；浏览器拒绝自动写入时，已收到的图片保留在预览面板，用户点击“复制图片”可直接重试。HTTP IP/域名不具备可靠的自动图片写入接口，使用预览上的浏览器原生“复制图片”（触屏长按）或下载。浏览器版本及系统可能提供不同原生菜单；下载作为备用路径。不能承诺图片尚未接收完成就切到外部程序后立即粘贴成功。
+
+本地图片回归：
+
+```sh
+node --test scripts/clipboard_test.mjs
+node scripts/clipboard_ui_smoke.mjs
+CHROME_BIN=/usr/bin/google-chrome node scripts/clipboard_image_browser_test.mjs
+npm --prefix web/ivnc run build
+cargo build --features tls --bin ivnc
+IVNC_BIN=target/debug/ivnc node scripts/clipboard_image_smoke.mjs
+```
+
+浏览器面板 smoke 使用 scripts/fixtures/clipboard-ui.html，测试数据来自生成的小图片，不访问用户剪贴板。图片链路 smoke 使用隔离的 Wayland Chrome、浏览器 profile、实例和生成图片，按像素及原始尺寸检查独立本机粘贴结果，并验证 worker 设置与来源策略的远程转发。所有浏览器测试仅在本地运行。
+
+本轮验证：Rust 222 项、剪贴板事件/生命周期 53 项、Chrome 复制 UI 24 项、图片完整链路 9 项、原有文本完整链路 14 项通过，设置交互在 Chromium/WebKit 各 24 个场景通过。图片浏览器回归在两引擎各验证 HTTP 预览/下载/菜单、可信点击调用真实写入 API、错误状态；Chrome 原生粘贴的尺寸和像素校验通过。当前 Linux 无头 WebKit 在独立最小页面同样产生空 PNG 粘贴数据，因此该引擎的原生粘贴子项显式跳过，Safari/macOS 真机尚未验证。生产前端和启用 TLS 的服务端构建通过；前端保留既有的 bundle 大小提示。审查详情见 [图片剪贴板 Review](CLIPBOARD_IMAGE_REVIEW.md)。

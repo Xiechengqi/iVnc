@@ -442,6 +442,18 @@ impl ProcessManager {
     }
 
     /// Whether a live process of the app runs in its own runtime.
+    pub fn worker_ids(&self) -> Vec<String> {
+        self.processes
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter_map(|(id, running)| {
+                (running.worker && matches!(running.child.try_wait(), Ok(None))).then(|| id.clone())
+            })
+            .collect()
+    }
+
+    /// Whether a live process of the app runs in its own runtime.
     pub fn in_worker(&self, app_id: &str) -> Option<bool> {
         let mut procs = self.processes.lock().unwrap();
         let running = procs.get_mut(app_id)?;

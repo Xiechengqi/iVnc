@@ -1,5 +1,6 @@
 //! Clipboard message handling (text + binary, single or multipart).
 
+pub mod image;
 pub mod paste;
 
 use crate::web::SharedState;

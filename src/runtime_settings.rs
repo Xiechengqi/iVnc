@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub struct RuntimeSettings {
+    console_updates: tokio::sync::Mutex<()>,
     target_fps: AtomicU32,
     max_fps: u32,
     binary_clipboard_enabled: AtomicBool,
@@ -19,6 +20,7 @@ pub struct RuntimeSettings {
 impl RuntimeSettings {
     pub fn new(config: &Config) -> Self {
         Self {
+            console_updates: Default::default(),
             target_fps: AtomicU32::new(config.encoding.target_fps.max(1)),
             max_fps: config.encoding.max_fps.max(1),
             binary_clipboard_enabled: AtomicBool::new(config.input.enable_binary_clipboard),
@@ -30,8 +32,17 @@ impl RuntimeSettings {
         }
     }
 
+    pub async fn console_update_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.console_updates.lock().await
+    }
+
     pub fn binary_clipboard_enabled(&self) -> bool {
         self.binary_clipboard_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_binary_clipboard_enabled(&self, enabled: bool) {
+        self.binary_clipboard_enabled
+            .store(enabled, Ordering::Relaxed);
     }
 
     pub fn video_bitrate_kbps(&self) -> u32 {
@@ -116,13 +127,8 @@ impl RuntimeSettings {
             self.set_target_fps(fps as u32);
         }
 
-        if let Some(enabled) = value
-            .get("enable_binary_clipboard")
-            .and_then(|v| v.as_bool())
-        {
-            self.binary_clipboard_enabled
-                .store(enabled, Ordering::Relaxed);
-        }
+        // Clipboard policy belongs to the instance owner. Older clients send
+        // their cached value on reconnect; it must not override console policy.
 
         if let Some(bitrate) = value.get("video_bitrate").and_then(|v| v.as_u64()) {
             self.set_video_bitrate_kbps(bitrate as u32);
@@ -135,5 +141,27 @@ impl RuntimeSettings {
         if let Some(interval) = value.get("keyframe_interval").and_then(|v| v.as_u64()) {
             self.set_keyframe_interval(interval as u32);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn owner_policy_cannot_be_overridden_by_an_old_viewer_setting() {
+        let config = Config::default();
+        assert!(config.input.enable_binary_clipboard);
+        let explicit: crate::config::InputConfig =
+            toml::from_str("enable_binary_clipboard = false").unwrap();
+        assert!(!explicit.enable_binary_clipboard);
+        let unset: crate::config::InputConfig = toml::from_str("").unwrap();
+        assert!(unset.enable_binary_clipboard);
+        let settings = RuntimeSettings::new(&config);
+        settings.set_binary_clipboard_enabled(false);
+        settings.apply_settings_json(r#"{"enable_binary_clipboard":true}"#);
+        assert!(!settings.binary_clipboard_enabled());
+        settings.set_binary_clipboard_enabled(true);
+        settings.apply_settings_json(r#"{"enable_binary_clipboard":false}"#);
+        assert!(settings.binary_clipboard_enabled());
     }
 }

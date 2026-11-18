@@ -2069,6 +2069,7 @@ mod tests {
         assert!(!data_path("api/apps"));
         assert!(!data_path("app/files"));
         assert!(!data_path("api/console/display"));
+        assert!(!data_path("api/console/clipboard-policy"));
     }
 
     fn gateway(apps: Arc<AppsState>) -> Arc<Gateway> {

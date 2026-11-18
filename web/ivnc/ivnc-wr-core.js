@@ -2300,10 +2300,7 @@ export default function webrtc() {
 
 		const knownSettings = [
 			'framerate', 'encoder_rtc',
-			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard'
-		];
-		const booleanSettingKeys = [
-			'enable_binary_clipboard'
+			'audio_bitrate', 'video_bitrate', 'scaling_dpi'
 		];
 		const integerSettingKeys = [
 			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_bitrate'
@@ -2315,9 +2312,7 @@ export default function webrtc() {
 				const baseKey = unprefixedKey;
 				if (knownSettings.includes(baseKey)) {
 					let value = localStorage.getItem(key);
-					if (booleanSettingKeys.includes(baseKey)) {
-						value = (value === 'true');
-					} else if (integerSettingKeys.includes(baseKey)) {
+					if (integerSettingKeys.includes(baseKey)) {
 						value = parseInt(value, 10);
 						if (isNaN(value)) continue;
 					}
@@ -3043,6 +3038,7 @@ export default function webrtc() {
 			limit: zh ? '剪贴板内容过大或待处理操作过多。' : 'Clipboard size or pending operation limit exceeded.',
 			busy: zh ? '远端正在处理另一次粘贴，请稍后再试。' : 'Another paste is still being delivered. Try again shortly.',
 			remote_copy_timeout: zh ? '未收到远端复制文本，请重新复制。' : 'No remote copied text was received. Copy again.',
+			remote_copy_failed: zh ? '未能接收本次复制内容，请根据复制提示处理后重新复制。' : 'The current copied content could not be received. Follow the copy notice and copy again.',
 		};
 		const message = messages[reason] || (zh ? '本次粘贴未能确认完成，请检查连接和输入焦点。' : 'Paste could not be confirmed. Check the connection and input focus.');
         showInputNotice(message);
@@ -3731,6 +3727,7 @@ export default function webrtc() {
 			clipboardController = createClipboard({
 				webrtc, overlay: overlayInput, imeTarget: () => input?._imeTextarea,
 				isActive: () => window.__ivncViewActive !== false && !appStreams?.activeId() && document.visibilityState !== 'hidden',
+				isViewActive: () => window.__ivncViewActive !== false && !appStreams?.activeId(),
 				getTarget: () => lastTaskbarData?.windows?.find(w => w.focused)?.id,
 				report: reportClipboardError,
 				onCopyState: state => clipboardUI?.update(state),
