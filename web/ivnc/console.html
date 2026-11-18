@@ -314,6 +314,13 @@
             </div>
 
             <div id="desktop-config" style="display:none">
+                <div class="form-line">
+                    <label class="form-label" id="label-desktop-preset" for="f-desktop-preset">应用</label>
+                    <select id="f-desktop-preset">
+                        <option value="custom">自定义命令</option>
+                        <option value="chrome">Chrome · 检测中…</option>
+                    </select>
+                </div>
                 <div class="form-line command-line">
                     <label class="form-label info-label">
                         <span id="label-exec">启动命令</span>
@@ -325,12 +332,33 @@
                     <div class="command-control">
                         <div class="command-options">
                         <div id="desktop-autostart-slot"></div>
+                        <label id="chrome-manual-control" class="checkbox-row" hidden><input type="checkbox" id="f-chrome-manual"><span id="label-chrome-manual">手动修改启动命令</span></label>
                         </div>
-                        <input type="text" id="f-exec" placeholder="例如：amp-desktop 或 /path/to/app">
+                        <textarea id="f-exec" rows="3" placeholder="例如：amp-desktop 或 /path/to/app"></textarea>
                     </div>
                     <div class="field-hint field-error" id="err-f-exec"></div>
                 </div>
-                <div class="form-line" id="proxy-url-line" hidden>
+                <div id="chrome-settings" hidden>
+                <div class="field-hint" id="chrome-manual-hint" hidden>手动模式下，以下配置不参与启动。</div>
+                <fieldset id="chrome-config" style="border:0;padding:0;margin:0;min-width:0">
+                <div class="form-line">
+                    <label class="form-label" id="label-chrome-profile" for="f-chrome-profile">用户数据目录</label>
+                    <input type="text" id="f-chrome-profile" placeholder="留空自动配置">
+                    <div class="field-hint" id="chrome-profile-effective"></div>
+                    <div class="field-hint field-error" id="err-f-chrome-profile"></div>
+                </div>
+                <div class="form-line">
+                    <label class="form-label" id="label-chrome-crash" for="f-chrome-crash">崩溃日志目录</label>
+                    <input type="text" id="f-chrome-crash" placeholder="留空自动配置">
+                    <div class="field-hint" id="chrome-crash-effective"></div>
+                    <div class="field-hint field-error" id="err-f-chrome-crash"></div>
+                </div>
+                <div class="form-line">
+                    <label class="form-label" id="label-chrome-port" for="f-chrome-port">远程调试端口</label>
+                    <input type="text" inputmode="numeric" id="f-chrome-port" placeholder="留空关闭远程调试">
+                    <div class="field-hint field-error" id="err-f-chrome-port"></div>
+                </div>
+                <div class="form-line" id="proxy-url-line">
                     <label class="form-label info-label">
                         <span id="label-proxy-url">代理地址</span>
                         <span class="info-tip">
@@ -340,6 +368,9 @@
                     </label>
                     <input type="text" id="f-proxy-url" placeholder="例如：socks5://127.0.0.1:1080">
                     <div class="field-hint field-error" id="err-f-proxy-url"></div>
+                </div>
+                </fieldset>
+                <div class="field-hint field-error" id="chrome-preview-error" role="status" aria-live="polite"></div>
                 </div>
                 <details id="desktop-launch-advanced" class="launch-advanced">
                     <summary id="desktop-launch-advanced-label">高级启动设置</summary>

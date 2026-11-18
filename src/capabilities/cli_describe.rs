@@ -327,6 +327,7 @@ mod tests {
             exec_command: None,
             env_vars: None,
             desktop_launch: Default::default(),
+            chrome: None,
             proxy_url: None,
             cli_binary_path: Some("/tmp/twitter-cli".to_string()),
             cli_env_vars: None,

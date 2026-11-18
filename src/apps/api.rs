@@ -19,7 +19,6 @@ use axum::{
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub struct AppsState {
@@ -32,6 +31,9 @@ pub struct AppsState {
     pub service: ServiceProcessManager,
     /// Remote applications the user started; only these are connected.
     started: Mutex<HashSet<String>>,
+    config_operations: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    test_entries: std::path::PathBuf,
     /// Wakes the monitor early, e.g. to connect a remote application just started.
     wake: tokio::sync::Notify,
     /// Set when the application list may have changed; the monitor reads it again.
@@ -40,6 +42,17 @@ pub struct AppsState {
 }
 
 impl AppsState {
+    fn write_desktop_entry(&self, app: &ManagedApp) -> Result<std::path::PathBuf, String> {
+        #[cfg(test)]
+        {
+            desktop_entry::ensure_app_entry_for_test(app, &self.test_entries)
+        }
+        #[cfg(not(test))]
+        {
+            desktop_entry::ensure_app_entry(app)
+        }
+    }
+
     pub fn new(proxy_panel: Arc<ProxyPanelManager>) -> Result<Self, String> {
         crate::paths::migrate_legacy();
         crate::paths::ensure_layout()?;
@@ -62,6 +75,10 @@ impl AppsState {
             process,
             service,
             started: Mutex::new(HashSet::new()),
+            config_operations: Default::default(),
+            #[cfg(test)]
+            test_entries: std::env::temp_dir()
+                .join(format!("ivnc-api-entries-{}", uuid::Uuid::new_v4())),
             wake: tokio::sync::Notify::new(),
             apps_changed: std::sync::atomic::AtomicBool::new(true),
             worker_clipboards: Default::default(),
@@ -592,6 +609,8 @@ impl AppsState {
             process: ProcessManager::new(remote, root.join("runtimes")),
             service: ServiceProcessManager::new(),
             started: Mutex::new(HashSet::new()),
+            config_operations: Default::default(),
+            test_entries: root.join("desktop-entries"),
             wake: tokio::sync::Notify::new(),
             apps_changed: std::sync::atomic::AtomicBool::new(true),
             worker_clipboards: Default::default(),
@@ -630,6 +649,7 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                chrome: None,
                 proxy_url: None,
                 cli_binary_path: None,
                 cli_env_vars: None,
@@ -643,15 +663,6 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
 }
 
 fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
-    // Use the saved proxy setting when regenerating the managed Chrome
-    // command so a registration refresh never drops the user's proxy choice.
-    let chrome_proxy_url = store
-        .get_optional("builtin-chrome")
-        .ok()
-        .flatten()
-        .and_then(|app| app.proxy_url);
-    let chrome_command = builtin_chrome_command(chrome_proxy_url.as_deref())?;
-
     for app in store.list()? {
         let is_builtin_terminal = app.id == "builtin-terminal"
             || (app.name == "Terminal" && app.exec_command.as_deref() == Some("alacritty"));
@@ -662,37 +673,54 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
             }
         }
     }
-    ensure_builtin_chrome(store, &chrome_command)?;
-    desktop_entry::ensure_desktop_entry("Chrome", &chrome_command)?;
+    ensure_builtin_chrome(store)?;
+    if let Some(app) = store.get_optional("builtin-chrome")? {
+        if let Err(error) = desktop_entry::ensure_app_entry(&app) {
+            // A temporarily unavailable external profile must not prevent
+            // the user from opening the console to repair its configuration.
+            log::warn!("Could not refresh built-in Chrome desktop entry: {error}");
+        } else if !store
+            .list()?
+            .iter()
+            .any(|other| other.id != app.id && other.name == "Chrome")
+        {
+            if let Err(error) = desktop_entry::retire_legacy_chrome_entry() {
+                log::warn!("Could not retire legacy Chrome desktop entry: {error}");
+            }
+        }
+    }
     ensure_builtin_agent_browser_cli(store)?;
     Ok(())
 }
 
-fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), String> {
-    match store.get("builtin-chrome") {
-        Ok(mut app) => {
-            if app.app_type != AppType::DesktopApp
-                || app.exec_command.as_deref() != Some(chrome_command)
-            {
-                app.app_type = AppType::DesktopApp;
-                // Refresh managed launch settings without replacing the saved startup preference.
+fn ensure_builtin_chrome(store: &AppStore) -> Result<(), String> {
+    match store.get_optional("builtin-chrome")? {
+        Some(mut app) => {
+            let was_legacy = app.app_type != AppType::DesktopApp;
+            app.app_type = AppType::DesktopApp;
+            if was_legacy {
                 app.url = None;
                 app.launch_command = None;
                 app.launch_env_vars = None;
                 app.launch_cwd = None;
                 app.launch_wait_timeout_secs = None;
-                app.exec_command = Some(chrome_command.to_string());
-                app.env_vars = None;
-                app.cli_binary_path = None;
-                app.cli_env_vars = None;
-                store.update(&app)?;
-                log::info!("Updated built-in Chrome desktop app");
+            }
+            if let Err(error) = super::chrome::migrate_builtin(&mut app) {
+                log::warn!("Could not refresh built-in Chrome configuration: {error}; retaining saved settings");
+                return Ok(());
+            }
+            if let Err(error) = store.update(&app) {
+                if error.code.starts_with("chrome_") {
+                    log::warn!("Could not refresh built-in Chrome configuration: {error}; retaining saved settings");
+                } else {
+                    return Err(error.into());
+                }
             }
         }
-        Err(_) => {
-            let app = ManagedApp {
-                id: "builtin-chrome".to_string(),
-                name: "Chrome".to_string(),
+        None => {
+            let mut app = ManagedApp {
+                id: "builtin-chrome".into(),
+                name: "Chrome".into(),
                 app_type: AppType::DesktopApp,
                 autostart: false,
                 url: None,
@@ -700,9 +728,10 @@ fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), S
                 launch_env_vars: None,
                 launch_cwd: None,
                 launch_wait_timeout_secs: None,
-                exec_command: Some(chrome_command.to_string()),
+                exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                chrome: Some(super::chrome::ChromeConfig::builtin()),
                 proxy_url: None,
                 cli_binary_path: None,
                 cli_env_vars: None,
@@ -710,10 +739,22 @@ fn ensure_builtin_chrome(store: &AppStore, chrome_command: &str) -> Result<(), S
                 sort_order: 0,
                 name_revision: 0,
             };
-            match store.add(&app) {
-                Ok(()) => log::info!("Added built-in Chrome desktop app"),
-                Err(err) if err.code == "app_name_exists" => {}
-                Err(err) => return Err(err.into()),
+            super::chrome::refresh_command(&mut app)?;
+            let mut result = store.add(&app);
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == "chrome_port_conflict")
+            {
+                // This is only an initial default, never an explicit saved
+                // setting. A different app may already own the default port.
+                app.chrome.as_mut().unwrap().debug_port = None;
+                super::chrome::refresh_command(&mut app)?;
+                result = store.add(&app);
+            }
+            match result {
+                Ok(()) => {}
+                Err(error) if error.code == "app_name_exists" => {}
+                Err(error) => return Err(error.into()),
             }
         }
     }
@@ -772,6 +813,7 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                chrome: None,
                 proxy_url: None,
                 cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
                 cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
@@ -787,18 +829,6 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
         }
     }
     Ok(())
-}
-
-fn builtin_chrome_data_dir() -> Result<PathBuf, String> {
-    let dir = crate::paths::chrome_profile();
-    std::fs::create_dir_all(&dir).map_err(|err| {
-        format!(
-            "Failed to create Chrome data dir {}: {}",
-            dir.display(),
-            err
-        )
-    })?;
-    Ok(dir)
 }
 
 fn shell_quote(value: &str) -> String {
@@ -817,16 +847,10 @@ fn shell_quote(value: &str) -> String {
 /// injected directly as `--proxy-server=<url>`; an empty value means no proxy.
 /// Proxy configuration is a user setting stored on the app, not read from a
 /// runtime file, so Chrome no longer follows the built-in proxy dynamically.
-fn builtin_chrome_command(proxy_url: Option<&str>) -> Result<String, String> {
-    let data_dir = builtin_chrome_data_dir()?;
+#[cfg(test)]
+pub(super) fn builtin_chrome_command(proxy_url: Option<&str>) -> Result<String, String> {
+    let data_dir = crate::paths::chrome_profile();
     let crash_dir = crate::paths::chrome_crash_dumps_dir();
-    std::fs::create_dir_all(&crash_dir).map_err(|err| {
-        format!(
-            "Failed to create Chrome crash dumps dir {}: {}",
-            crash_dir.display(),
-            err
-        )
-    })?;
     let data_dir = shell_quote(&data_dir.to_string_lossy());
     let crash_dir = shell_quote(&crash_dir.to_string_lossy());
     let debug_port = chrome_devtools_port();
@@ -850,6 +874,7 @@ pub(crate) fn chrome_devtools_port() -> u16 {
     std::env::var("IVNC_CHROME_DEBUG_PORT")
         .ok()
         .and_then(|v| v.trim().parse().ok())
+        .filter(|port| *port != 0)
         .unwrap_or(9222)
 }
 
@@ -858,6 +883,11 @@ pub fn router(state: Arc<AppsState>) -> Router {
         .route("/api/apps", get(list_apps).post(add_app))
         .route("/api/apps/order", get(get_order).put(reorder_apps))
         .route("/api/apps/launch-context", get(launch_context))
+        .route(
+            "/api/apps/desktop-presets",
+            get(desktop_presets).post(desktop_presets_for_app),
+        )
+        .route("/api/apps/chrome-preview", post(chrome_preview))
         .route("/api/apps/{id}/name", put(rename_app))
         .route(
             "/api/apps/{id}",
@@ -886,6 +916,91 @@ fn parse_desktop_launch(
             })
         })
         .transpose()
+}
+
+fn desktop_draft(state: &AppsState, body: &serde_json::Value) -> Result<ManagedApp, ApiError> {
+    let mut app = if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
+        state.store.get(id)?
+    } else {
+        ManagedApp {
+            id: creation_id(body, AppType::DesktopApp)?,
+            name: "Chrome".into(),
+            name_revision: 0,
+            app_type: AppType::DesktopApp,
+            autostart: false,
+            url: None,
+            launch_command: None,
+            launch_env_vars: None,
+            launch_cwd: None,
+            launch_wait_timeout_secs: None,
+            exec_command: None,
+            env_vars: None,
+            desktop_launch: Default::default(),
+            chrome: None,
+            proxy_url: None,
+            cli_binary_path: None,
+            cli_env_vars: None,
+            created_at: String::new(),
+            sort_order: 0,
+        }
+    };
+    if app.app_type != AppType::DesktopApp {
+        return Err(ApiError::new(
+            "desktop_preset_invalid",
+            "Only desktop applications have desktop presets",
+        ));
+    }
+    if body.get("env_vars").is_some() {
+        app.env_vars = parse_env_vars(body.get("env_vars"));
+    }
+    Ok(app)
+}
+
+async fn desktop_presets(State(state): State<Arc<AppsState>>) -> Response {
+    desktop_presets_for_app(State(state), axum::Json(json!({}))).await
+}
+
+async fn desktop_presets_for_app(
+    State(state): State<Arc<AppsState>>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let app = match desktop_draft(&state, &body) {
+        Ok(app) => app,
+        Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+    };
+    let installation =
+        tokio::task::spawn_blocking(move || super::chrome::installation_for_app(&app)).await;
+    json_response(
+        StatusCode::OK,
+        json!({"presets": [
+            {"id": "custom", "name": "Custom command"},
+            {"id": "chrome", "name": "Chrome", "installation": installation.ok()},
+        ]}),
+    )
+}
+
+async fn chrome_preview(
+    State(state): State<Arc<AppsState>>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let preview = || -> Result<serde_json::Value, ApiError> {
+        let mut app = desktop_draft(&state, &body)?;
+        super::chrome::apply_input(&mut app, &body)?;
+        if !super::chrome::generated(&app) {
+            return Err(ApiError::new(
+                "chrome_config_invalid",
+                "Preview requires generated Chrome configuration",
+            ));
+        }
+        let peers = state.store.list()?;
+        let _lock = super::chrome::configuration_lock(&app, &peers)?;
+        Ok(json!({"id": app.id, "exec_command": app.exec_command,
+            "chrome_config": app.chrome, "chrome_effective": super::chrome::resolve(&app)?}))
+    };
+    match preview() {
+        Ok(data) => json_response(StatusCode::OK, data),
+        Err(error) => err_response(StatusCode::BAD_REQUEST, error),
+    }
 }
 
 async fn get_launch_info(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
@@ -1028,14 +1143,23 @@ fn app_json(
         "sort_order": app.sort_order,
     });
 
-    if app.id == datadir::BUILTIN_CHROME_ID {
+    if app.chrome.is_some() {
         // Lets the console render the selective clear dialog without
         // hardcoding the built-in Chrome id.
-        obj["clear_categories"] = json!(datadir::ClearCategory::ALL
-            .iter()
-            .map(|category| category.as_str())
-            .collect::<Vec<_>>());
-        // The built-in Chrome app exposes an editable proxy URL; other apps do
+        obj["can_clear_data"] = json!(super::chrome::generated(app));
+        obj["can_full_reset"] = json!(
+            super::chrome::generated(app)
+                && super::chrome::resolve(app)
+                    .is_ok_and(|c| c.profile_dir.starts_with(&c.app_root)
+                        && c.crash_dir.starts_with(&c.app_root))
+        );
+        if super::chrome::generated(app) {
+            obj["clear_categories"] = json!(datadir::ClearCategory::ALL
+                .iter()
+                .map(|category| category.as_str())
+                .collect::<Vec<_>>());
+        }
+        // Chrome app exposes an editable proxy URL; other apps do
         // not manage the launch command, so the field is only advertised here.
         obj["proxy_url"] = json!(app.proxy_url);
         obj["proxy_configurable"] = json!(true);
@@ -1119,6 +1243,15 @@ fn app_json(
             obj["exec_command"] = json!(app.exec_command);
             obj["env_vars"] = json!(app.env_vars);
             obj["desktop_launch"] = json!(app.desktop_launch);
+            obj["desktop_preset"] = json!(if app.chrome.is_some() {
+                "chrome"
+            } else {
+                "custom"
+            });
+            obj["chrome_config"] = json!(app.chrome);
+            if super::chrome::generated(app) {
+                obj["chrome_effective"] = json!(super::chrome::resolve(app).ok());
+            }
             obj["launch_error"] = json!(state.process.failure(&app.id).map(|e| e.body()));
             // A running process is not proof of a mapped application window.
             // Worker status describes its session; it has a different compositor.
@@ -1213,8 +1346,16 @@ async fn reorder_apps(
 
 fn name_error(error: ApiError) -> Response {
     let status = match error.code {
-        "app_name_required" | "app_name_invalid" | "app_name_too_long" => StatusCode::BAD_REQUEST,
-        "app_name_exists" | "app_name_conflict" => StatusCode::CONFLICT,
+        "app_name_required"
+        | "app_name_invalid"
+        | "app_name_too_long"
+        | "chrome_path_invalid"
+        | "chrome_proxy_invalid"
+        | "chrome_port_invalid" => StatusCode::BAD_REQUEST,
+        "app_name_exists"
+        | "app_name_conflict"
+        | "chrome_directory_conflict"
+        | "chrome_port_conflict" => StatusCode::CONFLICT,
         "app_not_found" => StatusCode::NOT_FOUND,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -1233,6 +1374,7 @@ async fn rename_app(
     Path(id): Path<String>,
     body: Result<axum::Json<RenameRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    let _configuration = state.config_operations.lock().await;
     if id == BUILTIN_MIAO_ID {
         return err_response(
             StatusCode::FORBIDDEN,
@@ -1247,6 +1389,13 @@ async fn rename_app(
     };
     match state.store.rename(&id, &body.name, body.base_revision) {
         Ok(app) => {
+            if let Ok(current) = state.store.get(&id) {
+                if current.chrome.is_some() {
+                    if let Err(error) = state.write_desktop_entry(&current) {
+                        log::warn!("Could not refresh renamed Chrome desktop entry: {error}");
+                    }
+                }
+            }
             state.refresh_stream_apps();
             json_response(StatusCode::OK, json!(app))
         }
@@ -1281,6 +1430,7 @@ async fn add_app(
     State(state): State<Arc<AppsState>>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
+    let _configuration = state.config_operations.lock().await;
     let mut name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.trim().is_empty() => n.to_string(),
         _ if body["app_type"] == "remote" => String::new(),
@@ -1401,6 +1551,7 @@ async fn add_app(
         AppType::DesktopApp => {
             let exec_command = match body.get("exec_command").and_then(|v| v.as_str()) {
                 Some(e) if !e.trim().is_empty() => Some(e.trim().to_string()),
+                _ if body["desktop_preset"] == "chrome" => None,
                 _ => {
                     return err_response(
                         StatusCode::BAD_REQUEST,
@@ -1408,7 +1559,7 @@ async fn add_app(
                             "exec_command_required",
                             "missing exec_command for desktop app",
                         ),
-                    )
+                    );
                 }
             };
             let env_vars = parse_env_vars(body.get("env_vars"));
@@ -1464,7 +1615,7 @@ async fn add_app(
     } else {
         Default::default()
     };
-    let app = ManagedApp {
+    let mut app = ManagedApp {
         id,
         name,
         app_type,
@@ -1477,6 +1628,7 @@ async fn add_app(
         exec_command,
         env_vars,
         desktop_launch,
+        chrome: None,
         proxy_url,
         cli_binary_path,
         cli_env_vars,
@@ -1485,6 +1637,11 @@ async fn add_app(
         name_revision: 0,
     };
 
+    if app_type == AppType::DesktopApp {
+        if let Err(error) = super::chrome::apply_input(&mut app, &body) {
+            return err_response(StatusCode::BAD_REQUEST, error);
+        }
+    }
     if let Err(e) = state.store.add(&app) {
         return err_response(StatusCode::CONFLICT, e);
     }
@@ -1498,13 +1655,7 @@ async fn add_app(
         state.remote_health.remember_token(&app.id, token);
     }
     if app.app_type == AppType::DesktopApp {
-        let exec_command = app
-            .exec_command
-            .as_deref()
-            .ok_or_else(|| "missing exec_command for desktop app".to_string());
-        if let Err(e) =
-            exec_command.and_then(|exec| desktop_entry::ensure_desktop_entry(&app.name, exec))
-        {
+        if let Err(e) = state.write_desktop_entry(&app) {
             if let Err(delete_err) = state.store.delete(&app.id) {
                 log::warn!(
                     "Failed to roll back app {} after desktop entry error: {}",
@@ -1548,6 +1699,7 @@ async fn update_app(
     Path(id): Path<String>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
+    let _configuration = state.config_operations.lock().await;
     let mut app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, e),
@@ -1656,40 +1808,17 @@ async fn update_app(
             }
         }
         AppType::DesktopApp => {
-            if let Some(exec) = body.get("exec_command").and_then(|v| v.as_str()) {
-                let exec = exec.trim();
-                if exec.is_empty() {
-                    return err_response(
-                        StatusCode::BAD_REQUEST,
-                        ApiError::new(
-                            "exec_command_required",
-                            "missing exec_command for desktop app",
-                        ),
-                    );
-                }
-                app.exec_command = Some(exec.to_string());
-            }
             app.env_vars = parse_env_vars(body.get("env_vars"));
             match parse_desktop_launch(body.get("desktop_launch")) {
                 Ok(Some(options)) => app.desktop_launch = options,
                 Ok(None) => {}
                 Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
             }
-            // The built-in Chrome app keeps its proxy setting as a separate,
-            // user-editable field. Regenerate the managed command whenever the
-            // proxy URL is submitted so the change takes effect on next launch.
-            if body.get("proxy_url").is_some() {
-                app.proxy_url = parse_optional_string(body.get("proxy_url"));
-                if app.id == datadir::BUILTIN_CHROME_ID {
-                    match builtin_chrome_command(app.proxy_url.as_deref()) {
-                        Ok(command) => app.exec_command = Some(command),
-                        Err(error) => {
-                            return err_response(StatusCode::INTERNAL_SERVER_ERROR, error)
-                        }
-                    }
-                }
+            if let Err(error) = super::chrome::apply_input(&mut app, &body) {
+                return err_response(StatusCode::BAD_REQUEST, error);
             }
         }
+
         AppType::CliApp => {
             if let Some(path) = body.get("cli_binary_path").and_then(|v| v.as_str()) {
                 let path = path.trim();
@@ -1717,6 +1846,11 @@ async fn update_app(
     ) {
         return name_error(e);
     }
+    if app.app_type == AppType::DesktopApp {
+        if let Err(error) = state.write_desktop_entry(&app) {
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, error);
+        }
+    }
     // Tabs show the name.
     state.refresh_stream_apps();
     let current = state.store.get(&id).unwrap_or(app);
@@ -1727,6 +1861,7 @@ async fn update_app(
 }
 
 async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    let _configuration = state.config_operations.lock().await;
     if id == BUILTIN_MIAO_ID {
         return err_response(
             StatusCode::FORBIDDEN,
@@ -1738,8 +1873,30 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
     }
     // Clean up data directory before removing from store
     if let Ok(app) = state.store.get(&id) {
-        let _ = state.stop_app_processes(&app).await;
-        let _ = std::fs::remove_dir_all(datadir::app_root(&app));
+        if let Err(error) = state.stop_app_processes(&app).await {
+            if error.code != "app_not_running" {
+                return err_response(StatusCode::CONFLICT, error);
+            }
+        }
+        if let Err(error) = state.process.while_stopped(&id, || {
+            let _resources = if app.chrome.is_some() {
+                Some(super::chrome::managed_root_lock(&app)?)
+            } else {
+                None
+            };
+            let root = datadir::app_root(&app);
+            if root.exists() {
+                std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+            }
+            if app.chrome.is_some() {
+                let _ = std::fs::remove_file(
+                    crate::paths::applications_dir().join(format!("ivnc-{}.desktop", app.id)),
+                );
+            }
+            Ok(())
+        }) {
+            return err_response(StatusCode::CONFLICT, error);
+        }
         if crate::remote::valid_id(&app.id) {
             let _ = std::fs::remove_dir_all(state.process.runtime_dir(&app.id));
         }
@@ -1756,6 +1913,7 @@ async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>)
 }
 
 async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    let _configuration = state.config_operations.lock().await;
     if id == BUILTIN_MIAO_ID && !state.proxy_panel.status().enabled {
         return err_response(
             StatusCode::FORBIDDEN,
@@ -1785,6 +1943,7 @@ async fn start_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
 }
 
 async fn stop_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    let _configuration = state.config_operations.lock().await;
     let app = match state.store.get(&id) {
         Ok(a) => a,
         Err(e) => return err_response(StatusCode::NOT_FOUND, e),
@@ -1797,6 +1956,7 @@ async fn stop_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -
 }
 
 async fn restart_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
+    let _configuration = state.config_operations.lock().await;
     if id == BUILTIN_MIAO_ID && !state.proxy_panel.status().enabled {
         return err_response(
             StatusCode::FORBIDDEN,
@@ -1834,7 +1994,7 @@ async fn data_size(State(state): State<Arc<AppsState>>, Path(id): Path<String>) 
 #[derive(Debug, Default, serde::Deserialize)]
 struct ClearDataRequest {
     /// Chrome only: selected data categories. Absent means the default set
-    /// (everything except extensions).
+    /// (everything except extensions and site storage).
     #[serde(default)]
     categories: Option<Vec<String>>,
     /// Chrome only: remove the whole profile and sidecar data.
@@ -1879,6 +2039,7 @@ async fn clear_data(
     Path(id): Path<String>,
     body: Option<axum::Json<ClearDataRequest>>,
 ) -> Response {
+    let _configuration = state.config_operations.lock().await;
     if id == BUILTIN_MIAO_ID {
         return err_response(
             StatusCode::FORBIDDEN,
@@ -1905,24 +2066,63 @@ async fn clear_data(
         Ok(selection) => selection,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
-    // Stop app before clearing data
-    let _ = state.stop_app_processes(&app).await;
-    let before = datadir::durable_size(&app);
-    match datadir::clear(&app, &selection) {
-        Ok(()) => {
-            let freed = before.saturating_sub(datadir::durable_size(&app));
-            json_response(
-                StatusCode::OK,
-                json!({
-                    "ok": true,
-                    "categories": selection.categories.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
-                    "full_reset": selection.full_reset,
-                    "freed_bytes": freed,
-                    "freed_human": datadir::size_human(freed),
-                }),
-            )
+    if app.chrome.is_some() {
+        if !super::chrome::generated(&app) {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                ApiError::new(
+                    "chrome_manual_cleanup",
+                    "Chrome data cleanup is unavailable in manual command mode",
+                ),
+            );
         }
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+        if selection.full_reset
+            && super::chrome::resolve(&app).is_ok_and(|c| {
+                !c.profile_dir.starts_with(&c.app_root) || !c.crash_dir.starts_with(&c.app_root)
+            })
+        {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                ApiError::new(
+                    "chrome_external_full_reset",
+                    "Use category cleanup for external Chrome directories",
+                ),
+            );
+        }
+    }
+    if let Err(error) = state.stop_app_processes(&app).await {
+        if error.code != "app_not_running" {
+            return err_response(StatusCode::CONFLICT, error.or("app_stop_failed"));
+        }
+    }
+    let result = state.process.while_stopped(&id, || {
+        let current = state.store.get(&id)?;
+        let before = datadir::durable_size(&current);
+        datadir::clear(&current, &selection)?;
+        Ok(before.saturating_sub(datadir::durable_size(&current)))
+    });
+    match result {
+        Ok(freed) => json_response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "categories": selection.categories.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+                "full_reset": selection.full_reset,
+                "freed_bytes": freed,
+                "freed_human": datadir::size_human(freed),
+            }),
+        ),
+        Err(e) => {
+            let status = match e.code {
+                "chrome_profile_busy" | "chrome_directory_conflict" => StatusCode::CONFLICT,
+                "chrome_path_invalid"
+                | "chrome_manual_cleanup"
+                | "chrome_directory_unmanaged"
+                | "chrome_external_full_reset" => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            err_response(status, e)
+        }
     }
 }
 
@@ -2184,7 +2384,7 @@ mod tests {
     #[test]
     fn chrome_json_advertises_clear_categories() {
         let state = state(None, None);
-        ensure_builtin_chrome(&state.store, "google-chrome").unwrap();
+        ensure_builtin_chrome(&state.store).unwrap();
         let app = state.store.get("builtin-chrome").unwrap();
         let json = app_json(&state, &app, "stopped", None, 0);
         let categories = json["clear_categories"].as_array().unwrap();
@@ -2195,56 +2395,81 @@ mod tests {
     #[tokio::test]
     async fn chrome_autostart_edits_survive_registration_and_command_refresh() {
         let state = state(None, None);
-        let id = "builtin-chrome";
-        ensure_builtin_chrome(&state.store, "google-chrome --original").unwrap();
-        assert!(!state.store.get(id).unwrap().autostart);
-
-        for (autostart, refreshed_command) in [
-            (true, "google-chrome --updated-enabled"),
-            (false, "google-chrome --updated-disabled"),
-        ] {
+        ensure_builtin_chrome(&state.store).unwrap();
+        for autostart in [true, false] {
             let response = update_app(
                 State(state.clone()),
-                Path(id.to_string()),
+                Path("builtin-chrome".into()),
                 axum::Json(json!({"autostart": autostart, "env_vars": {"LANG": "zh_CN.UTF-8"}})),
             )
             .await;
             assert_eq!(response.status(), StatusCode::OK);
-            let saved = state.store.get(id).unwrap();
-            let original_command = saved.exec_command.as_deref().unwrap();
-
-            ensure_builtin_chrome(&state.store, original_command).unwrap();
-            let unchanged = state.store.get(id).unwrap();
-            assert_eq!(unchanged.autostart, autostart);
-            assert_eq!(unchanged.env_vars, saved.env_vars);
-
-            ensure_builtin_chrome(&state.store, refreshed_command).unwrap();
-            let updated = state.store.get(id).unwrap();
-            assert_eq!(updated.autostart, autostart);
-            assert_eq!(updated.exec_command.as_deref(), Some(refreshed_command));
+            let before = state.store.get("builtin-chrome").unwrap();
+            ensure_builtin_chrome(&state.store).unwrap();
+            let after = state.store.get("builtin-chrome").unwrap();
+            assert_eq!(after.autostart, autostart);
+            assert_eq!(after.env_vars, before.env_vars);
+            assert_eq!(after.exec_command, before.exec_command);
         }
     }
 
     #[test]
     fn chrome_legacy_type_migration_preserves_autostart() {
         let store = AppStore::in_memory();
-        ensure_builtin_chrome(&store, "google-chrome").unwrap();
-        for autostart in [true, false] {
-            let mut legacy = store.get("builtin-chrome").unwrap();
-            legacy.app_type = AppType::BackgroundApp;
-            legacy.autostart = autostart;
-            legacy.launch_command = Some("legacy launcher".into());
-            legacy.url = Some("http://127.0.0.1:1234".into());
-            store.update(&legacy).unwrap();
+        let mut legacy = ManagedApp::for_test("builtin-chrome", AppType::BackgroundApp);
+        legacy.name = "Chrome".into();
+        legacy.autostart = true;
+        legacy.launch_command = Some("legacy launcher".into());
+        store.add(&legacy).unwrap();
+        ensure_builtin_chrome(&store).unwrap();
+        let app = store.get("builtin-chrome").unwrap();
+        assert_eq!(app.app_type, AppType::DesktopApp);
+        assert!(app.autostart);
+        assert!(super::super::chrome::generated(&app));
+        assert!(app.launch_command.is_none());
+    }
 
-            ensure_builtin_chrome(&store, "google-chrome --wayland").unwrap();
-            let app = store.get("builtin-chrome").unwrap();
-            assert_eq!(app.app_type, AppType::DesktopApp);
-            assert_eq!(app.autostart, autostart);
-            assert_eq!(app.exec_command.as_deref(), Some("google-chrome --wayland"));
-            assert!(app.launch_command.is_none());
-            assert!(app.url.is_none());
-        }
+    #[test]
+    fn chrome_registration_keeps_unavailable_saved_profiles_repairable() {
+        let state = state(None, None);
+        ensure_builtin_chrome(&state.store).unwrap();
+        let mut app = state.store.get("builtin-chrome").unwrap();
+        let external = state.test_entries.join("external-profile");
+        std::fs::create_dir_all(&external).unwrap();
+        app.chrome.as_mut().unwrap().profile_dir = Some(external.to_string_lossy().into_owned());
+        super::super::chrome::refresh_command(&mut app).unwrap();
+        state.store.update(&app).unwrap();
+        std::fs::remove_dir(&external).unwrap();
+        std::fs::write(&external, b"profile is temporarily unavailable").unwrap();
+        ensure_builtin_chrome(&state.store).unwrap();
+        let after = state.store.get("builtin-chrome").unwrap();
+        assert_eq!(after.chrome, app.chrome);
+        assert_eq!(after.exec_command, app.exec_command);
+        assert!(super::super::chrome::generated(&after));
+        std::fs::remove_dir_all(&state.test_entries).unwrap();
+    }
+
+    #[test]
+    fn builtin_initialization_does_not_steal_a_saved_debug_port() {
+        let state = state(None, None);
+        let mut other =
+            ManagedApp::for_test(&uuid::Uuid::new_v4().to_string(), AppType::DesktopApp);
+        other.chrome = Some(super::super::chrome::ChromeConfig {
+            debug_port: Some(chrome_devtools_port()),
+            ..Default::default()
+        });
+        super::super::chrome::refresh_command(&mut other).unwrap();
+        state.store.add(&other).unwrap();
+        ensure_builtin_chrome(&state.store).unwrap();
+        let builtin = state.store.get("builtin-chrome").unwrap();
+        assert!(super::super::chrome::generated(&builtin));
+        assert_eq!(builtin.chrome.as_ref().unwrap().debug_port, None);
+        assert_eq!(state.store.get(&other.id).unwrap().chrome, other.chrome);
+        ensure_builtin_chrome(&state.store).unwrap();
+        assert_eq!(
+            state.store.get("builtin-chrome").unwrap().chrome,
+            builtin.chrome
+        );
     }
 
     #[test]
@@ -2265,34 +2490,127 @@ mod tests {
     }
 
     #[test]
+    fn chrome_migration_preserves_known_directories_and_arbitrary_manual_commands() {
+        let store = AppStore::in_memory();
+        let mut legacy = ManagedApp::for_test("builtin-chrome", AppType::DesktopApp);
+        legacy.name = "My browser".into();
+        legacy.autostart = true;
+        legacy.proxy_url = Some("socks5://localhost:1080".into());
+        legacy.exec_command = Some(builtin_chrome_command(legacy.proxy_url.as_deref()).unwrap());
+        store.add(&legacy).unwrap();
+        ensure_builtin_chrome(&store).unwrap();
+        let generated = store.get("builtin-chrome").unwrap();
+        assert!(super::super::chrome::generated(&generated));
+        assert_eq!(
+            generated.chrome.as_ref().unwrap().profile_dir,
+            Some(
+                crate::paths::chrome_profile()
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+        assert_eq!(generated.proxy_url, legacy.proxy_url);
+        assert_eq!(generated.autostart, legacy.autostart);
+        assert_eq!(generated.name, legacy.name);
+        assert!(!generated.exec_command.as_ref().unwrap().contains("rm -f"));
+        let manual = "source '/my/profile'; exec custom-chrome --custom\n# preserved  \n";
+        let mut manual_app = generated;
+        manual_app.chrome = None;
+        manual_app.exec_command = Some(manual.into());
+        store.update(&manual_app).unwrap();
+        ensure_builtin_chrome(&store).unwrap();
+        ensure_builtin_chrome(&store).unwrap();
+        let after = store.get("builtin-chrome").unwrap();
+        assert_eq!(
+            after.chrome.as_ref().unwrap().mode,
+            super::super::chrome::CommandMode::Manual
+        );
+        assert_eq!(after.exec_command.as_deref(), Some(manual));
+    }
+
+    #[tokio::test]
+    async fn chrome_preview_is_side_effect_free_and_generated_input_is_not_executed() {
+        let state = state(None, None);
+        let id = uuid::Uuid::new_v4().to_string();
+        let response = chrome_preview(
+            State(state.clone()),
+            axum::Json(json!({
+                "creation_id": id, "desktop_preset":"chrome", "chrome_config":{},
+                "exec_command":"touch /tmp/never-execute-a-preview"
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(body["exec_command"]
+            .as_str()
+            .unwrap()
+            .contains("exec google-chrome"));
+        assert!(!crate::paths::app_dir(&id).exists());
+        assert!(state.store.get_optional(&id).unwrap().is_none());
+        for port in [json!(0), json!(65536), json!("invalid")] {
+            let response = chrome_preview(State(state.clone()), axum::Json(json!({"creation_id":id,"desktop_preset":"chrome","chrome_config":{"debug_port":port}}))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_empty_port_and_manual_commands_survive_save_and_registration() {
+        let state = state(None, None);
+        ensure_builtin_chrome(&state.store).unwrap();
+        let update = |body| {
+            update_app(
+                State(state.clone()),
+                Path("builtin-chrome".into()),
+                axum::Json(body),
+            )
+        };
+        let response =
+            update(json!({"chrome_config":{"debug_port":null},"exec_command":"must-be-ignored"}))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        ensure_builtin_chrome(&state.store).unwrap();
+        let app = state.store.get("builtin-chrome").unwrap();
+        assert_eq!(app.chrome.as_ref().unwrap().debug_port, None);
+        assert!(!app.exec_command.unwrap().contains("--remote-debugging"));
+        let manual = "custom-browser --flag\n# exact command  \n";
+        assert_eq!(update(json!({"chrome_config":{"mode":"manual"},"exec_command":manual,"proxy_url":"inactive"})).await.status(), StatusCode::OK);
+        ensure_builtin_chrome(&state.store).unwrap();
+        assert_eq!(
+            state
+                .store
+                .get("builtin-chrome")
+                .unwrap()
+                .exec_command
+                .as_deref(),
+            Some(manual)
+        );
+    }
+
+    #[test]
     fn chrome_proxy_url_survives_registration_command_refresh() {
         let state = state(None, None);
-        let id = "builtin-chrome";
-        ensure_builtin_chrome(&state.store, "google-chrome --original").unwrap();
-        let mut app = state.store.get(id).unwrap();
+        ensure_builtin_chrome(&state.store).unwrap();
+        let mut app = state.store.get("builtin-chrome").unwrap();
         app.proxy_url = Some("socks5://127.0.0.1:1080".into());
-        app.exec_command = Some(builtin_chrome_command(app.proxy_url.as_deref()).unwrap());
+        super::super::chrome::refresh_command(&mut app).unwrap();
         state.store.update(&app).unwrap();
-
-        // A managed command refresh regenerates the command from the saved
-        // proxy URL (as ensure_builtin_apps does) and must not drop the setting.
-        let refreshed = builtin_chrome_command(app.proxy_url.as_deref()).unwrap();
-        ensure_builtin_chrome(&state.store, &refreshed).unwrap();
-        let after = state.store.get(id).unwrap();
-        assert_eq!(after.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
-        assert_eq!(after.exec_command.as_deref(), Some(refreshed.as_str()));
-
-        // Even an unrelated forced command refresh keeps the user's proxy URL.
-        ensure_builtin_chrome(&state.store, "google-chrome --forced").unwrap();
-        let forced = state.store.get(id).unwrap();
-        assert_eq!(forced.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
+        ensure_builtin_chrome(&state.store).unwrap();
+        let after = state.store.get("builtin-chrome").unwrap();
+        assert_eq!(after.proxy_url, app.proxy_url);
+        assert_eq!(after.exec_command, app.exec_command);
     }
 
     #[tokio::test]
     async fn chrome_update_persists_proxy_url_and_regenerates_command() {
         let state = state(None, None);
         let id = "builtin-chrome";
-        ensure_builtin_chrome(&state.store, "google-chrome --original").unwrap();
+        ensure_builtin_chrome(&state.store).unwrap();
         let response = update_app(
             State(state.clone()),
             Path(id.to_string()),
@@ -2305,8 +2623,7 @@ mod tests {
         assert_eq!(
             app.exec_command.as_deref(),
             Some(
-                builtin_chrome_command(app.proxy_url.as_deref())
-                    .unwrap()
+                super::super::chrome::command(&app, &super::super::chrome::resolve(&app).unwrap())
                     .as_str()
             )
         );
@@ -2331,7 +2648,7 @@ mod tests {
     #[test]
     fn chrome_json_advertises_proxy_url_and_configurable_flag() {
         let state = state(None, None);
-        ensure_builtin_chrome(&state.store, "google-chrome").unwrap();
+        ensure_builtin_chrome(&state.store).unwrap();
         let app = state.store.get("builtin-chrome").unwrap();
         let json = app_json(&state, &app, "stopped", None, 0);
         assert_eq!(json["proxy_url"], serde_json::Value::Null);
@@ -2468,6 +2785,37 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!runtime.exists());
         assert!(state.store.get_optional(&app.id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_unstarted_chrome_preserves_unclaimed_external_data() {
+        let state = state(None, None);
+        for unavailable in [false, true] {
+            let mut app =
+                ManagedApp::for_test(&uuid::Uuid::new_v4().to_string(), AppType::DesktopApp);
+            let external = state.test_entries.join(&app.id);
+            std::fs::create_dir_all(&external).unwrap();
+            app.chrome = Some(super::super::chrome::ChromeConfig {
+                profile_dir: Some(external.to_string_lossy().into_owned()),
+                ..Default::default()
+            });
+            super::super::chrome::refresh_command(&mut app).unwrap();
+            state.store.add(&app).unwrap();
+            if unavailable {
+                std::fs::remove_dir(&external).unwrap();
+            }
+            let sentinel = if unavailable {
+                external.clone()
+            } else {
+                external.join("keep")
+            };
+            std::fs::write(&sentinel, b"external user data").unwrap();
+            let response = delete_app(State(state.clone()), Path(app.id.clone())).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(std::fs::read(sentinel).unwrap(), b"external user data");
+            assert!(state.store.get_optional(&app.id).unwrap().is_none());
+        }
+        std::fs::remove_dir_all(&state.test_entries).unwrap();
     }
 
     #[tokio::test]
@@ -2614,7 +2962,7 @@ mod tests {
     #[tokio::test]
     async fn rename_changes_only_the_name_and_respects_read_only_apps() {
         let state = state(None, None);
-        ensure_builtin_chrome(&state.store, "test-chrome").unwrap();
+        ensure_builtin_chrome(&state.store).unwrap();
         let mut app = ManagedApp::for_test("rename-desktop", AppType::DesktopApp);
         app.name = "Rename desktop".into();
         app.env_vars = Some(HashMap::from([("KEEP".into(), "value".into())]));

@@ -41,16 +41,21 @@ export function enhanceSelect(select, label) {
     function sync() {
         button.textContent = select.selectedOptions[0]?.textContent || '';
         button.disabled = select.disabled;
-        popup.replaceChildren(...options().map((option, i) => {
-            const node = document.createElement('div');
-            node.id = `${popup.id}-${i}`; node.setAttribute('role', 'option');
+        const all = options();
+        while (popup.children.length > all.length) popup.lastElementChild.remove();
+        all.forEach((option, i) => {
+            let node = popup.children[i];
+            if (!node) {
+                node = document.createElement('div');
+                node.id = `${popup.id}-${i}`; node.setAttribute('role', 'option');
+                node.addEventListener('pointermove', () => highlight(i));
+                node.addEventListener('click', () => choose(i));
+                popup.appendChild(node);
+            }
             node.setAttribute('aria-selected', String(option.selected));
             node.setAttribute('aria-disabled', String(option.disabled));
-            node.textContent = option.textContent;
-            node.addEventListener('pointermove', () => highlight(i));
-            node.addEventListener('click', () => choose(i));
-            return node;
-        }));
+            if (node.textContent !== option.textContent) node.textContent = option.textContent;
+        });
         if (select.disabled) close();
         if (!popup.hidden) { highlight(index); position(); }
     }

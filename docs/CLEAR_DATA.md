@@ -1,6 +1,6 @@
-# 内置 Chrome 的选择性数据清理
+# Chrome 的选择性数据清理
 
-控制台“应用”页的“清理数据”操作对内置 Chrome（`builtin-chrome`）打开选择性清理对话框；其他应用保持原有的一次性确认流程。本文说明类别、扩展数据边界、接口与安全边界。
+控制台“应用”页的“清理数据”操作对配置生成模式的 Chrome 预设打开选择性清理对话框，包含内置 Chrome（`builtin-chrome`）和用户新增的 Chrome。手动命令模式停用目录清理；其他应用保持原有的一次性确认流程。本文说明类别、扩展数据边界、接口与安全边界，预设配置见 [Chrome 桌面应用](CHROME_APPS.md)。
 
 ## 清理类别
 
@@ -16,7 +16,7 @@
 | `extensions` 扩展及其数据（默认不选） | Extensions、Local Extension Settings、扩展 IndexedDB；并从 Preferences 删除 `extensions` 记录、删除 Secure Preferences 以便 Chrome 重建 | 其他类别；Preferences 无法解析为 JSON 时整体删除重建 |
 | `site_storage` 网站本地存储（默认不选） | Local Storage、Session Storage、WebStorage | Cookie、缓存、历史、密码、书签、扩展、Service Worker 注册 |
 
-类别清单只列出已知的 Chrome profile 条目。Chrome 更新后新增的未知文件会被保留，因此选择性清理可能留下少量数据，但不会删除不该删的内容。**完整的 sidecar 配置目录（`~/.config/google-chrome` 与 `$IVNC_HOME/.config/google-chrome`）不属于任何类别；只有“完全重置”才会移除它们。**
+类别清单只列出已知的 Chrome profile 条目。Chrome 更新后新增的未知文件会被保留，因此选择性清理可能留下少量数据。宿主机用户的 `~/.config/google-chrome`、`$IVNC_HOME/.config/google-chrome` 及全局 `/tmp/com.google.Chrome.*` 不属于本应用数据，选择性清理和完全重置都不会删除它们。
 
 ## 扩展数据能否恢复
 
@@ -34,9 +34,11 @@ Chrome 把网站数据和扩展数据混合存放在同一批存储里，因此�
 
 ## 完全重置
 
-“完全重置”需要二次点击确认，走原有清空逻辑：删除应用数据、工作目录、Chrome profile 以及 sidecar 配置目录，并重建 iVnc 管理的应用布局。它会移除宿主机用户真实的 `~/.config/google-chrome`，仅在确实需要全部重置时使用。
+“完全重置”需要二次点击确认，仅在 profile 与崩溃目录均位于该应用根目录内时提供：删除该应用的数据目录、隔离 HOME、profile、崩溃目录及其专属临时目录，并重建应用布局。它不会删除其他应用或宿主机浏览器的数据。
 
-清理前会先停止该应用的进程。清理过程中单个条目删除失败会被汇总返回，不会让一个无法访问的文件中断其余类别。
+外部目录仅支持按类别清理，且必须已由此应用启动并建立归属标记；不会递归删除整个外部目录。手动模式没有可信的有效目录，返回 `400 chrome_manual_cleanup`。外部目录请求完全重置返回 `400 chrome_external_full_reset`。删除应用记录也只删除该应用自己的根目录，保留外部目录。
+
+清理前会先确认该应用停止，并在进程管理锁和资源锁内执行，避免 watchdog 重启或其他 Chrome 启动与删除竞争。活动 profile、目录重叠以及通过符号链接越界的删除会被拒绝。单个条目删除失败会汇总返回。
 
 ## 接口
 

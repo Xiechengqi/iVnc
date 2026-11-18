@@ -27,6 +27,9 @@ npm --prefix web/ivnc run test:mobile-input
 npm --prefix web/ivnc run test:ime
 npm --prefix web/ivnc run test:settings
 npm --prefix web/ivnc run test:app-sharing
+npm --prefix web/ivnc run test:chrome-preset
+npm --prefix web/ivnc run test:clear-data
+npm --prefix web/ivnc run test:proxy-url
 node --test scripts/video_playback_test.mjs scripts/viewport_test.mjs scripts/clipboard_test.mjs
 node scripts/gesture_navigation_smoke.mjs
 npm --prefix web/ivnc run build

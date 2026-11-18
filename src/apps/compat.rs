@@ -504,7 +504,7 @@ pub fn plan(
         report_path: None,
         profile_homes: Vec::new(),
     };
-    if plan.options.compatibility == Compatibility::Raw {
+    if app.chrome.is_some() || plan.options.compatibility == Compatibility::Raw {
         return Ok(plan);
     }
     let cwd = env

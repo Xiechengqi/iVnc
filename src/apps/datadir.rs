@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const BUILTIN_CHROME_ID: &str = "builtin-chrome";
 
-/// Selective data categories offered by the built-in Chrome clear dialog.
+/// Selective data categories offered by managed Chrome applications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClearCategory {
     Cache,
@@ -49,7 +49,7 @@ impl ClearCategory {
     }
 }
 
-/// What a clear-data request removes for the built-in Chrome app.
+/// What a clear-data request removes for a managed Chrome application.
 pub struct ClearSelection {
     pub categories: Vec<ClearCategory>,
     /// Remove the whole profile and sidecar data (the legacy behavior).
@@ -97,11 +97,20 @@ fn durable_dirs(app: &ManagedApp) -> Vec<PathBuf> {
         crate::paths::app_data_dir(&app.id),
         crate::paths::app_home(&app.id),
     ];
-    if app.id == BUILTIN_CHROME_ID {
-        dirs.push(crate::paths::chrome_profile());
-        dirs.extend(crate::paths::chrome_sidecar_config_dirs());
+    if super::chrome::generated(app) {
+        if let Ok(chrome) = super::chrome::resolve(app) {
+            dirs.extend([chrome.profile_dir, chrome.crash_dir, chrome.temp_dir]);
+        }
     }
-    dirs
+    // Nested profile/crash/home paths must never be counted or removed twice.
+    dirs.sort_by_key(|path| path.components().count());
+    let mut unique = Vec::<PathBuf>::new();
+    for dir in dirs {
+        if !unique.iter().any(|parent| dir.starts_with(parent)) {
+            unique.push(dir);
+        }
+    }
+    unique
 }
 
 fn should_recreate_after_clear(dir: &Path) -> bool {
@@ -130,21 +139,31 @@ pub fn dir_size(path: &PathBuf) -> u64 {
         .unwrap_or(0)
 }
 
-/// Total durable data size for an app (data + home + chrome profile + sidecars).
+/// Total managed data size, counting nested profile/crash paths only once.
 pub fn durable_size(app: &ManagedApp) -> u64 {
-    let mut total: u64 = durable_dirs(app).iter().map(dir_size).sum();
-    if app.id == BUILTIN_CHROME_ID {
-        total = total.saturating_add(chrome_tmp_singleton_size());
-    }
-    total
+    durable_dirs(app).iter().map(dir_size).sum()
 }
 
-pub fn clear(app: &ManagedApp, selection: &ClearSelection) -> Result<(), String> {
+pub fn clear(app: &ManagedApp, selection: &ClearSelection) -> Result<(), super::error::ApiError> {
     if app.id == crate::proxy_panel::BUILTIN_MIAO_ID {
         return Err("Miao configuration cannot be cleared as ordinary app data".into());
     }
-    if app.id == BUILTIN_CHROME_ID && !selection.full_reset {
-        return clear_chrome_selective(selection);
+    let _resources = if app.chrome.is_some() {
+        Some(super::chrome::cleanup_lock(app)?)
+    } else {
+        None
+    };
+    if app.chrome.is_some() && !selection.full_reset {
+        return clear_chrome_selective(app, selection).map_err(Into::into);
+    }
+    if app.chrome.is_some() {
+        let resolved = super::chrome::resolve(app)?;
+        if [&resolved.profile_dir, &resolved.crash_dir]
+            .iter()
+            .any(|p| !p.starts_with(&resolved.app_root))
+        {
+            return Err(super::error::ApiError::new("chrome_external_full_reset", "Full reset is only available for directories inside this application's directory; use category cleanup for external profiles"));
+        }
     }
     for dir in durable_dirs(app) {
         if dir.exists() {
@@ -156,9 +175,6 @@ pub fn clear(app: &ManagedApp, selection: &ClearSelection) -> Result<(), String>
                 .map_err(|e| format!("Failed to recreate {}: {}", dir.display(), e))?;
         }
     }
-    if app.id == BUILTIN_CHROME_ID {
-        clear_chrome_tmp_singletons();
-    }
     Ok(())
 }
 
@@ -166,6 +182,19 @@ pub fn clear(app: &ManagedApp, selection: &ClearSelection) -> Result<(), String>
 /// collected so one unreadable entry does not abort the whole clear.
 fn remove_entries(paths: Vec<PathBuf>, errors: &mut Vec<String>) {
     for path in paths {
+        // Unlinking a selected symlink is safe; traversing a symlink in one of
+        // its parents could delete data outside the configured profile.
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+        {
+            errors.push(format!(
+                "Refusing to clear through a symbolic link: {}",
+                path.display()
+            ));
+            continue;
+        }
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
@@ -185,7 +214,7 @@ fn remove_entries(paths: Vec<PathBuf>, errors: &mut Vec<String>) {
 // reset removes everything), so a Chrome update adding new files can leave
 // some data behind but can never delete too much. Whole sidecar config
 // directories are deliberately NOT part of any category: they may contain the
-// host user's real Chrome profile and must only be removed by a full reset.
+// host user's real Chrome profile and are never part of application cleanup.
 
 fn chrome_cache_paths(profile: &Path) -> Vec<PathBuf> {
     let default_dir = profile.join("Default");
@@ -222,7 +251,6 @@ fn chrome_cache_paths(profile: &Path) -> Vec<PathBuf> {
     // Site caches only; registrations stay so installed PWAs keep working.
     paths.push(service_worker.join("CacheStorage"));
     paths.push(service_worker.join("ScriptCache"));
-    paths.push(crate::paths::app_home(BUILTIN_CHROME_ID).join(".cache"));
     paths
 }
 
@@ -403,9 +431,22 @@ fn scrub_extension_registration(profile: &Path, errors: &mut Vec<String>) {
 /// unless the extensions category is selected, so surviving extensions never
 /// trip Chrome tamper detection. Local State holds browser-wide profile
 /// metadata rather than extension registrations and is always preserved.
-fn clear_chrome_selective(selection: &ClearSelection) -> Result<(), String> {
-    let profile = crate::paths::chrome_profile();
+fn clear_chrome_selective(app: &ManagedApp, selection: &ClearSelection) -> Result<(), String> {
+    let resolved = super::chrome::resolve(app).map_err(String::from)?;
+    let profile = resolved.profile_dir;
     let default_dir = profile.join("Default");
+    for path in [
+        &default_dir,
+        &default_dir.join("Preferences"),
+        &default_dir.join("IndexedDB"),
+    ] {
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "Refusing to clear a linked Chrome profile entry: {}",
+                path.display()
+            ));
+        }
+    }
     let mut errors: Vec<String> = Vec::new();
 
     // Runtime lock artifacts are transient and always safe to drop.
@@ -421,11 +462,23 @@ fn clear_chrome_selective(selection: &ClearSelection) -> Result<(), String> {
         .collect(),
         &mut errors,
     );
-    clear_chrome_tmp_singletons();
+    remove_entries(vec![resolved.temp_dir], &mut errors);
 
     for category in &selection.categories {
         match category {
-            ClearCategory::Cache => remove_entries(chrome_cache_paths(&profile), &mut errors),
+            ClearCategory::Cache => {
+                let mut paths = chrome_cache_paths(&profile);
+                paths.push(crate::paths::app_home(&app.id).join(".cache"));
+                if resolved.crash_dir.starts_with(&resolved.app_root) {
+                    paths.push(resolved.crash_dir.clone());
+                } else {
+                    paths.extend(
+                        ["pending", "completed", "attachments"]
+                            .map(|name| resolved.crash_dir.join(name)),
+                    );
+                }
+                remove_entries(paths, &mut errors);
+            }
             ClearCategory::Cookies => {
                 remove_entries(chrome_cookie_paths(&default_dir), &mut errors);
                 clear_indexeddb(&default_dir, false, &mut errors);
@@ -454,46 +507,6 @@ fn clear_chrome_selective(selection: &ClearSelection) -> Result<(), String> {
         Ok(())
     } else {
         Err(errors.join("; "))
-    }
-}
-
-fn chrome_tmp_singleton_size() -> u64 {
-    let Ok(entries) = std::fs::read_dir("/tmp") else {
-        return 0;
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|n| n.starts_with("com.google.Chrome."))
-                .unwrap_or(false)
-        })
-        .map(|e| dir_size(&e.path()))
-        .sum()
-}
-
-fn clear_chrome_tmp_singletons() {
-    let Ok(entries) = std::fs::read_dir("/tmp") else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with("com.google.Chrome.") {
-            continue;
-        }
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if let Err(err) = std::fs::remove_dir_all(&path) {
-            log::warn!("Failed to remove {}: {}", path.display(), err);
-        } else {
-            log::info!("Removed Chrome tmp singleton dir {}", path.display());
-        }
     }
 }
 
@@ -528,6 +541,7 @@ mod tests {
             exec_command: None,
             env_vars: None,
             desktop_launch: Default::default(),
+            chrome: Some(super::super::chrome::ChromeConfig::builtin()),
             proxy_url: None,
             cli_binary_path: None,
             cli_env_vars: None,
@@ -538,17 +552,15 @@ mod tests {
     }
 
     #[test]
-    fn chrome_durable_dirs_include_sidecars() {
-        let dirs = durable_dirs(&chrome_app());
+    fn chrome_durable_dirs_are_scoped_and_deduplicated() {
+        let app = chrome_app();
+        let root = crate::paths::app_dir(&app.id);
+        let dirs = durable_dirs(&app);
         assert!(dirs.iter().any(|p| p.ends_with("profile")));
-        assert!(dirs
-            .iter()
-            .any(|p| { p.file_name().and_then(|n| n.to_str()) == Some("google-chrome") }));
-        assert!(
-            dirs.len() >= 5,
-            "expected data+home+profile+2 sidecars, got {}",
-            dirs.len()
-        );
+        let temp = super::super::chrome::resolve(&app).unwrap().temp_dir;
+        assert!(dirs.contains(&temp));
+        assert!(dirs.iter().all(|p| p.starts_with(&root) || p == &temp));
+        assert!(!dirs.iter().any(|p| p.ends_with("Crash Reports")));
     }
 
     // Environment variables are process-wide. Like paths::tests, run the
@@ -615,7 +627,6 @@ mod tests {
         }
         for file in [
             profile.join("Local State"),
-            profile.join("SingletonLock"),
             default_dir.join("Secure Preferences"),
             default_dir.join("Cookies"),
             default_dir.join("History"),
@@ -630,11 +641,21 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
+        std::os::unix::fs::symlink(
+            format!(
+                "{}-2147483647",
+                std::fs::read_to_string("/proc/sys/kernel/hostname")
+                    .unwrap()
+                    .trim()
+            ),
+            profile.join("SingletonLock"),
+        )
+        .unwrap();
         // Unknown entries must survive every selective clear.
         touch(&profile.join("FutureChromeData"));
     }
 
-    fn clear_chrome(categories: &[ClearCategory]) -> Result<(), String> {
+    fn clear_chrome(categories: &[ClearCategory]) -> Result<(), super::super::error::ApiError> {
         clear(
             &chrome_app(),
             &ClearSelection {

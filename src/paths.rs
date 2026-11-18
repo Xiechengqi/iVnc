@@ -95,6 +95,7 @@ pub fn host_home() -> PathBuf {
 }
 
 /// Chrome product dirs that may receive Crash/Metrics outside `--user-data-dir`.
+#[cfg(test)]
 pub fn chrome_sidecar_config_dirs() -> Vec<PathBuf> {
     vec![
         ivnc_home().join(".config").join("google-chrome"),

@@ -19,6 +19,8 @@ import tempfile
 import termios
 import time
 import urllib.request
+import urllib.error
+import uuid
 
 
 def free_port():
@@ -76,6 +78,81 @@ def check_detached(pid):
     assert state["sid"] == pid and state["pgid"] == pid, state
     assert state["tty"] == 0 and state["state"] != "T", state
     assert os.readlink(f"/proc/{pid}/fd/0") == "/dev/null"
+
+
+def chrome_presets(api, details, stop, apps):
+    catalog = api("/api/apps/desktop-presets")
+    assert next(p for p in catalog["presets"] if p["id"] == "chrome")["installation"]["status"] == "installed"
+    identity = str(uuid.uuid4())
+    draft = {"creation_id": identity, "name": "Chrome preset A", "app_type": "desktop",
+             "desktop_preset": "chrome", "chrome_config": {}, "proxy_url": None}
+    preview = api("/api/apps/chrome-preview", "POST", draft)
+    assert not Path(preview["chrome_effective"]["profile_dir"]).exists()
+    assert "--remote-debugging" not in preview["exec_command"]
+    ports = {free_port(), free_port()}
+    while len(ports) < 2:
+        ports.add(free_port())
+    port_a, port_b = ports
+    draft["chrome_config"] = {"debug_port": port_a}
+    draft["exec_command"] = "this-client-command-must-be-ignored"
+    first = api("/api/apps", "POST", draft)["app"]
+    second = api("/api/apps", "POST", {"name": "Chrome preset B", "app_type": "desktop",
+                 "desktop_preset": "chrome", "chrome_config": {"debug_port": port_b}})["app"]
+    first_id, second_id = first["id"], second["id"]
+    assert first_id == identity
+    assert first["exec_command"] == api("/api/apps/chrome-preview", "POST", draft)["exec_command"]
+    a = Path(first["chrome_effective"]["profile_dir"])
+    b = Path(second["chrome_effective"]["profile_dir"])
+    assert a != b
+    api(f"/api/apps/{second_id}/sharing", "PUT", {"enabled": True, "password": "chrome-preset-local-test"})
+    for app_id in [first_id, second_id]:
+        apps.add(app_id)
+        api(f"/api/apps/{app_id}/start", "POST")
+        wait("Chrome preset window", lambda: (api(f"/api/apps/{app_id}/launch-info")["launch_info"] or {}).get("window_seen"))
+    for app, port in [(first, port_a), (second, port_b)]:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=5) as response:
+            assert "Chrome/" in json.load(response)["Browser"]
+        effective = api(f"/api/apps/{app['id']}/launch-info")["launch_info"]["effective_command"]
+        assert app["chrome_effective"]["profile_dir"] in effective
+    assert a.joinpath("Default").is_dir() and b.joinpath("Default").is_dir()
+    print("PASS two generated Chrome instances open real main/worker windows with independent profiles and DevTools ports", flush=True)
+
+    def conflict(body):
+        try:
+            api("/api/apps", "POST", {"name": "Conflicting Chrome", "app_type": "desktop", "desktop_preset": "chrome", "chrome_config": body})
+            raise AssertionError("Expected a resource conflict")
+        except urllib.error.HTTPError as error:
+            assert error.code == 409
+            assert json.load(error)["code"] in ["chrome_port_conflict", "chrome_directory_conflict"]
+
+    conflict({"profile_dir": str(b)})
+    api(f"/api/apps/{first_id}", "PUT", {"chrome_config": {"profile_dir": str(a.parent / "new-profile"), "debug_port": None}})
+    conflict({"debug_port": port_a})
+    stop(first_id)
+    assert a.is_dir(), "editing a profile preserves old data"
+    api(f"/api/apps/{first_id}", "PUT", {"chrome_config": {"profile_dir": str(a)}})
+    a.joinpath("Default/Cache").mkdir(exist_ok=True)
+    a.joinpath("Default/Cache/preset-cache").write_text("cache")
+    a.joinpath("Default/Extensions/preset-test").mkdir(parents=True, exist_ok=True)
+    a.joinpath("Default/Extensions/preset-test/keep").write_text("extension data")
+    other = b / "preset-keep"
+    other.write_text("other profile")
+    api(f"/api/apps/{first_id}/clear-data", "POST", {"categories": ["cache"]})
+    assert not a.joinpath("Default/Cache").exists()
+    assert a.joinpath("Default/Extensions/preset-test/keep").is_file() and other.is_file()
+    with urllib.request.urlopen(f"http://127.0.0.1:{port_b}/json/version", timeout=5) as response:
+        assert "Chrome/" in json.load(response)["Browser"]
+    assert details(second_id)["status"] == "running"
+    print("PASS active resources survive edits; clearing A preserves extensions and leaves B running", flush=True)
+
+    manual = "printf 'manual command'\n# preserve exact text  \n"
+    api(f"/api/apps/{first_id}", "PUT", {"chrome_config": {"mode": "manual"}, "exec_command": manual, "proxy_url": "inactive value"})
+    assert details(first_id)["exec_command"] == manual
+    assert details(first_id)["can_clear_data"] is False
+    stop(second_id)
+    api(f"/api/apps/{first_id}", "DELETE")
+    api(f"/api/apps/{second_id}", "DELETE")
+    print("PASS manual commands retain exact text and disable inferred Chrome cleanup", flush=True)
 
 
 def main():
@@ -180,6 +257,7 @@ def main():
         previous_generation = api(f"/api/apps/{chrome_id}/launch-info")["launch_info"]["generation"]
         stop(chrome_id)
         print("PASS Chrome restarts successfully from the same foreground manager", flush=True)
+        chrome_presets(api, details, stop, apps)
 
         report_path = work / "service-report.json"
         fixture = work / "service.py"

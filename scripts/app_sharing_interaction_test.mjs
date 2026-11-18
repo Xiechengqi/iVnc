@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(new URL('../web/ivnc/package.json', import.meta.url));
 const { createServer } = require('vite'), engines = require('playwright');
 const root = fileURLToPath(new URL('../web/ivnc/', import.meta.url));
-const writes = calls => calls.filter(c => c.method !== 'GET');
+const writes = calls => calls.filter(c => c.method !== 'GET' && !/\/(desktop-presets|chrome-preview)$/.test(c.path));
 const idle = page => page.waitForFunction(() => !document.querySelector('#modal-save').disabled);
 const closed = page => page.waitForFunction(() => !document.querySelector('#modal').classList.contains('show'));
 async function add(page, type = 'desktop') {

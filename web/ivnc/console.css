@@ -584,15 +584,20 @@ tr:hover { background-color: #f8f9fa; }
 .form-line.command-line > .form-label { grid-area: label; }
 .form-line.command-line > .command-control { display: contents; }
 .form-line.command-line .command-options { grid-area: options; }
-.form-line.command-line .command-control > input { grid-area: input; }
+.form-line.command-line .command-control > :is(input, textarea) { grid-area: input; }
 .command-control {
   min-width: 0;
 }
 .command-options {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
+  gap: 8px 14px;
+  min-width: 0;
 }
+.command-options .checkbox-row { white-space: nowrap; }
+.app-modal .command-options input[type="checkbox"] { padding: 0; flex-shrink: 0; }
 .form-label {
   display: inline-flex;
   align-items: center;
@@ -1640,4 +1645,20 @@ tr:hover { background-color: #f8f9fa; }
   .schedule-row { flex-direction: column; }
   .sched-side { min-width: 0; align-items: flex-start; }
   .sched-times { text-align: left; }
+}
+
+#chrome-manual-control { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+#chrome-manual-control[hidden] { display: none; }
+#chrome-config:disabled { opacity: .55; }
+#chrome-profile-effective, #chrome-crash-effective { overflow-wrap: anywhere; }
+
+@media (max-width: 600px) {
+  .app-modal .form-label { position: relative; }
+  .app-modal .form-label .info-tip { position: static; }
+  .app-modal .form-label .default-text { left: 0; right: auto; }
+  #desktop-config .command-line {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "label" "options" "input";
+  }
+  #desktop-config .command-options { justify-content: flex-start; }
 }

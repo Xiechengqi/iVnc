@@ -3,6 +3,7 @@ import { notifyAppStarted } from './app-streams.js';
 import { createOrderNotifications } from './app-order.js';
 import { createConsoleDialogs } from './console-dialogs.js';
 import { enhanceSelect } from './select-control.js';
+import { createChromePreset } from './chrome-preset.js';
 import { createSettingsActions } from './settings-actions.js';
 import { createAdvancedSettings } from './advanced-settings.js';
 
@@ -12,7 +13,7 @@ const CONSOLE_API = '/api/console';
 const CAP_API = '/api/capabilities';
 let editId = null;
 let editBuiltin = false;
-let proxyConfigurable = false;  // built-in Chrome exposes an editable proxy URL
+let chromePreset = null;
 let editApp = null;        // record of the app being edited
 let sharingState = null;   // persisted sharing settings, or the initial disabled draft
 let appSignature = '';     // launch settings as last saved; a change on a running app needs a restart
@@ -147,9 +148,9 @@ const I18N = {
         launchCommandHelp: 'Command to run when the app starts',
         execHelp: 'Enter a program name or path. Recognized Electron apps automatically adapt to the desktop session.',
         proxyUrl: 'Proxy URL',
-        proxyUrlHelp: 'Proxy address for the built-in browser, e.g. socks5://127.0.0.1:1080. Leave empty for no proxy; restart the browser after changing it.',
+        proxyUrlHelp: 'Proxy address for this Chrome application, e.g. socks5://127.0.0.1:1080. Leave empty to omit the proxy argument; restart the browser after changing it.',
         proxyUrlPlaceholder: 'e.g. socks5://127.0.0.1:1080',
-        proxyUrlInvalid: 'Enter a valid proxy URL (socks5://, socks4://, http:// or https://) or leave it empty.',
+        proxyUrlInvalid: 'Enter a valid proxy URL (socks5://, socks5h://, socks4://, http:// or https://) or leave it empty.',
         nameInputPlaceholder: 'App display name',
         backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: 'e.g. amp-desktop or /path/to/app',
@@ -384,9 +385,9 @@ const I18N = {
         launchCommandHelp: '应用启动时要执行的命令',
         execHelp: '输入程序名或路径，可识别的 Electron 应用会自动适配桌面环境。',
         proxyUrl: '代理地址',
-        proxyUrlHelp: '内置浏览器使用的代理地址，例如 socks5://127.0.0.1:1080。留空表示不使用代理；修改后需重启浏览器生效。',
+        proxyUrlHelp: '此 Chrome 应用使用的代理地址，例如 socks5://127.0.0.1:1080。留空不添加代理参数；修改后需重启浏览器生效。',
         proxyUrlPlaceholder: '例如：socks5://127.0.0.1:1080',
-        proxyUrlInvalid: '请输入有效的代理地址（socks5://、socks4://、http:// 或 https://），或留空。',
+        proxyUrlInvalid: '请输入有效的代理地址（socks5://、socks5h://、socks4://、http:// 或 https://），或留空。',
         nameInputPlaceholder: '应用显示名称',
         backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: '例如：amp-desktop 或 /path/to/app',
@@ -735,7 +736,7 @@ function applyTranslations() {
     ].forEach(([id, keys]) => {
         [...document.getElementById(id).options].forEach((option, i) => option.textContent = t(keys[i]));
     });
-    launchModeControl?.sync(); sandboxControl?.sync(); renderLaunchInfo();
+    launchModeControl?.sync(); sandboxControl?.sync(); chromePreset?.translate(); renderLaunchInfo();
     renderLaunchContext();
     document.getElementById('modal-close')?.setAttribute('aria-label', t('close'));
     setPlaceholderById('f-name', t('nameInputPlaceholder'));
@@ -1403,7 +1404,7 @@ function resetModal() {
     renderLaunchContext();
     editId = null;
     editBuiltin = false;
-    proxyConfigurable = false;
+    chromePreset?.reset();
     editApp = null;
     sharingState = null;
     appSignature = '';
@@ -1435,12 +1436,13 @@ function openAppDialog() {
     resetModal();
     const modal = document.getElementById('modal');
     appDialog = dialogs.open(modal, () => {
-        appTypeControl?.close(); launchModeControl?.close(); sandboxControl?.close();
+        appTypeControl?.close(); launchModeControl?.close(); sandboxControl?.close(); chromePreset?.close();
         appDialog = null;
         modal.classList.remove('loading');
         modal.removeAttribute('aria-busy');
         resetModal();
     });
+    appDialog.draftId = newCreationId();
     loadLaunchContext(appDialog);
     return appDialog;
 }
@@ -1520,7 +1522,7 @@ async function showEdit(id) {
         editId = id;
         editApp = a;
         editBuiltin = a.builtin === true && a.managed_by === 'ivnc';
-        proxyConfigurable = a.proxy_configurable === true;
+
         modal.querySelector('#modal-title').textContent = t('editModal');
         modal.querySelector('#modal-save').textContent = t('editSave');
 
@@ -1549,6 +1551,7 @@ async function showEdit(id) {
             document.getElementById('f-launch-timeout').value = a.launch_wait_timeout_secs || '';
             document.getElementById('f-launch-env').value = envToText(a.launch_env_vars);
         }
+        if (appType === 'desktop') chromePreset?.load(a);
         updateAppTypeVisibility();
         appSignature = JSON.stringify(readAppBody(appType));
         appTypeControl?.sync();
@@ -1893,9 +1896,8 @@ function readAppBody(appType) {
     } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
-        if (proxyConfigurable) {
-            body.proxy_url = document.getElementById('f-proxy-url').value.trim() || null;
-        }
+        Object.assign(body, chromePreset?.read());
+        if (chromePreset?.generated()) delete body.exec_command;
         body.desktop_launch = {
             compatibility: document.getElementById('f-desktop-compat').value,
             sandbox: document.getElementById('f-desktop-sandbox').value,
@@ -1925,8 +1927,9 @@ function validateAppBody(body) {
             return fieldError('f-remote-password', t('remotePasswordForUrl'));
         }
     } else if (body.app_type === 'desktop') {
-        if (!body.exec_command) return fieldError('f-exec', t('missingExec'));
-        if (proxyConfigurable && !validateProxyUrl(body.proxy_url)) return fieldError('f-proxy-url', t('proxyUrlInvalid'));
+        if (!chromePreset?.generated() && !body.exec_command) return fieldError('f-exec', t('missingExec'));
+        if (!chromePreset?.validate()) return false;
+        if (chromePreset?.generated() && !validateProxyUrl(body.proxy_url)) return fieldError('f-proxy-url', t('proxyUrlInvalid'));
     } else if (body.app_type === 'cli') {
         if (!body.cli_binary_path) return fieldError('f-cli-binary', t('missingCliBinary'));
     } else {
@@ -1981,7 +1984,7 @@ function adoptCreatedApp(app, session) {
     if (app.app_type === 'desktop') {
         setValue('f-exec', app.exec_command || '');
         setValue('f-env', envToText(app.env_vars));
-        if (proxyConfigurable) setValue('f-proxy-url', app.proxy_url || '');
+        chromePreset?.load(app);
         document.getElementById('f-autostart').checked = !!app.autostart;
         setValue('f-desktop-compat', app.desktop_launch?.compatibility || 'auto');
         setValue('f-desktop-sandbox', app.desktop_launch?.sandbox || 'auto');
@@ -2003,13 +2006,13 @@ async function saveApp() {
     if (sharing === false) return;
     if (sharing?.password && sharingState.enabled && sharingState.password_set && !confirm(t('confirmPasswordChange'))) return;
     if (!editId && appType === 'desktop' && !session.creationAttempt) {
-        session.creationAttempt = { id: newCreationId(), body, uncertain: false };
+        session.creationAttempt = { id: session.draftId, body, uncertain: false };
     }
     const snapshot = { id: editId || session.creationAttempt?.id, app: editApp && { ...editApp }, signature: appSignature,
         sharing: sharingState && { ...sharingState }, wasEditing: !!editId };
     const btn = document.getElementById('modal-save');
     session.saving = true;
-    appTypeControl?.close(); launchModeControl?.close(); sandboxControl?.close();
+    appTypeControl?.close(); launchModeControl?.close(); sandboxControl?.close(); chromePreset?.close();
     document.getElementById('app-fields').disabled = true;
     btn.disabled = true; btn.textContent = t('savePending');
     const report = message => {
@@ -2092,6 +2095,7 @@ async function saveApp() {
                 document.getElementById('app-fields').disabled = !!session.creationAttempt;
                 btn.textContent = t(editId ? 'editSave' : session.creationAttempt ? 'retryCreate' : 'addSave');
                 updateDesktopLaunchControls();
+                chromePreset?.sync();
             }
         }
     });
@@ -2183,6 +2187,7 @@ function openClearDialog(app) {
         list.append(label);
     }
     const resetBtn = document.getElementById('clear-reset-btn');
+    resetBtn.hidden = app.can_full_reset === false;
     resetBtn.classList.remove('armed');
     resetBtn.textContent = t('clearReset');
     const confirmBtn = document.getElementById('clear-confirm-btn');
@@ -2308,7 +2313,7 @@ function updateAppTypeVisibility() {
     // A remote app with autostart is started (connected) when iVnc starts.
     autostartControl.style.display = type === 'cli' ? 'none' : '';
     document.getElementById('remote-config').hidden = type !== 'remote';
-    document.getElementById('proxy-url-line').hidden = !(type === 'desktop' && proxyConfigurable);
+
     document.getElementById('f-skill-paths').closest('.form-line').hidden = type === 'remote';
     document.getElementById('name-required-mark').hidden = type === 'remote';
     document.getElementById('remote-password-required-mark').hidden = !!editId;
@@ -2332,10 +2337,11 @@ function updateAppTypeVisibility() {
     document.getElementById('modal-cancel').textContent = t(editBuiltin || modalSaved ? 'close' : 'cancel');
     appTypeControl?.sync();
     updateDesktopLaunchControls();
+    chromePreset?.sync();
 }
 
 function updateDesktopLaunchControls() {
-    const disabled = editBuiltin || !!appDialog?.saving;
+    const disabled = editBuiltin || !!appDialog?.saving || !!chromePreset?.isChrome();
     document.getElementById('f-desktop-compat').disabled = disabled;
     document.getElementById('f-desktop-sandbox').disabled = disabled || document.getElementById('f-desktop-compat').value === 'raw';
     launchModeControl?.sync(); sandboxControl?.sync();
@@ -2354,6 +2360,8 @@ document.addEventListener('DOMContentLoaded', () => {
     displayScopeControl = enhanceSelect(document.getElementById('display-scope'), document.getElementById('display-scope-label'));
     document.getElementById('display-scope').addEventListener('change', () => loadDisplay());
     document.getElementById('display-apply').addEventListener('click', () => saveDisplay());
+    chromePreset = createChromePreset(() => ({ session: appDialog, id: editId, builtin: editBuiltin,
+        env: parseEnvText(document.getElementById('f-env').value) }), fieldError);
     appTypeControl = enhanceSelect(document.getElementById('f-app-type'), document.getElementById('label-app-type'));
     launchModeControl = enhanceSelect(document.getElementById('f-desktop-compat'), document.getElementById('label-desktop-compat'));
     sandboxControl = enhanceSelect(document.getElementById('f-desktop-sandbox'), document.getElementById('label-desktop-sandbox'));

@@ -23,6 +23,7 @@ struct RunningApp {
     worker: bool,
     log: LogCursor,
     window_ready: bool,
+    _chrome: Option<super::chrome::Lease>,
 }
 
 /// Watchdog restart state for an application that exited unexpectedly.
@@ -231,8 +232,16 @@ impl ProcessManager {
     }
 
     fn spawn(&self, app: &ManagedApp) -> Result<RunningApp, ApiError> {
-        let worker = native::runs_in_worker(app, &self.remote)?;
-        let mut command = native::build_command(app, worker)?;
+        let mut app = app.clone();
+        let peers = self
+            .store
+            .as_ref()
+            .map(|s| s.list())
+            .transpose()?
+            .unwrap_or_default();
+        let chrome = super::chrome::acquire(&mut app, &peers)?;
+        let worker = native::runs_in_worker(&app, &self.remote)?;
+        let mut command = native::build_command(&app, worker)?;
         let log = LogCursor::new(native::log_path(&app.id));
         let child = command
             .spawn()
@@ -245,6 +254,7 @@ impl ProcessManager {
             worker,
             log,
             window_ready: false,
+            _chrome: chrome,
         })
     }
 
@@ -306,6 +316,22 @@ impl ProcessManager {
         } else {
             Err(ApiError::new("app_not_running", "App is not running"))
         }
+    }
+
+    pub fn while_stopped<T>(
+        &self,
+        id: &str,
+        operation: impl FnOnce() -> Result<T, ApiError>,
+    ) -> Result<T, ApiError> {
+        let _operation = self.operations.lock().unwrap();
+        if self.is_running(id) {
+            return Err(ApiError::new(
+                "chrome_profile_busy",
+                "Application is running; retry after stopping it",
+            ));
+        }
+        self.processes.lock().unwrap().remove(id);
+        operation()
     }
 
     pub fn status(&self, app_id: &str) -> AppStatus {
@@ -489,6 +515,7 @@ mod tests {
                 worker: false,
                 log: LogCursor::new(PathBuf::new()),
                 window_ready: false,
+                _chrome: None,
             },
         );
         struct Cleanup(ProcessManager, u32);
@@ -537,6 +564,7 @@ mod tests {
                 worker: false,
                 log: LogCursor::new(PathBuf::new()),
                 window_ready: true,
+                _chrome: None,
             },
         );
         let error = manager.start(&app).unwrap_err();
@@ -646,6 +674,7 @@ mod tests {
                 worker,
                 log: LogCursor::new(runtimes.join(id).join("app.log")),
                 window_ready: false,
+                _chrome: None,
             };
             let pid = running.pid;
             manager.processes.lock().unwrap().insert(id.into(), running);

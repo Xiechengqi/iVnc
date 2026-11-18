@@ -220,6 +220,14 @@ pub fn permanent(error: &ApiError) -> bool {
             | "desktop_backend_conflict"
             | "desktop_sandbox_conflict"
             | "desktop_command_unsupported"
+            | "chrome_path_invalid"
+            | "chrome_directory_conflict"
+            | "chrome_directory_unavailable"
+            | "chrome_profile_busy"
+            | "chrome_port_conflict"
+            | "chrome_port_invalid"
+            | "chrome_proxy_invalid"
+            | "chrome_binary_unavailable"
     )
 }
 

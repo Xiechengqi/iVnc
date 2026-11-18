@@ -98,6 +98,7 @@ impl AppStore {
         Self::ensure_column(&conn, "name_revision", "INTEGER NOT NULL DEFAULT 0")?;
         Self::ensure_column(&conn, "desktop_launch", "TEXT NOT NULL DEFAULT '{}'")?;
         Self::ensure_column(&conn, "proxy_url", "TEXT")?;
+        Self::ensure_column(&conn, "chrome_config", "TEXT")?;
 
         // Adding the column and backfilling are one migration. Later opens must
         // never reset positions saved by the user (including timestamp ties).
@@ -164,6 +165,8 @@ impl AppStore {
 
     pub fn add(&self, app: &ManagedApp) -> Result<(), ApiError> {
         let conn = self.conn.lock().unwrap();
+        let peers = Self::read_apps(&conn, "created_at, rowid")?;
+        let _resources = super::chrome::configuration_lock(app, &peers)?;
 
         let url = app.url.as_deref().unwrap_or("");
         let exec_command = app.exec_command.as_deref().unwrap_or("");
@@ -184,15 +187,15 @@ impl AppStore {
             .unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, desktop_launch, sort_order, proxy_url)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, (SELECT COALESCE(MAX(sort_order), -1)+1 FROM apps), ?16)",
+            "INSERT INTO apps (id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, desktop_launch, sort_order, proxy_url, chrome_config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, (SELECT COALESCE(MAX(sort_order), -1)+1 FROM apps), ?16, ?17)",
             params![
                 app.id, app.name, app.app_type.as_str(), url,
                 app.autostart as i32, exec_command, env_vars_json, app.created_at,
                 app.launch_command.as_deref(), launch_env_vars_json,
                 app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64),
                 app.cli_binary_path.as_deref(), cli_env_vars_json, serde_json::to_string(&app.desktop_launch).unwrap(),
-                app.proxy_url.as_deref(),
+                app.proxy_url.as_deref(), app.chrome.as_ref().map(|c| serde_json::to_string(c).unwrap()),
             ],
         ).map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -245,9 +248,11 @@ impl AppStore {
             .and_then(|v| serde_json::to_string(v).ok())
             .unwrap_or_default();
 
+        let peers = Self::read_apps(&tx, "created_at, rowid")?;
+        let _resources = super::chrome::configuration_lock(app, &peers)?;
         let changed = tx.execute(
-            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11, desktop_launch=?13, proxy_url=?14 WHERE id=?12",
-            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, serde_json::to_string(&app.desktop_launch).unwrap(), app.proxy_url.as_deref()],
+            "UPDATE apps SET app_type=?1, url=?2, autostart=?3, exec_command=?4, env_vars=?5, launch_command=?6, launch_env_vars=?7, launch_cwd=?8, launch_wait_timeout_secs=?9, cli_binary_path=?10, cli_env_vars=?11, desktop_launch=?13, proxy_url=?14, chrome_config=?15 WHERE id=?12",
+            params![app.app_type.as_str(), url, app.autostart as i32, exec_command, env_vars_json, app.launch_command.as_deref(), launch_env_vars_json, app.launch_cwd.as_deref(), app.launch_wait_timeout_secs.map(|v| v as i64), app.cli_binary_path.as_deref(), cli_env_vars_json, app.id, serde_json::to_string(&app.desktop_launch).unwrap(), app.proxy_url.as_deref(), app.chrome.as_ref().map(|c| serde_json::to_string(c).unwrap())],
         ).map_err(|e| format!("Failed to update app: {}", e))?;
         if changed == 0 {
             return Err(ApiError::new(
@@ -343,7 +348,7 @@ impl AppStore {
     pub fn get_optional(&self, id: &str) -> Result<Option<ManagedApp>, String> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch, proxy_url FROM apps WHERE id=?1",
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch, proxy_url, chrome_config FROM apps WHERE id=?1",
             params![id],
             |row| Ok(Self::row_to_app(row)),
         ).optional().map_err(|e| format!("Failed to read app: {}", e))
@@ -356,7 +361,7 @@ impl AppStore {
 
     fn read_apps(conn: &Connection, order: &str) -> Result<Vec<ManagedApp>, String> {
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch, proxy_url FROM apps ORDER BY {order}"
+            "SELECT id, name, app_type, url, autostart, exec_command, env_vars, created_at, launch_command, launch_env_vars, launch_cwd, launch_wait_timeout_secs, cli_binary_path, cli_env_vars, sort_order, name_revision, desktop_launch, proxy_url, chrome_config FROM apps ORDER BY {order}"
         )).map_err(|e| format!("Failed to list apps: {}", e))?;
 
         let apps = stmt
@@ -502,6 +507,11 @@ impl AppStore {
                 .and_then(|v| serde_json::from_str(&v).ok())
                 .unwrap_or_default(),
             proxy_url,
+            chrome: row
+                .get::<_, Option<String>>(18)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str(&v).ok()),
             cli_binary_path,
             cli_env_vars,
             created_at: row.get(7).unwrap_or_default(),
@@ -513,6 +523,31 @@ impl AppStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_configuration_migrates_and_reopens_without_changing_custom_commands() {
+        let store = AppStore::in_memory();
+        let mut app = ManagedApp::for_test("legacy-chrome-preset", AppType::DesktopApp);
+        app.exec_command = Some("my-desktop --keep-this".into());
+        store.add(&app).unwrap();
+        let conn = store.conn.into_inner().unwrap();
+        conn.execute_batch("ALTER TABLE apps DROP COLUMN chrome_config")
+            .unwrap();
+        let store = AppStore::from_connection(conn).unwrap();
+        let mut loaded = store.get(&app.id).unwrap();
+        assert!(loaded.chrome.is_none());
+        assert_eq!(loaded.exec_command, app.exec_command);
+        loaded.chrome = Some(super::super::chrome::ChromeConfig {
+            mode: super::super::chrome::CommandMode::Manual,
+            profile_dir: Some("/saved/profile".into()),
+            crash_dir: None,
+            debug_port: None,
+        });
+        store.update(&loaded).unwrap();
+        let store = AppStore::from_connection(store.conn.into_inner().unwrap()).unwrap();
+        assert_eq!(store.get(&app.id).unwrap().chrome, loaded.chrome);
+        assert_eq!(store.list().unwrap()[0].exec_command, app.exec_command);
+    }
 
     #[test]
     fn launch_options_migrate_and_survive_configuration_edits_and_reopening() {
