@@ -7,25 +7,52 @@ const SWITCH_DISTANCE = 100;
 // than extending a lock every time the old swipe emits another momentum tick.
 const REARM_MS = 100;
 const PAUSE_MS = 90;
+const DECISION_MS = 60;
 
-export function createGestureNavigation({ navigate, canNavigate = () => true, canHandle, now = () => performance.now() }) {
+export function createGestureNavigation({ navigate, canNavigate = () => true, canHandle, now = () => performance.now(),
+    schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id) }) {
     let mode = 'idle';
     let x = 0, y = 0, last = null, source = null, kind = null;
     let committedAt = 0, direction = 0, peak = 0, valley = Infinity, previous = 0;
     let candidate = null;
+    let pendingX = 0, pendingY = 0, replay = null, decisionTimer = null;
+
+    function discardPending() {
+        if (decisionTimer !== null) cancel(decisionTimer);
+        decisionTimer = null; pendingX = 0; pendingY = 0; replay = null;
+    }
+
+    function yieldPending() {
+        const dx = pendingX, dy = pendingY, callback = replay;
+        discardPending();
+        if (canHandle(source)) callback?.(dx, dy);
+    }
+
+    function reserve(dx, dy, onScroll) {
+        pendingX += dx; pendingY += dy; replay = onScroll;
+        if (mode !== 'idle' || decisionTimer !== null) return;
+        // An ambiguous final sample must not remain swallowed indefinitely.
+        decisionTimer = schedule(() => {
+            decisionTimer = null;
+            if (mode !== 'idle') return;
+            mode = 'vertical'; yieldPending();
+        }, DECISION_MS);
+    }
 
     function reset() {
+        discardPending();
         mode = 'idle'; x = 0; y = 0; last = null; source = null; kind = null;
         committedAt = 0; direction = 0; peak = 0; valley = Infinity; previous = 0; candidate = null;
     }
 
     function commit(time, dx) {
+        discardPending();
         mode = 'committed'; committedAt = time; direction = Math.sign(dx);
         valley = Infinity; candidate = null;
         navigate(direction);
     }
 
-    function move(dx, dy, origin, blocked, inputKind) {
+    function move(dx, dy, origin, blocked, inputKind, onScroll) {
         if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
         if (!dx && !dy) return false;
         const time = now();
@@ -61,6 +88,7 @@ export function createGestureNavigation({ navigate, canNavigate = () => true, ca
                         // This is a newly recognized gesture, not the old tail.
                         // At the boundary it belongs to the remote application.
                         if (!canNavigate(sign)) {
+                            onScroll?.(candidate.x - dx, candidate.y - dy);
                             mode = 'passthrough'; source = origin; candidate = null;
                             return false;
                         }
@@ -80,28 +108,35 @@ export function createGestureNavigation({ navigate, canNavigate = () => true, ca
             // A modifier/pinch/drag beginning after reservation cancels this
             // switch, but must not deliver a partial gesture to the application.
             mode = 'consumed';
+            discardPending();
             return true;
         }
         // Decide before reserving any horizontal motion. Keep a yielded gesture
         // yielded even if modifiers, direction or available targets change.
         if (blocked || (mode === 'idle' && (dx ? !canNavigate(Math.sign(dx)) : !canNavigate(-1) && !canNavigate(1)))) {
             mode = 'passthrough';
+            yieldPending();
             return false;
         }
         x += dx; y += dy;
         peak = Math.max(peak, ax); previous = ax;
         const totalX = Math.abs(x), totalY = Math.abs(y);
         if (mode === 'horizontal' && totalX < SWITCH_DISTANCE && totalY > totalX * 1.2) {
-            mode = 'vertical'; return false;
+            mode = 'vertical'; yieldPending(); return false;
         }
         if (mode === 'idle') {
-            if (totalY >= AXIS_START && totalY >= totalX * 1.4) {
-                mode = 'vertical'; return false;
+            if (totalY > 0 && totalY >= totalX * 1.4) {
+                mode = 'vertical'; yieldPending(); return false;
             }
-            if (totalX >= AXIS_START && totalX >= totalY * 1.8) mode = 'horizontal';
-            else if (totalX + totalY >= 40) { mode = 'vertical'; return false; }
+            if (totalX >= AXIS_START && totalX >= totalY * 1.8) {
+                mode = 'horizontal';
+                if (decisionTimer !== null) cancel(decisionTimer);
+                decisionTimer = null;
+            }
+            else if (totalX + totalY >= 40) { mode = 'vertical'; yieldPending(); return false; }
         }
         if (mode === 'horizontal' && totalX >= SWITCH_DISTANCE) commit(time, x);
+        else reserve(dx, dy, onScroll);
         // Reserve horizontal motion from its first sample. This avoids moving
         // remote content before deciding to switch tabs.
         return true;
@@ -110,16 +145,21 @@ export function createGestureNavigation({ navigate, canNavigate = () => true, ca
     return {
         enabled: () => true,
         reset,
-        wheel(event, origin, blocked = false) {
+        cancelPending(origin) { if (source === origin && (mode === 'idle' || mode === 'horizontal')) reset(); },
+        wheel(event, origin, blocked = false, onScroll = null) {
             const unit = event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? 800 : 1;
             const modified = event.ctrlKey || event.metaKey || event.altKey || event.shiftKey;
-            return move(event.deltaX * unit, event.deltaY * unit, origin, blocked || modified, 'wheel');
+            return move(event.deltaX * unit, event.deltaY * unit, origin, blocked || modified, 'wheel', onScroll);
         },
         // Touch coordinates move opposite to scroll deltas. The caller tracks
         // both contacts and blocks navigation once their separation changes.
-        touch(dx, dy, origin, blocked = false) {
-            return move(-dx, -dy, origin, blocked, 'touch');
+        touch(dx, dy, origin, blocked = false, onScroll = null) {
+            return move(-dx, -dy, origin, blocked, 'touch', onScroll);
         },
-        endTouch() { if (kind === 'touch') reset(); },
+        endTouch(cancelled = false) {
+            if (kind !== 'touch') return;
+            if (!cancelled && mode === 'idle') yieldPending();
+            reset();
+        },
     };
 }

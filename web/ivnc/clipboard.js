@@ -265,6 +265,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
                 if (item.kind === 'paste' && !item.bytes) break;
                 queue.shift();
                 if (item.kind === 'input') {
+                    if (item.isCurrent && !item.isCurrent()) { item.sent?.(false); continue; }
                     try { const sent = send(item.message); item.sent?.(sent !== false); }
                     catch (error) { item.sent?.(false); throw error; }
                     continue;
@@ -519,13 +520,13 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         }
     }
 
-    function sendInput(message) {
-        if (!isActive() || disposed || !open()) return false;
+    function sendInput(message, isCurrent = null) {
+        if (!isActive() || disposed || !open() || (isCurrent && !isCurrent())) return false;
         if (capture || pumping || queue.length) {
             if (queue.length >= 512) { fail('limit'); cancel(); return false; }
             // A text receipt timeout starts when it actually leaves this
             // ordered queue, not while a preceding paste is still uploading.
-            return new Promise(sent => queue.push({ kind: 'input', message, sent }));
+            return new Promise(sent => queue.push({ kind: 'input', message, sent, isCurrent }));
         } else return send(message);
     }
 

@@ -128,6 +128,47 @@ const cases = [
             assert.equal(await frame.locator('#access-rules').evaluate(el=>document.documentElement.scrollWidth>innerWidth),false);
         }
     }],
+    ['scroll speed is immediate, local and independent of failed IP settings', async ({ page, frame, calls }) => {
+        await page.route('**/api/settings/access', route => route.fulfill({status:503,json:{error:'network'}}));
+        await frame.locator('#nav-advanced').click();
+        const slider = frame.locator('#scroll-speed');
+        assert.equal(await slider.inputValue(), '1');
+        assert.equal(await frame.locator('#scroll-value').textContent(), '1.0×');
+        assert(await frame.locator('#scroll-reset').isDisabled());
+        await slider.focus(); await slider.press('End');
+        for (let i=0;i<6;i++) await slider.press('ArrowLeft');
+        assert.equal(await frame.locator('#scroll-value').textContent(), '2.5×');
+        assert.equal(await frame.evaluate(() => localStorage.getItem('ivnc.scroll-speed.v1')), '2.5');
+        assert(await frame.locator('#access-save').isDisabled());
+        assert(!calls.some(c => c.url==='/api/settings/access' && c.method==='PUT'));
+        await page.reload();
+        frame=page.frameLocator('#settings-frame');
+        await frame.locator('#nav-advanced').click();
+        assert.equal(await frame.locator('#scroll-speed').inputValue(), '2.5');
+        await frame.locator('#lang-toggle').click();
+        assert.equal(await frame.locator('#scroll-title').textContent(), 'Scroll speed');
+        assert.match(await frame.locator('#scroll-hint').textContent(), /this browser only/);
+        await frame.locator('#scroll-reset').click();
+        assert.equal(await frame.locator('#scroll-speed').inputValue(), '1');
+    }],
+    ['scroll speed synchronizes across settings tabs without overwriting an IP draft', async ({ page, frame, context, url }) => {
+        await page.route('**/api/settings/access', route => route.fulfill({json:{enabled:false,ip_allowlist:[],authentication_enabled:true}}));
+        await frame.locator('#nav-advanced').click(); await frame.locator('#access-rules:enabled').waitFor();
+        await frame.locator('#access-enabled').check(); await frame.locator('#access-rules').fill('192.168.1.0/24');
+        const other=await context.newPage();
+        try {
+            await other.route('**/auth/session',route=>route.fulfill({json:{enabled:true,authenticated:true,kind:'session',csrf:'fixture-csrf'}}));
+            await other.goto(new URL('/settings.html',url).href); await other.locator('#nav-advanced').click();
+            await other.locator('#scroll-speed').focus(); await other.locator('#scroll-speed').press('End');
+            await frame.locator('#scroll-value').filter({hasText:'4.0×'}).waitFor();
+            assert.equal(await frame.locator('#access-rules').inputValue(), '192.168.1.0/24');
+            assert.equal(await frame.locator('#access-save').isDisabled(), false);
+            for (const width of [320,375,768,1280]) {
+                await page.setViewportSize({width,height:720});
+                assert.equal(await frame.locator('#scroll-speed').evaluate(el=>document.documentElement.scrollWidth>innerWidth),false);
+            }
+        } finally { await other.close(); }
+    }],
     ['password validation and failed submission keep native input and CSRF', async ({ page, frame, calls }) => {
         await page.route('**/api/change-password', route => route.fulfill({status:403,json:{error:'<img src=x onerror=alert(1)>'}}));
         await openPassword(frame);

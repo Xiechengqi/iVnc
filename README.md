@@ -10,6 +10,7 @@
 - **多编码器支持** - H.264, VP8, VP9, AV1
 - **硬件加速** - Intel VA-API, NVIDIA NVENC, Intel Quick Sync Video
 - **输入转发** - 通过 WebRTC DataChannel 支持键盘/鼠标/文本输入（IME）
+- **滚动速度** - “设置 → 高级”可调整鼠标滚轮与双指滚动速度（0.25–4.0×，默认 1.0×），当前浏览器即时生效并记忆；支持本地、独立及远程应用
 - **双向剪贴板** - 浏览器 ↔ 远程应用剪贴板同步，500ms 回声抑制
 - **任务栏** - 窗口列表广播，支持从浏览器切换焦点/关闭窗口；共享应用和远程应用以标签显示
 - **光标同步** - 远程光标样式实时同步到浏览器
@@ -382,6 +383,7 @@ ICE-TCP 连接也复用同一端口，通过首字节分类自动区分。
 | `m,{x},{y},{buttonMask},{0}` | 鼠标移动（buttonMask 变化时合成按键事件） |
 | `b,{button},{pressed}` | 鼠标按键 |
 | `w,{dx},{dy}` | 鼠标滚轮 |
+| `w2,{dx},{dy}` | 高精度滚动，浮点逻辑像素；收到 `_input,1` 的 `scroll_pixels: 1` 能力响应后使用 |
 | `k,{keysym},{pressed}` | 键盘事件（X11 KeySym） |
 | `t,{text}` | 兼容 IME 文本输入（优先 zwp_text_input_v3） |
 | `ti,{json}` | 带目标窗口与回执的 IME 提交／取消（协商 `commit:1` 后使用，见 [中文输入](docs/IME_INPUT.md)） |

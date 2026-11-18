@@ -1,10 +1,13 @@
 import { getLang, onLangChange } from './lib/i18n.js?v=1';
 import { onAuthChange, checkAuthentication } from './auth-client.js';
+import { getScrollSpeed, setScrollSpeed, onScrollSpeedChange, DEFAULT_SCROLL_SPEED, MIN_SCROLL_SPEED, MAX_SCROLL_SPEED } from './scroll-preference.mjs';
 import styles from './advanced-settings.css?inline';
 
 const STRINGS = {
     zh: {
         advanced: '高级', general: '常规', title: 'IP 白名单免密登录',
+        scrollTitle: '滚动速度', scrollHint: '调整鼠标滚轮和双指滚动的速度。仅对当前浏览器生效，立即应用。',
+        scrollReset: '恢复默认', scrollValue: '{value} 倍',
         enabled: '启用 IP 白名单免密登录', rules: 'IP 白名单',
         hint: '每行填写一个访问者 IP 或 CIDR 网段。命中后免密登录，名单外仍使用用户名和密码。',
         placeholder: '192.168.1.20\n192.168.1.0/24\n2001:db8::/64',
@@ -21,6 +24,8 @@ const STRINGS = {
     },
     en: {
         advanced: 'Advanced', general: 'General', title: 'Passwordless sign-in by IP',
+        scrollTitle: 'Scroll speed', scrollHint: 'Adjust mouse wheel and two-finger scrolling. Applies immediately to this browser only.',
+        scrollReset: 'Restore default', scrollValue: '{value} times',
         enabled: 'Enable passwordless sign-in by IP', rules: 'IP allowlist',
         hint: 'Enter one client IP or CIDR network per line. Matching clients sign in automatically; other clients use a username and password.',
         placeholder: '192.168.1.20\n192.168.1.0/24\n2001:db8::/64',
@@ -46,7 +51,13 @@ export function createAdvancedSettings(element) {
         document.head.appendChild(style);
     }
     element.classList.add('access-settings');
-    element.innerHTML = `<form class="access-card allow-native-input">
+    element.innerHTML = `<section class="access-card scroll-card allow-native-input" aria-labelledby="scroll-title">
+        <h2 id="scroll-title"></h2>
+        <p id="scroll-hint" class="access-hint"></p>
+        <div class="scroll-control"><input id="scroll-speed" type="range" min="${MIN_SCROLL_SPEED}" max="${MAX_SCROLL_SPEED}" step="0.25" aria-labelledby="scroll-title" aria-describedby="scroll-hint"><output id="scroll-value" for="scroll-speed"></output></div>
+        <div class="scroll-footer"><span>${MIN_SCROLL_SPEED}× — ${MAX_SCROLL_SPEED.toFixed(1)}×</span><button id="scroll-reset" type="button"></button></div>
+    </section>
+    <form class="access-card access-ip-form allow-native-input">
         <h2 id="access-title"></h2>
         <label class="access-toggle"><input id="access-enabled" type="checkbox"><span id="access-enabled-label"></span></label>
         <p id="access-hint" class="access-hint"></p>
@@ -59,13 +70,22 @@ export function createAdvancedSettings(element) {
         <div class="access-footer"><p id="access-message" role="status" aria-live="polite"></p><button id="access-save" type="submit" disabled></button></div>
     </form>`;
     const find = id => element.querySelector(`#${id}`);
-    const form = element.querySelector('form'), enabled = find('access-enabled'), rules = find('access-rules');
+    const form = element.querySelector('.access-ip-form'), enabled = find('access-enabled'), rules = find('access-rules');
     const save = find('access-save'), message = find('access-message');
+    const scrollSpeed = find('scroll-speed'), scrollReset = find('scroll-reset');
     let snapshot = null, dirty = false, saving = false, loading = false, status = '', line = null, request = null;
     let authMethod = null;
     const events = new AbortController();
 
     function render() {
+        const speed = getScrollSpeed(), value = speed.toFixed(2).replace(/0$/, '');
+        find('scroll-title').textContent = advancedText('scrollTitle');
+        find('scroll-hint').textContent = advancedText('scrollHint');
+        scrollSpeed.value = String(speed);
+        scrollSpeed.setAttribute('aria-valuetext', advancedText('scrollValue').replace('{value}', value));
+        find('scroll-value').value = value + '×';
+        scrollReset.textContent = advancedText('scrollReset');
+        scrollReset.disabled = speed === DEFAULT_SCROLL_SPEED;
         for (const [id, key] of [
             ['access-title','title'], ['access-enabled-label','enabled'], ['access-hint','hint'],
             ['access-rules-label','rules'], ['access-client-label','client'],
@@ -92,6 +112,9 @@ export function createAdvancedSettings(element) {
     }
     enabled.addEventListener('change', changed, { signal: events.signal });
     rules.addEventListener('input', changed, { signal: events.signal });
+    scrollSpeed.addEventListener('input', () => setScrollSpeed(Number(scrollSpeed.value)), { signal: events.signal });
+    scrollReset.addEventListener('click', () => setScrollSpeed(DEFAULT_SCROLL_SPEED), { signal: events.signal });
+    const unscroll = onScrollSpeedChange(render);
 
     async function fetchSettings(method, body) {
         request?.abort();
@@ -140,7 +163,7 @@ export function createAdvancedSettings(element) {
     const unauth = onAuthChange(state => { authMethod = state.method; render(); });
     window.addEventListener('pagehide', event => {
         if (event.persisted) return;
-        request?.abort(); events.abort(); untranslate(); unauth();
+        request?.abort(); events.abort(); untranslate(); unauth(); unscroll();
     });
     render();
     return { load };

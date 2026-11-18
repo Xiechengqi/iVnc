@@ -25,10 +25,10 @@
  *   limitations under the License.
  */
 
-import { WebRTCDemo } from "./lib/webrtc.js?v=26";
+import { WebRTCDemo } from "./lib/webrtc.js?v=27";
 import { WebRTCDemoSignaling } from "./lib/signaling.js?v=1";
 import { stringToBase64 } from "./lib/util.js?v=1";
-import { Input } from "./lib/input2.js?v=22";
+import { Input } from "./lib/input2.js?v=23";
 import { usesTouchKeyboard } from "./lib/text-input.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -3144,6 +3144,7 @@ export default function webrtc() {
 				canReorder: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
 				canRename: !window.__IVNC_APP_VIEW__ && toolbarFeatureEnabled('console'),
 				activateWindow: (id, key) => {
+					input?.resetScroll();
 					if (!webrtc.sendDataChannelMessage(key ? `focus-key,${key}` : `focus,${id}`)) return false;
 					if (appStreams?.activeId()) appStreams.activate(null);
 					input?.restoreImeFocus(true);
@@ -3515,8 +3516,9 @@ export default function webrtc() {
 				// Messages the parent sent on iframe load may predate the listener above.
 				postToParent({ type: 'ivnc-view-ready' });
 			}
-			const send = (data) => {
-				if (clipboardController) return clipboardController.sendInput(data);
+			const send = (data, isCurrent = null) => {
+				if (clipboardController) return clipboardController.sendInput(data, isCurrent);
+				if (isCurrent && !isCurrent()) return false;
 				return webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, false, 0, useCssScaling);
@@ -3637,6 +3639,7 @@ export default function webrtc() {
 				clipboardController?.connected();
 				input.setDisplayState(null);
 				webrtc.sendDataChannelMessage("_display,1");
+				webrtc.sendDataChannelMessage("_input,1");
 				loadLastSessionSettings();
 				fetchInitialIPv4();
 				sendClientPersistedSettings();
@@ -3787,6 +3790,7 @@ export default function webrtc() {
                 viewportController?.caret(state?.cursor, input?.displayState?.desktop, usesTouchKeyboard() && !!input?.textInput.focused());
             };
             webrtc.ontextinputresult = data => input?.textInputResult(data);
+            webrtc.oninputcapabilities = data => input?.setInputCapabilities(data);
             webrtc.ondisplaystate = state => {
                 if (state?.protocol !== 1) return;
                 window.__ivncDisplayState = state;

@@ -22,7 +22,8 @@
  * under the License.
  */
 
-import { Queue } from './util.js?v=1';
+import { createScrollInput, normalizeWheel } from './scroll-input.mjs';
+import { getScrollSpeed, onScrollSpeedChange } from '../scroll-preference.mjs';
 import { pasteShortcut } from '../clipboard.js';
 import { TextInput, usesTouchKeyboard } from './text-input.js';
 import { TextCommitter } from './text-commit.js';
@@ -1118,13 +1119,25 @@ export class Input {
         this._geometryFrameReady = true;
         this._geometryMetadataPending = false;
         this._relativeRemainder = { x: 0, y: 0 };
+        this._scrollEpoch = 0;
         this.send = message => {
+            const wheel = /^w2?,/.test(message), scrollEpoch = this._scrollEpoch;
+            if (message === 'kr') this.resetScroll();
+            // Preserve pointer targets and modifier order across an 8 ms batch.
+            else if (!/^w2?,/.test(message)) {
+                this.scrollInput?.flush();
+                // A sub-unit remainder belongs to the old modifier/button
+                // state; it must not be combined with a later modified wheel.
+                if (/^(kd|ku|b),/.test(message)) this.scrollInput?.reset();
+            }
             if (message === 'kr' && this.sendControl) return this.sendControl(message);
-            if (/^(m|m2|b|w),/.test(message) && this.displayState) {
-                if (!this._geometryReady()) return;
+            if (/^(m|m2|b|w|w2),/.test(message) && this.displayState) {
+                if (!this._geometryReady()) return false;
                 message = `i,${this.displayState.revision},${message}`;
             }
-            return send(message);
+            // A paste may hold this message beyond the local batching timer.
+            // Recheck the scroll's view/geometry epoch when it actually leaves.
+            return send(message, wheel ? () => scrollEpoch === this._scrollEpoch && this._canScroll() : null);
         };
         this._isSidebarOpen = false;
         this.isSharedMode = isSharedMode;
@@ -1157,12 +1170,9 @@ export class Input {
         this.onfullscreenhotkey = this.enterFullscreen;
         this.listeners = [];
         this.listeners_context = [];
-        this._queue = new Queue();
-        this._allowTrackpadScrolling = true;
-        this._allowThreshold = true;
-        this._smallestDeltaY = 10000;
-        this._wheelThreshold = 100;
-        this._scrollMagnitude = 10;
+        this.scrollInput = createScrollInput({ send: message => this.send(message),
+            canSend: () => this._canScroll(), getSpeed: getScrollSpeed });
+        this._replayScroll = (x, y) => this.scrollInput.add(x, y);
         this.cursorScaleFactor = null;
         this._cursorBase64Data = null;
 
@@ -1207,8 +1217,6 @@ export class Input {
         this._MIN_SWIPE_DISTANCE = 30;
         this._MAX_SWIPE_DURATION = 600;
         this._VERTICAL_SWIPE_RATIO = 1.5;
-        this._SCROLL_PIXELS_PER_TICK = 40;
-        this._MAX_SCROLL_MAGNITUDE = 8;
         this._TAP_THRESHOLD_DISTANCE_SQ = 10*10;
         this._TAP_MAX_DURATION = 250;
         this._trackpadMode = false;
@@ -1340,6 +1348,7 @@ export class Input {
     }
 
     _handleOutsideClick(event) {
+        if (!this.element.contains(event.target)) this.resetScroll();
         if (this._targetHasClass(event.target, 'taskbar')) {
             this.send('kr');
             this.resetKeyboard();
@@ -1474,6 +1483,7 @@ export class Input {
     }
 
     resetKeyboard() {
+        this.resetScroll();
         for (const code in this._keyDownList) {
             this._sendKeyEvent(this._keyDownList[code], code, false);
         }
@@ -1976,7 +1986,7 @@ export class Input {
             for (const touch of changedTouches) {
                 this._trackpadTouches.delete(touch.identifier);
             }
-            if (this._trackpadTouches.size < 2) this._gestureNav()?.endTouch();
+            if (this._trackpadTouches.size < 2) this._gestureNav()?.endTouch(type === 'touchcancel');
 
             if (this._trackpadTouches.size === 0) {
                 if (this._trackpadGestureMode === 'dragging') {
@@ -2092,7 +2102,7 @@ export class Input {
         if (!this._guac_markEvent(event)) return;
         const type = event.type;
         if ((type === 'touchend' || type === 'touchcancel') && event.touches.length < 2) {
-            this._gestureNav()?.endTouch();
+            this._gestureNav()?.endTouch(type === 'touchcancel');
             this._touchScrollStartSeparation = null;
         }
         const now = Date.now();
@@ -2331,12 +2341,6 @@ export class Input {
         }
     }
 
-    _triggerMouseWheel(direction, magnitude) {
-        const steps = Math.max(1, Math.round(magnitude));
-        const dy = direction === 'up' ? -steps : steps;
-        this.send(`w,0,${dy}`);
-    }
-
     _gestureNav() {
         try { return this.gestureNavigation?.() || null; } catch (_) { return null; }
     }
@@ -2347,74 +2351,41 @@ export class Input {
     }
 
     _handleTwoFingerScroll(deltaX, deltaY) {
+        if (!this._canScroll()) { this.resetScroll(); return; }
         const navigation = this._gestureNav();
-        if (navigation?.touch(deltaX, deltaY, window, this._gestureBlocked())) return;
-        const threshold = 2;
-        if (Math.abs(deltaY) > threshold) this._triggerMouseWheel(deltaY < 0 ? 'down' : 'up', 1);
-        if (Math.abs(deltaX) > threshold) this._triggerHorizontalMouseWheel(deltaX < 0 ? 'left' : 'right', 1);
-    }
-
-    _triggerHorizontalMouseWheel(direction, magnitude) {
-        const steps = Math.max(1, Math.round(magnitude));
-        const dx = direction === 'left' ? -steps : steps;
-        this.send(`w,${dx},0`);
-    }
-
-    _dropThreshold() {
-        var count = 0;
-        var val1 = this._queue.dequeue();
-        while (!this._queue.isEmpty()) {
-            var valNext = this._queue.dequeue();
-            if (valNext >= 80 && val1 == valNext) { count++; }
-            val1 = valNext;
+        if (navigation?.touch(deltaX, deltaY, window, this._gestureBlocked(), this._replayScroll)) {
+            this.scrollInput.reset(); return;
         }
-        return count >= 2;
+        this.scrollInput.add(-deltaX, -deltaY);
     }
 
     _mouseWheelWrapper(event) {
+        if (!this.inputAttached || document.hidden || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) {
+            this.resetScroll(); return;
+        }
         if (!document.pointerLockElement && !this._insideContent(event.clientX, event.clientY)) return;
-        if (this._gestureNav()?.wheel(event, window, this._gestureBlocked())) {
+        const rect = this.element.getBoundingClientRect();
+        const delta = normalizeWheel(event, rect.width, rect.height);
+        if (!delta) return;
+        const normalized = { deltaX: delta.x, deltaY: delta.y, deltaMode: 0,
+            ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey };
+        if (this._gestureNav()?.wheel(normalized, window, this._gestureBlocked(), this._replayScroll)) {
+            this.scrollInput.reset();
             event.preventDefault();
             event.stopPropagation();
             return;
         }
-        var deltaY = Math.trunc(Math.abs(event.deltaY));
-        if (this._queue.size() < 4) { this._queue.enqueue(deltaY); }
-        if (this._queue.size() == 4) {
-            if (this._dropThreshold()) {
-                this._allowThreshold = false; this._smallestDeltaY = 10000;
-            } else {
-                this._allowThreshold = true;
-            }
-        }
-        if (this._allowThreshold && this._allowTrackpadScrolling) {
-            this._allowTrackpadScrolling = false;
-            this._mouseWheel(event);
-            setTimeout(() => this._allowTrackpadScrolling = true, this._wheelThreshold);
-        } else if (!this._allowThreshold) {
-            this._mouseWheel(event);
-        }
+        this.scrollInput.add(delta.x, delta.y);
         event.preventDefault();
     }
 
-    _mouseWheel(event) {
-        if (event.deltaY !== 0) {
-            const direction = (event.deltaY < 0) ? 'up' : 'down';
-            let deltaY = Math.abs(Math.trunc(event.deltaY));
-            if (deltaY < this._smallestDeltaY && deltaY !== 0) {
-                this._smallestDeltaY = deltaY;
-            }
-            const verticalMagnitude = Math.max(1, Math.floor(deltaY / this._smallestDeltaY));
-            const magnitude = Math.min(verticalMagnitude, this._scrollMagnitude);
-            this._triggerMouseWheel(direction, magnitude);
-        }
-        if (event.deltaX !== 0) {
-            const direction = (event.deltaX < 0) ? 'left' : 'right';
-            const horizontalMagnitude = Math.max(1, Math.round(Math.abs(event.deltaX) / 100));
-            const magnitude = Math.min(horizontalMagnitude, this._scrollMagnitude);
-            this._triggerHorizontalMouseWheel(direction, magnitude);
-        }
+    _canScroll() {
+        return this.inputAttached && this._viewActive && !document.hidden && this._geometryReady()
+            && !document.documentElement.hasAttribute('data-ivnc-modal-blocked');
     }
+
+    resetScroll() { ++this._scrollEpoch; this.scrollInput?.reset(); this._gestureNav()?.cancelPending(window); }
+    setInputCapabilities(data) { this.scrollInput.setProtocol(data?.scroll_pixels); }
 
     _contextMenu(event) {
         if (this.element.contains(event.target)) {
@@ -2438,6 +2409,7 @@ export class Input {
         const changed = this.displayState && state && this.displayState.revision !== state.revision;
         const first = !this.displayState && state;
         this.displayState = state;
+        if (!state || changed || first) this.resetScroll();
         if (!state) { this._geometryFrameReady = true; this._geometryMetadataPending = false; this._relativeRemainder = {x:0,y:0}; }
         if (first) this._geometryMetadataPending = true;
         if (changed) {
@@ -2447,7 +2419,7 @@ export class Input {
             this._activeTouchIdentifier = null;
             this._isTwoFingerGesture = false; this._trackpadGestureMode = null;
             this._touchScrollLastCentroid = null; this._trackpadLastTapTime = 0;
-            this._gestureNav()?.endTouch();
+            this._gestureNav()?.endTouch(true);
             clearTimeout(this._longPressTimer); clearTimeout(this._trackpadTapTimeout);
             this._relativeRemainder = { x: 0, y: 0 };
             this._geometryFrameReady = false;
@@ -2592,6 +2564,7 @@ export class Input {
     }
 
     resize() {
+        this.resetScroll();
         this._windowMath();
         this.textInput.position();
     }
@@ -2601,6 +2574,9 @@ export class Input {
     }
 
     attach() {
+        this._unsubscribeScrollSpeed?.();
+        this._unsubscribeScrollSpeed = onScrollSpeedChange(() => this.resetScroll());
+        this.listeners.push(addListener(window, 'pagehide', this.resetScroll, this));
         this.listeners.push(addListener(this.element, 'resize', this._windowMath, this));
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
         this.listeners.push(addListener(document, 'fullscreenchange', this._onFullscreenChange, this));
@@ -2676,9 +2652,12 @@ export class Input {
         this.restoreImeFocus();
     }
 
-    _resumeIme() { this.restoreImeFocus(); }
+    _resumeIme() { if (document.hidden) this.resetScroll(); else this.restoreImeFocus(); }
 
     detach() {
+        this.resetScroll();
+        this.scrollInput.setProtocol(0);
+        this._unsubscribeScrollSpeed?.(); this._unsubscribeScrollSpeed = null;
         removeListeners(this.listeners);
         this.listeners = [];
         this.detach_context();

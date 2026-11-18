@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "test:toolbar": "node ../../scripts/toolbar_interaction_test.mjs",
     "test:settings": "node ../../scripts/settings_interaction_test.mjs",
+    "test:scroll": "node --test ../../scripts/scroll_input_test.mjs ../../scripts/scroll_interaction_test.mjs",
     "test:app-sharing": "node ../../scripts/app_sharing_interaction_test.mjs",
     "test:mobile-input": "node ../../scripts/mobile_input_test.mjs",
     "test:ime": "node --test ../../scripts/ime_input_test.mjs ../../scripts/text_commit_test.mjs",

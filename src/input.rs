@@ -3,6 +3,7 @@
 //! Defines the input event data structures used by the data channel
 //! and compositor input injection.
 
+pub mod scroll;
 pub mod text_commit;
 
 /// Input event types
@@ -35,6 +36,7 @@ pub struct InputEventData {
     pub button_pressed: bool,
     pub wheel_delta_x: i16,
     pub wheel_delta_y: i16,
+    pub scroll: Option<scroll::ScrollDelta>,
     pub keysym: u32,
     pub key_pressed: bool,
     pub button_mask: u32,
@@ -58,6 +60,7 @@ impl Default for InputEventData {
             button_pressed: false,
             wheel_delta_x: 0,
             wheel_delta_y: 0,
+            scroll: None,
             keysym: 0,
             key_pressed: false,
             button_mask: 0,

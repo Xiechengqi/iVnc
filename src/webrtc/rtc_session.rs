@@ -973,6 +973,11 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         let _ = session.send_datachannel_text(&ctx.shared_state.display_message());
         return;
     }
+    if text == "_input,1" {
+        let _ = session
+            .send_datachannel_text(r#"{"type":"input_capabilities","data":{"scroll_pixels":1}}"#);
+        return;
+    }
     if let Some(viewport) = text.strip_prefix("_viewport,") {
         ctx.shared_state.report_viewport(&session.id, viewport);
         return;

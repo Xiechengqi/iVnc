@@ -96,6 +96,25 @@ test('queued text reports actual send or cancellation without losing paste order
     } finally { t.controller.destroy(); }
 });
 
+test('scroll held behind a paste stays ordered and is discarded after its target changes', async () => {
+    const t=setup();
+    try {
+        let current=true;
+        t.controller.beginPaste(t.event(),'ctrl-v');t.paste('PASTE');
+        const first=t.controller.sendInput('i,1,w2,0,120',()=>current);
+        assert(!t.sent.includes('i,1,w2,0,120'));
+        t.ack();await tick();assert.equal(await first,true);
+        assert.equal(t.sent.at(-1),'i,1,w2,0,120');
+        t.controller.beginPaste(t.event(),'ctrl-v');t.paste('SECOND');
+        const stale=t.controller.sendInput('i,1,w2,0,240',()=>current);
+        const key=t.controller.sendInput('ku,65507');
+        current=false;t.ack();await tick();
+        assert.equal(await stale,false);assert.equal(await key,true);
+        assert(!t.sent.includes('i,1,w2,0,240'));
+        assert.equal(t.sent.at(-1),'ku,65507');
+    } finally {t.controller.destroy()}
+});
+
 test('local rename and native form inputs are left alone', () => {
     const t = setup();
     try {

@@ -660,6 +660,8 @@ export class WebRTCDemo {
 			}
 		} else if (msg.type === 'display') {
 			this.ondisplaystate?.(msg.data);
+		} else if (msg.type === 'input_capabilities') {
+			this.oninputcapabilities?.(msg.data);
 		} else if (msg.type === 'text_input') {
 			this.ontextinputstate?.(msg.data);
 		} else if (msg.type === 'text_input_result') {

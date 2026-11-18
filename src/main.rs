@@ -1331,7 +1331,9 @@ fn inject_scroll(state: &mut Compositor, ev: &InputEventData, time: u32) {
     use smithay::backend::input::Axis;
     use smithay::input::pointer::AxisFrame;
     let ptr = state.seat.get_pointer().unwrap();
-    let mut frame = AxisFrame::new(time);
+    let mut frame = ev
+        .scroll
+        .map_or_else(|| AxisFrame::new(time), |scroll| scroll.axis_frame(time));
     if ev.wheel_delta_y != 0 {
         frame = frame.value(Axis::Vertical, ev.wheel_delta_y as f64);
     }

@@ -64,6 +64,7 @@ impl InputDataChannel {
     /// - Relative mouse: `m2,dx,dy,buttons,0`
     /// - Mouse button: `b,button,pressed`
     /// - Mouse wheel: `w,dx,dy`
+    /// - High precision scroll: `w2,dx,dy` in logical pixels (capability v1)
     /// - Keyboard: `k,keysym,pressed`
     /// - Key down: `kd,keysym`
     /// - Key up: `ku,keysym`
@@ -145,6 +146,22 @@ impl InputDataChannel {
                 event.wheel_delta_y = parts[2].parse().map_err(|_| {
                     WebRTCError::DataChannelError("Invalid wheel delta Y".to_string())
                 })?;
+            }
+
+            "w2" => {
+                let parse = || -> Option<crate::input::scroll::ScrollDelta> {
+                    if parts.len() != 3 {
+                        return None;
+                    }
+                    crate::input::scroll::ScrollDelta::from_pixels(
+                        parts[1].parse().ok()?,
+                        parts[2].parse().ok()?,
+                    )
+                };
+                event.scroll = Some(parse().ok_or_else(|| {
+                    WebRTCError::DataChannelError("Invalid scroll pixels".into())
+                })?);
+                event.event_type = InputEvent::MouseWheel;
             }
 
             "k" => {
@@ -323,6 +340,39 @@ mod tests {
         assert_eq!(event.event_type, InputEvent::MouseWheel);
         assert_eq!(event.wheel_delta_x, 0);
         assert_eq!(event.wheel_delta_y, -120);
+        assert!(event.scroll.is_none());
+    }
+
+    #[test]
+    fn pixel_scroll_is_precise_bounded_and_geometry_checked() {
+        use crate::input::scroll::ScrollDelta;
+        let state =
+            crate::display::DisplayController::new(crate::display::Size::new(1920, 1080), false)
+                .snapshot();
+        let event = InputDataChannel::parse_display_input("i,1,w2,0.25,-100.125", &state).unwrap();
+        assert_eq!(event.event_type, InputEvent::MouseWheel);
+        assert_eq!(event.scroll, ScrollDelta::from_pixels(0.25, -100.125));
+        assert_eq!(event.geometry_revision, Some(1));
+        assert_eq!((event.wheel_delta_x, event.wheel_delta_y), (0, 0));
+        assert!(InputDataChannel::parse_display_input("i,0,w2,0,10", &state).is_err());
+        for message in [
+            "w2",
+            "w2,1",
+            "w2,1,2,3",
+            "w2,,1",
+            "w2,NaN,1",
+            "w2,1,inf",
+            "w2,1,-inf",
+            "w2,32769,0",
+            "w2,0,-32769",
+            "w2,1e100,0",
+        ] {
+            assert!(
+                InputDataChannel::parse_input_text(message).is_err(),
+                "{message}"
+            );
+        }
+        assert!(InputDataChannel::parse_input_text("w2,-32768,32768").is_ok());
     }
 
     #[test]
