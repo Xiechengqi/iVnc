@@ -11,6 +11,7 @@
 use crate::web::auth::{self, AuthContext, TransportSecurity};
 use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::github_update::{self, DownloadEvent};
+use crate::web::proxy_cookies::MiaoCookieScope;
 use crate::web::shared::SharedState;
 use axum::extract::Path;
 use axum::{
@@ -1388,7 +1389,9 @@ async fn proxy_panel_ws_handler(
 
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = upstream.into_client_request().unwrap();
+    let cookies = MiaoCookieScope::new(&headers);
     state.auth.strip_cookie(&mut headers);
+    cookies.prepare_upstream(&mut headers);
     for name in [header::HOST, header::ORIGIN, header::COOKIE] {
         if let Some(value) = headers.get(&name) {
             request.headers_mut().insert(name, value.clone());
@@ -1518,7 +1521,9 @@ async fn proxy_to_miao(
         }
     };
 
+    let cookies = MiaoCookieScope::new(&headers);
     state.auth.strip_cookie(&mut headers);
+    cookies.prepare_upstream(&mut headers);
     let mut req = client.request(method, upstream).body(body_bytes);
     for (name, value) in headers.iter() {
         // Preserve Host and Origin together for Miao's same-origin checks.
@@ -1563,7 +1568,12 @@ async fn proxy_to_miao(
             }
             let mut builder = Response::builder().status(status);
             for (name, value) in headers.iter() {
-                if name == header::SET_COOKIE && state.auth.is_own_cookie(value) {
+                if name == header::SET_COOKIE {
+                    if !state.auth.is_own_cookie(value) {
+                        if let Some(value) = cookies.downstream_cookie(value) {
+                            builder = builder.header(name, value);
+                        }
+                    }
                     continue;
                 }
                 if name == header::CONTENT_LENGTH

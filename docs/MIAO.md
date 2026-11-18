@@ -48,6 +48,8 @@ Docker 镜像名后可直接放 iVnc 启动参数；同时运行自定义前台�
 
 嵌入面板仅监听 `127.0.0.1`，浏览器经 `/proxy/` 访问，外部访问由 iVnc 的认证配置控制。网页自动建立 Miao 会话，保留 Cookie、同源、CSRF 和 WebSocket 校验；隐藏修改密码和退出登录按钮，初始化及改密接口禁用，只读状态接口不创建会话。嵌入模式允许同源 iframe，独立运行仍使用 `DENY`。嵌入模式不打开首次配置浏览器，升级随 iVnc 分发；面板自身的升级入口被禁用。内置 Chrome 不再自动读取 Miao 的实时 SOCKS 地址：在控制台“编辑应用”中通过独立的“代理地址”字段显式指定（例如 `socks5://127.0.0.1:1080`），留空则不使用代理。该值会写入 Chrome 启动命令的 `--proxy-server`，修改后需重启浏览器生效；Miao 的 SOCKS 端口若变化，需相应更新此字段。详见 [内置浏览器代理配置](CHROME_PROXY.md)。
 
+在同一 IP 的不同端口部署多个 iVnc 时，代理层按浏览器访问的 Host（含对外端口）为 Miao 会话 Cookie 添加独立名称，HTTP 请求与 WebSocket 都只还原当前入口的会话。这样即使各容器的 Miao 配置路径相同，也不会相互覆盖登录状态。升级后的首次打开会自动建立隔离会话，无需清理浏览器 Cookie，Miao 的配置、订阅和节点数据不受影响。此修复只需更新 iVnc，兼容现有协议 v2 的 Miao。
+
 VPS 部署调用运行环境中的 OpenSSH 客户端。Docker 运行时已安装 `openssh-client` 并在构建时执行 `ssh -V`；直接部署二进制时也需安装该软件包。若旧镜像出现 `SSH client unavailable`，需更新或重建镜像，仅更新嵌入二进制不会补齐系统依赖。
 
 ## 配套构建与发布
@@ -82,9 +84,11 @@ python3 scripts/docker_entrypoint_test.py -v
 python3 scripts/miao_smoke.py --binary /absolute/path/to/ivnc
 # 可选：另验证控制台编辑和认证 iframe，需要 Chrome、Node 20+ 及 web/ivnc 的 npm ci
 python3 scripts/miao_smoke.py --binary /absolute/path/to/ivnc --browser
+# 只运行两个真实实例共用浏览器 Cookie 的多端口回归（Chromium / WebKit）
+python3 scripts/miao_smoke.py --binary /absolute/path/to/ivnc --multi-instance-only
 ```
 
-隔离测试只启动面板，验证默认自启动、实际命令与配置展示、只读接口保护、同一 PID、免密码自动进入、认证/CSRF/WebSocket、原密码与配置保留、停止不复活、崩溃恢复、旧版自启动偏好和管理员总开关，不启动 TUN。浏览器测试验证完整只读表单、普通应用的新增与编辑不受影响，并从没有 Miao Cookie 的状态打开实际 iframe，检查自动进入和密码按钮隐藏。通用 `desktop_smoke.sh` 显式禁用代理，以免接触运行环境中的代理配置。
+隔离测试只启动面板，验证默认自启动、实际命令与配置展示、只读接口保护、同一 PID、免密码自动进入、认证/CSRF/WebSocket、原密码与配置保留、停止不复活、崩溃恢复、旧版自启动偏好和管理员总开关，不启动 TUN。HTTP/HTTPS 回归还验证相同 Miao 配置路径在不同对外端口的 Cookie 隔离、旧 Cookie 自动过渡和 WebSocket 的会话选择。浏览器测试验证完整只读表单、普通应用的新增与编辑不受影响，并从没有 Miao Cookie 的状态打开实际 iframe，检查自动进入和密码按钮隐藏；同时在共享浏览器中打开两个真实实例，观察超过两个认证轮询周期，验证刷新及重启单个面板不影响另一个。可设置 `IVNC_TEST_HTTP_HOST` 为本机局域网 IP 验证普通 HTTP IP 访问，设置 `BROWSERS=chromium` 只运行新增多实例测试的 Chromium 部分。所有浏览器测试仅在本地执行。通用 `desktop_smoke.sh` 显式禁用代理，以免接触运行环境中的代理配置。
 
 `--proxy-ip` 回归使用替代面板记录实际进程参数，覆盖 IPv4/IPv6、手动重启、崩溃恢复与禁用代理；Docker 入口测试使用隔离替代程序验证参数和退出信号，不连接真实 VPS。CI 在构建前执行 Docker 入口回归。
 

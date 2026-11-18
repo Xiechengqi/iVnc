@@ -110,3 +110,20 @@ Miao 的“编辑应用”改用完整后台应用表单，全部字段只读，
 - 主命令与 `run` 帮助包含新参数；Rust 格式、Shell/JS/Python/YAML 语法和 diff 空白检查通过。
 
 整体 review 未发现尚未解决的阻塞问题。无需修改或重新发布 Miao。已构建隔离测试二进制；Docker daemon 不可用，未实际构建镜像、连接真实 VPS 或更新现有服务。
+
+## 2026-11-18：同一主机多端口登录跳闪修复
+
+根因已在用户的 `http://192.168.1.4:17000` 部署复现。该主机运行多个 iVnc 容器，对外端口不同，内部端口均为 8008；Miao 的配置路径均为 `/root/.miao/config.yaml`。Miao v2 以配置路径生成 Cookie 名，因此 17000 和 16000 两个入口都返回 `miao_session_ae798df1b773`。浏览器 Cookie 不隔离端口：另一实例登录会覆盖当前会话，实测把 16000 的 Cookie 发回 17000 时，认证状态从 true 变为 false。面板每 15 秒检查状态并自动创建免密码会话，多个打开的面板相互覆盖，表现为“正在检查登录状态…”反复跳闪。这是嵌入代理未隔离多实例会话的 bug，HTTP IP 访问本身受支持。
+
+修复在 iVnc 代理边界完成，兼容现有 Miao 协议 v2，无需配套发布 Miao。响应中的会话 Cookie 按浏览器可见 Host（含发布端口）添加稳定的命名空间；HTTP 请求和 WebSocket 握手仅还原当前入口的 Cookie，并过滤其他入口及旧版共享会话。旧 Cookie 不作为回退，首次访问自动创建新会话，不删除 Miao 配置或浏览器的旧共享 Cookie。Miao 原有 HttpOnly、SameSite、Secure、有效期及删除属性保持原样；iVnc 外层认证、Origin 和 Miao CSRF 校验继续生效。
+
+整体审查覆盖发布端口与内部端口的区别、HTTP/WebSocket 一致性、旧 Cookie 过渡、同名重复 Cookie、响应属性及管理 Cookie 的过滤，未发现阻塞问题。浏览器测试只在本地执行，GitHub Actions 未新增或启用 UI 测试。
+
+验证记录：
+
+- Rust lib 212 项通过，包含新增 6 项 Cookie 隔离回归；TLS 二进制构建与前端生产构建通过。
+- HTTP/HTTPS 隔离集成及真实 Chrome iframe 通过，覆盖相同上游 Cookie 名在不同发布端口的选择、旧会话拒绝、外层认证、CSRF、WebSocket、启停、恢复和配置保留。
+- 新增共享浏览器多实例回归在 Chrome、WebKit 各 3 组通过，共 6 组。使用局域网 HTTP IP 和两个真实隔离的 iVnc/Miao 进程，观察 32 秒，验证超过两个 15 秒校验周期无跳闪，且单实例刷新、重启不影响另一实例。
+- 负向回归确认旧二进制会在新增端口隔离断言上失败；Rust 格式、JS/Python 语法和 diff 空白检查通过。
+
+本轮未更新或重启用户的远程容器。各实例更新 iVnc 后重新打开面板即可使用隔离会话。

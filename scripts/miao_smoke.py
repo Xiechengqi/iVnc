@@ -196,14 +196,42 @@ def scenario(binary, root, tls, browser=False):
         result, headers = instance.request("/proxy/api/auth/login", "POST", {})
         assert result["success"]
         cookie, csrf = headers["set-cookie"].split(";", 1)[0], result["data"]["csrf"]
+        assert cookie.startswith("ivnc_miao_"), "Miao session is not isolated by published host/port"
         assert ("; Secure" in headers["set-cookie"]) == tls
         session = {"Cookie": cookie, "X-Miao-CSRF": csrf}
+        # Simulate a second published port even when Docker maps both containers
+        # to the same internal port. Both requests use the same real Miao config
+        # path, so their upstream session-cookie names are exactly identical.
+        other_host = f"127.0.0.1:{port()}"
+        other_origin = f"{'https' if tls else 'http'}://{other_host}"
+        other_result, other_headers = instance.request("/proxy/api/auth/login", "POST", {},
+                                                       {"Host": other_host, "Origin": other_origin})
+        other_cookie = other_headers["set-cookie"].split(";", 1)[0]
+        assert cookie.split("=", 1)[0] != other_cookie.split("=", 1)[0]
+        assert csrf != other_result["data"]["csrf"]
+        all_cookies = f"{other_cookie}; {cookie}"
+        for host_headers, expected_csrf in [({}, csrf),
+                                            ({"Host": other_host}, other_result["data"]["csrf"])]:
+            status = instance.request("/proxy/api/auth/status",
+                                      headers=dict(host_headers, Cookie=all_cookies))[0]["data"]
+            assert status["authenticated"] and status["csrf"] == expected_csrf
+        assert not instance.request("/proxy/api/auth/status",
+                                    headers={"Cookie": other_cookie})[0]["data"]["authenticated"]
+        # Old unscoped cookies are shared across ports. Never accept them as a
+        # fallback; automatic login replaces them without clearing user data.
+        legacy_cookie = "miao_session_" + cookie.split("miao_session_", 1)[1]
+        assert not instance.request("/proxy/api/auth/status",
+                                    headers={"Cookie": legacy_cookie})[0]["data"]["authenticated"]
+        instance.request("/proxy/api/status", headers={"Cookie": legacy_cookie}, status=401)
         instance.request("/proxy/api/status", headers=session)
         instance.request("/proxy/api/auth/logout", "POST", {}, {"Cookie": cookie}, status=403)
         instance.request("/proxy/api/auth/logout", "POST", {}, dict(session, Origin="https://foreign.example"), status=403)
         instance.websocket(status=401)
+        instance.websocket(other_cookie, status=401)
+        instance.websocket(legacy_cookie, status=401)
         instance.websocket(cookie, origin="https://foreign.example", status=403)
         instance.websocket(cookie)
+        instance.websocket(all_cookies)
         # Preserve an old panel request path without intercepting iVnc management calls.
         instance.request("/api/auth/status", headers={"Referer": instance.origin + "/proxy/"})
         result = instance.request("/proxy/api/upgrade", "POST", {}, session)[0]
@@ -269,7 +297,7 @@ def scenario(binary, root, tls, browser=False):
         instance.request(app_path + "/restart", "POST", status=403)
         instance.request("/api/proxy/start", "POST", status=404)
         instance.request("/proxy/", status=404)
-        print(f"PASS {'HTTPS' if tls else 'HTTP'}: lifecycle, preference, auth, CSRF, WS, configuration and master switch", flush=True)
+        print(f"PASS {'HTTPS' if tls else 'HTTP'}: lifecycle, preference, auth, port-isolated cookies, CSRF, WS, configuration and master switch", flush=True)
     except BaseException:
         print((root / "ivnc.log").read_text()[-6000:], flush=True)
         miao_log = Path(instance.env["IVNC_HOME"]) / "miao/miao.log"
@@ -281,19 +309,41 @@ def scenario(binary, root, tls, browser=False):
         assert all(not alive(pid) for pid in instance.miao_pids), "owned Miao process leaked"
 
 
+def multi_instance_scenario(binary, root):
+    instances = [Instance(binary, root / name, False) for name in ("one", "two")]
+    try:
+        for instance in instances:
+            instance.boot()
+            eventually(instance.ready)
+        browser_env = dict(os.environ, MIAO_SMOKE_AUTH=instances[0].auth)
+        # A LAN IP also exercises Chrome's ordinary, untrusted HTTP behavior.
+        host = os.environ.get("IVNC_TEST_HTTP_HOST", "127.0.0.1")
+        origins = [f"http://{host}:{instance.http_port}" for instance in instances]
+        subprocess.run(["node", str(Path(__file__).with_name("miao_multi_instance_smoke.mjs")),
+                        *origins], env=browser_env, check=True, timeout=180)
+    finally:
+        for instance in instances:
+            instance.stop()
+            assert all(not alive(pid) for pid in instance.miao_pids), "owned Miao process leaked"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--http-only", action="store_true")
     parser.add_argument("--browser", action="store_true", help="also verify the shipped UI in an isolated headless Chrome (Node 20+)")
+    parser.add_argument("--multi-instance-only", action="store_true", help="only run the local shared-browser multi-port regression")
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("Miao requires root; run this isolated test as root")
     with tempfile.TemporaryDirectory(prefix="ivnc-miao-smoke-") as directory:
-        for tls in ([False] if args.http_only else [False, True]):
+        modes = [] if args.multi_instance_only else ([False] if args.http_only else [False, True])
+        for tls in modes:
             root = Path(directory) / ("https" if tls else "http")
             root.mkdir()
             scenario(args.binary.resolve(), root, tls, args.browser)
+        if args.browser or args.multi_instance_only:
+            multi_instance_scenario(args.binary.resolve(), Path(directory) / "multi")
 
 
 if __name__ == "__main__":
