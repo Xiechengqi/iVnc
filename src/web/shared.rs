@@ -29,6 +29,8 @@ pub struct ConnectionInfo {
     pub client_info: Option<Value>,
     pub client_visible: bool,
     pub client_focused: bool,
+    pub client_preview: bool,
+    input_needs_reset: bool,
     pub last_client_input_ms: u64,
     pub last_client_focus_ms: u64,
     pub last_client_hidden_ms: u64,
@@ -49,6 +51,7 @@ pub struct ClientViewerSummary {
 struct ClientActivityReport {
     visible: Option<bool>,
     focused: Option<bool>,
+    preview: Option<bool>,
     input: Option<bool>,
     #[allow(dead_code)]
     event: Option<String>,
@@ -113,6 +116,7 @@ pub struct StreamApp {
     /// "shared": a local application in its own runtime; "remote": an application of another instance.
     pub kind: &'static str,
     pub status: &'static str,
+    pub preview_supported: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -710,6 +714,8 @@ impl SharedState {
             client_info: None,
             client_visible: true,
             client_focused: true,
+            client_preview: false,
+            input_needs_reset: false,
             last_client_input_ms: now_millis(),
             last_client_focus_ms: now_millis(),
             last_client_hidden_ms: 0,
@@ -782,6 +788,9 @@ impl SharedState {
         if let Ok(mut conns) = self.connections.lock() {
             if let Some(conn) = conns.get_mut(id) {
                 conn.last_client_heartbeat_ms = now;
+                if let Some(preview) = report.preview {
+                    conn.client_preview = preview;
+                }
                 if let Some(visible) = report.visible {
                     if conn.client_visible != visible && !visible {
                         conn.last_client_hidden_ms = now;
@@ -811,10 +820,11 @@ impl SharedState {
         }
     }
 
-    pub fn record_connection_input_activity(&self, id: &str) {
+    pub fn record_connection_input_activity(&self, id: &str, affects_seat: bool) {
         let now = now_millis();
         if let Ok(mut conns) = self.connections.lock() {
             if let Some(conn) = conns.get_mut(id) {
+                conn.input_needs_reset |= affects_seat;
                 conn.client_visible = true;
                 conn.client_focused = true;
                 conn.last_client_input_ms = now;
@@ -857,6 +867,7 @@ impl SharedState {
             let stale = heartbeat_age > HEARTBEAT_STALE_AFTER_MS;
             let hidden_inactive = !conn.client_visible && hidden_age >= HIDDEN_DEEP_IDLE_AFTER_MS;
             let unfocused_inactive = conn.client_visible
+                && !conn.client_preview
                 && !conn.client_focused
                 && focus_age >= UNFOCUSED_DEEP_IDLE_AFTER_MS
                 && input_age >= UNFOCUSED_DEEP_IDLE_AFTER_MS;
@@ -865,7 +876,7 @@ impl SharedState {
             if !inactive {
                 all_clients_inactive = false;
             }
-            if !stale && conn.client_visible && conn.client_focused {
+            if !stale && conn.client_visible && (conn.client_focused || conn.client_preview) {
                 has_active_viewer = true;
             }
             if !stale && wakeup_age <= RECENT_WAKEUP_AFTER_MS {
@@ -883,7 +894,13 @@ impl SharedState {
 
     /// Remove a connection
     pub fn remove_connection(&self, id: &str) {
-        if self.connections.lock().unwrap().remove(id).is_some() {
+        if self
+            .connections
+            .lock()
+            .unwrap()
+            .remove(id)
+            .is_some_and(|conn| conn.input_needs_reset)
+        {
             self.reset_input();
         }
     }
@@ -895,12 +912,26 @@ impl SharedState {
         if let Some(tx) = connection.shutdown_tx {
             let _ = tx.send(());
         }
-        self.reset_input();
+        if connection.input_needs_reset {
+            self.reset_input();
+        }
     }
 
-    /// Releases every pressed key and pointer button. Every connection may
-    /// control the desktop, and keys a connection pressed before it dropped can
-    /// only be released here.
+    pub fn release_connection_input(&self, id: &str, explicit: bool) {
+        if self
+            .connections
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .is_some_and(|conn| {
+                std::mem::take(&mut conn.input_needs_reset) || (explicit && !conn.client_preview)
+            })
+        {
+            self.reset_input();
+        }
+    }
+
+    /// Releases pressed keys and pointer buttons after a controlling view drops.
     fn reset_input(&self) {
         let _ = self.input_sender.send(InputEventData {
             event_type: crate::input::InputEvent::KeyboardReset,
@@ -1065,6 +1096,7 @@ mod tests {
                 can_rename: true,
                 kind: "shared",
                 status: "starting",
+                preview_supported: true,
             },
             StreamApp {
                 id: "mapping".into(),
@@ -1073,6 +1105,7 @@ mod tests {
                 can_rename: true,
                 kind: "remote",
                 status: "auth_required",
+                preview_supported: false,
             },
         ];
         let value: serde_json::Value = serde_json::from_str(&taskbar_json(
@@ -1087,8 +1120,8 @@ mod tests {
         assert_eq!(
             value["apps"],
             json!([
-                {"id": "local", "name": "Chrome", "name_revision": 0, "can_rename": true, "kind": "shared", "status": "starting"},
-                {"id": "mapping", "name": "Remote", "name_revision": 0, "can_rename": true, "kind": "remote", "status": "auth_required"},
+                {"id": "local", "name": "Chrome", "name_revision": 0, "can_rename": true, "kind": "shared", "status": "starting", "preview_supported": true},
+                {"id": "mapping", "name": "Remote", "name_revision": 0, "can_rename": true, "kind": "remote", "status": "auth_required", "preview_supported": false},
             ])
         );
     }
@@ -1112,6 +1145,7 @@ mod tests {
             can_rename: true,
             kind: "remote",
             status: "connecting",
+            preview_supported: false,
         };
         state.set_taskbar_apps(TaskbarApps {
             apps: vec![app.clone()],
@@ -1132,6 +1166,68 @@ mod tests {
         });
         assert_eq!(state.apps_generation.load(Ordering::Relaxed), 2);
         assert_eq!(state.taskbar_apps().apps[0].status, "connected");
+    }
+
+    #[test]
+    fn visible_preview_stays_awake_without_owning_input() {
+        let (input, mut events) = mpsc::unbounded_channel();
+        let config = Config::default();
+        let state = SharedState::new(
+            config.clone(),
+            UiConfig::from_env(&config),
+            input,
+            Arc::new(RuntimeSettings::new(&config)),
+            None,
+            None,
+        );
+        state.add_connection(
+            "preview".into(),
+            "127.0.0.1".into(),
+            tokio::sync::oneshot::channel().0,
+        );
+        state.update_connection_client_activity(
+            "preview",
+            r#"{"visible":true,"focused":false,"preview":true}"#,
+        );
+        {
+            let mut connections = state.connections.lock().unwrap();
+            let connection = connections.get_mut("preview").unwrap();
+            let earlier = now_millis().saturating_sub(360_000);
+            connection.last_client_focus_ms = earlier;
+            connection.last_client_input_ms = earlier;
+        }
+        assert!(state.client_viewer_summary().has_active_viewer);
+        assert!(!state.client_viewer_summary().all_clients_inactive);
+
+        state.update_connection_client_activity(
+            "preview",
+            r#"{"visible":false,"focused":false,"preview":true}"#,
+        );
+        state
+            .connections
+            .lock()
+            .unwrap()
+            .get_mut("preview")
+            .unwrap()
+            .last_client_hidden_ms = now_millis().saturating_sub(60_000);
+        assert!(state.client_viewer_summary().all_clients_inactive);
+        state.record_connection_input_activity("preview", false);
+        state.release_connection_input("preview", true);
+        state.release_connection_input("preview", false);
+        state.remove_connection("preview");
+        assert!(events.try_recv().is_err());
+
+        state.add_connection(
+            "control".into(),
+            "127.0.0.1".into(),
+            tokio::sync::oneshot::channel().0,
+        );
+        state.record_connection_input_activity("control", true);
+        state.remove_connection("control");
+        assert_eq!(
+            events.try_recv().unwrap().event_type,
+            crate::input::InputEvent::KeyboardReset
+        );
     }
 
     #[test]
@@ -1284,6 +1380,7 @@ mod tests {
                 "192.0.2.1".into(),
                 tokio::sync::oneshot::channel().0,
             );
+            state.record_connection_input_activity("one", true);
             if disconnect {
                 state.disconnect_connection("one");
             }
@@ -1292,6 +1389,21 @@ mod tests {
             assert_eq!(reset(&mut events), 1);
         }
         state.remove_connection("missing");
+        state.add_connection(
+            "opening".into(),
+            "192.0.2.1".into(),
+            tokio::sync::oneshot::channel().0,
+        );
+        state.remove_connection("opening");
+        state.add_connection(
+            "channel".into(),
+            "192.0.2.1".into(),
+            tokio::sync::oneshot::channel().0,
+        );
+        state.record_connection_input_activity("channel", true);
+        state.release_connection_input("channel", false);
+        state.remove_connection("channel");
+        assert_eq!(reset(&mut events), 1);
         assert_eq!(reset(&mut events), 0);
     }
 }

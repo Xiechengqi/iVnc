@@ -84,6 +84,7 @@ pub struct RemoteHealth {
     pub state: &'static str,
     /// Why the application is not connected.
     pub detail: Option<ApiError>,
+    pub preview_supported: bool,
     at: Instant,
 }
 /// What A knows about a remote application while one saved connection lasts.
@@ -153,14 +154,24 @@ impl RemoteHealthCache {
         self.current(app, epoch, |l| l.refused.clone()).flatten()
     }
     /// Returns whether the state changed.
-    fn record(&self, app: &str, epoch: u64, state: &'static str, detail: Option<ApiError>) -> bool {
+    fn record(
+        &self,
+        app: &str,
+        epoch: u64,
+        state: &'static str,
+        detail: Option<ApiError>,
+        preview_supported: Option<bool>,
+    ) -> bool {
         self.current(app, epoch, |l| {
+            let preview_supported = preview_supported
+                .unwrap_or_else(|| l.health.as_ref().is_some_and(|h| h.preview_supported));
             let previous = l.health.replace(RemoteHealth {
                 state,
                 detail,
+                preview_supported,
                 at: Instant::now(),
             });
-            previous.is_none_or(|h| h.state != state)
+            previous.is_none_or(|h| h.state != state || h.preview_supported != preview_supported)
         })
         .unwrap_or(false)
     }
@@ -203,7 +214,7 @@ pub fn refresh_remote_health(apps: Arc<AppsState>, ids: Vec<String>) {
                 Ok(target) => {
                     let _ = probe(&apps, &id, epoch, &target, true).await;
                 }
-                Err(e) => record(&apps, &id, epoch, "auth_required", Some(e)),
+                Err(e) => record(&apps, &id, epoch, "auth_required", Some(e), None),
             }
             apps.remote_health.refreshing.lock().unwrap().remove(&id);
         });
@@ -211,8 +222,18 @@ pub fn refresh_remote_health(apps: Arc<AppsState>, ids: Vec<String>) {
 }
 
 /// Records a remote state; the taskbar follows state changes.
-fn record(apps: &AppsState, id: &str, epoch: u64, state: &'static str, detail: Option<ApiError>) {
-    if apps.remote_health.record(id, epoch, state, detail) {
+fn record(
+    apps: &AppsState,
+    id: &str,
+    epoch: u64,
+    state: &'static str,
+    detail: Option<ApiError>,
+    preview_supported: Option<bool>,
+) {
+    if apps
+        .remote_health
+        .record(id, epoch, state, detail, preview_supported)
+    {
         apps.refresh_stream_apps();
     }
 }
@@ -440,9 +461,10 @@ fn runtime(g: &Gateway, id: &str, remote: bool) -> Result<worker::Endpoint, Resp
     runtime_check(g, id, remote).map_err(|(status, message)| error(status, message))
 }
 async fn get_policy(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Response {
-    if let Err(e) = desktop(&g, &id) {
-        return e;
-    }
+    let app = match desktop(&g, &id) {
+        Ok(app) => app,
+        Err(e) => return e,
+    };
     let (policy, password) = match g
         .apps
         .remote
@@ -458,7 +480,7 @@ async fn get_policy(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Re
         "password_viewable": password.is_some(),
         "password": password,
         "share_path": super::share_path(&id),
-        "restart_required": g.apps.restart_required(&id, policy.enabled),
+        "restart_required": g.apps.restart_required(&app, policy.enabled),
     }))
     .into_response()
 }
@@ -467,9 +489,10 @@ async fn set_policy(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(e) = desktop(&g, &id) {
-        return e;
-    }
+    let app = match desktop(&g, &id) {
+        Ok(app) => app,
+        Err(e) => return e,
+    };
     let enabled = match body["enabled"].as_bool() {
         Some(v) => v,
         None => {
@@ -484,11 +507,12 @@ async fn set_policy(
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
     let store = g.apps.remote.clone();
-    let app = id.clone();
+    let app_id = id.clone();
     let password = body["password"].as_str().map(str::to_owned);
-    let result =
-        tokio::task::spawn_blocking(move || store.set_policy(&app, enabled, password.as_deref()))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        store.set_policy(&app_id, enabled, password.as_deref())
+    })
+    .await;
     match result {
         Ok(Ok(policy)) => {
             // A new revision has already ended every session token; end their media too.
@@ -497,7 +521,8 @@ async fn set_policy(
                 g.shared.media_router.revoke(&id, true, StopReason::Revoked);
                 log::info!("Remote access to {id} changed: enabled={}", policy.enabled);
             }
-            let restart_required = g.apps.restart_required(&id, policy.enabled);
+            let app = g.apps.store.get(&id).unwrap_or(app);
+            let restart_required = g.apps.restart_required(&app, policy.enabled);
             Json(json!({"ok":true,"revoked":changed && previous.enabled,"restart_required":restart_required}))
                 .into_response()
         }
@@ -601,7 +626,7 @@ async fn remote_info(
         Ok(_) => (true, String::new()),
         Err((_, e)) => (false, e.message),
     };
-    Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"status":status,"ready":ready,"detail":detail})).into_response()
+    Json(json!({"protocol":PROTOCOL,"node_id":g.apps.remote.node_id,"app_id":id,"name":app.name,"status":status,"ready":ready,"detail":detail,"preview_supported":true})).into_response()
 }
 
 /// One shared TLS client configuration: system roots plus `IVNC_REMOTE_CA_FILE`,
@@ -885,7 +910,7 @@ async fn session_token(
                     l.refused = Some(e.error.clone());
                 });
                 // The health check now waits before it tries the password again.
-                record(apps, id, epoch, e.state, Some(e.error.clone()));
+                record(apps, id, epoch, e.state, Some(e.error.clone()), None);
             }
             return Err(e);
         }
@@ -1005,14 +1030,14 @@ async fn probe(
                 ApiError::new("remote_app_not_ready", detail).param("detail", detail),
             )
         } else {
-            Ok(())
+            Ok(v["preview_supported"] == true)
         }
     });
     match &result {
-        Ok(()) => record(apps, id, epoch, "connected", None),
-        Err(e) => record(apps, id, epoch, e.state, Some(e.error.clone())),
+        Ok(supported) => record(apps, id, epoch, "connected", None, Some(*supported)),
+        Err(e) => record(apps, id, epoch, e.state, Some(e.error.clone()), None),
     }
-    result
+    result.map(|_| ())
 }
 /// Ends A's views of a remote application whose saved password B refuses, so
 /// that they stop reconnecting and polling until the connection is saved again.
@@ -1899,13 +1924,15 @@ mod tests {
         let cache = RemoteHealthCache::default();
         let old = cache.epoch("app");
         assert_eq!(cache.epoch("app"), old);
-        assert!(cache.record("app", old, "connected", None));
+        assert!(cache.record("app", old, "connected", None, Some(false)));
+        assert!(cache.record("app", old, "connected", None, Some(true)));
+        assert!(cache.get("app").unwrap().preview_supported);
         // The connection is saved again while a check of the old one runs.
         cache.forget("app");
         cache.remember_token("app", "new-token".into());
         let new = cache.epoch("app");
         assert_ne!(new, old);
-        assert!(!cache.record("app", old, "auth_required", Some("stale".into())));
+        assert!(!cache.record("app", old, "auth_required", Some("stale".into()), None));
         assert!(cache.get("app").is_none());
         assert!(cache
             .current("app", old, |l| l.token = Some("stale".into()))

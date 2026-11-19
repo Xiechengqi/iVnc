@@ -1287,7 +1287,15 @@ export class Input {
         window.__ivncViewActive = !!active;
         if (this._viewActive === !!active) return;
         this._viewActive = !!active;
-        if (!active) { this.textInput.hide(false); this.send('kr'); this.resetKeyboard(); }
+        if (!active) {
+            this.textInput.hide(false);
+            this.send('kr');
+            this.resetKeyboard();
+            this.buttonMask = 0;
+            this._resetTouchState();
+            this._exitPointerLock();
+            navigator.keyboard?.unlock?.();
+        }
         else this.restoreImeFocus();
     }
 
@@ -1348,6 +1356,7 @@ export class Input {
     }
 
     _handleOutsideClick(event) {
+        if (!this._viewActive) return;
         if (!this.element.contains(event.target)) this.resetScroll();
         if (this._targetHasClass(event.target, 'taskbar')) {
             this.send('kr');
@@ -1754,6 +1763,7 @@ export class Input {
     }
 
     _mouseButtonMovement(event) {
+        if (!this._viewActive) return;
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
         }
@@ -2093,7 +2103,26 @@ export class Input {
         }
     }
 
+    _resetTouchState() {
+        this._activeTouches.clear();
+        this._trackpadTouches.clear();
+        this._activeTouchIdentifier = null;
+        this._isTwoFingerGesture = false;
+        this._trackpadGestureMode = null;
+        this._touchScrollLastCentroid = null;
+        this._trackpadLastScrollCentroid = null;
+        this._touchScrollStartSeparation = null;
+        this._trackpadScrollStartSeparation = null;
+        this._trackpadLastTapTime = 0;
+        this._gestureTouchPinching = false;
+        this._gestureNav()?.endTouch(true);
+        clearTimeout(this._longPressTimer);
+        clearTimeout(this._trackpadTapTimeout);
+        this._longPressTimer = this._longPressTouchIdentifier = this._trackpadTapTimeout = null;
+    }
+
     _handleTouchEvent(event) {
+        if (!this._viewActive) return;
         if (this._trackpadMode) {
             this._handleTrackpadEvent(event);
             return;
@@ -2415,12 +2444,7 @@ export class Input {
         if (changed) {
             this.send('kr');
             this.buttonMask = 0;
-            this._activeTouches?.clear(); this._trackpadTouches?.clear();
-            this._activeTouchIdentifier = null;
-            this._isTwoFingerGesture = false; this._trackpadGestureMode = null;
-            this._touchScrollLastCentroid = null; this._trackpadLastTapTime = 0;
-            this._gestureNav()?.endTouch(true);
-            clearTimeout(this._longPressTimer); clearTimeout(this._trackpadTapTimeout);
+            this._resetTouchState();
             this._relativeRemainder = { x: 0, y: 0 };
             this._geometryFrameReady = false;
             this._geometryMetadataPending = true;
@@ -2539,6 +2563,7 @@ export class Input {
     }
 
     _onOverlayInteraction() {
+        if (!this._viewActive) return;
         this.textInput.hide(false);
         this.send('kr');
         this.resetKeyboard();
@@ -2672,9 +2697,7 @@ export class Input {
         this.cursorDiv.style.display = 'none';
         this.send("kr");
         this.resetKeyboard();
-        this._activeTouches.clear();
-        this._activeTouchIdentifier = null;
-        this._isTwoFingerGesture = false;
+        this._resetTouchState();
         if ((this.buttonMask & 1) === 1) {
              this.buttonMask &= ~1;
              this._sendMouseState();

@@ -438,7 +438,7 @@ export class WebRTCDemo {
 				this._audioElement = document.createElement('audio');
 				this._audioElement.autoplay = true;
 				// Start muted to comply with autoplay policy; unmute after user gesture
-				this._audioElement.muted = !this._audioUnlocked;
+				this._audioElement.muted = this._audioMuted || !this._audioUnlocked;
 				document.body.appendChild(this._audioElement);
 			}
 			this._audioElement.srcObject = new MediaStream([event.track]);
@@ -452,12 +452,17 @@ export class WebRTCDemo {
 	unmuteAudio() {
 		// Embedded views may be unlocked by the parent before the audio track arrives.
 		this._audioUnlocked = true;
-		if (this._audioElement) {
+		if (this._audioElement && !this._audioMuted) {
 			this._audioElement.muted = false;
 			this._audioElement.play().catch((e) => {
 				this._setDebug("Audio play failed: " + e.message);
 			});
 		}
+	}
+
+	setAudioMuted(muted) {
+		this._audioMuted = muted;
+		if (this._audioElement) this._audioElement.muted = muted || !this._audioUnlocked;
 	}
 
 	/**

@@ -39,6 +39,7 @@
     line-height: 24px;
 }
 .ivnc-toolbar .taskbar-conn { min-width: 20px; text-align: center; }
+.ivnc-toolbar .toolbar-app-strip,
 .ivnc-toolbar .toolbar-apps {
     display: flex;
     align-items: center;
@@ -46,6 +47,7 @@
     overflow: hidden;
     gap: 2px;
 }
+.ivnc-toolbar .toolbar-apps { flex: 1 1 0; }
 .ivnc-toolbar .toolbar-viewport {
     flex: 1 1 0;
     min-width: 0;

@@ -42,8 +42,9 @@ const toolbar = createToolbar({element:document.querySelector('#taskbar'),
         return true;
     }
 });
-function render() { toolbar.update(data, streams.tabs(), !!streams.activeId()); }
+function render() { toolbar.update(data, streams.tabs(), streams.coversDesktop()); }
 streams = createAppStreams({viewport:document.querySelector('#desktop'),onChange:render,onEdgeHover:()=>{}});
+if (new URLSearchParams(location.search).has('multi')) toolbar.addAppControl(streams.multiAppButton);
 streams.update([
     {id:'shared',name:'共享应用',name_revision:0,can_rename:true,kind:'shared',status:'running'},
     {id:'remote',name:'远程应用',name_revision:0,can_rename:true,kind:'remote',status:'connected'}
@@ -71,6 +72,8 @@ addEventListener('message', e => {
     if(e.origin !== location.origin || e.source !== parent) return;
     if(e.data.type === 'ivnc-view-active') {
         document.documentElement.dataset.active = String(e.data.active);
+        document.documentElement.dataset.visible = String(e.data.visible);
+        document.documentElement.dataset.preview = String(e.data.preview);
         if(e.data.active) document.querySelector('#app').focus();
     }
 });
@@ -447,6 +450,68 @@ const cases = [
         assert.deepEqual(await calls(page), []);
         await click(page); assert.deepEqual(await calls(page), [2]);
     }],
+    ['multi-app editor, inactive previews and responsive geometry', async page => {
+        await page.evaluate(() => {
+            window.gridApps = ['first', 'second', 'third', 'fourth', 'replacement'].map(id => ({
+                id, name: id, kind: 'shared', status: 'running',
+            }));
+            gridApps.push({ id: 'legacy', name: 'legacy', kind: 'remote', status: 'connected' });
+            fixture.streams.update(gridApps); fixture.render();
+        });
+        await page.getByRole('button', { name: '多应用视图', exact: true }).click();
+        const editor = page.locator('.multi-app-dialog');
+        const choice = editor.locator('select');
+        assert.equal(await editor.locator('option[value=legacy]').count(), 0);
+        await choice.nth(0).selectOption('first');
+        await choice.nth(1).selectOption('second');
+        await editor.getByRole('button', { name: '添加位置' }).click();
+        await choice.nth(2).selectOption('third');
+        await editor.getByRole('button', { name: '打开合看' }).click();
+        const tile = index => page.locator(`.app-stream.preview[data-slot="${index}"]`);
+        await page.waitForFunction(() => document.querySelectorAll('.app-stream.preview iframe').length === 3
+            && [...document.querySelectorAll('.app-stream.preview iframe')].every(frame =>
+                frame.inert && frame.contentDocument?.documentElement?.dataset.visible === 'true'
+                && frame.contentDocument.documentElement.dataset.active === 'false'));
+        const box = await Promise.all([0, 1, 2].map(i => tile(i).boundingBox()));
+        assert.equal(box[0].y, box[1].y);
+        assert(Math.abs(box[2].x - (box[0].x + box[1].x) / 2) < 1);
+        await page.getByRole('button', { name: '编辑组合' }).click();
+        await editor.getByRole('button', { name: '添加位置' }).click();
+        await choice.nth(3).selectOption('fourth');
+        assert(await editor.getByRole('button', { name: '添加位置' }).isDisabled());
+        await choice.nth(0).selectOption('replacement');
+        await editor.getByRole('button', { name: '上移' }).nth(3).click();
+        await editor.getByRole('button', { name: '打开合看' }).click();
+        assert.deepEqual(await Promise.all([0, 1, 2, 3].map(i => tile(i).locator('button').textContent())),
+            ['replacement', 'second', 'fourth', 'third']);
+        await page.setViewportSize({ width: 390, height: 700 });
+        await page.waitForFunction(() => document.querySelector('.app-streams').classList.contains('preview-narrow'));
+        const narrow = await Promise.all([0, 1, 2, 3].map(i => tile(i).boundingBox()));
+        assert(narrow[0].width > narrow[1].width && narrow[0].y < narrow[3].y);
+        const toolbar = await page.locator('#taskbar').boundingBox();
+        assert(narrow.every(rect => rect.y + rect.height <= toolbar.y + 1));
+        await page.evaluate(() => {
+            const strip = document.querySelector('.toolbar-app-strip');
+            const list = strip.querySelector('.toolbar-list');
+            strip.style.width = `${list.scrollWidth + 42}px`;
+        });
+        await page.waitForFunction(() => document.querySelector('.toolbar-scroll:last-child').hidden);
+        await page.evaluate(() => {
+            const strip = document.querySelector('.toolbar-app-strip');
+            strip.style.width = `${strip.offsetWidth - 32}px`;
+        });
+        // The control consumes space even when the tabs almost fit without it.
+        await page.waitForFunction(() => !document.querySelector('.toolbar-scroll:last-child').hidden);
+        await page.evaluate(() => document.querySelector('.toolbar-app-strip').style.removeProperty('width'));
+        await tile(1).locator('iframe').evaluate(frame => { window.liveFrame = frame; });
+        await tile(1).getByRole('button').click();
+        await page.waitForFunction(() => liveFrame === document.querySelector('.app-stream.active iframe')
+            && liveFrame.contentDocument?.documentElement?.dataset.active === 'true');
+        await page.getByRole('button', { name: '多应用视图', exact: true }).click();
+        await page.evaluate(() => { fixture.streams.update(gridApps.filter(app => app.id !== 'first' && app.id !== 'third')); fixture.render(); });
+        assert.equal(await tile(3).locator('iframe').count(), 0);
+        assert.equal(await tile(3).locator('.app-stream-status').textContent(), '应用未运行或不可用');
+    }, '?multi=1'],
 ];
 
 await test('toolbar native browser input', async t => {

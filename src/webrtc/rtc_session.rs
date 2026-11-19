@@ -705,10 +705,6 @@ pub async fn drive_session(
 
     info!("Session {} drive loop ended", session_id);
     paste.lock().unwrap_or_else(|e| e.into_inner()).cancel_all();
-    let _ = input_tx.send(InputEventData {
-        event_type: InputEvent::KeyboardReset,
-        ..Default::default()
-    });
     shared_state.remove_connection(&session_id);
     shared_state.decrement_webrtc_sessions();
 }
@@ -850,10 +846,8 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .cancel_all();
-                let _ = ctx.input_tx.send(InputEventData {
-                    event_type: InputEvent::KeyboardReset,
-                    ..Default::default()
-                });
+                ctx.shared_state
+                    .release_connection_input(&session.id, false);
                 session.dc_id = None;
             }
             info!("Session {} DataChannel closed (id={:?})", session.id, id);
@@ -904,7 +898,7 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         .handle(text)
     {
         ctx.shared_state
-            .record_connection_input_activity(&session.id);
+            .record_connection_input_activity(&session.id, false);
         return;
     }
 
@@ -915,7 +909,7 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         .handle(text)
     {
         ctx.shared_state
-            .record_connection_input_activity(&session.id);
+            .record_connection_input_activity(&session.id, false);
         return;
     }
 
@@ -960,10 +954,7 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
         return;
     }
     if text == "kr" {
-        let _ = ctx.input_tx.send(InputEventData {
-            event_type: InputEvent::KeyboardReset,
-            ..Default::default()
-        });
+        ctx.shared_state.release_connection_input(&session.id, true);
         return;
     }
     if text.starts_with("s,") || text.starts_with("SET_NATIVE_CURSOR_RENDERING,") {
@@ -1048,8 +1039,12 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
     // Fall through to input event parsing (mouse, keyboard, etc.)
     match InputDataChannel::parse_display_input(text, &ctx.shared_state.display.snapshot()) {
         Ok(event) => {
+            let affects_seat = matches!(
+                event.event_type,
+                InputEvent::Keyboard | InputEvent::MouseMove | InputEvent::MouseButton
+            );
             ctx.shared_state
-                .record_connection_input_activity(&session.id);
+                .record_connection_input_activity(&session.id, affects_seat);
             let _ = ctx.input_tx.send(event);
         }
         Err(e) => {

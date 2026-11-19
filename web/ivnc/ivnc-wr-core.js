@@ -1810,8 +1810,10 @@ export default function webrtc() {
 	let taskbarVisibility = null;
 	let cleanupTaskbarEvents = () => {};
 	let displayMode = 'fit', displayModeButton = null;
-	// An active stream tab covers the main desktop.
+	// The desktop stays connected for application state while another view covers it.
 	let mainCovered = false;
+	let embeddedVisible = false;
+	let embeddedPreview = !!window.__IVNC_EMBED__ && new URLSearchParams(location.search).get('preview') === '1';
 	let lastTaskbarData = {};
 	let serverLatency = 0;
 	let scaleLocal = false;
@@ -2126,13 +2128,13 @@ export default function webrtc() {
 
 	function sendClientActivity(event = 'heartbeat', input = false) {
 		if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') return;
+		const visible = !document.hidden && (window.__IVNC_EMBED__ ? embeddedVisible : !mainCovered);
 		const payload = {
 			event,
-			// Hidden stream tab (embedded view), or main desktop covered by an
-			// active stream tab: the compositor behind it may idle.
-			visible: document.visibilityState !== 'hidden' && window.__ivncViewActive !== false && !appStreams?.activeId(),
-			focused: document.hasFocus(),
-			input: Boolean(input),
+			visible,
+			focused: visible && !embeddedPreview && document.hasFocus(),
+			preview: embeddedPreview,
+			input: !!input && visible && !embeddedPreview && window.__ivncViewActive !== false,
 			ts: Date.now(),
 		};
 		if (input) {
@@ -2476,7 +2478,7 @@ export default function webrtc() {
 	async function handleFileInputChange(event) {
 		const files = Array.from(event.target.files || []);
 		event.target.value = null;
-		if (files.length === 0) return;
+		if (files.length === 0 || embeddedPreview || appStreams?.isPreviewing()) return;
 		// Files picked while a stream tab is active go to that application.
 		if (appStreams && appStreams.upload(files)) return;
 		await uploadFiles(files);
@@ -2779,6 +2781,7 @@ export default function webrtc() {
 	async function handleDrop(ev) {
 		ev.preventDefault();
 		ev.stopPropagation();
+		if (window.__ivncViewActive === false || appStreams?.coversDesktop()) return;
 		const entriesToProcess = [];
 		if (!webrtc.createAuxDataChannel()) {
 			console.warn("Simultaneous uploading of files with distinct upload operations is not supported yet");
@@ -3067,7 +3070,8 @@ export default function webrtc() {
 		clipboardNoticeTimer = setTimeout(() => { clipboardNotice?.remove(); clipboardNotice = null; }, 6000);
 	}
 	function handleWindowFocus() {
-		if (webrtc?._send_channel?.readyState === 'open') webrtc.sendDataChannelMessage('kr');
+		if (window.__ivncViewActive !== false && !embeddedPreview && !appStreams?.coversDesktop()
+			&& webrtc?._send_channel?.readyState === 'open') webrtc.sendDataChannelMessage('kr');
 	}
 	function handleWindowBlur() {
 		clipboardController?.suspend();
@@ -3146,7 +3150,7 @@ export default function webrtc() {
 				activateWindow: (id, key) => {
 					input?.resetScroll();
 					if (!webrtc.sendDataChannelMessage(key ? `focus-key,${key}` : `focus,${id}`)) return false;
-					if (appStreams?.activeId()) appStreams.activate(null);
+					if (appStreams?.coversDesktop()) appStreams.activate(null);
 					input?.restoreImeFocus(true);
 					return true;
 				},
@@ -3184,7 +3188,7 @@ export default function webrtc() {
 					canNavigate: direction => !!toolbarController?.canNavigate(direction),
 					canHandle: source => {
 						if (document.hidden || toolbarController?.interacting() || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return false;
-						if (source === window) return !appStreams?.activeId();
+						if (source === window) return !appStreams?.coversDesktop();
 						return !!appStreams?.isActiveFrame(source);
 					},
 				});
@@ -3218,6 +3222,7 @@ export default function webrtc() {
 			imeBtn.innerHTML = usesTouchKeyboard() ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M5 9h2m2 0h2m2 0h2m2 0h2M5 12h2m2 0h2m2 0h2m2 0h2M7 16h10"/></svg>' : imeSvg;
 			setLiveTitle(imeBtn, usesTouchKeyboard() ? 'keyboardShow' : (imeModeActive ? 'imeOff' : 'imeOn'));
             const syncImeButton = () => {
+                imeBtn.disabled = !!appStreams?.isPreviewing();
                 const active = usesTouchKeyboard() ? (appStreams?.imeState() ?? !!input?.textInput.focused()) : imeModeActive;
                 imeBtn.classList.toggle('active', active);
                 setLiveTitle(imeBtn, usesTouchKeyboard() ? (active ? 'keyboardHide' : 'keyboardShow') : (active ? 'imeOff' : 'imeOn'));
@@ -3265,6 +3270,7 @@ export default function webrtc() {
 			setLiveTitle(uploadBtn, 'uploadFile');
 			uploadBtn.addEventListener('click', (e) => {
 				e.stopPropagation();
+				if (appStreams?.isPreviewing()) return;
 				// Check if WebRTC data channel is open
 				if (!appStreams?.activeId() && (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open')) {
 					console.warn('Cannot upload: data channel not ready');
@@ -3393,13 +3399,16 @@ export default function webrtc() {
 					onChange: () => {
 						renderTaskbar();
 						syncImeButton();
-						// Report the main desktop hidden while a stream tab covers it.
-						const streamActive = !!appStreams?.activeId();
-						if (streamActive !== mainCovered) {
-							mainCovered = streamActive;
-							input?.setViewActive(!streamActive);
+						const previewing = !!appStreams?.isPreviewing();
+						uploadBtn.toggleAttribute('data-preview-disabled', previewing);
+						uploadBtn.setAttribute('aria-disabled', String(previewing));
+						webrtc?.setAudioMuted(previewing);
+						const covered = !!appStreams?.coversDesktop();
+						if (covered !== mainCovered) {
+							mainCovered = covered;
+							input?.setViewActive(!covered);
 							updateStatusDisplay();
-							webrtc?.playback?.setActive(!streamActive);
+							webrtc?.playback?.setActive(!covered);
 							clipboardController?.cancel();
 							sendClientActivity('view-switch');
 						}
@@ -3410,6 +3419,7 @@ export default function webrtc() {
 						hideTaskbar();
 					},
 				});
+				toolbarController.addAppControl(appStreams.multiAppButton);
 			}
 
 			videoContainer.appendChild(statusDisplayElement);
@@ -3467,11 +3477,16 @@ export default function webrtc() {
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
 			var signaling = new WebRTCDemoSignaling(new URL(protocol + window.location.host + pathname + (window.__IVNC_APP_VIEW__ ? "webrtc" : appName + "/signaling/")));
 			webrtc = new WebRTCDemo(signaling, videoElement, 1);
+			if (embeddedPreview) {
+				webrtc.playback.setActive(false);
+				webrtc.setAudioMuted(true);
+			}
             window.__ivncWebRTC = webrtc;
             window.addEventListener('ivnc-auth-ended', () => {
                 clipboardController?.cancel();
                 gestureController?.reset();
                 input?.setViewActive(false);
+				appStreams?.destroy(); appStreams = null;
                 webrtc?.destroy();
             }, { once: true });
 			// Embedded stream tab: the parent page drives activation, audio, upload and IME.
@@ -3495,18 +3510,26 @@ export default function webrtc() {
 					if (message.view && message.view !== window.location.pathname) return;
 					const open = webrtc._send_channel?.readyState === 'open';
 					if (message.type === 'ivnc-view-active') {
-						window.__ivncViewActive = !!message.active;
-						input?.setViewActive(!!message.active);
-						webrtc.playback.setActive(!!message.active);
+						const active = !!message.active;
+						const wasActive = window.__ivncViewActive;
+						const wasPreview = embeddedPreview;
+						input?.setViewActive(active);
+						window.__ivncViewActive = active;
+						embeddedPreview = message.preview === true;
+						embeddedVisible = message.visible ?? active;
+						webrtc.setAudioMuted(embeddedPreview || message.muted === true);
+						webrtc.playback.setActive(embeddedVisible);
+						if (embeddedPreview && !embeddedVisible && !videoElement.paused) videoElement.pause();
+						if (active && (!wasActive || wasPreview)) webrtc.playback.resume();
 						// Release held keys when the tab is switched away.
-						if (!message.active) clipboardController?.cancel();
+						if (!active) clipboardController?.cancel();
 						sendClientActivity('view-switch');
                         // The parent owns focus. Repeated ready/active messages
                         // must not pull it out of a local settings/terminal UI.
 					} else if (message.type === 'ivnc-unmute') {
 						webrtc.unmuteAudio();
 					} else if (message.type === 'ivnc-upload' && Array.isArray(message.files)) {
-						if (open) uploadFiles(message.files);
+						if (open && !embeddedPreview) uploadFiles(message.files);
 					} else if (message.type === 'ivnc-ime-mode' && typeof message.enabled === 'boolean'
                         && message.view === window.location.pathname) {
                         setImePreference(message.enabled);
@@ -3517,6 +3540,7 @@ export default function webrtc() {
 				postToParent({ type: 'ivnc-view-ready' });
 			}
 			const send = (data, isCurrent = null) => {
+				if (embeddedPreview) return false;
 				if (clipboardController) return clipboardController.sendInput(data, isCurrent);
 				if (isCurrent && !isCurrent()) return false;
 				return webrtc.sendDataChannelMessage(data);
@@ -3524,7 +3548,7 @@ export default function webrtc() {
 			input = new Input(overlayInput, send, false, 0, useCssScaling);
             // Releases and cancellation must reach the old connection even
             // after it becomes inactive; they must not wait behind a paste.
-            input.sendControl = data => webrtc._send_channel?.readyState === 'open' && webrtc.sendDataChannelMessage(data);
+            input.sendControl = data => !embeddedPreview && webrtc._send_channel?.readyState === 'open' && webrtc.sendDataChannelMessage(data);
 			window.__ivncInput = input;
 			input.onimepreferencechange = enabled => setImePreference(enabled, true);
             input.ontextinputerror = reason => {
@@ -3532,7 +3556,7 @@ export default function webrtc() {
                 else reportTextInputError(reason);
             };
             if (!usesTouchKeyboard()) input.setImeMode(imeModeActive, false);
-			input.setViewActive(window.__ivncViewActive !== false && !appStreams?.activeId());
+			input.setViewActive(window.__ivncViewActive !== false && !appStreams?.coversDesktop());
 			input.gestureNavigation = () => {
 				if (!window.__IVNC_EMBED__) return gestureController;
 				try { return window.parent.__ivncGestureNavigation || null; } catch (_) { return null; }
@@ -3722,15 +3746,15 @@ export default function webrtc() {
 			clipboardUI = createClipboardUI({
 				getController: () => clipboardController,
 				restoreFocus: () => {
-					if (window.__ivncViewActive !== false && !appStreams?.activeId() && document.hasFocus()) {
+					if (window.__ivncViewActive !== false && !appStreams?.coversDesktop() && document.hasFocus()) {
 						(!usesTouchKeyboard() && input?._imeModeActive ? input._imeTextarea : overlayInput)?.focus({ preventScroll: true });
 					}
 				},
 			});
 			clipboardController = createClipboard({
 				webrtc, overlay: overlayInput, imeTarget: () => input?._imeTextarea,
-				isActive: () => window.__ivncViewActive !== false && !appStreams?.activeId() && document.visibilityState !== 'hidden',
-				isViewActive: () => window.__ivncViewActive !== false && !appStreams?.activeId(),
+				isActive: () => window.__ivncViewActive !== false && !appStreams?.coversDesktop() && document.visibilityState !== 'hidden',
+				isViewActive: () => window.__ivncViewActive !== false && !appStreams?.coversDesktop(),
 				getTarget: () => lastTaskbarData?.windows?.find(w => w.focused)?.id,
 				report: reportClipboardError,
 				onCopyState: state => clipboardUI?.update(state),
@@ -3756,8 +3780,8 @@ export default function webrtc() {
 			function renderTaskbar(reveal = false) {
 				if (!toolbarController) return;
 				const streams = appStreams ? appStreams.tabs() : [];
-				toolbarController.update(lastTaskbarData, streams, !!appStreams?.activeId());
-				if (!(lastTaskbarData.windows || []).length && !streams.length) {
+				toolbarController.update(lastTaskbarData, streams, !!appStreams?.coversDesktop());
+				if (!(lastTaskbarData.windows || []).length && !streams.length && !appStreams?.isPreviewing()) {
 					taskbarVisibility.hide({ immediate: true });
 				} else if (reveal && !taskbarPinned) {
 					showTaskbar();

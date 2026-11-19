@@ -183,7 +183,8 @@ taskbar,{json_data}
             "name_revision": 1,
             "can_rename": true,
             "kind": "shared",
-            "status": "running"
+            "status": "running",
+            "preview_supported": true
         },
         {
             "id": "d4e5f6",
@@ -191,7 +192,8 @@ taskbar,{json_data}
             "name_revision": 0,
             "can_rename": true,
             "kind": "remote",
-            "status": "connected"
+            "status": "connected",
+            "preview_supported": true
         }
     ],
     "ordered_ids": ["terminal-app", "a1b2c3", "d4e5f6"],
@@ -207,8 +209,9 @@ taskbar,{json_data}
 | `name` | 显示名称 |
 | `name_revision` | 本实例为此应用保存的名称版本，与排序版本独立 |
 | `can_rename` | 应用本身是否允许改名，客户端还须检查控制台及内嵌视图权限 |
-| `kind` | `shared`：本实例开启远程访问、在独立运行环境中运行的桌面应用；`remote`：本实例已启动的远程应用 |
+| `kind` | `shared` 为本实例在独立运行环境中运行的桌面应用。`remote` 为本实例已启动的远程应用 |
 | `status` | `shared` 为 `starting` 或 `running`；`remote` 为 `/api/apps` 的 `remote_state`（`connecting`、`connected`、`starting`、`stopped`、`not_ready`、`auth_required`、`incompatible`、`unreachable`） |
+| `preview_supported` | 来源支持多应用预览。对远程应用取自已鉴权的 `/remote/v1/apps/{id}/info`，省略字段的旧来源继续使用单窗口 |
 
 任务栏消息另含 `ordered_ids`（本实例完整应用展示顺序）和 `order_revision`（持久化排序版本）。`windows` 中的 `managed_app_id` 为关联的应用 ID，无法关联时为 `null`；它与 Wayland `app_id` 的桌面类名不同。客户端将普通窗口与 `apps` 按同一应用顺序合并。同一应用的多个窗口保留组内顺序。`id` 是当前窗口列表下标，其他窗口关闭后可能变化；`window_key` 是窗口生命周期内不变的 UUID，窗口关闭后失效。新客户端应使用 `focus-key` 聚焦，旧客户端仍可使用 `focus`。排序 API 和合并规则见 [工具栏与排序](TOOLBAR.md)。
 
@@ -485,7 +488,7 @@ _stats_audio,{json}         # WebRTC 音频统计
 _client_activity,{json}     # 页面可见性、焦点与输入活动
 ```
 
-`_client_activity` 报告页面是否可见；所有连接都不可见（或长时间无焦点、无输入）时服务端让合成器进入空闲。页面被隐藏、内嵌视图的标签未被选中，以及桌面页面中应用标签覆盖主桌面（见[内嵌视图](#内嵌视图postmessage)）时都报告 `false`；它只影响空闲判断，不暂停输入和声音。
+`_client_activity` 报告页面可见性、焦点和输入。可见的只读预览报告 `visible: true, focused: false, preview: true`，在心跳有效期间持续参与画面调度。页面隐藏或某视图不在当前工作区时报告 `visible: false`。所有连接均空闲时，服务端让合成器进入空闲。消息省略 `preview` 时使用该连接原有状态，新连接默认使用单窗口状态。
 
 ## 7. 消息序列图
 
@@ -608,14 +611,17 @@ debug!("Session {} DC parse error: {}", session.id, e);
 
 `POST /api/apps` 创建本地桌面应用时可附加 `creation_id`，值为小写、带连字符的 UUID v4；成功时该值就是返回的 `app.id`。省略时仍由服务端生成 ID，原有调用方式不变。无效标识或对其他应用类型使用该字段返回 `app_creation_invalid`；标识已存在时返回 409（`app_creation_exists`），不会更新已有应用。客户端可通过 `GET /api/apps/{creation_id}` 核实丢失响应的创建结果，不能只按应用名称判断是否属于本次创建。
 
+桌面应用的创建和更新请求可传布尔字段 `independent_runtime`。创建时省略则默认为 `false`，更新时省略则保留原值。更新成功返回保存的 `independent_runtime` 和 `restart_required`。桌面应用更新时省略 `env_vars` 会保留原值，传 `null` 可清空。
+
 首次添加时的远程访问配置仍通过两个现有接口串行保存：先创建应用，再 `PUT /api/apps/{id}/sharing`。创建成功后应保留应用 ID；共享保存失败时重试同一个应用的配置，不能再次创建。应用配置与共享策略分库存储，此流程不提供跨库原子提交。创建和保存共享设置都不会自动启动应用。
 
 `GET /api/apps` 的每一项在原有字段之外包含：
 
 | 字段 | 适用 | 说明 |
 | --- | --- | --- |
-| `status` | 全部 | `running`、`starting`（共享应用的运行环境尚未就绪）、`stopped`、`crashed`；CLI 应用另有 `missing`、`installed`、`not_file`、`not_executable`、`invalid_path` |
-| `sharing` | 桌面应用 | `{"enabled": bool, "restart_required": bool}`；`restart_required` 表示应用当前的运行方式（是否在独立运行环境中）与 `enabled` 不一致，只在运行中有意义，停止时为 `false` |
+| `status` | 全部 | `running`、`starting`（独立运行环境尚未就绪）、`stopped`、`crashed`；CLI 应用另有 `missing`、`installed`、`not_file`、`not_executable`、`invalid_path` |
+| `independent_runtime` | 桌面应用 | 是否为本机查看启用独立运行 |
+| `sharing` | 桌面应用 | `{"enabled": bool, "restart_required": bool}`。独立运行或远程访问任一开启时，应用需要独立运行环境。若当前进程的运行方式与保存值不一致，`restart_required` 为 `true`；应用停止时为 `false` |
 | `started` | 远程应用 | 是否已启动（连接）；与本机应用的运行状态一起保存，短时间内重启（5 分钟内）后恢复 |
 | `autostart` | 后台、桌面和远程应用 | 原有的随 iVnc 启动偏好，远程应用同样支持：每次 iVnc 启动时自动启动（连接）；通过创建和更新应用接口设置 |
 | `remote_state` | 远程应用 | `disconnected`（未启动）、`connecting`、`connected`、`starting`（B 的应用已开启共享，运行环境仍在启动；不是错误，就绪后自动连接）、`stopped`（B 的应用未运行）、`not_ready`（B 需重启应用）、`auth_required`（密码错误或旧连接）、`incompatible`（协议版本不一致）、`unreachable` |
@@ -628,7 +634,7 @@ debug!("Session {} DC parse error: {}", session.id, e);
 | `POST /api/apps/{id}/start` \| `stop` \| `restart` | 远程应用：`start` 标记为已启动并连接，`stop` 取消启动并关闭本实例中该应用的全部视图；不影响 B 的进程 |
 | `GET /api/apps/{id}/sharing` | 桌面应用的远程访问设置，见下文 |
 | `PUT /api/apps/{id}/sharing` | 修改远程访问设置，见下文 |
-| `POST /api/apps/{id}/view` | 为共享应用或已启动的远程应用创建视图，返回 `{"url": "/app-view/{token}/", "name": "..."}`；每个页面为每个应用申请自己的令牌，一个令牌只允许一个连接 |
+| `POST /api/apps/{id}/view` | 为本机独立运行的应用或已启动的远程应用创建视图，返回 `{"url": "/app-view/{token}/", "name": "..."}`；每个页面为每个应用申请自己的令牌，一个令牌只允许一个连接 |
 | `POST /api/remote/test` | 请求体 `{"url", "password"}`，用连接地址和访问密码验证连接，返回 B 的 `info`（名称、`status` 为 `running`/`starting`/`stopped` 等、`ready`），或错误响应 |
 | `POST /app-view/{token}/close` | 关闭视图及其信令和媒体 |
 
@@ -656,7 +662,7 @@ debug!("Session {} DC parse error: {}", session.id, e);
 | 接口 | 说明 |
 | --- | --- |
 | `POST /remote/v1/apps/{id}/authenticate` | 请求体 `{"password"}`，换取仅绑定此应用和当前策略版本的短期会话令牌；按来源地址限流 |
-| `GET /remote/v1/apps/{id}/info` | 持 Bearer 令牌读取名称、状态、`ready`/`detail`（是否需重启应用）、节点身份和协议版本 |
+| `GET /remote/v1/apps/{id}/info` | 持 Bearer 令牌读取名称、状态、`ready`/`detail`（是否需重启应用）、节点身份、协议版本与 `preview_supported` |
 | `GET /remote/v1/apps/{id}/socket` | 持 Bearer 令牌建立中继信令 WebSocket |
 | `GET /remote/v1/apps/{id}/data/{path}` | 仅转发 UI 配置和渲染状态；不代理管理 API，也不提供文件下载 |
 | `DELETE /remote/v1/apps/{id}/session` | 持 Bearer 令牌结束该会话令牌；A 的“测试连接”用完即调用，不占用每个应用的会话名额 |
@@ -679,7 +685,7 @@ ICE-TCP 通过已授权 SDP 中的 ICE ufrag 路由，仍需完成运行环境�
 
 | 消息 | 说明 |
 | --- | --- |
-| `{type: "ivnc-view-active", active: bool}` | 标签被选中或切走；切走时释放按住的键，选中时获得焦点 |
+| `{type: "ivnc-view-active", active: bool, visible?: bool, preview?: bool, muted?: bool}` | `active` 表示输入归属，`visible` 表示播放可见性，`preview` 表示该视图仅供预览。布尔字段 `muted` 允许父页面在合看时静音。省略 `visible` 时跟随 `active` |
 | `{type: "ivnc-unmute"}` | 页面已获得用户手势，可以播放声音 |
 | `{type: "ivnc-upload", files: File[]}` | 把文件上传到该应用 |
 | `{type: "ivnc-ime"}` | 切换输入法模式 |
@@ -694,6 +700,6 @@ iframe → 父页面（每条消息另带 `view: <iframe 的 pathname>`，父页
 | `{type: "ivnc-edge-hover"}` | 指针到达底边，用于显示未固定的工具栏 |
 | `{type: "ivnc-reopen"}` | 运行代次变化，请父页面申请新令牌并重新打开 |
 
-应用标签被选中期间，桌面页面在自身的 `_client_activity` 中报告 `visible: false`，主桌面合成器因此可以空闲；切回窗口标签或该标签消失后恢复 `visible: true`。主桌面的输入和声音不受影响。
+应用标签或合看覆盖桌面时，桌面页面在自身的 `_client_activity` 中报告 `visible: false`，切回窗口标签时恢复可见。合看使用现有应用视图并将画面静音，进入单窗口后该应用接收输入。
 
-控制台页面（桌面页面中的 iframe）在用户启动应用后向父页面发送 `{type: "ivnc-app-started", id}`，桌面页面在该应用的标签出现时切换过去。
+控制台页面（桌面页面中的 iframe）在用户启动应用后向父页面发送 `{type: "ivnc-app-started", id}`。未打开合看时，桌面页面在该应用的标签出现后切换过去。

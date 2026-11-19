@@ -100,10 +100,9 @@ pub fn log_path(app_id: &str) -> std::path::PathBuf {
     dir.join("app.log")
 }
 
-/// Whether a desktop app runs in its own runtime. Only apps with remote access
-/// do; all others are windows of the main desktop.
+/// Whether a desktop app needs its own runtime for local viewing or sharing.
 pub fn runs_in_worker(app: &ManagedApp, remote: &RemoteStore) -> Result<bool, String> {
-    Ok(remote.policy(&app.id)?.enabled)
+    Ok(app.uses_worker(remote.policy(&app.id)?.enabled))
 }
 
 /// Build the launch command for a desktop app, in its own runtime if `worker`.
@@ -218,9 +217,9 @@ mod tests {
     }
 
     #[test]
-    fn only_apps_with_remote_access_run_in_a_worker() {
+    fn sharing_or_local_independent_view_uses_a_worker() {
         let remote = RemoteStore::in_memory();
-        let app = ManagedApp::for_test("app", AppType::DesktopApp);
+        let mut app = ManagedApp::for_test("app", AppType::DesktopApp);
         assert!(!runs_in_worker(&app, &remote).unwrap());
         remote
             .set_policy("app", true, Some("password-one"))
@@ -228,6 +227,9 @@ mod tests {
         assert!(runs_in_worker(&app, &remote).unwrap());
         remote.set_policy("app", false, None).unwrap();
         assert!(!runs_in_worker(&app, &remote).unwrap());
+        app.independent_runtime = true;
+        assert!(runs_in_worker(&app, &remote).unwrap());
+        assert!(!remote.policy("app").unwrap().enabled);
     }
 
     #[test]

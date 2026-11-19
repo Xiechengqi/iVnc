@@ -223,10 +223,11 @@ try {
         for(const deltaX of [40,40,40,190]) target.dispatchEvent(new WheelEvent('wheel',{deltaX,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2,bubbles:true,cancelable:true}));
     })()`);
     assert.deepEqual(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,'))`), [`focus-key,${fake.windows[0].window_key}`]);
-    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), false);
     await delay(300);
+    const sentWheel = `window.__messages.some(message=>/^(i,[0-9]+,)?w2?,/.test(message))`;
+    assert.equal(await evaluate(sentWheel), false);
     await evaluate(`(() => {const target=document.querySelector('#overlayInput'),r=target.getBoundingClientRect();target.dispatchEvent(new WheelEvent('wheel',{deltaX:120,shiftKey:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2,bubbles:true,cancelable:true}));})()`);
-    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), true);
+    await waitFor('modified horizontal wheel sent after batching', () => evaluate(sentWheel));
     pass('always-on horizontal navigation switches one tab and modified horizontal scrolling reaches the application');
 
     for (const count of [0, 1, 10, 30]) {
@@ -524,14 +525,14 @@ try {
     for (const dx of [-30, -65, -110, -170]) await twoFingers('touchMove', dx);
     await twoFingers('touchEnd');
     assert.deepEqual(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,'))`), [`focus-key,${swipeWindows[1].slice('window:'.length)}`]);
-    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), false);
+    assert.equal(await evaluate(sentWheel), false);
     await evaluate(`window.__messages=[]`);
     await twoFingers('touchStart');
     await twoFingers('touchMove', 0, -50);
     await twoFingers('touchMove', 0, -130);
     await twoFingers('touchEnd');
     assert.equal(await evaluate(`window.__messages.filter(message=>message.startsWith('focus-key,')).length`), 0);
-    assert.equal(await evaluate(`window.__messages.some(message=>/^(i,[0-9]+,)?w,/.test(message))`), true);
+    await waitFor('vertical touch wheel sent after batching', () => evaluate(sentWheel));
     await evaluate(`window.__messages=[]`);
     await twoFingers('touchStart');
     await twoFingers('touchMove', -50, 0, 30);

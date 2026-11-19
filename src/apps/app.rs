@@ -68,6 +68,9 @@ pub struct ManagedApp {
     pub env_vars: Option<HashMap<String, String>>,
     #[serde(default)]
     pub desktop_launch: super::compat::LaunchOptions,
+    /// Give this desktop application its own view without enabling sharing.
+    #[serde(default)]
+    pub independent_runtime: bool,
     /// Presence selects the Chrome desktop preset. None keeps custom commands.
     #[serde(default, rename = "chrome_config")]
     pub chrome: Option<super::chrome::ChromeConfig>,
@@ -88,6 +91,12 @@ pub struct ManagedApp {
     pub sort_order: i64,
 }
 
+impl ManagedApp {
+    pub(super) fn uses_worker(&self, sharing_enabled: bool) -> bool {
+        self.independent_runtime || sharing_enabled
+    }
+}
+
 #[cfg(test)]
 impl ManagedApp {
     /// An application with only its identity set, for tests.
@@ -106,6 +115,7 @@ impl ManagedApp {
             exec_command: (app_type == AppType::DesktopApp).then(|| "true".into()),
             env_vars: None,
             desktop_launch: Default::default(),
+            independent_runtime: false,
             chrome: None,
             proxy_url: None,
             cli_binary_path: None,

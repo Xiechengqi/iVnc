@@ -37,7 +37,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     };
     element.classList.add('ivnc-toolbar');
     const tools = make('div', 'toolbar-tools', element);
-    const apps = make('div', 'toolbar-apps', element);
+    const appStrip = make('div', 'toolbar-app-strip', element);
+    const apps = make('div', 'toolbar-apps', appStrip);
     const status = make('div', 'toolbar-status', element);
     const previous = make('button', 'toolbar-scroll', apps);
     previous.type = 'button'; previous.textContent = '‹';
@@ -617,7 +618,12 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             event.preventDefault(); showNetworkInfo(event);
         }
     });
-    const resize = new ResizeObserver(layout);
+    let resizeFrame = 0;
+    const resize = new ResizeObserver(() => {
+        if (resizeFrame) return;
+        // Updating overflow arrows resizes the observed viewport.
+        resizeFrame = requestAnimationFrame(() => { resizeFrame = 0; layout(); });
+    });
     resize.observe(element); resize.observe(viewport); resize.observe(list); resize.observe(status);
     const translate = () => {
         previous.title = tr('previous'); next.title = tr('next'); more.title = tr('more');
@@ -657,6 +663,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     return {
         status,
         addTool,
+        addAppControl(node) { appStrip.prepend(node); layout(); },
         canNavigate: direction => !!navigationTarget(direction),
         navigate(direction) {
             const entry = navigationTarget(direction);
@@ -698,6 +705,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         destroy() {
             destroyed = true;
             clearTimeout(navigationTimer);
+            cancelAnimationFrame(resizeFrame);
             closeEditor(); cancelInteraction(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
             clearTimeout(noticeTimer); untranslate(); notifications.destroy();
             element.remove(); nodes.clear();

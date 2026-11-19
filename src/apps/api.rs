@@ -242,16 +242,21 @@ impl AppsState {
     fn stream_apps(&self, apps: &[ManagedApp]) -> Vec<crate::web::shared::StreamApp> {
         apps.iter()
             .filter_map(|app| {
-                let (kind, status) = match app.app_type {
+                let (kind, status, preview_supported) = match app.app_type {
                     AppType::DesktopApp if self.process.in_worker(&app.id) == Some(true) => {
                         match self.process.status(&app.id) {
-                            AppStatus::Starting => ("shared", "starting"),
-                            AppStatus::Running => ("shared", "running"),
+                            AppStatus::Starting => ("shared", "starting", true),
+                            AppStatus::Running => ("shared", "running", true),
                             _ => return None,
                         }
                     }
                     AppType::RemoteApp if self.remote_started(&app.id) => {
-                        ("remote", self.remote_state(&app.id).0)
+                        let health = self.remote_health.get(&app.id);
+                        (
+                            "remote",
+                            health.as_ref().map_or("connecting", |h| h.state),
+                            health.is_some_and(|h| h.preview_supported),
+                        )
                     }
                     _ => return None,
                 };
@@ -262,6 +267,7 @@ impl AppsState {
                     can_rename: app.id != BUILTIN_MIAO_ID,
                     kind,
                     status,
+                    preview_supported,
                 })
             })
             .collect()
@@ -281,11 +287,11 @@ impl AppsState {
             .map_or(("connecting", None), |h| (h.state, h.detail))
     }
 
-    /// Whether the application runs differently than its sharing setting asks for.
-    pub fn restart_required(&self, id: &str, sharing: bool) -> bool {
+    /// Whether the live process needs to change its runtime at the next restart.
+    pub fn restart_required(&self, app: &ManagedApp, sharing: bool) -> bool {
         self.process
-            .in_worker(id)
-            .is_some_and(|worker| worker != sharing)
+            .in_worker(&app.id)
+            .is_some_and(|worker| worker != app.uses_worker(sharing))
     }
 
     pub fn revoke_views(&self, id: &str, reason: crate::remote::media::StopReason) {
@@ -649,6 +655,7 @@ fn ensure_builtin_miao(store: &AppStore) -> Result<(), String> {
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                independent_runtime: false,
                 chrome: None,
                 proxy_url: None,
                 cli_binary_path: None,
@@ -731,6 +738,7 @@ fn ensure_builtin_chrome(store: &AppStore) -> Result<(), String> {
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                independent_runtime: false,
                 chrome: Some(super::chrome::ChromeConfig::builtin()),
                 proxy_url: None,
                 cli_binary_path: None,
@@ -813,6 +821,7 @@ fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String>
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
+                independent_runtime: false,
                 chrome: None,
                 proxy_url: None,
                 cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
@@ -918,6 +927,19 @@ fn parse_desktop_launch(
         .transpose()
 }
 
+fn parse_independent_runtime(body: &serde_json::Value) -> Result<Option<bool>, ApiError> {
+    body.get("independent_runtime")
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                ApiError::new(
+                    "independent_runtime_invalid",
+                    "Independent runtime must be a boolean",
+                )
+            })
+        })
+        .transpose()
+}
+
 fn desktop_draft(state: &AppsState, body: &serde_json::Value) -> Result<ManagedApp, ApiError> {
     let mut app = if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
         state.store.get(id)?
@@ -936,6 +958,7 @@ fn desktop_draft(state: &AppsState, body: &serde_json::Value) -> Result<ManagedA
             exec_command: None,
             env_vars: None,
             desktop_launch: Default::default(),
+            independent_runtime: false,
             chrome: None,
             proxy_url: None,
             cli_binary_path: None,
@@ -1243,6 +1266,7 @@ fn app_json(
             obj["exec_command"] = json!(app.exec_command);
             obj["env_vars"] = json!(app.env_vars);
             obj["desktop_launch"] = json!(app.desktop_launch);
+            obj["independent_runtime"] = json!(app.independent_runtime);
             obj["desktop_preset"] = json!(if app.chrome.is_some() {
                 "chrome"
             } else {
@@ -1263,7 +1287,7 @@ fn app_json(
                 .unwrap_or(false);
             obj["sharing"] = json!({
                 "enabled": enabled,
-                "restart_required": state.restart_required(&app.id, enabled),
+                "restart_required": state.restart_required(app, enabled),
             });
         }
         AppType::CliApp => {
@@ -1615,6 +1639,14 @@ async fn add_app(
     } else {
         Default::default()
     };
+    let independent_runtime = if app_type == AppType::DesktopApp {
+        match parse_independent_runtime(&body) {
+            Ok(value) => value.unwrap_or(false),
+            Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+        }
+    } else {
+        false
+    };
     let mut app = ManagedApp {
         id,
         name,
@@ -1628,6 +1660,7 @@ async fn add_app(
         exec_command,
         env_vars,
         desktop_launch,
+        independent_runtime,
         chrome: None,
         proxy_url,
         cli_binary_path,
@@ -1808,7 +1841,14 @@ async fn update_app(
             }
         }
         AppType::DesktopApp => {
-            app.env_vars = parse_env_vars(body.get("env_vars"));
+            if let Some(value) = body.get("env_vars") {
+                app.env_vars = parse_env_vars(Some(value));
+            }
+            match parse_independent_runtime(&body) {
+                Ok(Some(value)) => app.independent_runtime = value,
+                Ok(None) => {}
+                Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+            }
             match parse_desktop_launch(body.get("desktop_launch")) {
                 Ok(Some(options)) => app.desktop_launch = options,
                 Ok(None) => {}
@@ -1854,10 +1894,14 @@ async fn update_app(
     // Tabs show the name.
     state.refresh_stream_apps();
     let current = state.store.get(&id).unwrap_or(app);
-    json_response(
-        StatusCode::OK,
-        json!({"ok": true, "id": id, "name": current.name, "name_revision": current.name_revision}),
-    )
+    let mut saved =
+        json!({"ok": true, "id": id, "name": current.name, "name_revision": current.name_revision});
+    if current.app_type == AppType::DesktopApp {
+        let sharing = state.remote.policy(&id).is_ok_and(|p| p.enabled);
+        saved["restart_required"] = json!(state.restart_required(&current, sharing));
+        saved["independent_runtime"] = json!(current.independent_runtime);
+    }
+    json_response(StatusCode::OK, saved)
 }
 
 async fn delete_app(State(state): State<Arc<AppsState>>, Path(id): Path<String>) -> Response {
@@ -2282,12 +2326,13 @@ mod tests {
     #[tokio::test]
     async fn desktop_options_validate_and_legacy_updates_preserve_them() {
         let state = state(None, None);
-        let app = ManagedApp::for_test("launch-options", AppType::DesktopApp);
+        let mut app = ManagedApp::for_test("launch-options", AppType::DesktopApp);
+        app.env_vars = Some(HashMap::from([("APP_FIXTURE".into(), "keep".into())]));
         state.store.add(&app).unwrap();
         let update =
             |body| update_app(State(state.clone()), Path(app.id.clone()), axum::Json(body));
         assert_eq!(
-            update(json!({"desktop_launch":{"compatibility":"raw","sandbox":"preserve"}}))
+            update(json!({"desktop_launch":{"compatibility":"raw","sandbox":"preserve"},"independent_runtime":true}))
                 .await
                 .status(),
             StatusCode::OK
@@ -2299,6 +2344,12 @@ mod tests {
             StatusCode::OK
         );
         let current = state.store.get(&app.id).unwrap();
+        assert!(current.independent_runtime);
+        assert_eq!(current.env_vars, app.env_vars);
+        assert_eq!(
+            update(json!({"independent_runtime":"yes"})).await.status(),
+            StatusCode::BAD_REQUEST
+        );
         assert_eq!(
             current.desktop_launch.compatibility,
             super::super::compat::Compatibility::Raw
@@ -2867,6 +2918,7 @@ mod tests {
                 can_rename: true,
                 kind: "remote",
                 status: "connecting",
+                preview_supported: false,
             }]
         );
 

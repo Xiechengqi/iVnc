@@ -155,6 +155,8 @@ const I18N = {
         backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: 'e.g. amp-desktop or /path/to/app',
         launchAdvanced: 'Advanced launch settings',
+        independentRuntime: 'Run independently',
+        independentRuntimeHelp: 'Provide a separate view for Multi-app view. Restart the running app to apply a runtime change.',
         launchCompatibility: 'Launch compatibility',
         launchAuto: 'Detect automatically (recommended)',
         launchElectron: 'Treat as Electron',
@@ -392,6 +394,8 @@ const I18N = {
         backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: '例如：amp-desktop 或 /path/to/app',
         launchAdvanced: '高级启动设置',
+        independentRuntime: '独立运行',
+        independentRuntimeHelp: '为多应用视图提供独立画面。运行中修改时需重启此应用。',
         launchCompatibility: '启动兼容',
         launchAuto: '自动识别（推荐）',
         launchElectron: '指定为 Electron',
@@ -725,6 +729,8 @@ function applyTranslations() {
     setText('log-close-btn', 'close');
     [
         ['desktop-launch-advanced-label', 'launchAdvanced'],
+        ['label-independent-runtime', 'independentRuntime'],
+        ['help-independent-runtime', 'independentRuntimeHelp'],
         ['label-desktop-compat', 'launchCompatibility'],
         ['label-desktop-sandbox', 'launchSandbox'],
         ['desktop-sandbox-help', 'sandboxHelp'],
@@ -850,8 +856,7 @@ function appStatus(a) {
     return { text, cls: a.status, detail: serverErrorText(a.launch_error) || a.error || '' };
 }
 
-// restart_required: the running app is (or is not) in its sharing worker
-// contrary to the saved setting.
+// restart_required compares the running app's runtime with its saved settings.
 function sharingBadge(a) {
     const sharing = a.app_type === 'desktop' ? a.sharing : null;
     if (!sharing) return '';
@@ -1399,6 +1404,7 @@ function resetModal() {
     launchInfo = null;
     document.getElementById('desktop-launch-advanced').open = false;
     document.getElementById('desktop-launch-details').open = false;
+    document.getElementById('f-independent-runtime').checked = false;
     setValue('f-desktop-compat', 'auto'); setValue('f-desktop-sandbox', 'auto');
     updateDesktopLaunchControls(); renderLaunchInfo();
     renderLaunchContext();
@@ -1539,6 +1545,7 @@ async function showEdit(id) {
             document.getElementById('f-exec').value = a.exec_command || '';
             document.getElementById('f-env').value = envToText(a.env_vars);
             document.getElementById('f-proxy-url').value = a.proxy_url || '';
+            document.getElementById('f-independent-runtime').checked = !!a.independent_runtime;
             setValue('f-desktop-compat', a.desktop_launch?.compatibility || 'auto');
             setValue('f-desktop-sandbox', a.desktop_launch?.sandbox || 'auto');
         } else if (appType === 'cli') {
@@ -1553,7 +1560,7 @@ async function showEdit(id) {
         }
         if (appType === 'desktop') chromePreset?.load(a);
         updateAppTypeVisibility();
-        appSignature = JSON.stringify(readAppBody(appType));
+        appSignature = launchSignature(readAppBody(appType));
         appTypeControl?.sync();
         if (appType === 'desktop' && !editBuiltin) loadSharing(id, session);
     } catch (e) {
@@ -1896,6 +1903,7 @@ function readAppBody(appType) {
     } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
+        body.independent_runtime = document.getElementById('f-independent-runtime').checked;
         Object.assign(body, chromePreset?.read());
         if (chromePreset?.generated()) delete body.exec_command;
         body.desktop_launch = {
@@ -1985,13 +1993,20 @@ function adoptCreatedApp(app, session) {
         setValue('f-exec', app.exec_command || '');
         setValue('f-env', envToText(app.env_vars));
         chromePreset?.load(app);
+        document.getElementById('f-independent-runtime').checked = !!app.independent_runtime;
         document.getElementById('f-autostart').checked = !!app.autostart;
         setValue('f-desktop-compat', app.desktop_launch?.compatibility || 'auto');
         setValue('f-desktop-sandbox', app.desktop_launch?.sandbox || 'auto');
     }
     updateAppTypeVisibility();
-    appSignature = JSON.stringify(readAppBody(app.app_type));
+    appSignature = launchSignature(readAppBody(app.app_type));
     syncShareUrl();
+}
+
+function launchSignature(body) {
+    // The server compares the effective runtime, including sharing. A change to
+    // this checkbox alone can leave an already shared application in its worker.
+    return JSON.stringify({ ...body, independent_runtime: undefined });
 }
 
 async function saveApp() {
@@ -2049,9 +2064,10 @@ async function saveApp() {
                 session.revealShareAfterSave = appType === 'desktop' && !!sharing?.enabled;
                 if (session.isCurrent()) adoptCreatedApp(saved, session);
             }
-            const signature = JSON.stringify(body);
-            let restart = snapshot.wasEditing && !['cli', 'remote'].includes(appType)
+            const signature = launchSignature(body);
+            const launchChanged = snapshot.wasEditing && !['cli', 'remote'].includes(appType)
                 && signature !== snapshot.signature && isActive(snapshot.app);
+            let runtimeRestart = !!(saved.restart_required ?? saved.sharing?.restart_required);
             let revoked = false;
             if (session.isCurrent() && snapshot.wasEditing) {
                 appSignature = signature;
@@ -2061,7 +2077,7 @@ async function saveApp() {
                 try {
                     const { result, data } = await saveAndReadSharing(snapshot.id, sharing, snapshot.sharing);
                     revoked = !!result.revoked;
-                    restart = restart || !!result.restart_required || !!data.restart_required;
+                    runtimeRestart = !!(data.restart_required ?? result.restart_required);
                     if (session.isCurrent()) renderSharing(data);
                 } catch (e) {
                     const message = session.revealShareAfterSave ? `${t('appSharingIncomplete')} ${e.message}` : e.message;
@@ -2076,7 +2092,7 @@ async function saveApp() {
             }
             load();
             if (session.isCurrent()) {
-                if (restart) { modalSaved = true; setText('modal-cancel', 'close'); showRestartNotice('restartSaved'); }
+                if (launchChanged || runtimeRestart) { modalSaved = true; setText('modal-cancel', 'close'); showRestartNotice('restartSaved'); }
                 else if (session.revealShareAfterSave && sharingState?.enabled) {
                     modalSaved = true; setText('modal-cancel', 'close');
                 }
@@ -2332,6 +2348,7 @@ function updateAppTypeVisibility() {
     document.getElementById('f-name').disabled = !!editId && !editBuiltin && type !== 'remote';
     document.getElementById('f-app-type').disabled = !!editId;
     document.getElementById('f-autostart').disabled = editBuiltin;
+    document.getElementById('f-independent-runtime').disabled = editBuiltin;
     document.getElementById('modal-save').hidden = editBuiltin;
     document.getElementById('modal-save').disabled = editBuiltin || !!appDialog?.saving;
     document.getElementById('modal-cancel').textContent = t(editBuiltin || modalSaved ? 'close' : 'cancel');

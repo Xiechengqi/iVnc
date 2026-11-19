@@ -38,7 +38,11 @@ npm --prefix web/ivnc run build
 python3 scripts/app_session_smoke.py
 # 本地生产前端、真实 Chrome / GTK，以及 A → B 远程滚动
 CHROME_BIN=/usr/bin/google-chrome node scripts/scroll_input_smoke.mjs
-# 可选：验证旧版本远程服务的实际回退，旧二进制应支持应用共享
+# 2–4 个真实 Chrome 视图、输入隔离、连接回收和远程撤权
+IVNC_BIN=target/debug/ivnc node scripts/multi_app_view_smoke.mjs
+# 可设置 LEGACY_IVNC_BIN 验证旧来源的单窗口回退；旧二进制需支持应用共享
+IVNC_BIN=target/debug/ivnc LEGACY_IVNC_BIN=/path/to/old/ivnc node scripts/multi_app_view_smoke.mjs
+# 同样可验证向旧来源下发滚轮事件
 CHROME_BIN=/usr/bin/google-chrome LEGACY_IVNC_BIN=/path/to/old/ivnc node scripts/scroll_input_smoke.mjs
 ```
 
