@@ -325,14 +325,57 @@ try {
         const r=row.getBoundingClientRect(),cols=window.__terminalSent.filter(m=>m.type==='resize').at(-1).cols;
         return {x:r.left+1,y:r.top+r.height/2,end:r.left+r.width/cols*${copyText.length}+1};
     })()`);
+    await evaluate(`navigator.clipboard.writeText('before-copy')`);
     await call('Input.dispatchMouseEvent',{type:'mousePressed',x:selection.x,y:selection.y,button:'left',buttons:1,clickCount:1});
     await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:selection.end,y:selection.y,button:'left',buttons:1});
     await call('Input.dispatchMouseEvent',{type:'mouseReleased',x:selection.end,y:selection.y,button:'left',buttons:0,clickCount:1});
-    await evaluate(`navigator.clipboard.writeText('before-copy')`);
-    await shortcut('c',true);
-    await waitFor('copied selection',async()=>await evaluate('navigator.clipboard.readText()')===copyText);
+    await waitFor('mouse selection copied automatically',async()=>await evaluate('navigator.clipboard.readText()')===copyText);
+    await waitFor('successful copy clears the selection',()=>evaluate(`document.querySelector('.xterm-selection')?.childElementCount===0`));
     assert.deepEqual(await evaluate('window.__remoteInput'),[]);
-    pass('mouse selection and Ctrl+Shift+C copy accurately without sending desktop input');
+    const shortcutText='COPY_BY_SHORTCUT';
+    await command(`printf '${shortcutText}\\n'`); await expectLine(shortcutText);
+    const shortcutSelection = await evaluate(`(() => {
+        const row=[...document.querySelectorAll('.xterm-rows > div')].find(n=>n.textContent.trimEnd()===${JSON.stringify(shortcutText)});
+        const r=row.getBoundingClientRect(),cols=window.__terminalSent.filter(m=>m.type==='resize').at(-1).cols;
+        return {x:r.left+1,y:r.top+r.height/2,end:r.left+r.width/cols*${shortcutText.length}+1};
+    })()`);
+    await call('Input.dispatchMouseEvent',{type:'mousePressed',x:shortcutSelection.x,y:shortcutSelection.y,button:'left',buttons:1,clickCount:1});
+    await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:shortcutSelection.end,y:shortcutSelection.y,button:'left',buttons:1});
+    await call('Input.dispatchMouseEvent',{type:'mouseReleased',x:shortcutSelection.end,y:shortcutSelection.y,button:'left',buttons:0,clickCount:1});
+    await waitFor('second selection copied',async()=>await evaluate('navigator.clipboard.readText()')===shortcutText);
+    await evaluate(`navigator.clipboard.writeText('before-shortcut')`);
+    await shortcut('c',true);
+    assert.equal(await evaluate('navigator.clipboard.readText()'),'before-shortcut');
+    pass('releasing a mouse selection copies it and clears the highlight; Ctrl+Shift+C remains available');
+
+    await command('for i in {1..40}; do printf "TOUCH_%03d\\n" "$i"; done');
+    await expectLine('TOUCH_040');
+    await evaluate(`navigator.clipboard.writeText('before-touch')`);
+    const touchSwipe = await evaluate(`(() => {
+        const screen=document.querySelector('.xterm-screen').getBoundingClientRect();
+        return {x:screen.left+screen.width/2,top:screen.top+24,bottom:screen.bottom-24};
+    })()`);
+    const touch = (type, y) => evaluate(`(() => {
+        const screen=document.querySelector('.xterm-screen');
+        screen.dispatchEvent(new PointerEvent(${JSON.stringify(type)},{
+            bubbles:true,cancelable:true,pointerId:7,pointerType:'touch',isPrimary:true,
+            button:${type === 'pointerup' ? -1 : 0},buttons:${type === 'pointerup' ? 0 : 1},
+            clientX:${touchSwipe.x},clientY:${y}
+        }));
+        return document.querySelector('.xterm-selection')?.childElementCount||0;
+    })()`);
+    // At the live prompt, moving a finger down reveals earlier history.
+    await touch('pointerdown', touchSwipe.top);
+    for (let y = touchSwipe.top + 12; y <= touchSwipe.bottom; y += 12) await touch('pointermove', y);
+    const touchSelection = await touch('pointerup', touchSwipe.bottom);
+    await waitFor('touch swipe scrolls history', async () => !(await rows()).includes('TOUCH_040'));
+    assert.equal(touchSelection, 0);
+    assert.equal(await evaluate(`document.querySelector('.xterm-selection')?.childElementCount||0`), 0);
+    assert((await rows()).some(line => /^TOUCH_\d+$/.test(line)));
+    assert.equal(await evaluate('navigator.clipboard.readText()'), 'before-touch');
+    assert.deepEqual(await evaluate('window.__remoteInput'), []);
+    await scrollTo('TOUCH_040', 120);
+    pass('a touch swipe scrolls terminal history without selecting or copying');
 
     await command('for i in {1..100}; do printf "HISTORY_%03d\\n" "$i"; done');
     await expectLine('HISTORY_100'); await scrollTo('IVNC_START_A',-120);

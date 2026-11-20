@@ -778,6 +778,11 @@ function InitUI() {
 	.web-terminal-modal[data-terminal-background] .xterm-viewport {
 		background: transparent;
 	}
+	/* A finger swipe scrolls the viewport. The screen sits above it and would
+	   otherwise receive the gesture as a text selection. */
+	.web-terminal-modal .xterm-screen {
+		touch-action: pan-y;
+	}
 	.web-terminal-modal[data-terminal-background] .web-terminal-title {
 		overflow: hidden;
 	}
@@ -1027,6 +1032,7 @@ function createWebTerminalController() {
 	let controller = null;
 	const backgroundStorageKey = 'ivnc.terminal.background';
 	let backgroundMode = readBackgroundMode();
+	let selectionCopy = 0;
 	const unsubscribeTerminalLanguage = onLangChange(renderTerminalActions);
 	window.addEventListener('storage', handleBackgroundStorage);
 
@@ -1172,6 +1178,7 @@ function createWebTerminalController() {
 		fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
 		terminal.open(modal.querySelector('#web-terminal-body'));
+		installTerminalTouchScroll(terminal, modal.querySelector('.xterm-screen'));
 		floating = createFloatingWindow({
 			modal,
 			getScale: () => Number(getComputedStyle(document.documentElement).getPropertyValue('--ivnc-modal-scale')) || 1,
@@ -1198,22 +1205,87 @@ function createWebTerminalController() {
 		terminal.onData((data) => {
 			send({ type: 'input', data });
 		});
+		// xterm reports a mouse selection only after the button is released,
+		// including a drag, double-click word, and triple-click line.
+		terminal.onSelectionChange(() => {
+			const generation = ++selectionCopy;
+			const selection = terminal.getSelection();
+			if (!selection) return;
+			copySelectionToClipboard(selection).then(copied => {
+				if (copied && generation === selectionCopy) terminal.clearSelection();
+			});
+		});
 
 		resizeObserver = new ResizeObserver(() => queueResize());
 		resizeObserver.observe(modal.querySelector('#web-terminal-body'));
 		connect();
 	}
 
-	async function copySelectionToClipboard() {
-		const selection = terminal?.getSelection();
-		if (!selection) return;
+	function installTerminalTouchScroll(term, screen) {
+		if (!screen) return;
+		// xterm on iOS, including iPad desktop mode, listens to pointer events
+		// as mouse events and turns a finger drag into a text selection.
+		const touch = new Map();
+		const slop = 8;
+		const cellHeight = () => {
+			const height = screen.clientHeight / (term.rows || 1);
+			return height > 0 ? height : 17;
+		};
+		const stopSelection = (event) => {
+			event.stopPropagation();
+			if (event.cancelable) event.preventDefault();
+			term.clearSelection();
+		};
+		screen.addEventListener('pointerdown', (event) => {
+			if (event.pointerType !== 'touch' || event.button !== 0 || !event.isPrimary) return;
+			touch.set(event.pointerId, {
+				x: event.clientX,
+				y: event.clientY,
+				pending: 0,
+				scrolling: false,
+			});
+		}, true);
+		screen.addEventListener('pointermove', (event) => {
+			const state = touch.get(event.pointerId);
+			if (!state) return;
+			const dx = event.clientX - state.x;
+			const dy = event.clientY - state.y;
+			if (!state.scrolling) {
+				if (Math.hypot(dx, dy) < slop || Math.abs(dy) < Math.abs(dx)) return;
+				state.scrolling = true;
+			}
+			stopSelection(event);
+			// scrollLines moves the buffer by whole rows. A fractional call rounds
+			// away, so accumulate the finger travel until it covers a cell.
+			state.pending += state.y - event.clientY;
+			state.y = event.clientY;
+			const lines = Math.trunc(state.pending / cellHeight());
+			if (!lines) return;
+			state.pending -= lines * cellHeight();
+			term.scrollLines(lines);
+		}, true);
+		const endTouch = (event) => {
+			const state = touch.get(event.pointerId);
+			if (!state) return;
+			touch.delete(event.pointerId);
+			if (!state.scrolling) return;
+			stopSelection(event);
+		};
+		screen.addEventListener('pointerup', endTouch, true);
+		screen.addEventListener('pointercancel', endTouch, true);
+	}
+
+	async function copySelectionToClipboard(selection = terminal?.getSelection()) {
+		if (!selection) return false;
 		try {
 			await navigator.clipboard.writeText(selection);
 			setStatus('copied');
 			setTimeout(() => setStatus(socket?.readyState === WebSocket.OPEN ? 'ready' : 'disconnected', socket?.readyState !== WebSocket.OPEN), 900);
+			return true;
 		} catch (err) {
 			setStatus('copy failed', true);
 			console.warn('Terminal copy failed:', err);
+			return false;
 		}
 	}
 
