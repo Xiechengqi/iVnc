@@ -541,7 +541,7 @@ mod tests {
             exec_command: None,
             env_vars: None,
             desktop_launch: Default::default(),
-            independent_runtime: false,
+            independent_runtime: true,
             chrome: Some(super::super::chrome::ChromeConfig::builtin()),
             proxy_url: None,
             cli_binary_path: None,

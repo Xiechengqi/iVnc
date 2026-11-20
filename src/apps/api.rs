@@ -738,7 +738,7 @@ fn ensure_builtin_chrome(store: &AppStore) -> Result<(), String> {
                 exec_command: None,
                 env_vars: None,
                 desktop_launch: Default::default(),
-                independent_runtime: false,
+                independent_runtime: true,
                 chrome: Some(super::chrome::ChromeConfig::builtin()),
                 proxy_url: None,
                 cli_binary_path: None,
@@ -958,7 +958,7 @@ fn desktop_draft(state: &AppsState, body: &serde_json::Value) -> Result<ManagedA
             exec_command: None,
             env_vars: None,
             desktop_launch: Default::default(),
-            independent_runtime: false,
+            independent_runtime: true,
             chrome: None,
             proxy_url: None,
             cli_binary_path: None,
@@ -1639,9 +1639,11 @@ async fn add_app(
     } else {
         Default::default()
     };
+    // Desktop apps always run independently. A supplied boolean is accepted and
+    // ignored so older consoles can still save; a non-boolean remains invalid.
     let independent_runtime = if app_type == AppType::DesktopApp {
         match parse_independent_runtime(&body) {
-            Ok(value) => value.unwrap_or(false),
+            Ok(_) => true,
             Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
         }
     } else {
@@ -1845,8 +1847,7 @@ async fn update_app(
                 app.env_vars = parse_env_vars(Some(value));
             }
             match parse_independent_runtime(&body) {
-                Ok(Some(value)) => app.independent_runtime = value,
-                Ok(None) => {}
+                Ok(_) => app.independent_runtime = true,
                 Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
             }
             match parse_desktop_launch(body.get("desktop_launch")) {
@@ -2347,6 +2348,11 @@ mod tests {
         assert!(current.independent_runtime);
         assert_eq!(current.env_vars, app.env_vars);
         assert_eq!(
+            update(json!({"independent_runtime": false})).await.status(),
+            StatusCode::OK
+        );
+        assert!(state.store.get(&app.id).unwrap().independent_runtime);
+        assert_eq!(
             update(json!({"independent_runtime":"yes"})).await.status(),
             StatusCode::BAD_REQUEST
         );
@@ -2377,6 +2383,35 @@ mod tests {
         }
         let response = get_launch_info(State(state), Path("missing".into())).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn new_desktop_apps_run_independently_even_when_the_field_is_omitted_or_false() {
+        let state = state(None, None);
+        for (name, body) in [
+            (
+                "omitted",
+                json!({"name": "Omitted", "app_type": "desktop", "exec_command": "true"}),
+            ),
+            (
+                "disabled",
+                json!({"name": "Disabled", "app_type": "desktop", "exec_command": "true", "independent_runtime": false}),
+            ),
+        ] {
+            let response = add_app(State(state.clone()), axum::Json(body)).await;
+            assert_eq!(response.status(), StatusCode::CREATED, "{name}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(saved["app"]["independent_runtime"], true, "{name}");
+        }
+        let response = add_app(
+            State(state),
+            axum::Json(json!({"name": "Invalid", "app_type": "desktop", "exec_command": "true", "independent_runtime": "yes"})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     fn state(

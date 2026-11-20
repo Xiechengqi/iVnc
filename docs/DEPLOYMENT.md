@@ -10,7 +10,7 @@
 - PulseAudio 或 PipeWire（音频捕获）
 - 硬件编码器驱动（可选）
 
-桌面应用是 Wayland 客户端；开启远程访问的应用在独立运行环境中运行，其私有音频使用
+桌面应用是 Wayland 客户端，并在独立运行环境中运行，其私有音频使用
 `pulseaudio pulseaudio-utils`，不需要额外的内核功能或权限。完整边界与用法见
 [远程桌面应用](REMOTE_APPS.md)。
 

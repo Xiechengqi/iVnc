@@ -10,8 +10,11 @@
     isolation: isolate;
 }
 .ivnc-toolbar button.taskbar-pin { font: inherit; padding: 0; color: inherit; }
+.ivnc-toolbar .taskbar-pin.active,
+.ivnc-toolbar .taskbar-pin.active:hover,
+.ivnc-toolbar .taskbar-pin.active:focus-visible,
 .ivnc-toolbar #keyboard-toggle.active,
-.ivnc-toolbar #keyboard-toggle.active:hover { color: #8abbff; background: rgba(76, 134, 230, .25); }
+.ivnc-toolbar #keyboard-toggle.active:hover { color: #8abbff; background: rgba(76, 134, 230, .25); border-color: rgba(76, 134, 230, .4); }
 .ivnc-toolbar .toolbar-display-mode.active,
 .ivnc-toolbar .toolbar-display-mode.active:hover,
 .ivnc-toolbar .toolbar-display-mode.active:focus-visible { color: #8abbff; background: rgba(76, 134, 230, .25); border-color: rgba(76, 134, 230, .4); }
@@ -27,6 +30,7 @@
     box-sizing: border-box;
     width: 28px;
     margin: 0;
+    color: inherit;
 }
 .ivnc-toolbar .toolbar-tool-label { display: none; }
 .ivnc-toolbar .toolbar-status { gap: 6px; }

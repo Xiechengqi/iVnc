@@ -217,19 +217,32 @@ mod tests {
     }
 
     #[test]
-    fn sharing_or_local_independent_view_uses_a_worker() {
+    fn desktop_apps_always_use_a_worker() {
         let remote = RemoteStore::in_memory();
         let mut app = ManagedApp::for_test("app", AppType::DesktopApp);
-        assert!(!runs_in_worker(&app, &remote).unwrap());
+        app.independent_runtime = false;
+        assert!(runs_in_worker(&app, &remote).unwrap());
         remote
             .set_policy("app", true, Some("password-one"))
             .unwrap();
         assert!(runs_in_worker(&app, &remote).unwrap());
         remote.set_policy("app", false, None).unwrap();
-        assert!(!runs_in_worker(&app, &remote).unwrap());
-        app.independent_runtime = true;
         assert!(runs_in_worker(&app, &remote).unwrap());
         assert!(!remote.policy("app").unwrap().enabled);
+
+        let service = ManagedApp::for_test("service", AppType::BackgroundApp);
+        assert!(!runs_in_worker(&service, &remote).unwrap());
+    }
+
+    #[test]
+    fn a_desktop_process_still_on_the_main_desktop_needs_a_restart() {
+        let apps = crate::apps::api::AppsState::for_test(None, None);
+        let app = ManagedApp::for_test("desktop", AppType::DesktopApp);
+        apps.store.add(&app).unwrap();
+        // A process started by the previous version can still be on the main desktop.
+        apps.process.testing_insert(&app.id, false);
+        assert_eq!(apps.process.in_worker(&app.id), Some(false));
+        assert!(apps.restart_required(&app, false));
     }
 
     #[test]

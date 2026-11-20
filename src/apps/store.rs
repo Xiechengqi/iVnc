@@ -101,6 +101,17 @@ impl AppStore {
         Self::ensure_column(&conn, "chrome_config", "TEXT")?;
         Self::ensure_column(&conn, "independent_runtime", "INTEGER NOT NULL DEFAULT 0")?;
 
+        // Desktop apps always use their own runtime. Backfill once, and only
+        // desktop rows: the column default stays 0 for background and CLI apps.
+        // Later opens must not rewrite a value an older binary stored.
+        if Self::ensure_meta(&conn, "desktop_independent_runtime", "1")? {
+            conn.execute(
+                "UPDATE apps SET independent_runtime=1 WHERE app_type='desktop'",
+                [],
+            )
+            .map_err(|e| format!("Failed to enable desktop independent runtime: {}", e))?;
+        }
+
         // Adding the column and backfilling are one migration. Later opens must
         // never reset positions saved by the user (including timestamp ties).
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -162,6 +173,24 @@ impl AppStore {
                 .map_err(|e| format!("Failed to add apps.{} column: {}", name, e))?;
         }
         Ok(!exists)
+    }
+
+    /// Record a one-shot migration. Returns true only the first time `key` is stored.
+    fn ensure_meta(conn: &Connection, key: &str, value: &str) -> Result<bool, String> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        )
+        .map_err(|e| format!("Failed to init app store meta: {}", e))?;
+        let changed = conn
+            .execute(
+                "INSERT OR IGNORE INTO app_store_meta(key, value) VALUES(?1, ?2)",
+                params![key, value],
+            )
+            .map_err(|e| format!("Failed to record app store meta: {}", e))?;
+        Ok(changed == 1)
     }
 
     pub fn add(&self, app: &ManagedApp) -> Result<(), ApiError> {
@@ -553,6 +582,45 @@ mod tests {
     }
 
     #[test]
+    fn existing_desktop_apps_switch_to_independent_runtime_once() {
+        let store = AppStore::in_memory();
+        let mut desktop = ManagedApp::for_test("desktop", AppType::DesktopApp);
+        desktop.independent_runtime = false;
+        store.add(&desktop).unwrap();
+        let mut service = ManagedApp::for_test("service", AppType::BackgroundApp);
+        service.name = "Service".into();
+        service.independent_runtime = false;
+        store.add(&service).unwrap();
+
+        let conn = store.conn.into_inner().unwrap();
+        conn.execute(
+            "DELETE FROM app_store_meta WHERE key='desktop_independent_runtime'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE apps SET independent_runtime=0 WHERE id='desktop'",
+            [],
+        )
+        .unwrap();
+        let store = AppStore::from_connection(conn).unwrap();
+        assert!(store.get("desktop").unwrap().independent_runtime);
+        assert!(!store.get("service").unwrap().independent_runtime);
+
+        let conn = store.conn.into_inner().unwrap();
+        conn.execute(
+            "UPDATE apps SET independent_runtime=0 WHERE id='desktop'",
+            [],
+        )
+        .unwrap();
+        let store = AppStore::from_connection(conn).unwrap();
+        assert!(
+            !store.get("desktop").unwrap().independent_runtime,
+            "a later open must not repeat the one-shot backfill"
+        );
+    }
+
+    #[test]
     fn launch_options_migrate_and_survive_configuration_edits_and_reopening() {
         let store = AppStore::in_memory();
         let mut app = ManagedApp::for_test("legacy", AppType::DesktopApp);
@@ -568,6 +636,7 @@ mod tests {
         let mut app = store.get("legacy").unwrap();
         assert_eq!(app.exec_command.as_deref(), Some("amp-desktop --custom"));
         assert_eq!(app.desktop_launch, Default::default());
+        // The one-shot backfill already ran, so restoring the old column keeps its default.
         assert!(!app.independent_runtime);
         app.independent_runtime = true;
         app.desktop_launch.compatibility = super::super::compat::Compatibility::Raw;

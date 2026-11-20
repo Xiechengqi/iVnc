@@ -45,6 +45,8 @@ const cases = [
     ['new Chrome has automatic paths, empty optional fields and a read-only preview', async ({ page }) => {
         await add(page);
         assert.equal(await page.locator('#chrome-settings').isVisible(), false);
+        assert.equal(await page.locator('#f-independent-runtime').count(), 0);
+        assert.match(await page.locator('#help-independent-runtime').textContent(), /独立画面/);
         await selectChrome(page);
         assert.equal(await page.locator('#f-exec').getAttribute('readonly'), '');
         for (const id of ['f-chrome-profile', 'f-chrome-crash', 'f-chrome-port', 'f-proxy-url']) assert.equal(await page.locator(`#${id}`).inputValue(), '');
@@ -62,6 +64,7 @@ const cases = [
         const write = writes(calls)[0];
         assert.equal(initial, `/ivnc/apps/${write.body.creation_id}/profile`);
         assert.equal(write.body.desktop_preset, 'chrome'); assert(!('exec_command' in write.body));
+        assert.equal(write.body.independent_runtime, true);
         await add(page); await selectChrome(page);
         assert.notEqual(await page.locator('#chrome-profile-effective').textContent(), initial);
     }],

@@ -131,6 +131,27 @@ const localNavigation = page => page.evaluate(() => {
 });
 
 const cases = [
+    ['tool icons match the keyboard button and use the brighter active color', async page => {
+        await page.evaluate(() => {
+            document.body.style.color = '#fff';
+            for (const [id, label] of [['pin','固定'],['upload','上传'],['proxy','代理'],['terminal','终端'],['settings','设置']]) {
+                const node = document.createElement('div');
+                node.className = 'taskbar-pin'; node.id = id; node.title = label; node.textContent = label;
+                fixture.toolbar.addTool(node);
+            }
+            const keyboard = document.createElement('button');
+            keyboard.id = 'keyboard-toggle'; keyboard.className = 'taskbar-pin'; keyboard.textContent = '中';
+            fixture.toolbar.addTool(keyboard);
+        });
+        const color = node => page.locator(node).evaluate(element => getComputedStyle(element).color);
+        const keyboard = await color('#keyboard-toggle');
+        assert.equal(keyboard, 'rgb(255, 255, 255)');
+        for (const id of ['pin','upload','proxy','terminal','settings']) assert.equal(await color('#' + id), keyboard);
+        await page.locator('#pin').evaluate(node => node.classList.add('active'));
+        assert.equal(await color('#pin'), 'rgb(138, 187, 255)');
+        await page.locator('#upload').evaluate(node => node.classList.add('disabled'));
+        assert.equal(await page.locator('#upload').evaluate(node => getComputedStyle(node).opacity), '0.4');
+    }],
     ['swipe navigation remains available without a toolbar toggle after reloading old preferences', async page => {
         await page.evaluate(()=>localStorage.setItem('test.gesture_navigation','false'));
         await page.reload(); await page.waitForFunction(()=>!!window.fixture);

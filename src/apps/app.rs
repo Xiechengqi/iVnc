@@ -68,7 +68,8 @@ pub struct ManagedApp {
     pub env_vars: Option<HashMap<String, String>>,
     #[serde(default)]
     pub desktop_launch: super::compat::LaunchOptions,
-    /// Give this desktop application its own view without enabling sharing.
+    /// Desktop apps always run in their own view. Kept so older databases and
+    /// clients still round-trip the field; launch no longer consults it.
     #[serde(default)]
     pub independent_runtime: bool,
     /// Presence selects the Chrome desktop preset. None keeps custom commands.
@@ -92,8 +93,10 @@ pub struct ManagedApp {
 }
 
 impl ManagedApp {
-    pub(super) fn uses_worker(&self, sharing_enabled: bool) -> bool {
-        self.independent_runtime || sharing_enabled
+    /// Desktop apps always have their own compositor, so each browser can stay
+    /// on a different application. Sharing still uses that same runtime.
+    pub(super) fn uses_worker(&self, _sharing_enabled: bool) -> bool {
+        self.app_type == AppType::DesktopApp
     }
 }
 
@@ -115,7 +118,7 @@ impl ManagedApp {
             exec_command: (app_type == AppType::DesktopApp).then(|| "true".into()),
             env_vars: None,
             desktop_launch: Default::default(),
-            independent_runtime: false,
+            independent_runtime: app_type == AppType::DesktopApp,
             chrome: None,
             proxy_url: None,
             cli_binary_path: None,

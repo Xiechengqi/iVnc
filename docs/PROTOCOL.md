@@ -611,7 +611,7 @@ debug!("Session {} DC parse error: {}", session.id, e);
 
 `POST /api/apps` 创建本地桌面应用时可附加 `creation_id`，值为小写、带连字符的 UUID v4；成功时该值就是返回的 `app.id`。省略时仍由服务端生成 ID，原有调用方式不变。无效标识或对其他应用类型使用该字段返回 `app_creation_invalid`；标识已存在时返回 409（`app_creation_exists`），不会更新已有应用。客户端可通过 `GET /api/apps/{creation_id}` 核实丢失响应的创建结果，不能只按应用名称判断是否属于本次创建。
 
-桌面应用的创建和更新请求可传布尔字段 `independent_runtime`。创建时省略则默认为 `false`，更新时省略则保留原值。更新成功返回保存的 `independent_runtime` 和 `restart_required`。桌面应用更新时省略 `env_vars` 会保留原值，传 `null` 可清空。
+桌面应用始终独立运行。创建和更新请求仍可传布尔字段 `independent_runtime`：省略或传 `true`/`false` 都保存为 `true`，非布尔值返回 `independent_runtime_invalid`。更新成功返回保存的 `independent_runtime`（桌面应用为 `true`）和 `restart_required`。桌面应用更新时省略 `env_vars` 会保留原值，传 `null` 可清空。
 
 首次添加时的远程访问配置仍通过两个现有接口串行保存：先创建应用，再 `PUT /api/apps/{id}/sharing`。创建成功后应保留应用 ID；共享保存失败时重试同一个应用的配置，不能再次创建。应用配置与共享策略分库存储，此流程不提供跨库原子提交。创建和保存共享设置都不会自动启动应用。
 
@@ -620,8 +620,8 @@ debug!("Session {} DC parse error: {}", session.id, e);
 | 字段 | 适用 | 说明 |
 | --- | --- | --- |
 | `status` | 全部 | `running`、`starting`（独立运行环境尚未就绪）、`stopped`、`crashed`；CLI 应用另有 `missing`、`installed`、`not_file`、`not_executable`、`invalid_path` |
-| `independent_runtime` | 桌面应用 | 是否为本机查看启用独立运行 |
-| `sharing` | 桌面应用 | `{"enabled": bool, "restart_required": bool}`。独立运行或远程访问任一开启时，应用需要独立运行环境。若当前进程的运行方式与保存值不一致，`restart_required` 为 `true`；应用停止时为 `false` |
+| `independent_runtime` | 桌面应用 | 始终为 `true`。保留该字段以兼容旧客户端 |
+| `sharing` | 桌面应用 | `{"enabled": bool, "restart_required": bool}`。桌面应用启动时进入独立运行环境。若当前进程仍在主桌面，`restart_required` 为 `true`；应用停止时为 `false` |
 | `started` | 远程应用 | 是否已启动（连接）；与本机应用的运行状态一起保存，短时间内重启（5 分钟内）后恢复 |
 | `autostart` | 后台、桌面和远程应用 | 原有的随 iVnc 启动偏好，远程应用同样支持：每次 iVnc 启动时自动启动（连接）；通过创建和更新应用接口设置 |
 | `remote_state` | 远程应用 | `disconnected`（未启动）、`connecting`、`connected`、`starting`（B 的应用已开启共享，运行环境仍在启动；不是错误，就绪后自动连接）、`stopped`（B 的应用未运行）、`not_ready`（B 需重启应用）、`auth_required`（密码错误或旧连接）、`incompatible`（协议版本不一致）、`unreachable` |

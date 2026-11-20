@@ -155,8 +155,7 @@ const I18N = {
         backgroundCommandPlaceholder: 'Enter launch command, e.g. python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: 'e.g. amp-desktop or /path/to/app',
         launchAdvanced: 'Advanced launch settings',
-        independentRuntime: 'Run independently',
-        independentRuntimeHelp: 'Provide a separate view for Multi-app view. Restart the running app to apply a runtime change.',
+        independentRuntimeHelp: 'Desktop apps always use their own view, so each browser can stay on a different app. Restart an app that is still on the main desktop.',
         launchCompatibility: 'Launch compatibility',
         launchAuto: 'Detect automatically (recommended)',
         launchElectron: 'Treat as Electron',
@@ -394,8 +393,7 @@ const I18N = {
         backgroundCommandPlaceholder: '请输入启动命令，例如： python3 app.py --host 0.0.0.0 --port 7860',
         desktopCommandPlaceholder: '例如：amp-desktop 或 /path/to/app',
         launchAdvanced: '高级启动设置',
-        independentRuntime: '独立运行',
-        independentRuntimeHelp: '为多应用视图提供独立画面。运行中修改时需重启此应用。',
+        independentRuntimeHelp: '桌面应用始终使用独立画面，不同浏览器可以各自停留在不同应用。已在主桌面运行的应用需重启一次。',
         launchCompatibility: '启动兼容',
         launchAuto: '自动识别（推荐）',
         launchElectron: '指定为 Electron',
@@ -729,7 +727,6 @@ function applyTranslations() {
     setText('log-close-btn', 'close');
     [
         ['desktop-launch-advanced-label', 'launchAdvanced'],
-        ['label-independent-runtime', 'independentRuntime'],
         ['help-independent-runtime', 'independentRuntimeHelp'],
         ['label-desktop-compat', 'launchCompatibility'],
         ['label-desktop-sandbox', 'launchSandbox'],
@@ -1404,7 +1401,6 @@ function resetModal() {
     launchInfo = null;
     document.getElementById('desktop-launch-advanced').open = false;
     document.getElementById('desktop-launch-details').open = false;
-    document.getElementById('f-independent-runtime').checked = false;
     setValue('f-desktop-compat', 'auto'); setValue('f-desktop-sandbox', 'auto');
     updateDesktopLaunchControls(); renderLaunchInfo();
     renderLaunchContext();
@@ -1545,7 +1541,6 @@ async function showEdit(id) {
             document.getElementById('f-exec').value = a.exec_command || '';
             document.getElementById('f-env').value = envToText(a.env_vars);
             document.getElementById('f-proxy-url').value = a.proxy_url || '';
-            document.getElementById('f-independent-runtime').checked = !!a.independent_runtime;
             setValue('f-desktop-compat', a.desktop_launch?.compatibility || 'auto');
             setValue('f-desktop-sandbox', a.desktop_launch?.sandbox || 'auto');
         } else if (appType === 'cli') {
@@ -1903,7 +1898,7 @@ function readAppBody(appType) {
     } else if (appType === 'desktop') {
         body.exec_command = document.getElementById('f-exec').value.trim();
         body.env_vars = parseEnvText(document.getElementById('f-env').value);
-        body.independent_runtime = document.getElementById('f-independent-runtime').checked;
+        body.independent_runtime = true;
         Object.assign(body, chromePreset?.read());
         if (chromePreset?.generated()) delete body.exec_command;
         body.desktop_launch = {
@@ -1993,7 +1988,6 @@ function adoptCreatedApp(app, session) {
         setValue('f-exec', app.exec_command || '');
         setValue('f-env', envToText(app.env_vars));
         chromePreset?.load(app);
-        document.getElementById('f-independent-runtime').checked = !!app.independent_runtime;
         document.getElementById('f-autostart').checked = !!app.autostart;
         setValue('f-desktop-compat', app.desktop_launch?.compatibility || 'auto');
         setValue('f-desktop-sandbox', app.desktop_launch?.sandbox || 'auto');
@@ -2348,7 +2342,6 @@ function updateAppTypeVisibility() {
     document.getElementById('f-name').disabled = !!editId && !editBuiltin && type !== 'remote';
     document.getElementById('f-app-type').disabled = !!editId;
     document.getElementById('f-autostart').disabled = editBuiltin;
-    document.getElementById('f-independent-runtime').disabled = editBuiltin;
     document.getElementById('modal-save').hidden = editBuiltin;
     document.getElementById('modal-save').disabled = editBuiltin || !!appDialog?.saving;
     document.getElementById('modal-cancel').textContent = t(editBuiltin || modalSaved ? 'close' : 'cancel');

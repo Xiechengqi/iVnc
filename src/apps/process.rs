@@ -26,6 +26,13 @@ struct RunningApp {
     _chrome: Option<super::chrome::Lease>,
 }
 
+impl Drop for RunningApp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Watchdog restart state for an application that exited unexpectedly.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Restart {
@@ -477,6 +484,26 @@ impl ProcessManager {
                 (running.worker && matches!(running.child.try_wait(), Ok(None))).then(|| id.clone())
             })
             .collect()
+    }
+
+    /// Record a live process without launching it, for runtime-transition tests.
+    #[cfg(test)]
+    pub(crate) fn testing_insert(&self, app_id: &str, worker: bool) {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").stdin(std::process::Stdio::null());
+        let child = command.spawn().expect("sleep");
+        self.processes.lock().unwrap().insert(
+            app_id.to_string(),
+            RunningApp {
+                pid: child.id(),
+                child,
+                started: Instant::now(),
+                worker,
+                log: LogCursor::new(native::log_path(app_id)),
+                window_ready: false,
+                _chrome: None,
+            },
+        );
     }
 
     /// Whether a live process of the app runs in its own runtime.

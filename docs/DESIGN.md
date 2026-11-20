@@ -385,7 +385,7 @@ Wayland offer 保存独立内容快照，管道写入在有限并发的异步执
 
 #### 应用标签
 
-开启远程访问的桌面应用在独立运行环境中运行，已启动的远程应用运行在另一台实例上，二者都不在主合成器中绘制，因此以应用标签出现在同一工具栏：
+桌面应用在独立运行环境中运行，已启动的远程应用运行在另一台实例上，二者都不在主合成器中绘制，因此以应用标签出现在同一工具栏：
 
 1. `AppsState` 在应用启动、停止、删除、运行环境就绪以及远程连接状态变化时更新 `SharedState` 中的应用快照，并递增 `apps_generation`（`AtomicU64`）
 2. 主循环像比较 `datachannel_open_count` 一样比较 `apps_generation`，变化时重发 `taskbar` 消息，`apps` 字段为快照内容（`id`、`name`、`name_revision`、`can_rename`、`kind`、`status`，见 [PROTOCOL.md](PROTOCOL.md) §5.3）；主循环不访问 SQLite

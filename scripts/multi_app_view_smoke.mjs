@@ -184,7 +184,8 @@ try {
     await consolePage.goto(`${A.base}/console.html`);
     await consolePage.locator('#nav-apps').click();
     await consolePage.locator(`tr[data-app-id="${first}"] .btn-edit`).click();
-    await consolePage.locator('#f-independent-runtime').check();
+    await consolePage.locator('#help-independent-runtime').waitFor({ state: 'visible' });
+    assert.equal(await consolePage.locator('#f-independent-runtime').count(), 0);
     await consolePage.locator('#modal-save').click();
     await consolePage.locator('#restart-notice').waitFor({ state: 'visible' });
     assert.equal((await api(A.base, `/api/apps/${first}`)).sharing.restart_required, true);
