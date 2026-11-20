@@ -256,7 +256,7 @@ fn params_schema(params: &[CliParamSpec]) -> Value {
         "cdp_port".to_string(),
         json!({
             "type": "string",
-            "description": "Optional CDP port/session used by tools that need agent-browser."
+            "description": "Optional CDP port passed to the CLI as --cdp-port."
         }),
     );
     json!({

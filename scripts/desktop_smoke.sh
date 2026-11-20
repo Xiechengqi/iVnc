@@ -13,7 +13,7 @@
 #   1. Console API: overview, settings round-trip (persisted to console.json),
 #      keyframe request.
 #   2. Apps CRUD: create / list / fetch / update / delete a CLI app.
-#   3. Built-in apps: builtin-chrome and builtin-agent-browser are seeded.
+#   3. Built-in apps: builtin-chrome is seeded; builtin-agent-browser is removed.
 #   4. Capabilities: snapshot, apps, tools, calls; the raw CLI tool for a
 #      registered CLI app shows up in the tool list.
 #   5. Removed surface: agent, MCP, provider and schedule endpoints are gone.
@@ -229,7 +229,7 @@ check_status "keyframe request 200" "200" "$BASE/api/console/keyframe" -X POST
 hdr "apps: built-ins seeded"
 resp="$(curl -sS -m 10 "$BASE/api/apps")"
 check_contains "builtin-chrome present"        '"builtin-chrome"'        "$resp"
-check_contains "builtin-agent-browser present" '"builtin-agent-browser"' "$resp"
+check_eq "builtin-agent-browser removed" "0" "$(grep -c 'builtin-agent-browser' <<<"$resp")"
 check_eq "apps carry no skill_paths" "0" "$(grep -c 'skill_paths' <<<"$resp")"
 check_eq "apps.db under IVNC_HOME" "1" "$(test -f "$IVNC_HOME/apps.db" && echo 1 || echo 0)"
 check_eq "chrome profile dir ready" "1" \

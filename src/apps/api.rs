@@ -696,7 +696,7 @@ fn ensure_builtin_apps(store: &Arc<AppStore>) -> Result<(), String> {
             }
         }
     }
-    ensure_builtin_agent_browser_cli(store)?;
+    remove_builtin_agent_browser_cli(store)?;
     Ok(())
 }
 
@@ -769,73 +769,11 @@ fn ensure_builtin_chrome(store: &AppStore) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_builtin_agent_browser_cli(store: &Arc<AppStore>) -> Result<(), String> {
-    match store.get("builtin-agent-browser") {
-        Ok(mut app) => {
-            let mut changed = false;
-            if app.app_type != AppType::CliApp {
-                app.app_type = AppType::CliApp;
-                app.url = None;
-                app.launch_command = None;
-                app.launch_env_vars = None;
-                app.launch_cwd = None;
-                app.launch_wait_timeout_secs = None;
-                app.exec_command = None;
-                app.env_vars = None;
-                changed = true;
-            }
-            if app.autostart {
-                app.autostart = false;
-                changed = true;
-            }
-            if app
-                .cli_binary_path
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-            {
-                app.cli_binary_path = Some("/usr/local/bin/agent-browser".to_string());
-                changed = true;
-            }
-            if app.cli_env_vars.is_none() {
-                app.cli_env_vars = Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())]));
-                changed = true;
-            }
-            if changed {
-                store.update(&app)?;
-                log::info!("Updated built-in agent-browser CLI app defaults");
-            }
-        }
-        Err(_) => {
-            let app = ManagedApp {
-                id: "builtin-agent-browser".to_string(),
-                name: "agent-browser".to_string(),
-                app_type: AppType::CliApp,
-                autostart: false,
-                url: None,
-                launch_command: None,
-                launch_env_vars: None,
-                launch_cwd: None,
-                launch_wait_timeout_secs: None,
-                exec_command: None,
-                env_vars: None,
-                desktop_launch: Default::default(),
-                independent_runtime: false,
-                chrome: None,
-                proxy_url: None,
-                cli_binary_path: Some("/usr/local/bin/agent-browser".to_string()),
-                cli_env_vars: Some(HashMap::from([("NO_COLOR".to_string(), "1".to_string())])),
-                created_at: chrono_now(),
-                sort_order: 0,
-                name_revision: 0,
-            };
-            match store.add(&app) {
-                Ok(()) => log::info!("Added built-in agent-browser CLI app"),
-                Err(err) if err.code == "app_name_exists" => {}
-                Err(err) => return Err(err.into()),
-            }
-        }
+fn remove_builtin_agent_browser_cli(store: &AppStore) -> Result<(), String> {
+    match store.delete("builtin-agent-browser") {
+        Ok(()) => log::info!("Removed built-in agent-browser CLI app"),
+        Err(err) if err.code == "app_not_found" => {}
+        Err(err) => return Err(err.to_string()),
     }
     Ok(())
 }
@@ -2497,6 +2435,32 @@ mod tests {
             assert_eq!(after.env_vars, before.env_vars);
             assert_eq!(after.exec_command, before.exec_command);
         }
+    }
+
+    #[test]
+    fn builtin_initialization_removes_agent_browser_and_keeps_user_cli_apps() {
+        let store = AppStore::in_memory();
+        let mut builtin = ManagedApp::for_test("builtin-agent-browser", AppType::CliApp);
+        builtin.name = "agent-browser".into();
+        builtin.cli_binary_path = Some("/usr/local/bin/agent-browser".into());
+        store.add(&builtin).unwrap();
+        let mut user = ManagedApp::for_test("user-agent-browser", AppType::CliApp);
+        user.name = "my-agent-browser".into();
+        user.cli_binary_path = Some("/usr/local/bin/agent-browser".into());
+        store.add(&user).unwrap();
+
+        remove_builtin_agent_browser_cli(&store).unwrap();
+
+        assert!(store
+            .get_optional("builtin-agent-browser")
+            .unwrap()
+            .is_none());
+        assert_eq!(store.get("user-agent-browser").unwrap().name, user.name);
+        remove_builtin_agent_browser_cli(&store).unwrap();
+        assert!(store
+            .get_optional("builtin-agent-browser")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
