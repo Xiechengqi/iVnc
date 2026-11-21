@@ -444,6 +444,8 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 				key: `app:${s.id}`, appId: s.id, dot,
 				label: s.app.name || s.id, title: `${s.app.name} · ${text}`,
 				appName: s.app.name, nameRevision: s.app.name_revision, canRename: s.app.can_rename,
+				canManage: s.app.can_rename !== false, kind: s.app.kind,
+				running: s.app.status === 'running' || s.app.status === 'starting' || s.app.status === 'connected' || s.app.status === 'connecting',
 				statusText: text,
 				available: ready(s) && !s.withdrawn,
 				active: s.id === activeId, activate: () => activate(s.id),

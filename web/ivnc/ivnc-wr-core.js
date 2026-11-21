@@ -1617,7 +1617,19 @@ function createConsoleModalController(consoleEnabled) {
 		return !!modal && modal.contains(target);
 	}
 
-	controller = registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains,
+	function openAppAction(action, entry) {
+		if (!consoleEnabled || (action !== 'edit' && action !== 'logs') || !entry?.appId) return;
+		const deliver = () => frame?.contentWindow?.postMessage({
+			type: 'ivnc-toolbar-app-action', action, id: entry.appId, name: entry.appName || entry.label,
+		}, window.location.origin);
+		if (frame && frame.dataset.appActionBound !== 'true') {
+			frame.dataset.appActionBound = 'true';
+			frame.addEventListener('load', () => { if (!modal?.classList.contains('minimized')) deliver(); });
+		}
+		deliver();
+	}
+
+	controller = registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains, openAppAction,
 		childState: () => childBridge?.childState(), syncChild: source => childBridge?.syncChild(source) });
 	return controller;
 }
@@ -3225,6 +3237,13 @@ export default function webrtc() {
 					if (appStreams?.coversDesktop()) appStreams.activate(null);
 					input?.restoreImeFocus(true);
 					return true;
+				},
+				onAppAction: (action, entry) => {
+					if (action !== 'edit' && action !== 'logs') return;
+					proxyController.minimize();
+					terminalController.minimize('auto');
+					consoleController.show();
+					consoleController.openAppAction(action, entry);
 				},
 				onInteraction: (active) => active ? showTaskbar() : hideTaskbar(),
 			});

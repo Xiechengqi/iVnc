@@ -9,15 +9,19 @@ const STRINGS = {
         move: '按住标签左右拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态',
         rename: '修改应用名', save: '保存', cancel: '取消', pending: '保存中…', nameFailed: '无法保存应用名',
         latest: '当前名称：', changed: '应用名已发生变化。请核对当前名称，再次保存以使用你的输入。',
-        invalid: '名称不能为空、不能包含换行或控制字符，且不能超过 256 个 UTF-8 字节。' },
+        invalid: '名称不能为空、不能包含换行或控制字符，且不能超过 256 个 UTF-8 字节。',
+        menu: '应用操作', stop: '停止', restart: '重启', logs: '日志', edit: '编辑', renameAction: '重命名',
+        stopped: '应用已停止', restarted: '应用已重启', actionFailed: '操作失败：', manageUnavailable: '当前页面不能打开控制台' },
     en: { apps: 'Applications', previous: 'Scroll apps left', next: 'Scroll apps right', more: 'More tools',
         move: 'Hold and drag the tab left or right to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
         rename: 'Rename application', save: 'Save', cancel: 'Cancel', pending: 'Saving…', nameFailed: 'Could not save application name',
         latest: 'Current name: ', changed: 'The application name changed. Review the current name, then save again to use your draft.',
-        invalid: 'Enter a name without line breaks or control characters, up to 256 UTF-8 bytes.' }
+        invalid: 'Enter a name without line breaks or control characters, up to 256 UTF-8 bytes.',
+        menu: 'Application actions', stop: 'Stop', restart: 'Restart', logs: 'Logs', edit: 'Edit', renameAction: 'Rename',
+        stopped: 'Application stopped', restarted: 'Application restarted', actionFailed: 'Action failed: ', manageUnavailable: 'The console is not available on this page' }
 };
 
-export function createToolbar({ element, canReorder = false, canRename = false, activateWindow, onInteraction = () => {} }) {
+export function createToolbar({ element, canReorder = false, canRename = false, activateWindow, onInteraction = () => {}, onAppAction = null }) {
     // The desktop entry is loaded as a module at runtime by index.html; Vite
     // cannot attach its extracted styles to that dynamically created script.
     if (!document.getElementById('ivnc-toolbar-styles')) {
@@ -69,6 +73,15 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const renameActions = make('div', 'toolbar-rename-actions', renamePanel);
     const renameCancel = make('button', 'toolbar-rename-cancel', renameActions); renameCancel.type = 'button';
     const renameSave = make('button', 'toolbar-rename-save', renameActions); renameSave.type = 'button';
+    const appMenuPanel = make('div', 'toolbar-app-menu', element);
+    appMenuPanel.hidden = true;
+    appMenuPanel.setAttribute('role', 'menu');
+    const appMenuActions = ['stop', 'restart', 'logs', 'edit', 'rename'];
+    const appMenuButtons = new Map(appMenuActions.map(action => {
+        const button = make('button', 'toolbar-app-menu-item', appMenuPanel);
+        button.type = 'button'; button.dataset.action = action; button.setAttribute('role', 'menuitem');
+        return [action, button];
+    }));
     const names = new Map(), requests = new Set(), nameRefreshes = new Set();
     const notifications = createOrderNotifications(undefined, async (id, revision) => {
         if (destroyed || revision <= (names.get(id)?.name_revision ?? -1) || nameRefreshes.has(id) || !entries.some(e => e.appId === id)) return;
@@ -81,7 +94,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const toolEntries = [], nodes = new Map();
     let entries = [], confirmed = { ordered_ids: [], order_revision: -1 }, pendingIds = null;
     let drag = null, saving = false, destroyed = false, ghost = null, frame = 0, noticeTimer;
-    let lastActive = null, editor = null, renameBusy = false;
+    let lastActive = null, editor = null, renameBusy = false, appMenu = null, actionBusy = false;
     let press = null, pressTimer, paintPending = false, suppressedPointer = null;
     let navigation = null, navigationTimer;
 
@@ -150,13 +163,16 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (entry.windowClass) entry.title += ` (${entry.windowClass})`;
     }
 
-    function positionEditor() {
-        if (!editor) return;
-        const anchor = nodes.get(editor.key)?.getBoundingClientRect();
+    function placePanel(panel, key) {
+        const anchor = nodes.get(key)?.getBoundingClientRect();
         if (!anchor) return;
         const rect = element.getBoundingClientRect();
-        const left = Math.max(8, Math.min(window.innerWidth - renamePanel.offsetWidth - 8, anchor.left));
-        renamePanel.style.left = `${left - rect.left}px`;
+        const left = Math.max(8, Math.min(window.innerWidth - panel.offsetWidth - 8, anchor.left));
+        panel.style.left = `${left - rect.left}px`;
+    }
+
+    function positionEditor() {
+        if (editor) placePanel(renamePanel, editor.key);
     }
 
     function paintEditor() {
@@ -183,11 +199,87 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     function openEditor(node) {
         const entry = node._entry, app = names.get(entry.appId);
         if (!canRename || !entry.canRename || !app || destroyed) return;
-        closeEditor(); cancelDrag(); closeMenu(); closeInfo();
+        closeEditor(); closeAppMenu(false); cancelDrag(); closeMenu(); closeInfo();
         editor = { id: entry.appId, key: entry.key, revision: app.name_revision, saving: false };
         renameInput.value = app.name; renameError.textContent = '';
         renamePanel.hidden = false; paintEditor(); onInteraction(true);
         renameInput.focus({ preventScroll: true }); renameInput.select();
+    }
+
+    function closeAppMenu(restoreFocus = false) {
+        if (!appMenu) return;
+        const state = appMenu; appMenu = null;
+        appMenuPanel.hidden = true;
+        if (restoreFocus) nodes.get(state.key)?.focus({ preventScroll: true });
+        if (!editor) onInteraction(false);
+    }
+
+    function menuActions(entry) {
+        const actions = [];
+        if (entry.kind !== 'cli') {
+            actions.push(entry.running ? 'stop' : 'restart');
+            if (entry.kind !== 'remote') actions.push('logs');
+        }
+        actions.push('edit', 'rename');
+        return actions;
+    }
+
+    function paintAppMenu() {
+        if (!appMenu) return;
+        const entry = entries.find(e => e.key === appMenu.key && e.appId === appMenu.id);
+        if (!entry?.canManage) { closeAppMenu(); return; }
+        appMenu.entry = entry;
+        const available = new Set(menuActions(entry));
+        for (const [action, button] of appMenuButtons) {
+            button.hidden = !available.has(action);
+            button.disabled = actionBusy || (action === 'rename' && (!canRename || !entry.canRename));
+            button.textContent = tr(action === 'rename' ? 'renameAction' : action);
+        }
+        appMenuPanel.setAttribute('aria-busy', String(actionBusy));
+        placePanel(appMenuPanel, entry.key);
+    }
+
+    function openAppMenu(node) {
+        const entry = node?._entry;
+        if (!canRename || !entry?.canManage || !entry.appId || destroyed) return false;
+        closeEditor(); closeAppMenu(false); cancelDrag(); closeMenu(); closeInfo();
+        appMenu = { id: entry.appId, key: entry.key, entry };
+        appMenuPanel.hidden = false;
+        paintAppMenu(); onInteraction(true);
+        appMenuButtons.get(menuActions(entry)[0])?.focus({ preventScroll: true });
+        return true;
+    }
+
+    async function runAppAction(action) {
+        if (!appMenu || actionBusy || destroyed) return;
+        const state = appMenu, entry = state.entry;
+        if (action === 'rename') {
+            const node = nodes.get(state.key);
+            closeAppMenu(false);
+            if (node) openEditor(node);
+            return;
+        }
+        if (action === 'edit' || action === 'logs') {
+            closeAppMenu(true);
+            if (typeof onAppAction === 'function') onAppAction(action, entry);
+            else notify(tr('manageUnavailable'), true);
+            return;
+        }
+        actionBusy = true; paintAppMenu();
+        const controller = new AbortController();
+        try {
+            await request(`/api/apps/${encodeURIComponent(state.id)}/${action}`, { method: 'POST' }, controller);
+            if (destroyed || appMenu !== state) return;
+            notify(tr(action === 'stop' ? 'stopped' : 'restarted'));
+            notice.hidden = false;
+            closeAppMenu(true);
+        } catch (error) {
+            if (destroyed || appMenu !== state) return;
+            notify(`${tr('actionFailed')}${error.message}`, true);
+        } finally {
+            actionBusy = false;
+            if (!destroyed && appMenu === state) paintAppMenu();
+        }
     }
 
     async function saveName() {
@@ -240,16 +332,43 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); saveName(); }
     });
     listen(renameCancel, 'click', () => closeEditor(true));
+    listen(appMenuPanel, 'click', event => {
+        const action = event.target.closest('[data-action]')?.dataset.action;
+        if (!action) return;
+        event.preventDefault(); event.stopPropagation();
+        runAppAction(action);
+    });
+    listen(appMenuPanel, 'keydown', event => {
+        if (event.isComposing || event.keyCode === 229) return;
+        const items = [...appMenuButtons.values()].filter(button => !button.hidden && !button.disabled);
+        const index = items.indexOf(document.activeElement);
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault(); event.stopPropagation();
+            const next = items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length];
+            next?.focus({ preventScroll: true });
+        } else if (event.key === 'Home' || event.key === 'End') {
+            event.preventDefault(); event.stopPropagation();
+            items[event.key === 'Home' ? 0 : items.length - 1]?.focus({ preventScroll: true });
+        } else if ((event.key === 'Enter' || event.key === ' ') && index >= 0) {
+            event.preventDefault(); event.stopPropagation();
+            runAppAction(items[index].dataset.action);
+        }
+    });
     listen(list, 'contextmenu', event => {
         const node = event.target.closest('.taskbar-item');
-        if (!canRename || !node?._entry.canRename) return;
-        event.preventDefault(); event.stopPropagation(); openEditor(node);
+        if (!canRename || !node?._entry.canManage) return;
+        event.preventDefault(); event.stopPropagation(); openAppMenu(node);
     });
     listen(list, 'keydown', event => {
-        if (event.key !== 'F2' && !(event.shiftKey && event.key === 'F10')) return;
         const node = event.target.closest('.taskbar-item');
-        if (!canRename || !node?._entry.canRename) return;
-        event.preventDefault(); event.stopPropagation(); openEditor(node);
+        if (!node) return;
+        if (event.key === 'F2' && canRename && node._entry.canRename) {
+            event.preventDefault(); event.stopPropagation(); openEditor(node);
+            return;
+        }
+        if (event.shiftKey && event.key === 'F10' && canRename && node._entry.canManage) {
+            event.preventDefault(); event.stopPropagation(); openAppMenu(node);
+        }
     });
 
     function notify(message, error = false) {
@@ -353,7 +472,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             node.setAttribute('aria-pressed', String(!!entry.active));
             const shortcuts = ['Enter', 'Space'];
             if (sortable) shortcuts.push('ArrowLeft', 'ArrowRight');
-            if (canRename && entry.canRename) shortcuts.push('F2', 'Shift+F10');
+            if (canRename && entry.canRename) shortcuts.push('F2');
+            if (entry.canManage) shortcuts.push('Shift+F10');
             node.setAttribute('aria-keyshortcuts', shortcuts.join(' '));
             if (sortable) node.setAttribute('aria-description', tr('move'));
             else node.removeAttribute('aria-description');
@@ -366,6 +486,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         viewport.scrollLeft = left;
         updateOverflow();
         paintEditor();
+        paintAppMenu();
         const active = sorted.find(e => e.active)?.key || null;
         if (active !== lastActive && !drag && !saving) {
             lastActive = active;
@@ -403,6 +524,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (!compact) closeMenu();
         updateOverflow();
         positionEditor();
+        if (appMenu) placePanel(appMenuPanel, appMenu.key);
     }
 
     function closeMenu() {
@@ -584,6 +706,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (event.key !== 'Escape') return;
         if (event.isComposing || event.keyCode === 229) return;
         if (editor) { event.preventDefault(); event.stopPropagation(); closeEditor(true); }
+        else if (appMenu) { event.preventDefault(); event.stopPropagation(); closeAppMenu(true); }
         if (drag?.started) { event.preventDefault(); event.stopPropagation(); }
         cancelInteraction(); closeMenu(); closeInfo();
     }, { capture: true });
@@ -593,7 +716,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         event.preventDefault(); event.stopPropagation();
         viewport.scrollLeft += event.deltaY * (event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? viewport.clientWidth : 1);
     }, { passive: false });
-    listen(viewport, 'scroll', () => { updateOverflow(); positionEditor(); }, { passive: true });
+    listen(viewport, 'scroll', () => { updateOverflow(); positionEditor(); if (appMenu) placePanel(appMenuPanel, appMenu.key); }, { passive: true });
     listen(previous, 'click', () => viewport.scrollBy({ left: -Math.max(100, viewport.clientWidth * .7), behavior: 'smooth' }));
     listen(next, 'click', () => viewport.scrollBy({ left: Math.max(100, viewport.clientWidth * .7), behavior: 'smooth' }));
     listen(more, 'click', () => {
@@ -603,6 +726,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     listen(tools, 'click', (event) => { if (event.target.closest('.taskbar-pin')) closeMenu(); }, { capture: true });
     listen(document, 'pointerdown', (event) => {
         if (!renamePanel.contains(event.target)) closeEditor();
+        if (!appMenuPanel.contains(event.target)) closeAppMenu();
         if (!tools.contains(event.target)) closeMenu();
         if (!status.contains(event.target)) closeInfo();
     });
@@ -631,6 +755,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         apps.setAttribute('aria-label', tr('apps'));
         renameCaption.textContent = tr('rename'); renamePanel.setAttribute('aria-label', tr('rename'));
         renameInput.setAttribute('aria-label', tr('rename')); renameCancel.textContent = tr('cancel');
+        appMenuPanel.setAttribute('aria-label', tr('menu'));
+        paintAppMenu();
         layout(); paint();
     };
     const untranslate = onLangChange(translate);
@@ -650,7 +776,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     // Query and activation share ordering, pending intent and eligibility.
     // A gesture can yield at an edge without sending a focus request.
     function navigationTarget(direction) {
-        if (destroyed || saving || press || drag?.started || editor || !menu.hidden || !info.hidden || ![-1, 1].includes(direction)) return null;
+        if (destroyed || saving || press || drag?.started || editor || appMenu || !menu.hidden || !info.hidden || ![-1, 1].includes(direction)) return null;
         const sorted = orderedEntries();
         const focused = sorted.findIndex(entry => navigation ? entry.key === navigation.key : entry.active);
         const current = focused < 0 ? (direction > 0 ? -1 : sorted.length) : focused;
@@ -682,6 +808,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             entries = (data.windows || []).map(w => ({
                 key: `window:${w.window_key || w.id}`, appId: w.managed_app_id,
                 canRename: w.can_rename === true,
+                canManage: !!w.managed_app_id && w.can_rename === true,
+                kind: 'desktop', running: true,
                 windowTitle: w.title || '', windowClass: w.app_id,
                 label: w.title || w.display_name || w.app_id || `Window ${w.id}`,
                 title: `${w.title || w.display_name || w.app_id || ''} (${w.app_id || ''})`,
@@ -696,17 +824,18 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
                 else if (target.active && (!navigation.wasActive || navigation.sawChange)) resetNavigation(false, false);
             }
             if (editor && !entries.some(e => e.key === editor.key && e.appId === editor.id && e.canRename)) closeEditor();
+            if (appMenu && !entries.some(e => e.key === appMenu.key && e.appId === appMenu.id && e.canManage)) closeAppMenu();
             for (const id of names.keys()) if (!entries.some(e => e.appId === id)) names.delete(id);
             if (press && !entries.some(e => e.key === press.key && e.appId === press.appId)) press.cancelled = true;
             if (drag && (drag.revision !== confirmed.order_revision || drag.ids.length !== visibleIdsFromConfirmed().length || !drag.ids.every(id => entries.some(e => e.appId === id)))) cancelDrag();
             paint();
         },
-        interacting: () => !!editor || !!press || !!drag?.started || !menu.hidden || !info.hidden,
+        interacting: () => !!editor || !!appMenu || !!press || !!drag?.started || !menu.hidden || !info.hidden,
         destroy() {
             destroyed = true;
             clearTimeout(navigationTimer);
             cancelAnimationFrame(resizeFrame);
-            closeEditor(); cancelInteraction(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
+            closeEditor(); closeAppMenu(); cancelInteraction(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
             clearTimeout(noticeTimer); untranslate(); notifications.destroy();
             element.remove(); nodes.clear();
         }

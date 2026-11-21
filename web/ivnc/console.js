@@ -1505,6 +1505,16 @@ function showAdd() {
     document.getElementById('f-name').focus();
 }
 
+function toolbarAppAction(event) {
+    if (event.origin !== window.location.origin || event.source !== window.parent) return;
+    const message = event.data || {};
+    if (message.type !== 'ivnc-toolbar-app-action' || typeof message.id !== 'string') return;
+    if (message.action === 'edit') showEdit(message.id);
+    else if (message.action === 'logs') showLogs(message.id, message.name || message.id);
+}
+
+window.addEventListener('message', toolbarAppAction);
+
 async function showEdit(id) {
     const session = openAppDialog();
     if (!session) return;

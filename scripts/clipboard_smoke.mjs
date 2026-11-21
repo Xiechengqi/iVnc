@@ -195,7 +195,7 @@ try {
     await waitFor('duplicate rejection', () => local.evaluate(`window.__clipReplies.some(m=>m.data?.status==='duplicate')`));
     assert.equal(await value(),'once');
     pass('replayed transaction cannot paste twice');
-    await local.evaluate(`(() => {const n=document.querySelector('.toolbar-list [data-app-id="builtin-chrome"]');n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));})()`);
+    await local.evaluate(`(() => {const n=document.querySelector('.toolbar-list [data-app-id="builtin-chrome"]');n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));document.querySelector('.toolbar-app-menu [data-action="rename"]').click();})()`);
     await waitFor('rename input', () => local.evaluate(`document.activeElement?.classList.contains('toolbar-rename-input')`));
     const before = await local.evaluate('window.__clipSent.length');
     await writeLocal('local rename text'); await paste();

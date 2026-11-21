@@ -85,17 +85,26 @@ const key = async (name, code = name, modifiers = 0) => {
     await call('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code, modifiers });
     await call('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code, modifiers });
 };
-const openRename = async (id, keyboard = false) => {
+const openAppMenu = async (id, keyboard = false) => {
     const point = await evaluate(`(() => {
         const n = document.querySelector('.toolbar-list [data-app-id="${id}"]');
         n.scrollIntoView({block:'nearest',inline:'nearest'}); n.focus({preventScroll:true});
         const r=n.getBoundingClientRect();return {x:r.left+25,y:r.top+r.height/2};
     })()`);
-    if (keyboard === 'menu') await key('F10','F10',8);
-    else if (keyboard) await key('F2');
+    if (keyboard) await key('F10','F10',8);
     else for (const type of ['mousePressed','mouseReleased']) await call('Input.dispatchMouseEvent', {
         type, ...point, button:'right', buttons:type === 'mousePressed' ? 2 : 0, clickCount:1
     });
+    await waitFor('app menu', () => evaluate(`!document.querySelector('.toolbar-app-menu').hidden`));
+};
+const openRename = async (id, keyboard = false) => {
+    if (keyboard === true) {
+        await evaluate(`document.querySelector('.toolbar-list [data-app-id="${id}"]').focus({preventScroll:true})`);
+        await key('F2');
+    } else {
+        await openAppMenu(id, keyboard === 'menu');
+        await evaluate(`document.querySelector('.toolbar-app-menu [data-action="rename"]').click()`);
+    }
     await waitFor('rename editor', () => evaluate(`!document.querySelector('.toolbar-rename').hidden && document.activeElement === document.querySelector('.toolbar-rename-input')`));
 };
 const draftName = name => evaluate(`document.querySelector('.toolbar-rename-input').value=${JSON.stringify(name)}`);

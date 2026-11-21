@@ -115,6 +115,7 @@
 .ivnc-toolbar .toolbar-more-menu,
 .ivnc-toolbar .toolbar-info,
 .ivnc-toolbar .toolbar-notice,
+.ivnc-toolbar .toolbar-app-menu,
 .ivnc-toolbar .toolbar-rename {
     position: absolute;
     bottom: 38px;
@@ -142,6 +143,31 @@
 .ivnc-toolbar .toolbar-info { right: 0; width: max-content; }
 .ivnc-toolbar .toolbar-notice { right: 8px; max-width: min(420px, calc(100vw - 16px)); }
 .ivnc-toolbar .toolbar-rename { width: 320px; z-index: 3; white-space: normal; }
+.ivnc-toolbar .toolbar-app-menu {
+    z-index: 3;
+    display: grid;
+    gap: 2px;
+    width: max-content;
+    min-width: 132px;
+    padding: 4px;
+    white-space: normal;
+}
+.ivnc-toolbar .toolbar-app-menu-item {
+    width: 100%;
+    height: 28px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #eee;
+    padding: 0 10px;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.ivnc-toolbar .toolbar-app-menu-item:hover:not(:disabled),
+.ivnc-toolbar .toolbar-app-menu-item:focus-visible {
+    background: #303f52;
+}
 .ivnc-toolbar .toolbar-rename-label { display: grid; gap: 6px; }
 .ivnc-toolbar .toolbar-rename-input {
     box-sizing: border-box;

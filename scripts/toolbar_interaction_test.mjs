@@ -33,6 +33,7 @@ const calls = [], pointerIds = [];
 let streams;
 const toolbar = createToolbar({element:document.querySelector('#taskbar'),
     canReorder:new URLSearchParams(location.search).get('reorder') !== '0', canRename:true,
+    onAppAction:(action, entry) => window.fixture?.actions.push({action, id:entry.appId, name:entry.appName || entry.label}),
     activateWindow:(id,key) => {
         calls.push({id,key});
         if (window.fixture?.rejectFocus) return false;
@@ -64,7 +65,7 @@ function wheel(event,source) {
 }
 document.querySelector('#desktop').addEventListener('wheel',e=>wheel(e,window),{passive:false});
 document.addEventListener('pointerdown', e => pointerIds.push(e.pointerId), true);
-window.fixture = {data,calls,toolbar,streams,render,pointerIds,navigation,wheel,setLang,clock:0,wheelCount:0,scrolls:[]};
+window.fixture = {data,calls,actions:[],toolbar,streams,render,pointerIds,navigation,wheel,setLang,clock:0,wheelCount:0,scrolls:[]};
 </script>`;
 const embedded = `<!doctype html><style>#app{position:fixed;inset:0}</style><div id="app" tabindex="0">Embedded application</div><script>
 document.querySelector('#app').addEventListener('wheel',e=>parent.fixture.wheel(e,window),{passive:false});
@@ -407,16 +408,55 @@ const cases = [
         await page.mouse.up(); assert.deepEqual(await calls(page), []);
         await click(page); assert.deepEqual(await calls(page), [2]);
     }],
-    ['Enter, Space, right-click rename and F2 retain their local behavior', async page => {
+    ['Enter, Space, the right-click action menu and F2 retain their local behavior', async page => {
         await row(page).focus(); await page.keyboard.press('Enter'); await page.keyboard.press('Space');
         assert.deepEqual(await calls(page), [2,2]);
         const p = await point(row(page).locator('.toolbar-label'));
         await page.mouse.click(p.x,p.y,{button:'right'});
+        const menu = page.locator('.toolbar-app-menu');
+        assert.equal(await menu.isVisible(), true);
+        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '日志', '编辑', '重命名']);
+        await menu.locator('[data-action="rename"]').click();
         assert.equal(await page.locator('.toolbar-rename').isVisible(), true);
         await page.keyboard.press('Escape'); await row(page).focus(); await page.keyboard.press('F2');
         assert.equal(await page.locator('.toolbar-rename').isVisible(), true);
         assert.deepEqual(await calls(page), [2,2]);
         await page.keyboard.press('Escape'); await click(page); assert.deepEqual(await calls(page), [2,2,2]);
+    }],
+    ['the action menu follows running state and opens logs or edit without switching apps', async (page, api) => {
+        const menu = page.locator('.toolbar-app-menu');
+        const open = async () => {
+            const p = await point(row(page, 'shared').locator('.toolbar-label'));
+            await page.mouse.click(p.x, p.y, {button:'right'});
+            await menu.waitFor({state:'visible'});
+        };
+        await open();
+        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '日志', '编辑', '重命名']);
+        await menu.locator('[data-action="logs"]').click();
+        assert.deepEqual(await page.evaluate(() => fixture.actions), [{action:'logs', id:'shared', name:'共享应用'}]);
+        assert.equal(await menu.isVisible(), false);
+        await page.evaluate(() => {
+            fixture.actions = [];
+            fixture.streams.update([
+                {id:'shared',name:'共享应用',name_revision:0,can_rename:true,kind:'shared',status:'stopped'},
+                {id:'remote',name:'远程应用',name_revision:0,can_rename:true,kind:'remote',status:'connected'}
+            ]);
+            fixture.render();
+        });
+        await open();
+        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['重启', '日志', '编辑', '重命名']);
+        const remote = await point(row(page, 'remote').locator('.toolbar-label'));
+        await page.mouse.click(remote.x, remote.y, {button:'right'});
+        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '编辑', '重命名']);
+        await page.keyboard.press('Escape');
+        await open();
+        await menu.locator('[data-action="edit"]').click();
+        assert.deepEqual(await page.evaluate(() => fixture.actions), [{action:'edit', id:'shared', name:'共享应用'}]);
+        await row(page, 'beta').click({button:'right'});
+        await menu.locator('[data-action="stop"]').click();
+        await page.waitForFunction(() => document.querySelector('.toolbar-app-menu').hidden);
+        assert.deepEqual(api.actions, [{action:'stop', id:'beta'}]);
+        assert.deepEqual(await calls(page), []);
     }],
     ['touch tap activates once without initiating sorting', async (page, api) => {
         const p = await point(row(page).locator('.toolbar-label')); await page.touchscreen.tap(p.x,p.y);
@@ -556,7 +596,7 @@ await test('toolbar native browser input', async t => {
             try {
                 for (const [title,run,query=''] of cases) await t.test(title, async () => {
                     const context = await browser.newContext({viewport:{width:1280,height:800},deviceScaleFactor:2,hasTouch:true});
-                    const page = await context.newPage(), errors = [], api = {orders:[]};
+                    const page = await context.newPage(), errors = [], api = {orders:[], actions:[]};
                     page.on('pageerror', error => errors.push(error.message));
                     await page.route('**/api/**', async route => {
                         const request = route.request(), pathname = new URL(request.url()).pathname;
@@ -564,6 +604,9 @@ await test('toolbar native browser input', async t => {
                         if (pathname === '/api/apps/order' && request.method() === 'PUT') {
                             const input = request.postDataJSON(); api.orders.push(input);
                             body = {ordered_ids:input.ordered_ids,order_revision:input.base_revision+1};
+                        } else if (pathname.endsWith('/stop') || pathname.endsWith('/restart')) {
+                            api.actions.push({action:pathname.split('/').at(-1), id:pathname.split('/')[3]});
+                            body = {ok:true};
                         } else if (pathname.endsWith('/view')) body = {url:`/app-view/${pathname.split('/')[3]}/`};
                         await route.fulfill({json:body});
                     });
