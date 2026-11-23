@@ -22,7 +22,7 @@
  * under the License.
  */
 
-import { createScrollInput, normalizeWheel } from './scroll-input.mjs';
+import { createScrollInput, normalizeWheel, TOUCH_SCROLL_GAIN } from './scroll-input.mjs';
 import { getScrollSpeed, onScrollSpeedChange } from '../scroll-preference.mjs';
 import { pasteShortcut } from '../clipboard.js';
 import { TextInput, usesTouchKeyboard } from './text-input.js';
@@ -1213,6 +1213,8 @@ export class Input {
 
         this._activeTouches = new Map();
         this._activeTouchIdentifier = null;
+        this._oneFingerMode = null;
+        this._oneFingerScrollPoint = null;
         this._isTwoFingerGesture = false;
         this._MIN_SWIPE_DISTANCE = 30;
         this._MAX_SWIPE_DURATION = 600;
@@ -1903,12 +1905,13 @@ export class Input {
                     this.send(`m2,0,0,${this.buttonMask},0`);
                     this._trackpadLastTapTime = 0;
                 } else {
-                    this._trackpadGestureMode = 'moving';
+                    this._trackpadGestureMode = 'pending';
                 }
             }
             else if (touchCount === 2) {
                 this._trackpadGestureMode = 'scrolling';
                 this._trackpadLastTapTime = 0;
+                for (const touch of this._trackpadTouches.values()) touch.moved = true;
                 const touches = Array.from(this._trackpadTouches.values());
                 this._trackpadLastScrollCentroid = {
                     x: (touches[0].lastX + touches[1].lastX) / 2,
@@ -1919,32 +1922,35 @@ export class Input {
             }
         }
         else if (type === 'touchmove') {
-            let hasAnyFingerMovedBeyondThreshold = false;
-            for (const touch of this._trackpadTouches.values()) {
-                if (!touch.moved) {
-                    const currentTouch = Array.from(changedTouches).find(t => t.identifier === touch.id) || touch;
-                    if (currentTouch) {
-                        const dx = currentTouch.clientX - touch.startX;
-                        const dy = currentTouch.clientY - touch.startY;
-                        if (dx * dx + dy * dy > this._TAP_THRESHOLD_DISTANCE_SQ) {
-                            touch.moved = true;
-                        }
-                    }
+            if (this._trackpadGestureMode === 'pending' && this._trackpadTouches.size === 1) {
+                const touchData = this._trackpadTouches.values().next().value;
+                const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id) || touchData;
+                const decision = this._classifyOneFinger(touchData.startX, touchData.startY, changedTouch.clientX, changedTouch.clientY);
+                if (decision === 'scroll') {
+                    this._trackpadGestureMode = 'finger-scroll';
+                    touchData.moved = true;
+                    this._trackpadLastTapTime = 0;
+                    this._scrollFinger(changedTouch.clientX - touchData.startX, changedTouch.clientY - touchData.startY);
+                } else if (decision === 'drag') {
+                    this._trackpadGestureMode = 'moving';
+                    touchData.moved = true;
+                    this._trackpadLastTapTime = 0;
+                    const [deltaX, deltaY] = this._relativeDelta(changedTouch.clientX - touchData.startX, changedTouch.clientY - touchData.startY);
+                    if (deltaX || deltaY) this.send(`m2,${deltaX},${deltaY},${this.buttonMask},0`);
                 }
-                if (touch.moved) {
-                    hasAnyFingerMovedBeyondThreshold = true;
-                }
-            }
-
-            if (hasAnyFingerMovedBeyondThreshold) {
-                this._trackpadLastTapTime = 0;
-            }
-
-            if (this._trackpadGestureMode === 'moving' || this._trackpadGestureMode === 'dragging') {
+                touchData.lastX = changedTouch.clientX;
+                touchData.lastY = changedTouch.clientY;
+            } else if (this._trackpadGestureMode === 'moving' || this._trackpadGestureMode === 'dragging') {
                 const touchData = this._trackpadTouches.values().next().value;
                 if (touchData) {
                     const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id);
                     if (changedTouch) {
+                        const dx = changedTouch.clientX - touchData.startX;
+                        const dy = changedTouch.clientY - touchData.startY;
+                        if (dx * dx + dy * dy > this._TAP_THRESHOLD_DISTANCE_SQ) {
+                            touchData.moved = true;
+                            this._trackpadLastTapTime = 0;
+                        }
                         const [deltaX, deltaY] = this._relativeDelta(changedTouch.clientX - touchData.lastX, changedTouch.clientY - touchData.lastY);
                         if (deltaX || deltaY) {
                             this.send(`m2,${deltaX},${deltaY},${this.buttonMask},0`);
@@ -1953,13 +1959,18 @@ export class Input {
                         touchData.lastY = changedTouch.clientY;
                     }
                 }
+            } else if (this._trackpadGestureMode === 'finger-scroll' && this._trackpadTouches.size === 1) {
+                const touchData = this._trackpadTouches.values().next().value;
+                const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id);
+                if (changedTouch) {
+                    touchData.moved = true;
+                    this._scrollFinger(changedTouch.clientX - touchData.lastX, changedTouch.clientY - touchData.lastY);
+                    touchData.lastX = changedTouch.clientX;
+                    touchData.lastY = changedTouch.clientY;
+                }
             } else if (this._trackpadGestureMode === 'scrolling') {
                 const touches = Array.from(this._trackpadTouches.values());
                 if (touches.length === 2) {
-                    for (const changed of changedTouches) {
-                        const data = this._trackpadTouches.get(changed.identifier);
-                        if (data) { data.lastX = changed.clientX; data.lastY = changed.clientY; }
-                    }
                     const curr_avg_x = (touches[0].lastX + touches[1].lastX) / 2;
                     const curr_avg_y = (touches[0].lastY + touches[1].lastY) / 2;
                     if (this._trackpadScrollStartSeparation !== null &&
@@ -1985,7 +1996,7 @@ export class Input {
                 this._trackpadGestureMode = 'completed';
                 this._trackpadLastTapTime = 0;
             }
-            else if (touchCountBeforeEnd === 1 && wasTap && this._trackpadGestureMode !== 'completed' && this._trackpadGestureMode !== 'dragging') {
+            else if (touchCountBeforeEnd === 1 && wasTap && this._trackpadGestureMode !== 'completed' && this._trackpadGestureMode !== 'dragging' && this._trackpadGestureMode !== 'finger-scroll') {
                 this._trackpadLastTapTime = now;
                 this._trackpadTapTimeout = setTimeout(() => {
                     this.buttonMask |= 1; this.send(`m2,0,0,${this.buttonMask},0`);
@@ -2038,6 +2049,8 @@ export class Input {
 
         this._activeTouches.clear();
         this._activeTouchIdentifier = null;
+        this._oneFingerMode = null;
+        this._oneFingerScrollPoint = null;
         this._isTwoFingerGesture = false;
         this._touchScrollLastCentroid = null;
 
@@ -2107,6 +2120,8 @@ export class Input {
         this._activeTouches.clear();
         this._trackpadTouches.clear();
         this._activeTouchIdentifier = null;
+        this._oneFingerMode = null;
+        this._oneFingerScrollPoint = null;
         this._isTwoFingerGesture = false;
         this._trackpadGestureMode = null;
         this._touchScrollLastCentroid = null;
@@ -2153,7 +2168,7 @@ export class Input {
                         startX: touch.clientX, startY: touch.clientY,
                         currentX: touch.clientX, currentY: touch.clientY,
                         startTime: now, identifier: touch.identifier,
-                        longPressCompleted: false
+                        longPressCompleted: false, oneFingerMode: null
                     });
                     if (i === 0) {
                         this._calculateTouchCoordinates(touch);
@@ -2200,6 +2215,10 @@ export class Input {
                 }
             } else {
                 if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
+                if (this._oneFingerMode === 'scroll') {
+                    this._oneFingerMode = null;
+                    this._oneFingerScrollPoint = null;
+                }
                 if (touchCount === 2) {
                     if (!this.use_browser_cursors) {
                         this.cursorDiv.style.visibility = 'hidden';
@@ -2254,18 +2273,29 @@ export class Input {
                 this._handleTwoFingerScroll(deltaX, deltaY);
             }
             this._touchScrollLastCentroid = { x: curr_avg_x, y: curr_avg_y };
-        } else if (this._activeTouches.size === 1) {
+        } else if (this._activeTouches.size === 1 && !this._isTwoFingerGesture) {
             const [singleTouchID] = this._activeTouches.keys();
             const touchData = this._activeTouches.get(singleTouchID);
-            if (this._activeTouchIdentifier === singleTouchID) {
+            if (touchData.oneFingerMode === 'scroll') {
+                this._scrollFinger(touchData.currentX - this._oneFingerScrollPoint.x, touchData.currentY - this._oneFingerScrollPoint.y);
+                this._oneFingerScrollPoint = { x: touchData.currentX, y: touchData.currentY };
+                activeTouchMoved = true; preventDefault = true;
+            } else if (this._activeTouchIdentifier === singleTouchID) {
                 this._calculateTouchCoordinates({ clientX: touchData.currentX, clientY: touchData.currentY }); this._sendMouseState();
                 activeTouchMoved = true; preventDefault = true;
             } else if (this._activeTouchIdentifier === null && !touchData.longPressCompleted) {
-                const dx = touchData.currentX - touchData.startX;
-                const dy = touchData.currentY - touchData.startY;
-                const distSq = dx * dx + dy * dy;
-                if (distSq >= TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
+                const decision = this._classifyOneFinger(touchData.startX, touchData.startY, touchData.currentX, touchData.currentY);
+                if (decision === 'scroll' || decision === 'drag') {
                     if (this._longPressTimer && singleTouchID === this._longPressTouchIdentifier) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
+                }
+                if (decision === 'scroll') {
+                    this._oneFingerMode = touchData.oneFingerMode = 'scroll';
+                    this._oneFingerScrollPoint = { x: touchData.startX, y: touchData.startY };
+                    this._scrollFinger(touchData.currentX - touchData.startX, touchData.currentY - touchData.startY);
+                    this._oneFingerScrollPoint = { x: touchData.currentX, y: touchData.currentY };
+                    activeTouchMoved = true; preventDefault = true;
+                } else if (decision === 'drag') {
+                    this._oneFingerMode = 'drag';
                     this._activeTouchIdentifier = singleTouchID;
                     this._calculateTouchCoordinates({ clientX: touchData.currentX, clientY: touchData.currentY });
                     this.buttonMask |= 1; this._sendMouseState();
@@ -2296,13 +2326,14 @@ export class Input {
                 const deltaX = startData.currentX - startData.startX;
                 const deltaY = startData.currentY - startData.startY;
                 const deltaDistSq = deltaX * deltaX + deltaY * deltaY;
-                if (this._isTwoFingerGesture) {
-                    // Scrolling is handled externally
+                if (this._isTwoFingerGesture || startData.oneFingerMode === 'scroll') {
+                    // Scrolling is handled externally and must not become a click.
                 } else if (!swipeDetected && this._activeTouchIdentifier === null && this._activeTouches.size === 1 && this._activeTouches.has(identifier)) {
                     if (duration < this._TAP_MAX_DURATION && deltaDistSq < TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
                         if (this.isComposing) this.textInput.cancel();
-                        this._calculateTouchCoordinates(endedTouch); this.buttonMask |= 1; this._sendMouseState(); preventDefault = true;
-                        this.textInput.touch(endedTouch);
+                        const origin = { clientX: startData.startX, clientY: startData.startY };
+                        this._calculateTouchCoordinates(origin); this.buttonMask |= 1; this._sendMouseState(); preventDefault = true;
+                        this.textInput.touch(origin);
                         setTimeout(() => { this.buttonMask &= ~1; this._sendMouseState(); }, 10);
                     }
                 } else if (!swipeDetected && identifier === this._activeTouchIdentifier) {
@@ -2323,6 +2354,7 @@ export class Input {
                 }
                 if (remainingTouchCount === 0) {
                     this._activeTouchIdentifier = null; this._isTwoFingerGesture = false;
+                    this._oneFingerMode = null; this._oneFingerScrollPoint = null;
                     this._touchScrollLastCentroid = null;
                     if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
                     this._longPressTouchIdentifier = null;
@@ -2386,6 +2418,24 @@ export class Input {
             this.scrollInput.reset(); return;
         }
         this.scrollInput.add(-deltaX, -deltaY);
+    }
+
+    // Vertical travel wins when it reaches the tap slop first and is at least
+    // as large as the horizontal travel. Horizontal travel still drags.
+    _classifyOneFinger(startX, startY, x, y) {
+        const dx = x - startX, dy = y - startY;
+        const threshold = Math.sqrt(this._TAP_THRESHOLD_DISTANCE_SQ);
+        if (Math.abs(dy) >= threshold && Math.abs(dy) >= Math.abs(dx)) return 'scroll';
+        if (Math.abs(dx) >= threshold && Math.abs(dx) > Math.abs(dy)) return 'drag';
+        return null;
+    }
+
+    // One finger goes straight to the wheel channel. App switching stays on
+    // the two-finger and mouse-wheel paths, which do not use this gain.
+    _scrollFinger(deltaX, deltaY) {
+        if (!deltaX && !deltaY) return;
+        if (!this._canScroll()) { this.resetScroll(); return; }
+        this.scrollInput.add(-deltaX * TOUCH_SCROLL_GAIN, -deltaY * TOUCH_SCROLL_GAIN);
     }
 
     _mouseWheelWrapper(event) {

@@ -1,6 +1,9 @@
 // Browser deltas are logical pixels, independent of video scaling and DPR.
 export const SCROLL_LINE_PIXELS = 24;
 export const MAX_SCROLL_PIXELS = 32768;
+// Finger travel is shorter than a mouse notch. 48 CSS pixels at speed 1
+// become one 120-pixel notch. Mouse wheels and trackpads do not use this.
+export const TOUCH_SCROLL_GAIN = 2.5;
 // Wayland's conventional 10 axis units per wheel notch map to 120 Chromium
 // wheel pixels. Keep the same calibration when talking to an older server.
 const LEGACY_PIXELS_PER_UNIT = 12;

@@ -24,6 +24,7 @@ input.gestureNavigation=()=>nav;
 window.fixture={input,el,messages,switches,nav,getScrollSpeed,setScrollSpeed,hold(value){hold=value},release(){hold=false;for(const item of held.splice(0))if(!item.isCurrent||item.isCurrent())messages.push(item.message)},
 clear(){input.resetScroll();nav.reset();messages.length=0;switches.length=0},
 wheel(x,y,mode=0,extras={}){el.dispatchEvent(new WheelEvent('wheel',{deltaX:x,deltaY:y,deltaMode:mode,clientX:60,clientY:60,bubbles:true,cancelable:true,...extras}))},
+touch(type,points){const touches=points.map((p,i)=>new Touch({identifier:p.id??i,target:el,clientX:p.x,clientY:p.y}));el.dispatchEvent(new TouchEvent(type,{bubbles:true,cancelable:true,touches:type==='touchend'||type==='touchcancel'?[]:touches,targetTouches:type==='touchend'||type==='touchcancel'?[]:touches,changedTouches:touches}))},
 frame(){const frame=document.createElement('iframe');frame.src='/__scroll-child';document.body.appendChild(frame)},
 hidden(value){Object.defineProperty(document,'hidden',{configurable:true,value});document.dispatchEvent(new Event('visibilitychange'))}};
 </script>`;
@@ -58,6 +59,54 @@ const cases = [
         await page.evaluate(() => { fixture.input.gestureNavigation=null; for(let i=0;i<8;i++)fixture.input._handleTwoFingerScroll(.25,-1); }); await settle(page);
         const total=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
         assert(Math.abs(total[0]+2)<.047 && Math.abs(total[1]-8)<.047);
+    }],
+    ['a one-finger movement under the threshold sends no button until a stationary tap clicks the start point', async page => {
+        await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{x:80,y:80}]); fixture.touch('touchmove',[{x:86,y:84}]); });
+        assert.deepEqual(await page.evaluate(() => fixture.messages), []);
+        await page.evaluate(() => fixture.touch('touchend',[{x:86,y:84}]));
+        await page.waitForTimeout(40);
+        const held=await page.evaluate(() => fixture.messages);
+        assert.deepEqual(held.filter(m => m.startsWith('m,')).map(m => m.split(',').slice(1,4).join(',')), ['80,80,1','80,80,0']);
+        assert.deepEqual(await wheelMessages(page), []);
+    }],
+    ['a one-finger vertical swipe sends only a wheel at the touch gain and does not click', async page => {
+        await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{x:100,y:100}]); fixture.touch('touchmove',[{x:104,y:148}]); fixture.touch('touchend',[{x:104,y:148}]); });
+        await settle(page);
+        const messages=await page.evaluate(() => fixture.messages);
+        assert.equal(messages.filter(m => /^m2?,/.test(m)).length, 0);
+        const total=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
+        assert(Math.abs(total[0]+10)<.047 && Math.abs(total[1]+120)<.047);
+        assert.deepEqual(await page.evaluate(() => fixture.switches), []);
+    }],
+    ['a one-finger horizontal swipe still drags and a second finger leaves one-finger scrolling', async page => {
+        await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{x:40,y:40}]); fixture.touch('touchmove',[{x:80,y:46}]); fixture.touch('touchend',[{x:80,y:46}]); });
+        await settle(page);
+        const drag=await page.evaluate(() => fixture.messages);
+        assert(drag.some(m => /^m,.*,1,0$/.test(m)));
+        assert.deepEqual(await wheelMessages(page), []);
+        await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{id:1,x:100,y:80}]); fixture.touch('touchmove',[{id:1,x:100,y:120}]); fixture.touch('touchstart',[{id:1,x:100,y:120},{id:2,x:160,y:120}]); fixture.touch('touchmove',[{id:1,x:100,y:150},{id:2,x:160,y:150}]); fixture.touch('touchend',[{id:1,x:100,y:150},{id:2,x:160,y:150}]); });
+        await settle(page);
+        const messages=await page.evaluate(() => fixture.messages);
+        assert.equal(messages.filter(m => /^m2?,/.test(m)).length, 0);
+        const total=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
+        assert(Math.abs(total[0])<.047 && Math.abs(total[1]+130)<.047);
+    }],
+    ['two-finger scrolling and horizontal switching stay on the existing gesture', async page => {
+        await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{id:1,x:90,y:90},{id:2,x:150,y:90}]); fixture.touch('touchmove',[{id:1,x:90,y:114},{id:2,x:150,y:114}]); fixture.touch('touchend',[{id:1,x:90,y:114},{id:2,x:150,y:114}]); });
+        await settle(page);
+        const scrolled=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
+        assert(Math.abs(scrolled[0])<.047 && Math.abs(scrolled[1]+24)<.047);
+        await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{id:1,x:40,y:200},{id:2,x:100,y:200}]); fixture.touch('touchmove',[{id:1,x:58,y:200},{id:2,x:118,y:200}]); fixture.touch('touchmove',[{id:1,x:168,y:204},{id:2,x:228,y:204}]); fixture.touch('touchend',[{id:1,x:168,y:204},{id:2,x:228,y:204}]); });
+        await settle(page);
+        assert.deepEqual(await wheelMessages(page), []);
+        assert.deepEqual(await page.evaluate(() => fixture.switches), [-1]);
+        await page.evaluate(() => { fixture.clear(); fixture.input.setTrackpadMode(true); fixture.touch('touchstart',[{x:100,y:100}]); fixture.touch('touchmove',[{x:104,y:148}]); fixture.touch('touchend',[{x:104,y:148}]); });
+        await settle(page);
+        const trackpad=await page.evaluate(() => fixture.messages);
+        assert.equal(trackpad.filter(m => /^m2?,/.test(m)).length, 0);
+        const scaled=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
+        assert(Math.abs(scaled[0]+10)<.047 && Math.abs(scaled[1]+120)<.047);
+        await page.evaluate(() => fixture.input.setTrackpadMode(false));
     }],
     ['a queued wheel is sent before pointer moves, buttons and modifier release', async page => {
         await page.evaluate(() => { fixture.wheel(0,10); fixture.input.send('ku,65507'); });
