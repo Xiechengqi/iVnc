@@ -68,12 +68,15 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 	// this entire box and must not subtract the toolbar a second time.
 	function layout() {
 		if (disposed) return;
-		const rect = viewport.getBoundingClientRect();
-		layer.style.left = `${rect.left}px`;
-		layer.style.top = `${rect.top}px`;
-		layer.style.width = `${rect.width}px`;
-		layer.style.height = `${rect.height}px`;
-		layer.classList.toggle('preview-narrow', rect.width < 700);
+		const host = viewport.parentElement.getBoundingClientRect();
+		const transform = viewport.style.transform;
+		const shift = transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).m42 : 0;
+		layer.style.transition = viewport.style.transition;
+		layer.style.left = `${host.left}px`;
+		layer.style.top = `${host.top + shift}px`;
+		layer.style.width = `${host.width}px`;
+		layer.style.height = `${host.height}px`;
+		layer.classList.toggle('preview-narrow', host.width < 700);
 	}
 	window.addEventListener('resize', layout);
 	const resizeObserver = new ResizeObserver(layout);

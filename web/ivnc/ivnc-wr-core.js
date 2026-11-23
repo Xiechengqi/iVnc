@@ -624,6 +624,7 @@ function InitUI() {
 		z-index: 990;
 		visibility: hidden;
 		pointer-events: none;
+		inset: auto;
 	}
 	.app-stream {
 		position: absolute;

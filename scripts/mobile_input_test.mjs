@@ -15,7 +15,7 @@ const fixture = `<!doctype html><meta name="viewport" content="width=device-widt
 html,body{margin:0;overflow:hidden}#app{position:relative;top:var(--ivnc-visible-top,0px);height:calc(var(--ivnc-visible-height,100dvh) - var(--ivnc-toolbar-height,0px))}
 #area{position:relative;width:100%;height:100%;overflow:hidden}#stream,#overlayInput{position:absolute}#overlayInput{opacity:0;touch-action:none;border:0;padding:0}
 #toolbar{position:fixed;bottom:var(--ivnc-keyboard-inset,0px);height:36px;width:100%;background:#333}button{height:36px}
-.app-streams{position:fixed;z-index:5;pointer-events:none}.app-stream{position:absolute;inset:0;display:none}.app-stream.active{display:block;pointer-events:auto}.app-stream iframe{width:100%;height:100%;border:0}.app-stream-status{display:none}
+.app-streams{position:fixed;z-index:5;pointer-events:none;inset:auto}.app-stream{position:absolute;inset:0;display:none}.app-stream.active{display:block;pointer-events:auto}.app-stream iframe{width:100%;height:100%;border:0}.app-stream-status{display:none}
 </style><div id="app"><div id="area"><video id="stream"></video><input id="overlayInput" readonly></div></div><div id="toolbar"><button id="keyboard-toggle">Keyboard</button></div>
 <script type="module">
 import {Input} from '/lib/input2.js';import {createViewport} from '/viewport.js';import {createAppStreams} from '/app-streams.js';
@@ -26,7 +26,7 @@ const messages=[],focusTrace=[],video=document.querySelector('video'),overlay=do
 Object.defineProperties(video,{videoWidth:{get:()=>1280},videoHeight:{get:()=>720}});
 const input=new Input(overlay,m=>messages.push(m));window.__ivncInput=input;input.attach();
 let streams=null;input.setViewActive(!embedded);
-const viewport=createViewport({root:document.querySelector('#app'),container:document.querySelector('#area'),video,overlay,toolbar:document.querySelector('#toolbar'),embedded,isPinned:()=>true,onChange:()=>input.resize()});
+const viewport=createViewport({root:document.querySelector('#app'),container:document.querySelector('#area'),video,overlay,toolbar:document.querySelector('#toolbar'),embedded,isPinned:()=>true,onChange:()=>{input.resize();streams?.layout()}});
 input._imeTextarea.addEventListener('focus',()=>focusTrace.push(navigator.userActivation?.isActive));
 input.onimetoggle=()=>button.setAttribute('aria-pressed',String(input.textInput.focused()));
 let wasActive;button.addEventListener('pointerdown',()=>{wasActive=streams?.imeState()??input.textInput.focused()});button.addEventListener('click',()=>{const desired=wasActive===undefined?undefined:!wasActive;wasActive=undefined;if(streams?.toggleIme(desired))return;input.toggleImeMode(desired)});
@@ -245,48 +245,80 @@ const cases = [
         await page.evaluate(()=>fixture.streams.activate(null));
         assert.equal(await child.evaluate(()=>fixture.input.textInput.focused()),false);
     }],
-    ['visual viewport reserves keyboard space once and restores after dismissal', async page => {
+    ['an open keyboard keeps the full picture and only lifts a covered caret', async page => {
         await open(page);await page.evaluate(()=>fixture.resize(480,20));
-        const b=await page.evaluate(()=>fixture.bounds());
-        assert.equal(b[0].top,20);assert.equal(b[1].height,444);assert.equal(b[2].bottom,500);
+        const openBounds=await page.evaluate(()=>fixture.bounds());
+        assert.equal(openBounds[0].top,20);assert.equal(openBounds[1].height,788);assert.equal(openBounds[2].bottom,500);
+        await page.evaluate(()=>{
+            fixture.viewport.mode('fill');
+            fixture.viewport.caret([100,40,2,18],{width:1280,height:720},true);
+            fixture.viewport.layout();
+        });
+        assert.equal((await page.evaluate(()=>document.querySelector('#stream').getBoundingClientRect().top)),20);
+        await page.evaluate(()=>{
+            fixture.viewport.caret([100,600,2,18],{width:1280,height:720},true);
+            fixture.viewport.layout();
+        });
+        const lifted=await page.evaluate(()=>{const value=document.querySelector('#area').style.transform;return !value||value==='none'?0:new DOMMatrixReadOnly(value).m42});
+        assert(lifted<0);
+        await page.evaluate(()=>fixture.streams.activate('a'));
+        const aligned=await page.evaluate(()=>{
+            const area=document.querySelector('#area'),layer=document.querySelector('.app-streams');
+            const value=area.style.transform;
+            const shift=!value||value==='none'?0:new DOMMatrixReadOnly(value).m42;
+            const expected=area.parentElement.getBoundingClientRect().top+shift;
+            return {layer:layer.getBoundingClientRect().top,expected,delta:layer.getBoundingClientRect().top-expected};
+        });
+        assert(Math.abs(aligned.delta)<1, JSON.stringify(aligned));
         await page.evaluate(()=>fixture.resize(844));
         assert.equal(await page.evaluate(()=>fixture.input.textInput.focused()),false);
         assert.equal((await page.evaluate(()=>fixture.bounds()))[1].height,808);
+        assert.equal((await page.evaluate(()=>document.querySelector('#stream').getBoundingClientRect().top)),0);
     }],
     ['pinch zoom does not masquerade as software keyboard occlusion', async page => {
         await page.evaluate(()=>fixture.resize(400,20,2));
         assert.equal((await page.evaluate(()=>fixture.bounds()))[1].height,808);
     }],
-    ['pinch zoom with an open keyboard preserves its reserved work area', async page => {
+    ['pinch zoom with an open keyboard preserves the full picture', async page => {
         await open(page);await page.evaluate(()=>fixture.resize(480,20));
         const before=await page.evaluate(()=>fixture.bounds());
         await page.evaluate(()=>fixture.resize(230,40,2));
         assert.deepEqual(await page.evaluate(()=>fixture.bounds()),before);
         assert(await page.evaluate(()=>fixture.input.textInput.focused()));
     }],
-    ['resizing while zoomed preserves keyboard occlusion and follows the current toolbar position', async page => {
+    ['resizing while zoomed keeps the picture full height and the toolbar at the keyboard', async page => {
         await open(page);await page.evaluate(()=>fixture.resize(480,20));
         await page.evaluate(()=>fixture.resize(230,40,2));
         await page.setViewportSize({width:390,height:700});
-        await page.waitForFunction(()=>document.querySelector('#area').getBoundingClientRect().bottom===document.querySelector('#toolbar').getBoundingClientRect().top);
+        await page.waitForFunction(()=>document.querySelector('#area').getBoundingClientRect().height===644);
         const b=await page.evaluate(()=>fixture.bounds());
-        assert.equal(b[0].top,20);assert.equal(b[1].height,300);assert.equal(b[2].bottom,356);
+        assert.equal(b[0].top,20);assert.equal(b[1].height,644);assert.equal(b[2].bottom,356);
         assert(await page.evaluate(()=>fixture.input.textInput.focused()));
         await page.evaluate(()=>fixture.resize(700));
         assert.equal((await page.evaluate(()=>fixture.bounds()))[1].height,664);
     }],
-    ['fill keeps the complete picture and reported caret inside the keyboard-reduced area without scrolling', async page => {
+    ['fill keeps the full picture and lifts only a caret that the keyboard would cover', async page => {
         await open(page);await page.evaluate(()=>{
             fixture.resize(450);fixture.viewport.mode('fill');
-            fixture.viewport.caret([1100,650,2,18],{width:1280,height:720},true);fixture.viewport.layout();
+            fixture.viewport.caret([1100,40,2,18],{width:1280,height:720},true);fixture.viewport.layout();
         });
         const scroll=await page.evaluate(()=>({x:document.querySelector('#area').scrollLeft,y:document.querySelector('#area').scrollTop}));
         assert.deepEqual(scroll,{x:0,y:0});
+        const high=await page.evaluate(()=>document.querySelector('#stream').getBoundingClientRect().top);
+        assert.equal(high,0);
+        await page.evaluate(()=>{
+            fixture.viewport.caret([1100,650,2,18],{width:1280,height:720},true);fixture.viewport.layout();
+        });
         const picture=await page.evaluate(()=>{
             const v=document.querySelector('#stream').getBoundingClientRect(),c=document.querySelector('#area').getBoundingClientRect(),bar=document.querySelector('#toolbar').getBoundingClientRect();
-            return {video:[v.left,v.top,v.width,v.height],area:[c.left,c.top,c.width,c.height],bottom:v.bottom,toolbar:bar.top};
+            const value=document.querySelector('#area').style.transform;
+            const lift=!value||value==='none'?0:new DOMMatrixReadOnly(value).m42;
+            return {width:v.width,area:c.height,top:lift,bottom:c.height+lift,toolbar:bar.top};
         });
-        assert.deepEqual(picture.video,picture.area);assert.equal(picture.bottom,picture.toolbar);
+        assert.equal(picture.width,picture.area?picture.width:0);
+        assert.equal(picture.width,390);
+        assert(picture.top<0);
+        assert(picture.bottom>picture.toolbar);
     }],
     ['overlay interaction cancels editing and disconnect destroys the proxy', async page => {
         await open(page); await page.evaluate(()=>window.dispatchEvent(new Event('ivnc-overlay-interaction')));
@@ -314,7 +346,7 @@ await test('mobile keyboard input',async t=>{
         for(const name of (process.env.BROWSERS||'chromium,webkit').split(','))await t.test(name,async t=>{
             const browser=await engines[name].launch({headless:true,...(name==='chromium'&&process.env.CHROME_BIN?{executablePath:process.env.CHROME_BIN}:{})});
             try{for(const [title,run]of cases)await t.test(title,async()=>{
-                const context=await browser.newContext({...engines.devices['iPhone 13'],viewport:{width:390,height:844}}),page=await context.newPage(),errors=[];
+                const context=await browser.newContext({...engines.devices['iPhone 13'],viewport:{width:390,height:844},reducedMotion:'reduce'}),page=await context.newPage(),errors=[];
                 page.on('pageerror',e=>errors.push(e.message));
                 try{await page.goto(url);await page.waitForFunction(()=>!!window.fixture);await run(page);assert.deepEqual(errors,[]);}finally{await context.close();}
             });}finally{await browser.close();}

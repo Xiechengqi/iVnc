@@ -8,6 +8,7 @@ export function normalizeDisplayMode(value) {
 export function createViewport({ root, container, video, overlay, toolbar, isPinned, isToolbarReserved = isPinned, embedded, onChange }) {
     let disposed = false, frame = 0, mode = 'fit', previousSize = '', pixelRatioQuery;
     let occlusion = { top: 0, inset: 0, left: 0, right: 0 };
+    let caretRect = null, caretDesktop = null, caretActive = false, appliedShift = 0;
     const set = (element, property, value) => {
         if (element.style[property] !== value) element.style[property] = value;
     };
@@ -34,7 +35,7 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
         // viewport can still resize while zoomed, moving the fixed toolbar.
         const top = Math.min(occlusion.top, window.innerHeight);
         const inset = Math.min(occlusion.inset, window.innerHeight - top);
-        const height = window.innerHeight - top - inset;
+        const height = window.innerHeight - top;
         const visibleLeft = Math.min(occlusion.left, window.innerWidth);
         const right = Math.min(occlusion.right, window.innerWidth - visibleLeft);
         const visibleWidth = window.innerWidth - visibleLeft - right;
@@ -58,6 +59,12 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
             videoWidth = sourceWidth; videoHeight = sourceHeight;
             left = (width - videoWidth) / 2; videoTop = (areaHeight - videoHeight) / 2;
         }
+        const presentedHeight = mode === 'fill' ? areaHeight : videoHeight;
+        const shift = caretShift(videoTop, presentedHeight, areaHeight, inset, reserved);
+        if (shift !== appliedShift) {
+            set(container, 'transition', window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'transform .18s ease');
+            appliedShift = shift;
+        }
         for (const element of [video, overlay]) {
             set(element, 'left', `${left}px`); set(element, 'top', `${videoTop}px`);
         }
@@ -76,13 +83,18 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
             set(video, 'transform', 'none');
             set(video, 'transformOrigin', '');
         }
-        // Both modes show the complete picture. Focus/legacy scroll offsets
-        // must never move its bottom edge underneath the toolbar.
+        container.style.transform = shift ? `translateY(${-shift}px)` : 'none';
         container.scrollLeft = container.scrollTop = 0;
         const size = `${width}x${areaHeight}@${window.devicePixelRatio}/${frameWidth}x${frameHeight}/${mode}`;
         const changed = size !== previousSize;
         previousSize = size;
         onChange({ width, height: areaHeight, changed });
+    }
+    function caretShift(originY, boxHeight, areaHeight, inset, reserved) {
+        if (!caretActive || inset < 80 || !caretRect || !caretDesktop) return 0;
+        const bottom = originY + ((caretRect[1] + caretRect[3]) / caretDesktop.height) * boxHeight;
+        const limit = areaHeight - inset - reserved - 8;
+        return Math.max(0, Math.min(Math.max(0, areaHeight - 48), bottom - limit));
     }
     function schedule() {
         if (!disposed && !frame) frame = requestAnimationFrame(() => { frame = 0; layout(); });
@@ -108,7 +120,10 @@ export function createViewport({ root, container, video, overlay, toolbar, isPin
     layout();
     return {
         layout,
-        caret() {
+        caret(rect, desktop, active = false) {
+            caretRect = Array.isArray(rect) && rect.length >= 4 ? rect : null;
+            caretDesktop = desktop?.width > 0 && desktop?.height > 0 ? desktop : null;
+            caretActive = !!active;
             schedule();
         },
         mode(value) {
