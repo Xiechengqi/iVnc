@@ -68,9 +68,10 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 	// this entire box and must not subtract the toolbar a second time.
 	function layout() {
 		if (disposed) return;
-		const host = viewport.parentElement.getBoundingClientRect();
+		const own = viewport.getBoundingClientRect();
 		const transform = viewport.style.transform;
 		const shift = transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).m42 : 0;
+		const host = shift ? viewport.parentElement.getBoundingClientRect() : own;
 		layer.style.transition = viewport.style.transition;
 		layer.style.left = `${host.left}px`;
 		layer.style.top = `${host.top + shift}px`;

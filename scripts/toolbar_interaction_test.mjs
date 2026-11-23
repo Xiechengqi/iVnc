@@ -167,7 +167,7 @@ const cases = [
         assert(await page.locator('.toolbar-more-menu .fixture-tool').isVisible());
         assert.equal(await page.locator('.toolbar-gesture-action').count(),0);
         assert(await page.getByRole('button', {name:'辅助功能', exact:true}).isHidden());
-    }, '', false],
+    }],
     ['a coarse touch screen gathers the tools into a draggable circle and leaves the network status in the bar', async page => {
         await page.addInitScript(() => {
             const native = window.matchMedia.bind(window);
@@ -176,7 +176,7 @@ const cases = [
                 : native(text);
         });
         await page.reload();
-        await page.setViewportSize({ width: 390, height: 700 });
+        await page.setViewportSize({ width: 800, height: 700 });
         await page.waitForFunction(() => !!window.fixture);
         await page.evaluate(() => {
             const badge = document.createElement('div');
@@ -194,20 +194,41 @@ const cases = [
         });
         const assist = page.getByRole('button', { name: '辅助功能', exact: true });
         await assist.waitFor();
+        assert.equal(await page.locator('.toolbar-assist svg').count(), 0);
         assert.equal(await page.locator('#taskbar .toolbar-tools > .taskbar-pin').count(), 0);
         assert.equal(await page.locator('#taskbar #network-quality').count(), 1);
         assert(await page.locator('#taskbar .toolbar-list .taskbar-item').count() > 0);
         const before = await assist.boundingBox();
         await assist.click();
-        assert(await page.locator('.toolbar-more-menu #pin').isVisible());
-        const menu = await page.locator('.toolbar-more-menu').boundingBox();
+        const pin = page.locator('.toolbar-more-menu #pin');
+        await pin.waitFor();
+        await page.waitForFunction(() => {
+            const button = document.querySelector('.toolbar-assist').getBoundingClientRect();
+            const node = document.querySelector('.toolbar-assist-menu #pin');
+            const box = node.getBoundingClientRect();
+            return Math.hypot(box.left + box.width / 2 - button.left - button.width / 2, box.top + box.height / 2 - button.top - button.height / 2) > 80;
+        });
+        const ring = await page.evaluate(() => {
+            const button = document.querySelector('.toolbar-assist').getBoundingClientRect();
+            const nodes = [...document.querySelectorAll('.toolbar-assist-menu .taskbar-pin:not([hidden])')];
+            const center = { x: button.left + button.width / 2, y: button.top + button.height / 2 };
+            return nodes.map(node => {
+                const box = node.getBoundingClientRect();
+                return { x: box.left + box.width / 2 - center.x, y: box.top + box.height / 2 - center.y };
+            });
+        });
+        assert(ring.length >= 2);
+        assert(ring.every(point => Math.hypot(point.x, point.y) > 80 && Math.hypot(point.x, point.y) < 130));
+        const spread = Math.max(...ring.map(point => point.y)) - Math.min(...ring.map(point => point.y));
+        assert(spread > 40);
         const network = await page.locator('#network-quality').boundingBox();
-        assert(menu.x + menu.width <= network.x || menu.y + menu.height <= network.y);
-        await page.locator('.toolbar-more-menu #pin').click();
+        const pinBox = await pin.boundingBox();
+        assert(pinBox.y + pinBox.height <= network.y);
+        await pin.click();
         await page.waitForFunction(() => document.querySelector('.toolbar-more-menu').hidden);
-        const activeIcon = await page.locator('.toolbar-assist svg').evaluate(node => node.outerHTML);
+        const glyph = await page.locator('.toolbar-assist').evaluate(node => node.innerHTML);
         await page.evaluate(() => document.querySelector('#pin').classList.remove('active'));
-        await page.waitForFunction(icon => document.querySelector('.toolbar-assist svg')?.outerHTML !== icon, activeIcon);
+        assert.equal(await page.locator('.toolbar-assist').evaluate(node => node.innerHTML), glyph);
         const opened = await assist.boundingBox();
         const start = { x: opened.x + opened.width / 2, y: opened.y + opened.height / 2 };
         await page.mouse.move(start.x, start.y);
@@ -219,10 +240,35 @@ const cases = [
         assert(await page.locator('.toolbar-more-menu').isHidden());
         const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ivnc.toolbar-assist.v1')));
         assert(['left', 'right', 'top', 'bottom'].includes(stored.edge));
+    }, '', true],
+    ['an iPad-sized desktop Safari shows the fixed circle in portrait and landscape', async page => {
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel', configurable: true });
+            Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5, configurable: true });
+        });
+        await page.reload();
+        for (const size of [{ width: 1024, height: 768 }, { width: 1366, height: 1024 }]) {
+            await page.setViewportSize(size);
+            await page.waitForFunction(() => !!window.fixture);
+            await page.getByRole('button', { name: '辅助功能', exact: true }).waitFor();
+            assert.equal(await page.locator('#taskbar .toolbar-tools > .taskbar-pin').count(), 0);
+        }
+    }, '', true],
+    ['a fine-pointer touch laptop keeps the tools in the toolbar', async page => {
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+            Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 10, configurable: true });
+            const native = window.matchMedia.bind(window);
+            window.matchMedia = (text) => text === '(hover: none) and (pointer: coarse)'
+                ? { matches: false, media: text, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }
+                : native(text);
+        });
+        await page.reload();
         await page.setViewportSize({ width: 1280, height: 800 });
-        await assist.waitFor({ state: 'hidden' });
-        assert(await page.locator('#taskbar .toolbar-tools #pin').isVisible());
-    }],
+        await page.waitForFunction(() => !!window.fixture);
+        assert(await page.getByRole('button', { name: '辅助功能', exact: true }).isHidden());
+        assert(await page.locator('#taskbar .toolbar-tools .fixture-tool').isVisible());
+    }, '', true],
     ['direction queries use the pending navigation target without activating any app', async page => {
         await localNavigation(page);
         await page.evaluate(()=>{fixture.streams.update([]);fixture.render()});
@@ -314,7 +360,7 @@ const cases = [
         assert.equal(await page.evaluate(()=>fixture.streams.activeId()),null);
         assert(await page.evaluate(()=>originalShared.isConnected && originalRemote.isConnected));
         assert.deepEqual(await page.evaluate(()=>fixture.scrolls),[]);
-    }],
+    }, '', true],
     ['native vertical scrolling and modified horizontal scrolling do not switch apps', async page => {
         await nativeWheel(page,0,0,80);
         await page.keyboard.down('Shift');
@@ -517,7 +563,7 @@ const cases = [
     ['touch tap activates once without initiating sorting', async (page, api) => {
         const p = await point(row(page).locator('.toolbar-label')); await page.touchscreen.tap(p.x,p.y);
         assert.deepEqual(await calls(page), [2]); assert.equal(api.orders.length, 0);
-    }],
+    }, '', true],
     ['shared, remote and local tabs switch focus while retaining their iframes', async page => {
         await click(page, 'shared');
         // Navigation can expose a Document before its root element is parsed.
@@ -650,7 +696,7 @@ await test('toolbar native browser input', async t => {
             const browser = await engines[name].launch({headless:true,
                 ...(name === 'chromium' && process.env.CHROME_BIN ? {executablePath:process.env.CHROME_BIN} : {})});
             try {
-                for (const [title,run,query='', touch=true] of cases) await t.test(title, async () => {
+                for (const [title,run,query='', touch=false] of cases) await t.test(title, async () => {
                     const context = await browser.newContext({viewport:{width:1280,height:800},deviceScaleFactor:2,hasTouch:touch});
                     const page = await context.newPage(), errors = [], api = {orders:[], actions:[]};
                     page.on('pageerror', error => errors.push(error.message));

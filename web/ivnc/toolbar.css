@@ -136,10 +136,10 @@
     position: fixed;
     z-index: 1200;
     box-sizing: border-box;
-    width: 44px;
-    height: 44px;
+    width: 48px;
+    height: 48px;
     padding: 0;
-    border: 2px solid rgba(255, 255, 255, .85);
+    border: 0;
     border-radius: 50%;
     background: rgba(28, 32, 38, .72);
     color: #fff;
@@ -147,27 +147,77 @@
     touch-action: none;
     cursor: pointer;
 }
-.toolbar-assist[aria-expanded="true"] { background: rgba(48, 78, 120, .9); }
-.toolbar-assist-glyph { display: grid; place-items: center; pointer-events: none; }
-.toolbar-assist-glyph svg { width: 18px; height: 18px; }
+.toolbar-assist-ring {
+    display: block;
+    width: 18px;
+    height: 18px;
+    margin: auto;
+    border: 2px solid rgba(255, 255, 255, .92);
+    border-radius: 50%;
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, .16);
+    pointer-events: none;
+}
+.toolbar-assist:active,
+.toolbar-assist[aria-expanded="true"] { background: rgba(28, 32, 38, .92); }
 .toolbar-more-menu.toolbar-assist-menu {
     position: fixed;
     bottom: auto;
     z-index: 1201;
-    display: grid;
-    gap: 2px;
-    padding: 6px;
+    display: block;
+    width: 0;
+    height: 0;
+    padding: 0;
+    overflow: visible;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
 }
 .toolbar-more-menu.toolbar-assist-menu[hidden] { display: none !important; }
-.toolbar-more-menu.toolbar-assist-menu .taskbar-pin {
-    width: 100%;
-    height: 36px;
+.toolbar-more-menu.toolbar-assist-menu .taskbar-pin,
+.toolbar-more-menu.toolbar-assist-menu .toolbar-assist-pager {
+    position: absolute;
+    box-sizing: border-box;
+    width: 44px;
+    height: 44px;
     margin: 0;
-    justify-content: flex-start;
-    padding: 0 8px;
-    gap: 9px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, .72);
+    border-radius: 50%;
+    background: rgba(28, 32, 38, .9);
+    color: #fff;
+    justify-content: center;
+    transform: translate(-50%, -50%);
+    transition: left .22s ease, top .22s ease, transform .22s ease;
 }
-.toolbar-more-menu.toolbar-assist-menu .toolbar-tool-label { display: inline; }
+.toolbar-more-menu.toolbar-assist-menu.opening .taskbar-pin,
+.toolbar-more-menu.toolbar-assist-menu.opening .toolbar-assist-pager {
+    transform: translate(-50%, -50%) scale(.4);
+}
+.toolbar-more-menu.toolbar-assist-menu.closing .taskbar-pin,
+.toolbar-more-menu.toolbar-assist-menu.closing .toolbar-assist-pager {
+    transform: translate(-50%, -50%) scale(.4);
+}
+.toolbar-more-menu.toolbar-assist-menu .toolbar-tool-label {
+    position: absolute;
+    top: 46px;
+    left: 50%;
+    display: block;
+    width: max-content;
+    max-width: 72px;
+    overflow: hidden;
+    color: #fff;
+    font: 11px/1.2 system-ui, sans-serif;
+    text-align: center;
+    text-overflow: ellipsis;
+    text-shadow: 0 1px 2px #000;
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+.toolbar-more-menu.toolbar-assist-menu .toolbar-assist-pager { font: 12px/1 system-ui, sans-serif; }
+@media (prefers-reduced-motion: reduce) {
+    .toolbar-more-menu.toolbar-assist-menu .taskbar-pin,
+    .toolbar-more-menu.toolbar-assist-menu .toolbar-assist-pager { transition: none; }
+}
 .ivnc-toolbar .toolbar-more-menu .taskbar-pin {
     width: auto;
     justify-content: flex-start;
