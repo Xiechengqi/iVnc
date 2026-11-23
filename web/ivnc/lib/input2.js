@@ -22,7 +22,7 @@
  * under the License.
  */
 
-import { createScrollInput, normalizeWheel, TOUCH_SCROLL_GAIN } from './scroll-input.mjs';
+import { createScrollInput, normalizeWheel, touchFling, TOUCH_FLING_WINDOW_MS, TOUCH_SCROLL_GAIN } from './scroll-input.mjs';
 import { getScrollSpeed, onScrollSpeedChange } from '../scroll-preference.mjs';
 import { pasteShortcut } from '../clipboard.js';
 import { TextInput, usesTouchKeyboard } from './text-input.js';
@@ -1215,6 +1215,9 @@ export class Input {
         this._activeTouchIdentifier = null;
         this._oneFingerMode = null;
         this._oneFingerScrollPoint = null;
+        this._touchFlingSamples = [];
+        this._touchFlingArmed = false;
+        this._touchFlingTimer = null;
         this._isTwoFingerGesture = false;
         this._MIN_SWIPE_DISTANCE = 30;
         this._MAX_SWIPE_DURATION = 600;
@@ -1874,13 +1877,14 @@ export class Input {
         event.preventDefault();
         event.stopPropagation();
 
-        const now = Date.now();
+        const now = this._inputNow();
         const TAP_AND_HOLD_THRESHOLD = 300;
 
         const type = event.type;
         const changedTouches = event.changedTouches;
 
         if (type === 'touchstart') {
+            this._stopTouchFling();
             if (Array.from(changedTouches).some(t => !this._insideContent(t.clientX,t.clientY))) return;
             if (this._trackpadTapTimeout) {
                 clearTimeout(this._trackpadTapTimeout);
@@ -1909,6 +1913,7 @@ export class Input {
                 }
             }
             else if (touchCount === 2) {
+                this._beginTouchScroll(now);
                 this._trackpadGestureMode = 'scrolling';
                 this._trackpadLastTapTime = 0;
                 for (const touch of this._trackpadTouches.values()) touch.moved = true;
@@ -1930,7 +1935,9 @@ export class Input {
                     this._trackpadGestureMode = 'finger-scroll';
                     touchData.moved = true;
                     this._trackpadLastTapTime = 0;
-                    this._scrollFinger(changedTouch.clientX - touchData.startX, changedTouch.clientY - touchData.startY);
+                    this._beginTouchScroll(now);
+                    this._scrollFinger(changedTouch.clientX - touchData.startX, changedTouch.clientY - touchData.startY,
+                        { clientX: touchData.startX, clientY: touchData.startY });
                 } else if (decision === 'drag') {
                     this._trackpadGestureMode = 'moving';
                     touchData.moved = true;
@@ -1964,7 +1971,7 @@ export class Input {
                 const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id);
                 if (changedTouch) {
                     touchData.moved = true;
-                    this._scrollFinger(changedTouch.clientX - touchData.lastX, changedTouch.clientY - touchData.lastY);
+                    this._scrollFinger(changedTouch.clientX - touchData.lastX, changedTouch.clientY - touchData.lastY, null, now);
                     touchData.lastX = changedTouch.clientX;
                     touchData.lastY = changedTouch.clientY;
                 }
@@ -1980,7 +1987,7 @@ export class Input {
                     if (this._trackpadLastScrollCentroid) {
                         const deltaX = curr_avg_x - this._trackpadLastScrollCentroid.x;
                         const deltaY = curr_avg_y - this._trackpadLastScrollCentroid.y;
-                        this._handleTwoFingerScroll(deltaX, deltaY);
+                        this._handleTwoFingerScroll(deltaX, deltaY, now);
                     }
                     this._trackpadLastScrollCentroid = { x: curr_avg_x, y: curr_avg_y };
                 }
@@ -2010,6 +2017,9 @@ export class Input {
             if (this._trackpadTouches.size < 2) this._gestureNav()?.endTouch(type === 'touchcancel');
 
             if (this._trackpadTouches.size === 0) {
+                if (type === 'touchend' && (this._trackpadGestureMode === 'finger-scroll' || this._trackpadGestureMode === 'scrolling')) {
+                    this._releaseTouchScroll(now);
+                }
                 if (this._trackpadGestureMode === 'dragging') {
                     this.buttonMask &= ~1;
                     this.send(`m2,0,0,${this.buttonMask},0`);
@@ -2051,6 +2061,8 @@ export class Input {
         this._activeTouchIdentifier = null;
         this._oneFingerMode = null;
         this._oneFingerScrollPoint = null;
+        this._touchFlingSamples = [];
+        this._stopTouchFling();
         this._isTwoFingerGesture = false;
         this._touchScrollLastCentroid = null;
 
@@ -2122,6 +2134,8 @@ export class Input {
         this._activeTouchIdentifier = null;
         this._oneFingerMode = null;
         this._oneFingerScrollPoint = null;
+        this._touchFlingSamples = [];
+        this._stopTouchFling();
         this._isTwoFingerGesture = false;
         this._trackpadGestureMode = null;
         this._touchScrollLastCentroid = null;
@@ -2149,7 +2163,7 @@ export class Input {
             this._gestureNav()?.endTouch(type === 'touchcancel');
             this._touchScrollStartSeparation = null;
         }
-        const now = Date.now();
+        const now = this._inputNow();
         let preventDefault = false;
         const LONG_PRESS_DURATION = 750;
         let activeTouchMoved = false;
@@ -2157,6 +2171,7 @@ export class Input {
         const TAP_THRESHOLD_DISTANCE_SQ_LOGICAL = this._TAP_THRESHOLD_DISTANCE_SQ;
 
         if (type === 'touchstart') {
+            this._stopTouchFling();
             if (Array.from(event.changedTouches).some(t => !this._insideContent(t.clientX, t.clientY))) return;
             if (!this.use_browser_cursors && !this._useDefaultCursor) {
                 this.cursorDiv.style.display = this._cursorImageBitmap ? 'block' : 'none';
@@ -2220,6 +2235,7 @@ export class Input {
                     this._oneFingerScrollPoint = null;
                 }
                 if (touchCount === 2) {
+                    this._beginTouchScroll(now);
                     if (!this.use_browser_cursors) {
                         this.cursorDiv.style.visibility = 'hidden';
                     }
@@ -2270,14 +2286,14 @@ export class Input {
             if (this._touchScrollLastCentroid) {
                 const deltaX = curr_avg_x - this._touchScrollLastCentroid.x;
                 const deltaY = curr_avg_y - this._touchScrollLastCentroid.y;
-                this._handleTwoFingerScroll(deltaX, deltaY);
+                this._handleTwoFingerScroll(deltaX, deltaY, now);
             }
             this._touchScrollLastCentroid = { x: curr_avg_x, y: curr_avg_y };
         } else if (this._activeTouches.size === 1 && !this._isTwoFingerGesture) {
             const [singleTouchID] = this._activeTouches.keys();
             const touchData = this._activeTouches.get(singleTouchID);
             if (touchData.oneFingerMode === 'scroll') {
-                this._scrollFinger(touchData.currentX - this._oneFingerScrollPoint.x, touchData.currentY - this._oneFingerScrollPoint.y);
+                this._scrollFinger(touchData.currentX - this._oneFingerScrollPoint.x, touchData.currentY - this._oneFingerScrollPoint.y, null, now);
                 this._oneFingerScrollPoint = { x: touchData.currentX, y: touchData.currentY };
                 activeTouchMoved = true; preventDefault = true;
             } else if (this._activeTouchIdentifier === singleTouchID) {
@@ -2290,8 +2306,10 @@ export class Input {
                 }
                 if (decision === 'scroll') {
                     this._oneFingerMode = touchData.oneFingerMode = 'scroll';
+                    this._beginTouchScroll(now);
                     this._oneFingerScrollPoint = { x: touchData.startX, y: touchData.startY };
-                    this._scrollFinger(touchData.currentX - touchData.startX, touchData.currentY - touchData.startY);
+                    this._scrollFinger(touchData.currentX - touchData.startX, touchData.currentY - touchData.startY,
+                        { clientX: touchData.startX, clientY: touchData.startY }, now);
                     this._oneFingerScrollPoint = { x: touchData.currentX, y: touchData.currentY };
                     activeTouchMoved = true; preventDefault = true;
                 } else if (decision === 'drag') {
@@ -2328,6 +2346,9 @@ export class Input {
                 const deltaDistSq = deltaX * deltaX + deltaY * deltaY;
                 if (this._isTwoFingerGesture || startData.oneFingerMode === 'scroll') {
                     // Scrolling is handled externally and must not become a click.
+                    if (type === 'touchend' && startData.oneFingerMode === 'scroll' && this._activeTouches.size === 1) {
+                        this._releaseTouchScroll(now);
+                    }
                 } else if (!swipeDetected && this._activeTouchIdentifier === null && this._activeTouches.size === 1 && this._activeTouches.has(identifier)) {
                     if (duration < this._TAP_MAX_DURATION && deltaDistSq < TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
                         if (this.isComposing) this.textInput.cancel();
@@ -2345,6 +2366,9 @@ export class Input {
             }
             if (!swipeDetected) {
                 const remainingTouchCount = this._activeTouches.size;
+                if (type === 'touchend' && this._isTwoFingerGesture && remainingTouchCount < 2) {
+                    this._releaseTouchScroll(now);
+                }
                 if (this._isTwoFingerGesture && remainingTouchCount < 2) {
                     if (!this._trackpadMode && !this.use_browser_cursors) {
                         this.cursorDiv.style.visibility = 'visible';
@@ -2411,12 +2435,17 @@ export class Input {
             !!document.pointerLockElement || this._gestureTouchPinching;
     }
 
-    _handleTwoFingerScroll(deltaX, deltaY) {
+    _handleTwoFingerScroll(deltaX, deltaY, now = this._inputNow()) {
         if (!this._canScroll()) { this.resetScroll(); return; }
         const navigation = this._gestureNav();
         if (navigation?.touch(deltaX, deltaY, window, this._gestureBlocked(), this._replayScroll)) {
+            // Reserved or committed motion must not become a fling in the next app.
+            this._touchFlingSamples = [];
+            this._touchFlingArmed = false;
             this.scrollInput.reset(); return;
         }
+        this._touchFlingArmed = true;
+        this._trackTouchScroll(deltaX, deltaY, now);
         this.scrollInput.add(-deltaX, -deltaY);
     }
 
@@ -2430,11 +2459,72 @@ export class Input {
         return null;
     }
 
+    _beginTouchScroll(now = this._inputNow()) {
+        this._stopTouchFling();
+        this._touchFlingArmed = true;
+        this._touchFlingSamples = [{ time: now, x: 0, y: 0 }];
+    }
+
+    _inputNow() { return this._clock ? this._clock() : Date.now(); }
+
+    _trackTouchScroll(deltaX, deltaY, now = this._inputNow()) {
+        if (!this._touchFlingSamples.length) return;
+        const previous = this._touchFlingSamples[this._touchFlingSamples.length - 1];
+        this._touchFlingSamples.push({
+            time: Math.max(now, previous.time),
+            x: previous.x + deltaX, y: previous.y + deltaY,
+        });
+        const cutoff = now - TOUCH_FLING_WINDOW_MS;
+        const kept = this._touchFlingSamples.findIndex(sample => sample.time >= cutoff);
+        if (kept > 0) this._touchFlingSamples.splice(0, kept);
+    }
+
+    // A slow release stops with the finger. A flick spends its final velocity
+    // on the same wheel channel, bounded in time and distance.
+    _releaseTouchScroll(now = this._inputNow()) {
+        if (!this._touchFlingArmed) { this._touchFlingSamples = []; return; }
+        this._touchFlingArmed = false;
+        const fling = touchFling(this._touchFlingSamples, now);
+        this._touchFlingSamples = [];
+        if (!fling || !this._canScroll()) return;
+        const started = now;
+        const step = () => {
+            this._touchFlingTimer = null;
+            const elapsed = this._inputNow() - started;
+            if (elapsed >= fling.duration || !this._canScroll()) return;
+            const progress = elapsed / fling.duration;
+            const next = Math.min(fling.duration, elapsed + 16);
+            const remaining = t => { const u = 1 - t; return u * u * u / 3; };
+            const portion = remaining(progress) - remaining(next / fling.duration);
+            this.scrollInput.add(-fling.vx * portion * TOUCH_SCROLL_GAIN, -fling.vy * portion * TOUCH_SCROLL_GAIN);
+            this._touchFlingTimer = setTimeout(step, 16);
+        };
+        this._touchFlingTimer = setTimeout(step, 16);
+    }
+
+    _stopTouchFling() {
+        if (this._touchFlingTimer !== null) clearTimeout(this._touchFlingTimer);
+        this._touchFlingTimer = null;
+        this._touchFlingSamples = [];
+        this._touchFlingArmed = false;
+    }
+
     // One finger goes straight to the wheel channel. App switching stays on
     // the two-finger and mouse-wheel paths, which do not use this gain.
-    _scrollFinger(deltaX, deltaY) {
+    _scrollFinger(deltaX, deltaY, point = null, now = this._inputNow()) {
         if (!deltaX && !deltaY) return;
         if (!this._canScroll()) { this.resetScroll(); return; }
+        // A wheel reaches only the window that already has keyboard focus.
+        // Switching an app or a browser tab leaves focus behind, so the first
+        // finger scroll clicks its start point before any wheel sample.
+        if (point && (this.buttonMask & 1) === 0) {
+            this._calculateTouchCoordinates(point);
+            this.buttonMask |= 1;
+            this._sendMouseState();
+            this.buttonMask &= ~1;
+            this._sendMouseState();
+        }
+        this._trackTouchScroll(deltaX, deltaY, now);
         this.scrollInput.add(-deltaX * TOUCH_SCROLL_GAIN, -deltaY * TOUCH_SCROLL_GAIN);
     }
 
@@ -2463,7 +2553,7 @@ export class Input {
             && !document.documentElement.hasAttribute('data-ivnc-modal-blocked');
     }
 
-    resetScroll() { ++this._scrollEpoch; this.scrollInput?.reset(); this._gestureNav()?.cancelPending(window); }
+    resetScroll() { ++this._scrollEpoch; this._stopTouchFling(); this.scrollInput?.reset(); this._gestureNav()?.cancelPending(window); }
     setInputCapabilities(data) { this.scrollInput.setProtocol(data?.scroll_pixels); }
 
     _contextMenu(event) {

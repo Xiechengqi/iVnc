@@ -4,6 +4,12 @@ export const MAX_SCROLL_PIXELS = 32768;
 // Finger travel is shorter than a mouse notch. 48 CSS pixels at speed 1
 // become one 120-pixel notch. Mouse wheels and trackpads do not use this.
 export const TOUCH_SCROLL_GAIN = 2.5;
+// Release velocity uses only the last moments of contact, so a slow finish
+// stops and a late flick continues. Units are CSS pixels per millisecond.
+export const TOUCH_FLING_WINDOW_MS = 100;
+export const TOUCH_FLING_MIN_SPEED = 0.22;
+export const TOUCH_FLING_DURATION_MS = 1500;
+export const TOUCH_FLING_MAX_PIXELS = 2400;
 // Wayland's conventional 10 axis units per wheel notch map to 120 Chromium
 // wheel pixels. Keep the same calibration when talking to an older server.
 const LEGACY_PIXELS_PER_UNIT = 12;
@@ -23,6 +29,20 @@ export function normalizeWheel(event, width = 800, height = 800) {
 
 // An 8 ms batch retains all normal motion, including fractional legacy units.
 // No delayed retry is allowed to carry input into another view/connection.
+// A slow drag ends with the finger. A flick keeps its final velocity and
+// decays within a bounded time and distance. The integral of (1 - t)^2 is 1/3.
+export function touchFling(samples, now) {
+    const recent = samples.filter(sample => now - sample.time <= TOUCH_FLING_WINDOW_MS);
+    const first = recent[0], last = recent[recent.length - 1];
+    const elapsed = first && last ? last.time - first.time : 0;
+    if (elapsed < 16) return null;
+    const vx = (last.x - first.x) / elapsed, vy = (last.y - first.y) / elapsed;
+    const speed = Math.hypot(vx, vy);
+    if (speed < TOUCH_FLING_MIN_SPEED) return null;
+    const distance = Math.min(speed * TOUCH_FLING_DURATION_MS / 3, TOUCH_FLING_MAX_PIXELS);
+    return { vx: vx / speed * distance, vy: vy / speed * distance, duration: TOUCH_FLING_DURATION_MS };
+}
+
 export function createScrollInput({ send, canSend, getSpeed = () => 1,
     schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id) }) {
     let x = 0, y = 0, timer = null, precise = false;

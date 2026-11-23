@@ -20,11 +20,11 @@ Object.defineProperties(video,{videoWidth:{get:()=>1280},videoHeight:{get:()=>72
 const held=[];let hold=false;
 const input=new Input(el,(message,isCurrent)=>{if(hold){held.push({message,isCurrent});return Promise.resolve(true)}messages.push(message);return true});input.attach();input.setInputCapabilities({scroll_pixels:1});
 const nav=createGestureNavigation({canHandle:()=>input._viewActive, navigate:d=>{switches.push(d);input.resetScroll()}});
-input.gestureNavigation=()=>nav;
-window.fixture={input,el,messages,switches,nav,getScrollSpeed,setScrollSpeed,hold(value){hold=value},release(){hold=false;for(const item of held.splice(0))if(!item.isCurrent||item.isCurrent())messages.push(item.message)},
+input.gestureNavigation=()=>nav;input._clock=()=>fixture.now||Date.now();
+window.fixture={input,el,messages,switches,nav,getScrollSpeed,setScrollSpeed,now:0,hold(value){hold=value},release(){hold=false;for(const item of held.splice(0))if(!item.isCurrent||item.isCurrent())messages.push(item.message)},
 clear(){input.resetScroll();nav.reset();messages.length=0;switches.length=0},
 wheel(x,y,mode=0,extras={}){el.dispatchEvent(new WheelEvent('wheel',{deltaX:x,deltaY:y,deltaMode:mode,clientX:60,clientY:60,bubbles:true,cancelable:true,...extras}))},
-touch(type,points){const touches=points.map((p,i)=>new Touch({identifier:p.id??i,target:el,clientX:p.x,clientY:p.y}));el.dispatchEvent(new TouchEvent(type,{bubbles:true,cancelable:true,touches:type==='touchend'||type==='touchcancel'?[]:touches,targetTouches:type==='touchend'||type==='touchcancel'?[]:touches,changedTouches:touches}))},
+touch(type,points,time){if(time!==undefined)fixture.now=time;const touches=points.map((p,i)=>new Touch({identifier:p.id??i,target:el,clientX:p.x,clientY:p.y}));el.dispatchEvent(new TouchEvent(type,{bubbles:true,cancelable:true,touches:type==='touchend'||type==='touchcancel'?[]:touches,targetTouches:type==='touchend'||type==='touchcancel'?[]:touches,changedTouches:touches}))},
 frame(){const frame=document.createElement('iframe');frame.src='/__scroll-child';document.body.appendChild(frame)},
 hidden(value){Object.defineProperty(document,'hidden',{configurable:true,value});document.dispatchEvent(new Event('visibilitychange'))}};
 </script>`;
@@ -73,7 +73,7 @@ const cases = [
         await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{x:100,y:100}]); fixture.touch('touchmove',[{x:104,y:148}]); fixture.touch('touchend',[{x:104,y:148}]); });
         await settle(page);
         const messages=await page.evaluate(() => fixture.messages);
-        assert.equal(messages.filter(m => /^m2?,/.test(m)).length, 0);
+        assert.deepEqual(messages.filter(m => /^m2?,/.test(m)).map(m => m.split(',').slice(1,4).join(',')), ['100,100,1','100,100,0']);
         const total=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
         assert(Math.abs(total[0]+10)<.047 && Math.abs(total[1]+120)<.047);
         assert.deepEqual(await page.evaluate(() => fixture.switches), []);
@@ -87,7 +87,7 @@ const cases = [
         await page.evaluate(() => { fixture.clear(); fixture.touch('touchstart',[{id:1,x:100,y:80}]); fixture.touch('touchmove',[{id:1,x:100,y:120}]); fixture.touch('touchstart',[{id:1,x:100,y:120},{id:2,x:160,y:120}]); fixture.touch('touchmove',[{id:1,x:100,y:150},{id:2,x:160,y:150}]); fixture.touch('touchend',[{id:1,x:100,y:150},{id:2,x:160,y:150}]); });
         await settle(page);
         const messages=await page.evaluate(() => fixture.messages);
-        assert.equal(messages.filter(m => /^m2?,/.test(m)).length, 0);
+        assert.deepEqual(messages.filter(m => /^m2?,/.test(m)).map(m => m.split(',').slice(1,4).join(',')), ['100,80,1','100,80,0']);
         const total=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
         assert(Math.abs(total[0])<.047 && Math.abs(total[1]+130)<.047);
     }],
@@ -103,10 +103,39 @@ const cases = [
         await page.evaluate(() => { fixture.clear(); fixture.input.setTrackpadMode(true); fixture.touch('touchstart',[{x:100,y:100}]); fixture.touch('touchmove',[{x:104,y:148}]); fixture.touch('touchend',[{x:104,y:148}]); });
         await settle(page);
         const trackpad=await page.evaluate(() => fixture.messages);
-        assert.equal(trackpad.filter(m => /^m2?,/.test(m)).length, 0);
+        assert.deepEqual(trackpad.filter(m => /^m2?,/.test(m)).map(m => m.split(',').slice(1,4).join(',')), ['100,100,1','100,100,0']);
         const scaled=(await wheelMessages(page))[0].split(',').slice(1).map(Number);
         assert(Math.abs(scaled[0]+10)<.047 && Math.abs(scaled[1]+120)<.047);
         await page.evaluate(() => fixture.input.setTrackpadMode(false));
+    }],
+    ['a slow one-finger release stops and a fast release keeps decaying', async page => {
+        const slow = await page.evaluate(async () => {
+            fixture.clear(); fixture.now = 1000;
+            fixture.touch('touchstart',[{x:120,y:80}],1000);
+            fixture.touch('touchmove',[{x:120,y:140}],1300);
+            fixture.touch('touchend',[{x:120,y:200}],1600);
+            await new Promise(resolve => setTimeout(resolve, 80));
+            return fixture.messages.filter(message => message.startsWith('w2,')).length;
+        });
+        await settle(page);
+        assert.equal((await page.evaluate(() => fixture.messages)).filter(message => message.startsWith('w2,')).length, slow);
+        const flick = await page.evaluate(async () => {
+            fixture.clear(); fixture.now = 2000;
+            fixture.touch('touchstart',[{x:120,y:40}],2000);
+            fixture.touch('touchmove',[{x:120,y:70}],2020);
+            fixture.touch('touchmove',[{x:120,y:130}],2040);
+            fixture.touch('touchend',[{x:120,y:190}],2060);
+            const contact = fixture.messages.filter(message => message.startsWith('w2,')).length;
+            fixture.now = 2300;
+            await new Promise(resolve => setTimeout(resolve, 80));
+            return {contact, later: fixture.messages.filter(message => message.startsWith('w2,')).length};
+        });
+        assert(flick.later > flick.contact);
+        await page.evaluate(() => { fixture.now = 2800; fixture.touch('touchstart',[{x:40,y:40}],2800); fixture.touch('touchend',[{x:40,y:40}],2850); });
+        await page.waitForTimeout(80);
+        const stopped = (await page.evaluate(() => fixture.messages)).filter(message => message.startsWith('w2,')).length;
+        await page.waitForTimeout(80);
+        assert.equal((await page.evaluate(() => fixture.messages)).filter(message => message.startsWith('w2,')).length, stopped);
     }],
     ['a queued wheel is sent before pointer moves, buttons and modifier release', async page => {
         await page.evaluate(() => { fixture.wheel(0,10); fixture.input.send('ku,65507'); });
