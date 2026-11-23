@@ -161,11 +161,67 @@ const cases = [
         await page.evaluate(()=>fixture.setLang('en'));
         assert.equal(await page.getByRole('button',{name:'Swipe to switch apps',exact:true}).count(),0);
     }],
-    ['compact tools have no swipe toggle in either toolbar or overflow menu', async page => {
+    ['compact pointer tools have no swipe toggle in either toolbar or overflow menu', async page => {
         await page.setViewportSize({width:430,height:800});
         await page.locator('.toolbar-more').click();
         assert(await page.locator('.toolbar-more-menu .fixture-tool').isVisible());
         assert.equal(await page.locator('.toolbar-gesture-action').count(),0);
+        assert(await page.getByRole('button', {name:'辅助功能', exact:true}).isHidden());
+    }, '', false],
+    ['a coarse touch screen gathers the tools into a draggable circle and leaves the network status in the bar', async page => {
+        await page.addInitScript(() => {
+            const native = window.matchMedia.bind(window);
+            window.matchMedia = (text) => text === '(hover: none) and (pointer: coarse)'
+                ? { matches: true, media: text, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }
+                : native(text);
+        });
+        await page.reload();
+        await page.setViewportSize({ width: 390, height: 700 });
+        await page.waitForFunction(() => !!window.fixture);
+        await page.evaluate(() => {
+            const badge = document.createElement('div');
+            badge.className = 'taskbar-network-quality good'; badge.id = 'network-quality'; badge.textContent = '良好';
+            fixture.toolbar.status.appendChild(badge);
+            const pin = document.createElement('div');
+            pin.className = 'taskbar-pin active'; pin.id = 'pin'; pin.title = '固定';
+            pin.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/></svg>';
+            pin.addEventListener('click', event => event.stopPropagation());
+            fixture.toolbar.addTool(pin, true);
+            const idle = document.createElement('div');
+            idle.className = 'taskbar-pin'; idle.id = 'idle';
+            idle.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"/></svg>';
+            fixture.toolbar.addTool(idle);
+        });
+        const assist = page.getByRole('button', { name: '辅助功能', exact: true });
+        await assist.waitFor();
+        assert.equal(await page.locator('#taskbar .toolbar-tools > .taskbar-pin').count(), 0);
+        assert.equal(await page.locator('#taskbar #network-quality').count(), 1);
+        assert(await page.locator('#taskbar .toolbar-list .taskbar-item').count() > 0);
+        const before = await assist.boundingBox();
+        await assist.click();
+        assert(await page.locator('.toolbar-more-menu #pin').isVisible());
+        const menu = await page.locator('.toolbar-more-menu').boundingBox();
+        const network = await page.locator('#network-quality').boundingBox();
+        assert(menu.x + menu.width <= network.x || menu.y + menu.height <= network.y);
+        await page.locator('.toolbar-more-menu #pin').click();
+        await page.waitForFunction(() => document.querySelector('.toolbar-more-menu').hidden);
+        const activeIcon = await page.locator('.toolbar-assist svg').evaluate(node => node.outerHTML);
+        await page.evaluate(() => document.querySelector('#pin').classList.remove('active'));
+        await page.waitForFunction(icon => document.querySelector('.toolbar-assist svg')?.outerHTML !== icon, activeIcon);
+        const opened = await assist.boundingBox();
+        const start = { x: opened.x + opened.width / 2, y: opened.y + opened.height / 2 };
+        await page.mouse.move(start.x, start.y);
+        await page.mouse.down();
+        for (const step of [30, 80, 140, 200]) await page.mouse.move(start.x + step, start.y);
+        await page.mouse.up();
+        const after = await assist.boundingBox();
+        assert(after.x > before.x + 40);
+        assert(await page.locator('.toolbar-more-menu').isHidden());
+        const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ivnc.toolbar-assist.v1')));
+        assert(['left', 'right', 'top', 'bottom'].includes(stored.edge));
+        await page.setViewportSize({ width: 1280, height: 800 });
+        await assist.waitFor({ state: 'hidden' });
+        assert(await page.locator('#taskbar .toolbar-tools #pin').isVisible());
     }],
     ['direction queries use the pending navigation target without activating any app', async page => {
         await localNavigation(page);
@@ -594,8 +650,8 @@ await test('toolbar native browser input', async t => {
             const browser = await engines[name].launch({headless:true,
                 ...(name === 'chromium' && process.env.CHROME_BIN ? {executablePath:process.env.CHROME_BIN} : {})});
             try {
-                for (const [title,run,query=''] of cases) await t.test(title, async () => {
-                    const context = await browser.newContext({viewport:{width:1280,height:800},deviceScaleFactor:2,hasTouch:true});
+                for (const [title,run,query='', touch=true] of cases) await t.test(title, async () => {
+                    const context = await browser.newContext({viewport:{width:1280,height:800},deviceScaleFactor:2,hasTouch:touch});
                     const page = await context.newPage(), errors = [], api = {orders:[], actions:[]};
                     page.on('pageerror', error => errors.push(error.message));
                     await page.route('**/api/**', async route => {

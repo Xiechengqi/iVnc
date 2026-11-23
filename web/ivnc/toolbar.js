@@ -6,6 +6,7 @@ import { createOrderNotifications } from './app-order.js';
 
 const STRINGS = {
     zh: { apps: '应用', previous: '向左滚动应用', next: '向右滚动应用', more: '更多工具',
+        assist: '辅助功能',
         move: '按住标签左右拖动排序，或使用左右方向键移动', saved: '应用顺序已保存', failed: '无法保存应用顺序', network: '网络状态',
         rename: '修改应用名', save: '保存', cancel: '取消', pending: '保存中…', nameFailed: '无法保存应用名',
         latest: '当前名称：', changed: '应用名已发生变化。请核对当前名称，再次保存以使用你的输入。',
@@ -13,6 +14,7 @@ const STRINGS = {
         menu: '应用操作', stop: '停止', restart: '重启', logs: '日志', edit: '编辑', renameAction: '重命名',
         stopped: '应用已停止', restarted: '应用已重启', actionFailed: '操作失败：', manageUnavailable: '当前页面不能打开控制台' },
     en: { apps: 'Applications', previous: 'Scroll apps left', next: 'Scroll apps right', more: 'More tools',
+        assist: 'Accessibility shortcut',
         move: 'Hold and drag the tab left or right to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
         rename: 'Rename application', save: 'Save', cancel: 'Cancel', pending: 'Saving…', nameFailed: 'Could not save application name',
         latest: 'Current name: ', changed: 'The application name changed. Review the current name, then save again to use your draft.',
@@ -41,6 +43,11 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     };
     element.classList.add('ivnc-toolbar');
     const tools = make('div', 'toolbar-tools', element);
+    const assist = make('button', 'toolbar-assist', document.body);
+    assist.type = 'button'; assist.hidden = true;
+    assist.setAttribute('aria-expanded', 'false');
+    const assistGlyph = make('span', 'toolbar-assist-glyph', assist);
+    assistGlyph.setAttribute('aria-hidden', 'true');
     const appStrip = make('div', 'toolbar-app-strip', element);
     const apps = make('div', 'toolbar-apps', appStrip);
     const status = make('div', 'toolbar-status', element);
@@ -97,6 +104,45 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     let lastActive = null, editor = null, renameBusy = false, appMenu = null, actionBusy = false;
     let press = null, pressTimer, paintPending = false, suppressedPointer = null;
     let navigation = null, navigationTimer;
+    const ASSIST_KEY = 'ivnc.toolbar-assist.v1';
+    const assistQuery = window.matchMedia('(hover: none) and (pointer: coarse)');
+    let assistPoint = loadAssistPoint();
+    let assistDrag = null, assistIgnoreClick = false;
+    const assistIcons = new MutationObserver(() => assistIcon());
+
+    function loadAssistPoint() {
+        try {
+            const stored = JSON.parse(localStorage.getItem(ASSIST_KEY) || 'null');
+            if (stored && ['left', 'right', 'top', 'bottom'].includes(stored.edge) && typeof stored.along === 'number') {
+                return { edge: stored.edge, along: Math.min(1, Math.max(0, stored.along)) };
+            }
+        } catch (_) {}
+        return { edge: 'left', along: 0.72 };
+    }
+    function assistActive() {
+        return assistQuery.matches && element.clientWidth > 0 && element.clientWidth <= 700;
+    }
+    function assistFrame() {
+        const visual = window.visualViewport;
+        const left = visual?.offsetLeft || 0, top = visual?.offsetTop || 0;
+        return { left, top, right: left + (visual?.width || window.innerWidth), bottom: top + (visual?.height || window.innerHeight) };
+    }
+    function placeAssist() {
+        const size = 44, margin = 8, frame = assistFrame();
+        const spanX = Math.max(0, frame.right - frame.left - size - margin * 2);
+        const spanY = Math.max(0, frame.bottom - frame.top - size - margin * 2);
+        const alongX = frame.left + margin + assistPoint.along * spanX;
+        const alongY = frame.top + margin + assistPoint.along * spanY;
+        const x = assistPoint.edge === 'right' ? frame.left + margin + spanX : assistPoint.edge === 'left' ? frame.left + margin : alongX;
+        const y = assistPoint.edge === 'bottom' ? frame.top + margin + spanY : assistPoint.edge === 'top' ? frame.top + margin : alongY;
+        assist.style.left = `${x}px`;
+        assist.style.top = `${y}px`;
+    }
+    function assistIcon() {
+        const ranked = [...toolEntries].reverse().find(tool => tool.node.classList.contains('active') || tool.node.classList.contains('uploading') || tool.node.getAttribute('aria-pressed') === 'true');
+        const source = ranked?.node.querySelector('svg') || [...toolEntries].reverse().find(tool => tool.node.querySelector('svg'))?.node.querySelector('svg');
+        assistGlyph.replaceChildren(source ? source.cloneNode(true) : document.createTextNode('◉'));
+    }
 
     function resetNavigation(hideNotice = true, repaint = true) {
         const changed = !!navigation;
@@ -510,26 +556,72 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     }
 
     function layout() {
-        const compact = element.clientWidth <= 700;
+        const floating = assistActive();
+        element.classList.toggle('toolbar-assistive', floating);
+        menu.classList.toggle('toolbar-assist-menu', floating);
+        const compact = !floating && element.clientWidth <= 700;
         let toolCursor = more, menuCursor = null;
         for (const tool of [...toolEntries].reverse()) {
-            const parent = compact && !tool.primary ? menu : tools;
+            const parent = (floating || (compact && !tool.primary)) ? menu : tools;
             const cursor = parent === tools ? toolCursor : menuCursor;
             if (tool.node.parentNode !== parent || tool.node.nextElementSibling !== cursor) parent.insertBefore(tool.node, cursor);
             if (parent === tools) toolCursor = tool.node;
             else menuCursor = tool.node;
             tool.label.textContent = tool.node.dataset.toolLabel || tool.node.title;
+            tool.label.hidden = parent === tools;
         }
-        more.hidden = !menu.children.length;
-        if (!compact) closeMenu();
+        const menuParent = floating ? document.body : tools;
+        if (menu.parentNode !== menuParent) menuParent.appendChild(menu);
+        more.hidden = floating || !menu.children.length;
+        assist.hidden = !floating;
+        if (!compact && !floating) closeMenu();
+        if (!floating) {
+            assist.setAttribute('aria-expanded', 'false');
+            menu.style.left = menu.style.top = menu.style.width = '';
+        }
+        assistIcon();
+        placeAssist();
+        placeAssistMenu();
         updateOverflow();
         positionEditor();
         if (appMenu) placePanel(appMenuPanel, appMenu.key);
     }
 
+    function placeAssistMenu() {
+        if (menu.hidden || !assistActive()) return;
+        const button = assist.getBoundingClientRect();
+        const frame = assistFrame();
+        const width = Math.min(220, frame.right - frame.left - 16);
+        menu.style.width = `${width}px`;
+        const height = menu.offsetHeight;
+        let left = button.left;
+        let top = button.top - height - 8;
+        if (top < frame.top + 8) top = Math.min(frame.bottom - height - 8, button.bottom + 8);
+        left = Math.max(frame.left + 8, Math.min(frame.right - width - 8, left));
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+    }
+
+    function snapAssist(x, y) {
+        const size = 44, margin = 8;
+        const frame = assistFrame();
+        const cx = x + size / 2, cy = y + size / 2;
+        const edges = [['left', cx - frame.left], ['right', frame.right - cx], ['top', cy - frame.top], ['bottom', frame.bottom - cy]];
+        const edge = edges.reduce((best, item) => item[1] < best[1] ? item : best)[0];
+        const vertical = edge === 'left' || edge === 'right';
+        const span = Math.max(1, (vertical ? frame.bottom - frame.top : frame.right - frame.left) - size - margin * 2);
+        const origin = vertical ? frame.top : frame.left;
+        assistPoint = { edge, along: Math.min(1, Math.max(0, ((vertical ? y : x) - origin - margin) / span)) };
+        try { localStorage.setItem(ASSIST_KEY, JSON.stringify(assistPoint)); } catch (_) {}
+        placeAssist();
+        placeAssistMenu();
+    }
+
     function closeMenu() {
         const open = !menu.hidden;
-        menu.hidden = true; more.setAttribute('aria-expanded', 'false');
+        menu.hidden = true;
+        more.setAttribute('aria-expanded', 'false');
+        assist.setAttribute('aria-expanded', 'false');
         if (open) onInteraction(false);
     }
 
@@ -700,8 +792,13 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     listen(viewport, 'lostpointercapture', (event) => {
         if (event.target === viewport && drag?.started) cancelDrag();
     });
-    listen(window, 'blur', cancelInteraction);
-    listen(document, 'visibilitychange', () => { if (document.hidden) { cancelInteraction(); resetNavigation(); } });
+    listen(window, 'blur', () => { cancelAssistDrag({ pointerId: assistDrag?.pointerId }); cancelInteraction(); });
+    listen(assistQuery, 'change', () => { closeMenu(); layout(); });
+    if (window.visualViewport) {
+        listen(window.visualViewport, 'resize', () => { placeAssist(); placeAssistMenu(); });
+        listen(window.visualViewport, 'scroll', () => { placeAssist(); placeAssistMenu(); });
+    }
+    listen(document, 'visibilitychange', () => { if (document.hidden) { cancelAssistDrag({ pointerId: assistDrag?.pointerId }); cancelInteraction(); closeMenu(); resetNavigation(); } });
     listen(document, 'keydown', (event) => {
         if (event.key !== 'Escape') return;
         if (event.isComposing || event.keyCode === 229) return;
@@ -719,15 +816,64 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     listen(viewport, 'scroll', () => { updateOverflow(); positionEditor(); if (appMenu) placePanel(appMenuPanel, appMenu.key); }, { passive: true });
     listen(previous, 'click', () => viewport.scrollBy({ left: -Math.max(100, viewport.clientWidth * .7), behavior: 'smooth' }));
     listen(next, 'click', () => viewport.scrollBy({ left: Math.max(100, viewport.clientWidth * .7), behavior: 'smooth' }));
+    function toggleAssist(open = menu.hidden) {
+        menu.hidden = !open;
+        assist.setAttribute('aria-expanded', String(open));
+        more.setAttribute('aria-expanded', 'false');
+        if (open) placeAssistMenu();
+        onInteraction(open);
+    }
     listen(more, 'click', () => {
         menu.hidden = !menu.hidden; more.setAttribute('aria-expanded', String(!menu.hidden)); onInteraction(!menu.hidden);
     });
+    listen(assist, 'pointerdown', (event) => {
+        if (event.button !== 0 || !assistActive()) return;
+        assistIgnoreClick = false;
+        assistDrag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+            left: assist.getBoundingClientRect().left, top: assist.getBoundingClientRect().top, moved: false };
+        assist.setPointerCapture(event.pointerId);
+    });
+    listen(document, 'pointermove', (event) => {
+        if (!assistDrag || assistDrag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - assistDrag.x, dy = event.clientY - assistDrag.y;
+        if (!assistDrag.moved && Math.hypot(dx, dy) < 8) return;
+        assistDrag.moved = true;
+        event.preventDefault();
+        const size = 44, margin = 8, frame = assistFrame();
+        assist.style.left = `${Math.min(frame.right - size - margin, Math.max(frame.left + margin, assistDrag.left + dx))}px`;
+        assist.style.top = `${Math.min(frame.bottom - size - margin, Math.max(frame.top + margin, assistDrag.top + dy))}px`;
+    }, { passive: false });
+    listen(document, 'pointerup', (event) => {
+        if (!assistDrag || assistDrag.pointerId !== event.pointerId) return;
+        const moved = assistDrag.moved;
+        const box = assist.getBoundingClientRect();
+        assistDrag = null;
+        if (moved) { assistIgnoreClick = true; snapAssist(box.left, box.top); }
+    });
+    const cancelAssistDrag = (event) => {
+        if (!assistDrag || (event.pointerId !== undefined && event.pointerId !== assistDrag.pointerId)) return;
+        const moved = assistDrag.moved;
+        assistDrag = null;
+        if (moved) snapAssist(assist.getBoundingClientRect().left, assist.getBoundingClientRect().top);
+        else placeAssist();
+    };
+    listen(assist, 'pointercancel', cancelAssistDrag);
+    listen(assist, 'lostpointercapture', cancelAssistDrag);
+    listen(assist, 'click', (event) => {
+        if (!assistActive()) return;
+        if (assistIgnoreClick) { assistIgnoreClick = false; event.preventDefault(); event.stopPropagation(); return; }
+        event.stopPropagation();
+        toggleAssist();
+    });
+
     // Tool handlers stop propagation; close before they open their own panels.
-    listen(tools, 'click', (event) => { if (event.target.closest('.taskbar-pin')) closeMenu(); }, { capture: true });
+    const closeMenuFromTool = (event) => { if (event.target.closest('.taskbar-pin')) closeMenu(); };
+    listen(tools, 'click', closeMenuFromTool, { capture: true });
+    listen(menu, 'click', closeMenuFromTool, { capture: true });
     listen(document, 'pointerdown', (event) => {
         if (!renamePanel.contains(event.target)) closeEditor();
         if (!appMenuPanel.contains(event.target)) closeAppMenu();
-        if (!tools.contains(event.target)) closeMenu();
+        if (!tools.contains(event.target) && !assist.contains(event.target) && !menu.contains(event.target)) closeMenu();
         if (!status.contains(event.target)) closeInfo();
     });
     function showNetworkInfo(event) {
@@ -750,8 +896,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     });
     resize.observe(element); resize.observe(viewport); resize.observe(list); resize.observe(status);
     const translate = () => {
-        previous.title = tr('previous'); next.title = tr('next'); more.title = tr('more');
-        [previous, next, more].forEach(n => n.setAttribute('aria-label', n.title));
+        previous.title = tr('previous'); next.title = tr('next'); more.title = tr('more'); assist.title = tr('assist');
+        [previous, next, more, assist].forEach(n => n.setAttribute('aria-label', n.title));
         apps.setAttribute('aria-label', tr('apps'));
         renameCaption.textContent = tr('rename'); renamePanel.setAttribute('aria-label', tr('rename'));
         renameInput.setAttribute('aria-label', tr('rename')); renameCancel.textContent = tr('cancel');
@@ -764,6 +910,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     function addTool(node, primary = false) {
         const label = make('span', 'toolbar-tool-label', node);
         toolEntries.push({ node, label, primary });
+        assistIcons.observe(node, { attributes: true, attributeFilter: ['class', 'aria-pressed'] });
         node.setAttribute('role', 'button'); node.tabIndex = 0;
         listen(node, 'keydown', event => {
             if (['Enter', ' '].includes(event.key) && !node.classList.contains('disabled')) {
@@ -830,14 +977,14 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             if (drag && (drag.revision !== confirmed.order_revision || drag.ids.length !== visibleIdsFromConfirmed().length || !drag.ids.every(id => entries.some(e => e.appId === id)))) cancelDrag();
             paint();
         },
-        interacting: () => !!editor || !!appMenu || !!press || !!drag?.started || !menu.hidden || !info.hidden,
+        interacting: () => !!editor || !!appMenu || !!press || !!drag?.started || !!assistDrag?.moved || !menu.hidden || !info.hidden,
         destroy() {
             destroyed = true;
             clearTimeout(navigationTimer);
             cancelAnimationFrame(resizeFrame);
             closeEditor(); closeAppMenu(); cancelInteraction(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
             clearTimeout(noticeTimer); untranslate(); notifications.destroy();
-            element.remove(); nodes.clear();
+            assistIcons.disconnect(); assist.remove(); menu.remove(); element.remove(); nodes.clear();
         }
     };
 }

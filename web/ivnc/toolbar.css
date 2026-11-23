@@ -132,6 +132,42 @@
     box-sizing: border-box;
 }
 .ivnc-toolbar .toolbar-more-menu { left: 0; width: max-content; }
+.toolbar-assist {
+    position: fixed;
+    z-index: 1200;
+    box-sizing: border-box;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 2px solid rgba(255, 255, 255, .85);
+    border-radius: 50%;
+    background: rgba(28, 32, 38, .72);
+    color: #fff;
+    box-shadow: 0 4px 16px #0006;
+    touch-action: none;
+    cursor: pointer;
+}
+.toolbar-assist[aria-expanded="true"] { background: rgba(48, 78, 120, .9); }
+.toolbar-assist-glyph { display: grid; place-items: center; pointer-events: none; }
+.toolbar-assist-glyph svg { width: 18px; height: 18px; }
+.toolbar-more-menu.toolbar-assist-menu {
+    position: fixed;
+    bottom: auto;
+    z-index: 1201;
+    display: grid;
+    gap: 2px;
+    padding: 6px;
+}
+.toolbar-more-menu.toolbar-assist-menu[hidden] { display: none !important; }
+.toolbar-more-menu.toolbar-assist-menu .taskbar-pin {
+    width: 100%;
+    height: 36px;
+    margin: 0;
+    justify-content: flex-start;
+    padding: 0 8px;
+    gap: 9px;
+}
+.toolbar-more-menu.toolbar-assist-menu .toolbar-tool-label { display: inline; }
 .ivnc-toolbar .toolbar-more-menu .taskbar-pin {
     width: auto;
     justify-content: flex-start;

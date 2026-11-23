@@ -1363,7 +1363,7 @@ export class Input {
     _handleOutsideClick(event) {
         if (!this._viewActive) return;
         if (!this.element.contains(event.target)) this.resetScroll();
-        if (this._targetHasClass(event.target, 'taskbar')) {
+        if (this._localChrome(event.target)) {
             this.send('kr');
             this.resetKeyboard();
         }
@@ -1515,7 +1515,7 @@ export class Input {
     _handleKeyDown(event) {
         if (!this._viewActive) return;
         if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
-        if (this._targetHasClass(event.target, 'taskbar')) return;
+        if (this._localChrome(event.target)) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
@@ -1703,7 +1703,7 @@ export class Input {
 
     _handleKeyPress(event) {
         if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
-        if (this._targetHasClass(event.target, 'taskbar')) return;
+        if (this._localChrome(event.target)) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
@@ -1713,7 +1713,7 @@ export class Input {
         if (!this._viewActive) return;
         if (this.textInput.owns(event.target) && !(KeyboardUtil.getKeyCode(event) in this._keyDownList)) return;
         if (document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
-        if (this._targetHasClass(event.target, 'taskbar')) return;
+        if (this._localChrome(event.target)) return;
         if (this._targetHasClass(event.target, 'web-terminal-modal')) return;
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
@@ -2709,6 +2709,12 @@ export class Input {
         this.resetKeyboard();
         if (this.buttonMask) { this.buttonMask = 0; this._sendMouseState(); }
         this.cursorDiv.style.display = 'none';
+    }
+
+    _localChrome(target) {
+        return this._targetHasClass(target, 'taskbar')
+            || this._targetHasClass(target, 'toolbar-assist')
+            || this._targetHasClass(target, 'toolbar-more-menu');
     }
 
     _targetHasClass(target, className) {

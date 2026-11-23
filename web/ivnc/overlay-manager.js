@@ -50,7 +50,7 @@ export function installOverlayGuard(updateLayout, updateSettingsViewport = () =>
             consume(event); return;
         }
         gesture = null;
-        if (event.target?.closest?.('.web-terminal-modal, .clipboard-assist, .taskbar-pin, .force-update-modal, .modal, .pwd-overlay, .update-overlay')) return;
+        if (event.target?.closest?.('.web-terminal-modal, .clipboard-assist, .taskbar-pin, .toolbar-assist, .toolbar-more-menu, .force-update-modal, .modal, .pwd-overlay, .update-overlay')) return;
         for (const controller of controllers()) {
             if (controller.isOpen?.() && !controller.isPinned?.() && !controller.contains?.(event.target)) controller.minimize?.('auto');
         }
