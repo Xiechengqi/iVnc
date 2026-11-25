@@ -24,7 +24,8 @@ ${slice('const MAIN_I18N =', 'function InitUI()')}
 ${slice('function getBasePath()', 'function createWebTerminalController()')}
 ${slice('function createConsoleModalController(', 'function createProxyModalController()')}
 const controller=createConsoleModalController(new URLSearchParams(location.search).get('console')!=='0');
-controller.show();window.fixture={controller,clicks:0};
+if (!new URLSearchParams(location.search).has('cold')) controller.show();
+window.fixture={controller,clicks:0};
 document.getElementById('underlay').onclick=()=>fixture.clicks++;
 </script>`;
 const wait = (frame, fn) => frame.waitForFunction(fn);
@@ -36,6 +37,75 @@ const locked = frame => wait(frame, () => window.__ivncConsoleDialogState.locked
 const unlocked = frame => wait(frame, () => !window.__ivncConsoleDialogState.locked);
 
 const cases = [
+    ['toolbar actions show only the latest requested dialog from a cold iframe', async ({ page, url, calls }) => {
+        await page.goto(url+'?cold=1'); await page.waitForFunction(()=>!!window.fixture);
+        const previous = calls.length;
+        await page.evaluate(()=>{
+            const origin = document.getElementById('underlay');
+            fixture.controller.openAppAction('logs',{appId:'first',label:'First'},origin);
+            fixture.controller.openAppAction('logs',{appId:'second',label:'Second'},origin);
+            if (!document.querySelector('.web-settings-modal').classList.contains('minimized')) throw Error('settings flashed');
+        });
+        const frame = page.frameLocator('#settings-frame');
+        await frame.locator('#log-modal.show').waitFor();
+        assert.match(await frame.locator('#log-title').textContent(), /Second/);
+        assert(!calls.slice(previous).some(c=>c.url==='/api/apps/first/logs' || c.url.startsWith('/api/console/')));
+        assert(await frame.locator('.console-shell').isHidden());
+        assert(await page.locator('.web-settings-modal > .web-terminal-header').isHidden());
+        await page.mouse.click(5,5);
+        await page.locator('.web-settings-modal').waitFor({state:'hidden'});
+        assert.equal(await page.evaluate(()=>fixture.clicks),0);
+        assert.equal(await page.evaluate(()=>document.activeElement.id),'underlay');
+        await page.evaluate(()=>fixture.controller.show());
+        await frame.locator('.console-shell').waitFor();
+        await frame.locator('#nav-advanced').click();
+        await page.route('**/api/apps/second',route=>route.fulfill({json:{id:'second',name:'Second',app_type:'background'}}));
+        await page.evaluate(()=>fixture.controller.openAppAction('edit',{appId:'second',label:'Second'},document.getElementById('underlay')));
+        await frame.locator('#modal.show #modal-save:enabled').waitFor();
+        assert.equal(await frame.locator('#f-name').inputValue(),'Second');
+        assert(await frame.locator('.console-shell').isHidden());
+        await page.keyboard.press('Escape');
+        await page.locator('.web-settings-modal').waitFor({state:'hidden'});
+        await page.evaluate(()=>fixture.controller.show());
+        await frame.locator('#section-advanced.active').waitFor();
+    }],
+    ['a failed dialog load releases the opener and retries on the next click', async ({page, url}) => {
+        await page.goto(url + '?cold=1');
+        await page.waitForFunction(() => !!window.fixture);
+        await page.route('**/console', route => route.fulfill({status:503, contentType:'text/html', body:'Unavailable'}), {times:1});
+        const open = () => page.evaluate(() => fixture.controller.openAppAction('logs', {appId:'target', label:'Target'},
+            document.getElementById('underlay'), () => { fixture.loadFailed = true; }));
+        await open();
+        await page.waitForFunction(() => fixture.loadFailed && !fixture.controller.isOpen());
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'underlay');
+        await open();
+        const frame = page.frameLocator('#settings-frame');
+        await frame.locator('#log-modal.show').waitFor();
+        assert(await frame.locator('.console-shell').isHidden());
+        assert.match(await frame.locator('#log-title').textContent(), /Target/);
+    }],
+    ['add current IP saves only the address and preserves unrelated drafts and concurrent rules', async ({page, frame, calls}) => {
+        const ip = '2001:db8::4';
+        const before = {enabled:false,ip_allowlist:['192.0.2.1'],client_ip:ip,covered:false,etag:'"old"',authentication_enabled:true,matches:false};
+        const after = {...before,ip_allowlist:[...before.ip_allowlist,'198.51.100.5',ip],covered:true,changed:true,etag:'"new"'};
+        await page.route('**/api/settings/access', route=>route.fulfill({json:before}));
+        await page.route('**/api/settings/access/current-ip', route=>route.fulfill({json:after}));
+        await frame.locator('#nav-advanced').click();
+        await frame.locator('#access-enabled').check();
+        await frame.locator('#access-rules').fill('192.0.2.1\n\ninvalid draft');
+        await frame.locator('#access-add-current').click();
+        await frame.locator('#access-add-current:disabled').filter({hasText:'已在白名单'}).waitFor();
+        assert.equal(await frame.locator('#access-rules').inputValue(),'192.0.2.1\n\ninvalid draft\n198.51.100.5\n'+ip);
+        assert(await frame.locator('#access-enabled').isChecked());
+        assert(await frame.locator('#access-save').isEnabled());
+        const writes=calls.filter(c=>c.url.startsWith('/api/settings/access')&&c.method!=='GET');
+        assert.equal(writes.length,1); assert.equal(writes[0].method,'POST'); assert.deepEqual(writes[0].body,{});
+        assert.match(await frame.locator('#access-message').textContent(), /开启免密后生效.*未保存/);
+        await page.route('**/api/settings/access', route=>route.fulfill({status:412,json:{...after,etag:'"newer"',ip_allowlist:[...after.ip_allowlist,'192.0.2.8'],error:'access_changed'}}));
+        await frame.locator('#access-save').click();
+        await frame.locator('#access-message').filter({hasText:'请核对'}).waitFor();
+        assert((await frame.locator('#access-rules').inputValue()).endsWith('\n192.0.2.8'));
+    }],
     ['desktop header keeps navigation and exposes all actions without requests', async ({ page, frame, calls }) => {
         assert.equal(await frame.locator('.nav-item').count(), 4);
         assert(await frame.locator('#settings-password').isVisible());

@@ -229,6 +229,9 @@
 .ivnc-toolbar .toolbar-info { right: 0; width: max-content; }
 .ivnc-toolbar .toolbar-notice { right: 8px; max-width: min(420px, calc(100vw - 16px)); }
 .ivnc-toolbar .toolbar-rename { width: 320px; z-index: 3; white-space: normal; }
+.toolbar-app-menu-shield { position: fixed; inset: 0; z-index: 1920; touch-action: none; }
+.toolbar-app-menu-shield[hidden] { display: none; }
+.taskbar.ivnc-toolbar.app-menu-open { z-index: 1921; }
 .ivnc-toolbar .toolbar-app-menu {
     z-index: 3;
     display: grid;

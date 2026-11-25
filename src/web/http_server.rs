@@ -144,6 +144,10 @@ pub async fn run_http_server_with_webrtc(
                 .put(auth::access_put)
                 .layer(DefaultBodyLimit::max(32768)),
         )
+        .route(
+            "/api/settings/access/current-ip",
+            post(auth::access_add_current).layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/health", get(health_handler))
         .route("/version", get(public_version_handler))
         .route("/metrics", get(metrics_handler))
@@ -2595,6 +2599,7 @@ mod tests {
             "/api/restart",
             "/api/upgrade/ws",
             "/api/settings/access",
+            "/api/settings/access/current-ip",
             "/terminal/ws",
         ] {
             assert!(!worker_path_allowed(path), "{path}");
@@ -2608,9 +2613,11 @@ mod tests {
             axum::http::header::REFERER,
             "http://localhost:8008/proxy/".parse().unwrap(),
         );
-        assert!(!super::is_miao_request("/api/settings/access", &headers));
+        for path in ["/api/settings/access", "/api/settings/access/current-ip"] {
+            assert!(!super::is_miao_request(path, &headers));
+            assert!(!is_console_management_path(path));
+        }
         assert!(super::is_miao_request("/api/config", &headers));
-        assert!(!is_console_management_path("/api/settings/access"));
     }
 
     #[test]

@@ -823,6 +823,15 @@ function InitUI() {
 		display: block;
 		background: #101214;
 	}
+	.web-settings-modal.app-dialog-only {
+		inset: var(--ivnc-settings-visible-top, 0px) 0 auto;
+		width: 100%; height: var(--ivnc-settings-visible-height, 100dvh);
+		transform: none; border: 0; border-radius: 0; box-shadow: none;
+		z-index: 1950; background: transparent;
+	}
+	.web-settings-modal.app-dialog-only > .web-terminal-header { display: none; }
+	.web-settings-modal.app-dialog-only .web-console-body,
+	.web-settings-modal.app-dialog-only .web-console-frame { background: transparent; }
 	.connect-page {
 		position: fixed;
 		inset: 0;
@@ -1532,6 +1541,10 @@ function createConsoleModalController(consoleEnabled) {
 	let destroyed = false;
 	let controller = null;
 	let childBridge = null;
+	let pendingAction = null;
+	let actionOpener = null;
+	let frameLoadFailed = false;
+	const frameUrl = `${getBasePath()}${consoleEnabled ? 'console' : 'settings.html'}`;
 
 	const consoleSvgSmall = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6 1.8 1.8 0 0 0-.5 1.3V21a2 2 0 1 1-4 0v-.1A1.8 1.8 0 0 0 8.5 19.4a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1 1.8 1.8 0 0 0-1.3-.5H2.6a2 2 0 1 1 0-4h.1A1.8 1.8 0 0 0 4.6 8.5a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6 1.8 1.8 0 0 0 .5-1.3V2.6a2 2 0 1 1 4 0v.1A1.8 1.8 0 0 0 15.5 4.6a1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.2.37.57.6 1 .6h.1a2 2 0 1 1 0 4h-.1a1.8 1.8 0 0 0-1 .5z"/></svg>`;
 
@@ -1541,7 +1554,13 @@ function createConsoleModalController(consoleEnabled) {
 
 	function ensureModal() {
 		if (destroyed) return;
-		if (modal) return;
+		if (modal) {
+			if (frameLoadFailed) {
+				frameLoadFailed = false;
+				frame.src = frameUrl;
+			}
+			return;
+		}
 		updateOverlayModalScale();
 
 		modal = document.createElement('div');
@@ -1557,13 +1576,14 @@ function createConsoleModalController(consoleEnabled) {
 				<iframe id="settings-frame" class="web-console-frame" title="${tt('consoleFrameTitle')}"></iframe>
 			</div>
 		`;
-		document.body.appendChild(modal);
 		frame = modal.querySelector('.web-console-frame');
 		childBridge = createConsoleShield(modal, frame);
+		frame.addEventListener('load', onFrameLoad);
 		setLiveText(modal.querySelector('.web-terminal-title span'), 'consoleTitle');
 		setLiveTitle(modal.querySelector('#web-console-minimize'), 'minimize');
 		setLiveTitle(frame, 'consoleFrameTitle');
-		frame.src = `${getBasePath()}${consoleEnabled ? 'console' : 'settings.html'}`;
+		frame.src = frameUrl;
+		document.body.appendChild(modal);
 		modal.querySelector('#web-console-minimize').addEventListener('click', (e) => {
 			e.stopPropagation();
 			minimize();
@@ -1573,6 +1593,15 @@ function createConsoleModalController(consoleEnabled) {
 	function show() {
 		ensureModal();
 		if (!modal) return;
+		if (modal.classList.contains('app-dialog-only')) {
+			if (childBridge.childState()?.locked) { childBridge.childState().focus(); return; }
+			minimize();
+		}
+		if (frame.hasAttribute('data-app-dialog')) {
+			frame.removeAttribute('data-app-dialog');
+			frame.contentDocument?.body?.classList.remove('app-dialog-only');
+			frame.contentDocument?.defaultView?.dispatchEvent(new Event('ivnc-console-show'));
+		}
 		minimizeOverlayControllersExcept(controller);
 		updateOverlayModalScale();
 		modal.classList.remove('minimized');
@@ -1584,7 +1613,15 @@ function createConsoleModalController(consoleEnabled) {
 	function minimize() {
 		if (!modal) return;
 		if (childBridge?.childState()?.locked) { childBridge.childState().focus(); return; }
+		pendingAction = null;
 		modal.classList.add('minimized');
+		if (modal.classList.contains('app-dialog-only')) {
+			modal.classList.remove('app-dialog-only');
+			const child = childBridge?.childState();
+			if (child?.id) child.dismiss(child.id);
+			if (actionOpener?.isConnected) actionOpener.focus({ preventScroll: true });
+			actionOpener = null;
+		}
 		childBridge?.syncChild();
 		consoleBtn?.classList.remove('active');
 	}
@@ -1602,6 +1639,8 @@ function createConsoleModalController(consoleEnabled) {
 	function destroy() {
 		if (destroyed) return;
 		destroyed = true;
+		pendingAction = actionOpener = null;
+		frame?.removeEventListener('load', onFrameLoad);
 		childBridge?.destroy();
 		unregisterOverlayController(controller);
 		frame?.removeAttribute('src');
@@ -1611,27 +1650,60 @@ function createConsoleModalController(consoleEnabled) {
 	}
 
 	function isOpen() {
-		return !!modal && !modal.classList.contains('minimized');
+		return !!pendingAction || (!!modal && !modal.classList.contains('minimized'));
 	}
 
 	function contains(target) {
 		return !!modal && modal.contains(target);
 	}
 
-	function openAppAction(action, entry) {
+	function openAppAction(action, entry, opener, onUnavailable) {
 		if (!consoleEnabled || (action !== 'edit' && action !== 'logs') || !entry?.appId) return;
-		const deliver = () => frame?.contentWindow?.postMessage({
-			type: 'ivnc-toolbar-app-action', action, id: entry.appId, name: entry.appName || entry.label,
-		}, window.location.origin);
-		if (frame && frame.dataset.appActionBound !== 'true') {
-			frame.dataset.appActionBound = 'true';
-			frame.addEventListener('load', () => { if (!modal?.classList.contains('minimized')) deliver(); });
-		}
-		deliver();
+		ensureModal();
+		if (!modal || childBridge.childState()?.locked) return;
+		minimizeOverlayControllersExcept(controller);
+		releaseOverlayInput();
+		actionOpener = opener || document.activeElement;
+		pendingAction = { action, id: entry.appId, name: entry.appName || entry.label, onUnavailable };
+		frame.setAttribute('data-app-dialog', '');
+		modal.classList.add('app-dialog-only', 'minimized');
+		consoleBtn?.classList.remove('active');
+		deliverAppAction();
+	}
+
+	function onFrameLoad() {
+		frameLoadFailed = consoleEnabled && !frame.contentDocument?.defaultView?.__ivncOpenToolbarAppAction;
+		if (frameLoadFailed && pendingAction) {
+			const { onUnavailable } = pendingAction;
+			minimize();
+			onUnavailable?.();
+		} else deliverAppAction();
+	}
+
+	function deliverAppAction() {
+		if (!pendingAction) return;
+		const doc = frame.contentDocument;
+		const open = doc?.defaultView?.__ivncOpenToolbarAppAction;
+		if (!open) return;
+		doc.body.classList.add('app-dialog-only');
+		open(pendingAction);
+		pendingAction = null;
+		const child = childBridge.childState();
+		if (!child?.id) { minimize(); return; }
+		modal.classList.remove('minimized');
+		childBridge.syncChild();
+		child.focus();
+	}
+
+	function syncChild(source) {
+		if (!frame || source !== frame.contentWindow) return;
+		if (modal.classList.contains('app-dialog-only') && !pendingAction && !childBridge.childState()?.id) {
+			minimize();
+		} else childBridge.syncChild(source);
 	}
 
 	controller = registerOverlayController({ setButton, toggle, show, minimize, destroy, isOpen, contains, openAppAction,
-		childState: () => childBridge?.childState(), syncChild: source => childBridge?.syncChild(source) });
+		childState: () => childBridge?.childState(), syncChild });
 	return controller;
 }
 
@@ -3235,24 +3307,18 @@ export default function webrtc() {
 				activateWindow: (id, key) => {
 					input?.resetScroll();
 					if (!webrtc.sendDataChannelMessage(key ? `focus-key,${key}` : `focus,${id}`)) return false;
-					if (appStreams?.coversDesktop()) appStreams.activate(null);
+					appStreams?.activate(null);
 					input?.restoreImeFocus(true);
 					return true;
 				},
-				onAppAction: (action, entry) => {
-					if (action !== 'edit' && action !== 'logs') return;
-					proxyController.minimize();
-					terminalController.minimize('auto');
-					consoleController.show();
-					consoleController.openAppAction(action, entry);
-				},
+				onAppAction: consoleController.openAppAction,
 				onInteraction: (active) => active ? showTaskbar() : hideTaskbar(),
 			});
 			// Pin button (first element in taskbar)
 			let taskbarPinned = getBoolParam('taskbar_pinned', true);
 			taskbarVisibility?.destroy();
 			taskbarVisibility = createToolbarVisibility({ element: taskbar, pinned: taskbarPinned,
-				interacting: () => !!toolbarController?.interacting(), onChange: () => viewportController?.layout() });
+				interacting: () => toolbarController?.interacting() || toolbarController?.holdingNotice(), onChange: () => viewportController?.layout() });
 			// SVG icons for pin states
 			// Unpinned: tilted pin (📌 style)
 			const pinSvgUnpinned = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><g transform="rotate(-45 12 12)"><path d="M12 17v5"/><path d="M9 11V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v7"/><path d="M5 15h14"/><path d="M9 11l-2 4h10l-2-4"/></g></svg>`;

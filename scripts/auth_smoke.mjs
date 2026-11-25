@@ -109,6 +109,21 @@ async function formLogin(page, server, next = '/') {
     await page.waitForURL(server.origin + next);
     await page.locator(next === '/console' ? '#nav-overview' : '#taskbar').waitFor();
 }
+async function openSettings(page) {
+    const gear = page.locator('#console-btn');
+    await gear.waitFor({ state: 'attached' });
+    if (!await gear.isVisible()) {
+        const assist = page.locator('.toolbar-assist');
+        if (await assist.isVisible()) {
+            await assist.click();
+            const more = page.locator('.toolbar-assist-pager[data-page="more"]');
+            while (!await gear.isVisible() && await more.isVisible()) await more.click();
+        } else {
+            await page.locator('.toolbar-more').click();
+        }
+    }
+    await gear.click();
+}
 async function confirmShutdown(page, scope, server) {
     page.setDefaultTimeout(15000);
     await scope.locator('#settings-shutdown').click();
@@ -184,7 +199,7 @@ try {
             assert.equal((await page.evaluate(async () => (await (await fetch('/auth/session')).json()).kind)), 'session');
             pass(`${tag}: real login form, mobile layout, errors and HttpOnly Cookie attributes`);
             assert.equal(await page.locator('#taskbar #signout-btn, #taskbar #update-btn, #taskbar [title="修改密码"], #taskbar [title="Change password"]').count(), 0);
-            await page.locator('.toolbar-tools > #console-btn').click();
+            await openSettings(page);
             const settings = page.frameLocator('#settings-frame');
             await settings.locator('#settings-password').waitFor();
             assert(await settings.locator('#settings-update').isVisible());
@@ -319,7 +334,7 @@ try {
     const settingsBrowser = await engines.chromium.launch({ executablePath: process.env.CHROME_BIN || '/usr/bin/google-chrome', args: ['--no-sandbox', '--disable-dev-shm-usage'] }); browsers.push(settingsBrowser);
     const settingsContext = await settingsBrowser.newContext({ locale: 'zh-CN' }), settingsPage = await settingsContext.newPage();
     await formLogin(settingsPage, restricted);
-    await settingsPage.locator('.toolbar-tools > #console-btn').click();
+    await openSettings(settingsPage);
     const settings = settingsPage.frameLocator('#settings-frame');
     await settings.locator('#settings-password').waitFor();
     assert((await settingsPage.locator('#settings-frame').getAttribute('src')).endsWith('/settings.html'));
@@ -332,7 +347,7 @@ try {
     restricted.password = 'new-settings-password';
     await formLogin(settingsPage, restricted);
     pass('console-disabled settings retains real password changes and cross-tab session revocation');
-    await settingsPage.locator('.toolbar-tools > #console-btn').click();
+    await openSettings(settingsPage);
     await confirmShutdown(settingsPage, settingsPage.frameLocator('#settings-frame'), restricted);
     pass('console-disabled settings confirms shutdown and the isolated process exits cleanly');
     await settingsContext.close(); await settingsBrowser.close();
@@ -345,6 +360,12 @@ try {
     assert.equal(await noAuthPage.locator('#settings-password').isVisible(), false);
     assert.equal(await noAuthPage.locator('#signout-btn').isVisible(), false);
     assert.equal((await request(open, '/api/shutdown', {method:'POST',headers:{Origin:'http://foreign.test'}})).status, 403);
+    for (const [method, endpoint, body] of [
+        ['POST', '/api/settings/access/current-ip', {}],
+        ['PUT', '/api/settings/access', {enabled:false, ip_allowlist:[]}],
+    ]) {
+        assert.equal((await request(open, endpoint, {method, headers:{Origin:'http://foreign.test'}, body})).status, 403);
+    }
     await confirmShutdown(noAuthPage, noAuthPage, open);
     await noAuthBrowser.close();
     pass('authentication-disabled installations retain service controls and reject cross-origin shutdown');

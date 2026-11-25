@@ -810,6 +810,7 @@ function switchSection(section) {
 }
 
 async function loadSection(section = activeSection) {
+    if (window.frameElement?.hasAttribute('data-app-dialog')) return;
     if (section === 'overview') await loadOverview();
     if (section === 'apps') await load();
     if (section === 'settings') await loadSettings();
@@ -1505,15 +1506,17 @@ function showAdd() {
     document.getElementById('f-name').focus();
 }
 
-function toolbarAppAction(event) {
-    if (event.origin !== window.location.origin || event.source !== window.parent) return;
-    const message = event.data || {};
-    if (message.type !== 'ivnc-toolbar-app-action' || typeof message.id !== 'string') return;
-    if (message.action === 'edit') showEdit(message.id);
-    else if (message.action === 'logs') showLogs(message.id, message.name || message.id);
+function openToolbarAppAction({ action, id, name }) {
+    if (typeof id !== 'string' || !id) return;
+    if (action === 'edit') showEdit(id);
+    else if (action === 'logs') showLogs(id, name || id);
 }
 
-window.addEventListener('message', toolbarAppAction);
+window.addEventListener('message', event => {
+    if (event.origin === location.origin && event.source === parent && event.data?.type === 'ivnc-toolbar-app-action') {
+        openToolbarAppAction(event.data);
+    }
+});
 
 async function showEdit(id) {
     const session = openAppDialog();
@@ -2457,12 +2460,15 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) {
         console.error('[console] applyTranslations failed:', e);
     }
+    window.__ivncOpenToolbarAppAction = openToolbarAppAction;
+    window.addEventListener('ivnc-console-show', () => loadSection());
     loadSection();
     setInterval(() => {
+        if (window.frameElement?.hasAttribute('data-app-dialog')) return;
         if (activeSection === 'apps') load();
         if (activeSection === 'overview') loadOverview();
     }, 5000);
     setInterval(() => {
-        if (activeSection === 'overview') updateOverviewMeta();
+        if (activeSection === 'overview' && !window.frameElement?.hasAttribute('data-app-dialog')) updateOverviewMeta();
     }, 1000);
 });

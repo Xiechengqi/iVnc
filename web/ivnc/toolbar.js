@@ -1,8 +1,9 @@
 // Owns toolbar DOM, display order and gestures. Stream views remain owned by
 // app-streams.js; moving tabs never moves or recreates an application's iframe.
 import toolbarStyles from './toolbar.css?inline';
-import { getLang, onLangChange, serverErrorText } from './lib/i18n.js?v=1';
+import { appText, getLang, onLangChange, remoteStateText, serverErrorText } from './lib/i18n.js?v=1';
 import { createOrderNotifications } from './app-order.js';
+import { releaseOverlayInput } from './overlay-manager.js';
 
 const STRINGS = {
     zh: { apps: '应用', previous: '向左滚动应用', next: '向右滚动应用', more: '更多工具',
@@ -12,7 +13,9 @@ const STRINGS = {
         latest: '当前名称：', changed: '应用名已发生变化。请核对当前名称，再次保存以使用你的输入。',
         invalid: '名称不能为空、不能包含换行或控制字符，且不能超过 256 个 UTF-8 字节。',
         menu: '应用操作', stop: '停止', restart: '重启', logs: '日志', edit: '编辑', renameAction: '重命名',
-        stopped: '应用已停止', restarted: '应用已重启', actionFailed: '操作失败：', manageUnavailable: '当前页面不能打开控制台' },
+        reconnect: '重新连接', reconnecting: '正在重新连接…', reconnected: '已重新发起连接',
+        restarting: '正在重启…', stopping: '正在停止…', unconfirmed: '未收到操作结果', currentState: '当前状态',
+        stopped: '应用已停止', restarted: '应用已重启', actionFailed: '操作失败：', manageUnavailable: '无法打开应用弹窗，请重试。' },
     en: { apps: 'Applications', previous: 'Scroll apps left', next: 'Scroll apps right', more: 'More tools',
         morePage: 'More', backPage: 'Back', assist: 'Accessibility shortcut',
         move: 'Hold and drag the tab left or right to reorder, or use left/right arrow keys', saved: 'Application order saved', failed: 'Could not save application order', network: 'Network status',
@@ -20,7 +23,9 @@ const STRINGS = {
         latest: 'Current name: ', changed: 'The application name changed. Review the current name, then save again to use your draft.',
         invalid: 'Enter a name without line breaks or control characters, up to 256 UTF-8 bytes.',
         menu: 'Application actions', stop: 'Stop', restart: 'Restart', logs: 'Logs', edit: 'Edit', renameAction: 'Rename',
-        stopped: 'Application stopped', restarted: 'Application restarted', actionFailed: 'Action failed: ', manageUnavailable: 'The console is not available on this page' }
+        reconnect: 'Reconnect', reconnecting: 'Reconnecting…', reconnected: 'Reconnection requested',
+        restarting: 'Restarting…', stopping: 'Stopping…', unconfirmed: 'Operation result unconfirmed', currentState: 'Current status',
+        stopped: 'Application stopped', restarted: 'Application restarted', actionFailed: 'Action failed: ', manageUnavailable: 'Could not open the application dialog. Please try again.' }
 };
 
 export function createToolbar({ element, canReorder = false, canRename = false, activateWindow, onInteraction = () => {}, onAppAction = null }) {
@@ -82,6 +87,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const renameCancel = make('button', 'toolbar-rename-cancel', renameActions); renameCancel.type = 'button';
     const renameSave = make('button', 'toolbar-rename-save', renameActions); renameSave.type = 'button';
     const appMenuPanel = make('div', 'toolbar-app-menu', element);
+    const appMenuShield = make('div', 'toolbar-app-menu-shield allow-native-input', document.body);
+    appMenuShield.hidden = true;
     appMenuPanel.hidden = true;
     appMenuPanel.setAttribute('role', 'menu');
     const appMenuActions = ['stop', 'restart', 'logs', 'edit', 'rename'];
@@ -102,7 +109,9 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const toolEntries = [], nodes = new Map();
     let entries = [], confirmed = { ordered_ids: [], order_revision: -1 }, pendingIds = null;
     let drag = null, saving = false, destroyed = false, ghost = null, frame = 0, noticeTimer;
-    let lastActive = null, editor = null, renameBusy = false, appMenu = null, actionBusy = false;
+    let lastActive = null, editor = null, renameBusy = false, appMenu = null;
+    let noticeHoldsToolbar = false;
+    const pendingAppActions = new Set();
     let press = null, pressTimer, paintPending = false, suppressedPointer = null;
     let navigation = null, navigationTimer;
     const ASSIST_KEY = 'ivnc.toolbar-assist.v1';
@@ -152,7 +161,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         const changed = !!navigation;
         clearTimeout(navigationTimer);
         navigation = null;
-        if (hideNotice) { clearTimeout(noticeTimer); notice.hidden = true; }
+        if (hideNotice && !noticeHoldsToolbar) clearNotice();
         if (changed && repaint && !destroyed) paint();
     }
 
@@ -260,6 +269,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (!appMenu) return;
         const state = appMenu; appMenu = null;
         appMenuPanel.hidden = true;
+        appMenuShield.hidden = true;
+        element.classList.remove('app-menu-open');
         if (restoreFocus) nodes.get(state.key)?.focus({ preventScroll: true });
         if (!editor) onInteraction(false);
     }
@@ -267,7 +278,8 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     function menuActions(entry) {
         const actions = [];
         if (entry.kind !== 'cli') {
-            actions.push(entry.running ? 'stop' : 'restart');
+            if (entry.running) actions.push('stop');
+            actions.push('restart');
             if (entry.kind !== 'remote') actions.push('logs');
         }
         actions.push('edit', 'rename');
@@ -279,11 +291,13 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         const entry = entries.find(e => e.key === appMenu.key && e.appId === appMenu.id);
         if (!entry?.canManage) { closeAppMenu(); return; }
         appMenu.entry = entry;
+        const actionBusy = pendingAppActions.has(entry.appId);
         const available = new Set(menuActions(entry));
         for (const [action, button] of appMenuButtons) {
             button.hidden = !available.has(action);
-            button.disabled = actionBusy || (action === 'rename' && (!canRename || !entry.canRename));
-            button.textContent = tr(action === 'rename' ? 'renameAction' : action);
+            button.disabled = (actionBusy && (action === 'stop' || action === 'restart')) || (action === 'rename' && (!canRename || !entry.canRename));
+            const key = action === 'restart' && entry.kind === 'remote' ? 'reconnect' : action;
+            button.textContent = tr(key === 'rename' ? 'renameAction' : key);
         }
         appMenuPanel.setAttribute('aria-busy', String(actionBusy));
         placePanel(appMenuPanel, entry.key);
@@ -294,15 +308,18 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (!canRename || !entry?.canManage || !entry.appId || destroyed) return false;
         closeEditor(); closeAppMenu(false); cancelDrag(); closeMenu(); closeInfo();
         appMenu = { id: entry.appId, key: entry.key, entry };
-        appMenuPanel.hidden = false;
+        appMenuPanel.hidden = appMenuShield.hidden = false;
+        element.classList.add('app-menu-open');
+        releaseOverlayInput();
         paintAppMenu(); onInteraction(true);
-        appMenuButtons.get(menuActions(entry)[0])?.focus({ preventScroll: true });
+        appMenuPanel.querySelector('button:not([hidden]):enabled')?.focus({ preventScroll: true });
         return true;
     }
 
     async function runAppAction(action) {
-        if (!appMenu || actionBusy || destroyed) return;
+        if (!appMenu || destroyed) return;
         const state = appMenu, entry = state.entry;
+        if (!menuActions(entry).includes(action) || appMenuButtons.get(action)?.disabled) return;
         if (action === 'rename') {
             const node = nodes.get(state.key);
             closeAppMenu(false);
@@ -311,24 +328,47 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         }
         if (action === 'edit' || action === 'logs') {
             closeAppMenu(true);
-            if (typeof onAppAction === 'function') onAppAction(action, entry);
-            else notify(tr('manageUnavailable'), true);
+            const unavailable = () => notify(tr('manageUnavailable'), true);
+            if (onAppAction) onAppAction(action, entry, nodes.get(state.key), unavailable);
+            else unavailable();
             return;
         }
-        actionBusy = true; paintAppMenu();
-        const controller = new AbortController();
+        if (pendingAppActions.has(state.id)) return;
+        pendingAppActions.add(state.id);
+        closeAppMenu(true);
+        const finishRestart = action === 'restart' && entry.beginRestart?.();
+        let reconnectView = false;
+        const url = `/api/apps/${encodeURIComponent(state.id)}`;
+        const remote = entry.kind === 'remote';
+        const report = message => {
+            if (destroyed) return;
+            notify(`${entry.appName || entry.label} · ${message}`, true);
+        };
+        report(tr(action === 'stop' ? 'stopping' : remote ? 'reconnecting' : 'restarting'));
         try {
-            await request(`/api/apps/${encodeURIComponent(state.id)}/${action}`, { method: 'POST' }, controller);
-            if (destroyed || appMenu !== state) return;
-            notify(tr(action === 'stop' ? 'stopped' : 'restarted'));
-            notice.hidden = false;
-            closeAppMenu(true);
+            await request(`${url}/${action}`, { method: 'POST' }, new AbortController(), 120000);
+            reconnectView = true;
+            report(tr(action === 'stop' ? 'stopped' : remote ? 'reconnected' : 'restarted'));
         } catch (error) {
-            if (destroyed || appMenu !== state) return;
-            notify(`${tr('actionFailed')}${error.message}`, true);
+            if (destroyed) return;
+            if (error.status) report(tr('actionFailed') + error.message);
+            else {
+                // A lost response can follow a successful restart. Only read back state.
+                let details = tr('unconfirmed');
+                try {
+                    const app = await request(url);
+                    const status = remote ? remoteStateText(app.remote_state) : appText(app.status);
+                    reconnectView = remote ? ['connected', 'connecting'].includes(app.remote_state) : ['running', 'starting'].includes(app.status);
+                    if (status) details += ` · ${tr('currentState')} ${status}`;
+                } catch (_) {}
+                report(details);
+            }
         } finally {
-            actionBusy = false;
-            if (!destroyed && appMenu === state) paintAppMenu();
+            pendingAppActions.delete(state.id);
+            if (!destroyed) {
+                if (finishRestart) finishRestart(reconnectView);
+                paintAppMenu();
+            }
         }
     }
 
@@ -421,12 +461,22 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         }
     });
 
-    function notify(message, error = false) {
-        if (destroyed) return;
+    function clearNotice() {
         clearTimeout(noticeTimer);
+        notice.hidden = true;
+        if (noticeHoldsToolbar) { noticeHoldsToolbar = false; onInteraction(false); }
+    }
+
+    function notify(message, visible = false) {
+        if (destroyed) return;
+        clearNotice();
         notice.textContent = message;
-        notice.hidden = !error;
-        noticeTimer = setTimeout(() => { notice.hidden = true; }, 5000);
+        notice.hidden = !visible;
+        if (visible) {
+            noticeHoldsToolbar = true;
+            onInteraction(true);
+            noticeTimer = setTimeout(clearNotice, 5000);
+        }
     }
 
     function acceptOrder(data) {
@@ -695,9 +745,9 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         if (open) onInteraction(false);
     }
 
-    async function request(url, options = {}, controller = new AbortController()) {
+    async function request(url, options = {}, controller = new AbortController(), timeout = 10000) {
         requests.add(controller);
-        const timer = setTimeout(() => controller.abort(), 10000);
+        const timer = setTimeout(() => controller.abort(), timeout);
         try {
             const response = await fetch(url, { ...options, signal: controller.signal });
             const body = await response.json();
@@ -856,13 +906,13 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     listen(viewport, 'lostpointercapture', (event) => {
         if (event.target === viewport && drag?.started) cancelDrag();
     });
-    listen(window, 'blur', () => { cancelAssistDrag({ pointerId: assistDrag?.pointerId }); cancelInteraction(); });
+    listen(window, 'blur', () => { closeAppMenu(); cancelAssistDrag({ pointerId: assistDrag?.pointerId }); cancelInteraction(); });
     listen(assistQuery, 'change', () => { closeMenu(); layout(); });
     if (window.visualViewport) {
         listen(window.visualViewport, 'resize', () => { placeAssist(); placeAssistMenu(); });
         listen(window.visualViewport, 'scroll', () => { placeAssist(); placeAssistMenu(); });
     }
-    listen(document, 'visibilitychange', () => { if (document.hidden) { cancelAssistDrag({ pointerId: assistDrag?.pointerId }); cancelInteraction(); closeMenu(); resetNavigation(); } });
+    listen(document, 'visibilitychange', () => { if (document.hidden) { closeAppMenu(); cancelAssistDrag({ pointerId: assistDrag?.pointerId }); cancelInteraction(); closeMenu(); resetNavigation(); } });
     listen(document, 'keydown', (event) => {
         if (event.key !== 'Escape') return;
         if (event.isComposing || event.keyCode === 229) return;
@@ -971,9 +1021,23 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
     const closeMenuFromTool = (event) => { if (event.target.closest('.taskbar-pin')) closeMenu(); };
     listen(tools, 'click', closeMenuFromTool, { capture: true });
     listen(menu, 'click', closeMenuFromTool, { capture: true });
+    // Keep the shield through release so an iframe never receives half a click.
+    listen(appMenuShield, 'pointerdown', event => {
+        event.preventDefault(); event.stopPropagation();
+        appMenuShield.setPointerCapture(event.pointerId);
+    });
+    listen(appMenuShield, 'click', event => {
+        event.preventDefault(); event.stopPropagation(); closeAppMenu(true);
+    });
+    listen(appMenuShield, 'contextmenu', event => event.preventDefault());
+    listen(appMenuShield, 'pointerup', event => {
+        if (event.button !== 0) { event.preventDefault(); closeAppMenu(true); }
+    });
+    listen(document, 'pointerdown', event => {
+        if (appMenu && event.target !== appMenuShield && !appMenuPanel.contains(event.target)) closeAppMenu();
+    }, { capture: true });
     listen(document, 'pointerdown', (event) => {
         if (!renamePanel.contains(event.target)) closeEditor();
-        if (!appMenuPanel.contains(event.target)) closeAppMenu();
         if (!tools.contains(event.target) && !assist.contains(event.target) && !menu.contains(event.target)) closeMenu();
         if (!status.contains(event.target)) closeInfo();
     });
@@ -1041,7 +1105,7 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
         navigate(direction) {
             const entry = navigationTarget(direction);
             if (!entry || !activateEntry(entry)) return null;
-            clearTimeout(noticeTimer);
+            clearNotice();
             notice.textContent = entry.label;
             notice.hidden = false;
             noticeTimer = setTimeout(() => { notice.hidden = true; }, 1300);
@@ -1078,11 +1142,13 @@ export function createToolbar({ element, canReorder = false, canRename = false, 
             paint();
         },
         interacting: () => !!editor || !!appMenu || !!press || !!drag?.started || !!assistDrag?.moved || !menu.hidden || !info.hidden,
+        holdingNotice: () => noticeHoldsToolbar,
         destroy() {
             destroyed = true;
             clearTimeout(navigationTimer);
             cancelAnimationFrame(resizeFrame);
             closeEditor(); closeAppMenu(); cancelInteraction(); requests.forEach(controller => controller.abort()); events.abort(); resize.disconnect();
+            appMenuShield.remove();
             clearTimeout(noticeTimer); untranslate(); notifications.destroy();
             clearTimeout(assistHideTimer); assist.remove(); menu.remove(); element.remove(); nodes.clear();
         }

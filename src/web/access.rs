@@ -111,9 +111,13 @@ impl AccessPolicy {
         })
     }
 
+    pub fn covers(&self, ip: IpAddr) -> bool {
+        let ip = normalize_ip(ip);
+        self.networks.iter().any(|n| n.contains(&ip))
+    }
+
     pub fn matches(&self, ip: Option<IpAddr>) -> bool {
-        self.config.enabled
-            && ip.is_some_and(|ip| self.networks.iter().any(|n| n.contains(&normalize_ip(ip))))
+        self.config.enabled && ip.is_some_and(|ip| self.covers(ip))
     }
 
     pub fn load(path: &Path) -> Self {

@@ -224,7 +224,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 	}
 
     function focusFrame(s) {
-        if (document.hidden || !document.hasFocus() || multiApp.isEditing()
+        if (document.hidden || !document.hasFocus() || multiApp.isEditing() || document.querySelector('.toolbar-app-menu:not([hidden])')
             || document.documentElement.hasAttribute('data-ivnc-modal-blocked')) return;
         const target = document.activeElement;
         if (target?.closest?.('.web-terminal-modal, .clipboard-assist, .pwd-overlay, .update-overlay, .toolbar-rename')) return;
@@ -289,7 +289,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		release(s);
 		streams.delete(s.id);
 		s.wrap.remove();
-		if (activeId === s.id) activate(null);
+		if (activeId === s.id) activate(null, true);
 	}
 
 	function describe(s) {
@@ -371,9 +371,11 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		onChange();
 	}
 
-	function activate(id) {
+	function activate(id, keepPending = false) {
 		if (disposed) return;
+		if (!keepPending && pendingSelect?.id !== id) pendingSelect = null;
 		const next = (id && streams.get(id)) || null;
+		if (!next && !activeId && !previews.length) return;
 		previews = [];
 		activeId = next ? next.id : null;
 		if (next) next.unlocked = true;
@@ -393,8 +395,39 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		refresh();
 	}
 
-	// Taskbar `apps` push. Tabs appear without stealing focus unless the
-	// user just started the app from this page's console.
+	function selectPending() {
+		const intent = pendingSelect;
+		if (!intent || intent.phase === 'restarting') return;
+		if (Date.now() > intent.until) { pendingSelect = null; return; }
+		const s = streams.get(intent.id);
+		if (!s) return;
+		if (intent.phase !== 'reconnecting' || s.state === 'connected') pendingSelect = null;
+		if (s.id !== activeId) activate(s.id, true);
+	}
+
+	function beginRestart(s) {
+		const previousUrl = s.url;
+		// Keep the user's selection across the empty taskbar snapshot between stop and start.
+		const intent = activeId === s.id ? { id: s.id, phase: 'restarting' } : null;
+		if (intent) pendingSelect = intent;
+		return restarted => {
+			if (disposed) return;
+			if (intent && pendingSelect === intent) {
+				pendingSelect = restarted ? { id: s.id, phase: 'reconnecting', until: Date.now() + STARTED_SELECT_MS } : null;
+			}
+			if (!restarted) return;
+			if (streams.get(s.id) === s && s.url === previousUrl && wantsView(s)) {
+				// Some snapshots coalesce the stop/start. The old view token was still revoked.
+				release(s);
+				s.withdrawn = false;
+				s.delay = 0;
+				open(s);
+			}
+			selectPending();
+		};
+	}
+
+	// Taskbar pushes alone never select a new app.
 	function update(apps) {
 		order = [];
 		for (let app of apps) {
@@ -424,12 +457,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 		for (const s of Array.from(streams.values())) {
 			if (!order.includes(s.id)) remove(s);
 		}
-		if (pendingSelect && Date.now() > pendingSelect.until) pendingSelect = null;
-		if (pendingSelect && streams.has(pendingSelect.id)) {
-			const id = pendingSelect.id;
-			pendingSelect = null;
-			activate(id);
-		}
+		selectPending();
 		updatePresentation();
 		refreshCatalog();
 	}
@@ -453,6 +481,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 				statusText: text,
 				available: ready(s) && !s.withdrawn,
 				active: s.id === activeId, activate: () => activate(s.id),
+				beginRestart: () => beginRestart(s),
 			};
 		});
 	}
@@ -482,6 +511,7 @@ export function createAppStreams({ viewport, onChange, onEdgeHover, onFrameReady
 				} else if (message.state === 'connected') {
 					s.state = 'connected';
 					s.delay = 0;
+					if (pendingSelect?.phase === 'reconnecting' && pendingSelect.id === s.id) pendingSelect = null;
 					refresh();
 				} else if (message.state === 'connecting' && s.state !== 'ended') {
 					s.state = 'connecting';

@@ -1,7 +1,7 @@
 //! Browser sessions are independent of HTTP Basic's browser credential cache.
 //! Only token digests are retained, in memory; a restart ends every session.
 
-use super::access::{normalize_ip, AccessConfig, AccessPolicy, TrustedProxies};
+use super::access::{normalize_ip, AccessConfig, AccessPolicy, TrustedProxies, ValidationError};
 use super::{http_server::HttpPeerAddr, SharedState};
 use crate::config::HttpConfig;
 use axum::{
@@ -78,6 +78,23 @@ pub struct AuthStore {
     trusted_proxies: TrustedProxies,
     access_path: PathBuf,
     access_writer: Mutex<()>,
+}
+
+enum AccessEdit {
+    Replace(AccessPolicy, Option<String>),
+    AddCurrent(IpAddr),
+}
+
+#[derive(Debug)]
+enum AccessWriteError {
+    Stale,
+    Invalid(ValidationError),
+    Storage(String),
+}
+
+fn access_etag(config: &AccessConfig) -> String {
+    let bytes = serde_json::to_vec(config).expect("IP access settings serialize to JSON");
+    format!("\"{:x}\"", Sha256::digest(bytes))
 }
 
 #[derive(Clone)]
@@ -310,13 +327,40 @@ impl AuthStore {
             "client_ip": client_ip,
             "peer_ip": normalize_ip(peer.0.ip()),
             "matches": inner.access.matches(client_ip),
+            "covered": client_ip.is_some_and(|ip| inner.access.covers(ip)),
+            "etag": access_etag(&inner.access.config),
         })
     }
 
-    fn apply_access(&self, policy: AccessPolicy) -> Result<(), String> {
-        // Serialize the durable commit and memory swap; failed saves leave both unchanged.
+    fn update_access(&self, edit: AccessEdit) -> Result<bool, AccessWriteError> {
+        // Read, modify and commit under the same writer lock, including full-form saves.
         let _writer = self.access_writer.lock().unwrap();
-        policy.save(&self.access_path)?;
+        let policy = {
+            let inner = self.inner.lock().unwrap();
+            match edit {
+                AccessEdit::AddCurrent(ip) => {
+                    if inner.access.covers(ip) {
+                        return Ok(false);
+                    }
+                    let mut config = inner.access.config.clone();
+                    config.ip_allowlist.push(normalize_ip(ip).to_string());
+                    AccessPolicy::parse(config).map_err(AccessWriteError::Invalid)?
+                }
+                AccessEdit::Replace(policy, expected) => {
+                    if let Some(expected) = expected {
+                        let current = access_etag(&inner.access.config);
+                        if expected != "*" && !expected.split(',').any(|tag| tag.trim() == current)
+                        {
+                            return Err(AccessWriteError::Stale);
+                        }
+                    }
+                    policy
+                }
+            }
+        };
+        policy
+            .save(&self.access_path)
+            .map_err(AccessWriteError::Storage)?;
         let mut inner = self.inner.lock().unwrap();
         inner.sessions.retain(|_, session| match session.source {
             LoginSource::Password => true,
@@ -324,7 +368,7 @@ impl AuthStore {
         });
         inner.access = policy;
         self.changes.send_modify(|v| *v = v.wrapping_add(1));
-        Ok(())
+        Ok(true)
     }
 
     pub fn change_password(&self, password: &str) {
@@ -583,7 +627,11 @@ pub async fn middleware(
             if unsafe_method && !miao && !csrf_matches(&context, req.headers()) {
                 return failure(StatusCode::FORBIDDEN, "csrf_invalid");
             }
-        } else if (state.config.http.basic_auth_enabled || req.uri().path() == "/api/shutdown")
+        } else if (state.config.http.basic_auth_enabled
+            || matches!(
+                req.uri().path(),
+                "/api/shutdown" | "/api/settings/access" | "/api/settings/access/current-ip"
+            ))
             && (websocket || unsafe_method)
             && !same_origin(req.headers(), secure, false)
         {
@@ -776,16 +824,63 @@ pub(crate) async fn access_put(
         Ok(policy) => policy,
         Err(error) => return no_store((StatusCode::BAD_REQUEST, Json(error)).into_response()),
     };
+    let expected = headers
+        .get(header::IF_MATCH)
+        .map(|v| v.to_str().unwrap_or("").to_owned());
+    write_access(
+        &state,
+        peer,
+        &headers,
+        AccessEdit::Replace(policy, expected),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AddCurrentIp {}
+
+pub(crate) async fn access_add_current(
+    State(state): State<Arc<SharedState>>,
+    Extension(peer): Extension<HttpPeerAddr>,
+    headers: HeaderMap,
+    Json(_): Json<AddCurrentIp>,
+) -> Response {
+    let Some(ip) = state.auth.client_ip(peer, &headers) else {
+        return failure(StatusCode::BAD_REQUEST, "access_source_unknown");
+    };
+    write_access(&state, peer, &headers, AccessEdit::AddCurrent(ip)).await
+}
+
+async fn write_access(
+    state: &SharedState,
+    peer: HttpPeerAddr,
+    headers: &HeaderMap,
+    edit: AccessEdit,
+) -> Response {
     let auth = state.auth.clone();
-    match tokio::task::spawn_blocking(move || auth.apply_access(policy)).await {
-        Ok(Ok(())) => {
-            log::info!("IP login policy updated through web settings");
-            no_store(Json(state.auth.access_status(peer, &headers)).into_response())
+    match tokio::task::spawn_blocking(move || auth.update_access(edit)).await {
+        Ok(Ok(changed)) => {
+            if changed {
+                log::info!("IP login policy updated through web settings");
+            }
+            let mut status = state.auth.access_status(peer, headers);
+            status["changed"] = json!(changed);
+            no_store(Json(status).into_response())
         }
-        result => {
-            log::warn!("Cannot save IP login policy: {result:?}");
+        Ok(Err(AccessWriteError::Stale)) => {
+            let mut status = state.auth.access_status(peer, headers);
+            status["error"] = json!("access_changed");
+            no_store((StatusCode::PRECONDITION_FAILED, Json(status)).into_response())
+        }
+        Ok(Err(AccessWriteError::Invalid(error))) => {
+            no_store((StatusCode::BAD_REQUEST, Json(error)).into_response())
+        }
+        Ok(Err(AccessWriteError::Storage(error))) => {
+            log::warn!("Cannot save IP login policy: {error}");
             failure(StatusCode::INTERNAL_SERVER_ERROR, "access_save_failed")
         }
+        Err(_) => failure(StatusCode::INTERNAL_SERVER_ERROR, "access_save_failed"),
     }
 }
 
@@ -1014,6 +1109,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_ip_additions_merge_under_the_writer_lock_and_preserve_the_switch() {
+        let store = store();
+        let config = AccessConfig {
+            enabled: false,
+            ip_allowlist: vec!["192.0.2.0/24".into()],
+        };
+        let etag = access_etag(&config);
+        store
+            .update_access(AccessEdit::Replace(
+                AccessPolicy::parse(config).unwrap(),
+                None,
+            ))
+            .unwrap();
+        let add = |ip: &str| {
+            store
+                .update_access(AccessEdit::AddCurrent(ip.parse().unwrap()))
+                .unwrap()
+        };
+        assert!(!add("::ffff:192.0.2.42"));
+        std::thread::scope(|scope| {
+            scope.spawn(|| assert!(add("198.51.100.4")));
+            scope.spawn(|| assert!(add("2001:db8::4")));
+        });
+        assert!(!add("2001:db8::4"));
+        assert!(matches!(
+            store.update_access(AccessEdit::Replace(AccessPolicy::default(), Some(etag))),
+            Err(AccessWriteError::Stale)
+        ));
+        let saved = AccessPolicy::load(&store.access_path);
+        assert!(!saved.config.enabled);
+        assert_eq!(saved.config.ip_allowlist.len(), 3);
+        assert!(saved.covers("198.51.100.4".parse().unwrap()));
+        assert!(saved.covers("2001:db8::4".parse().unwrap()));
+        std::fs::remove_dir_all(store.access_path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
     async fn ip_sessions_are_source_bound_and_policy_changes_revoke_only_removed_sources() {
         let s = store();
         let ip = Some("192.168.1.20".parse().unwrap());
@@ -1025,7 +1157,8 @@ mod tests {
             })
             .unwrap()
         };
-        s.apply_access(enabled("192.168.1.0/24")).unwrap();
+        s.update_access(AccessEdit::Replace(enabled("192.168.1.0/24"), None))
+            .unwrap();
         let (token, context) = s.ip_login(ip).unwrap();
         let headers = cookie(&s, &token);
         assert_eq!(context.method(), Some("ip_whitelist"));
@@ -1041,9 +1174,11 @@ mod tests {
         assert!(s.authenticate(&headers, ip).is_some()); // a foreign source cannot revoke the owner
         let (password, password_context) = s.login(ip.unwrap(), "user", "mypasswd").unwrap();
         assert_eq!(password_context.method(), Some("password"));
-        s.apply_access(enabled("192.168.0.0/16")).unwrap();
+        s.update_access(AccessEdit::Replace(enabled("192.168.0.0/16"), None))
+            .unwrap();
         assert!(context.remaining().is_some());
-        s.apply_access(enabled("192.168.2.0/24")).unwrap();
+        s.update_access(AccessEdit::Replace(enabled("192.168.2.0/24"), None))
+            .unwrap();
         tokio::time::timeout(Duration::from_millis(100), context.cancelled())
             .await
             .unwrap();
@@ -1052,7 +1187,8 @@ mod tests {
         assert!(password_context.remaining().is_some());
         assert!(s.authenticate(&basic(), None).is_some());
         assert!(s.ip_login(ip).is_err());
-        s.apply_access(AccessPolicy::default()).unwrap();
+        s.update_access(AccessEdit::Replace(AccessPolicy::default(), None))
+            .unwrap();
         std::fs::remove_dir_all(s.access_path.parent().unwrap()).unwrap();
     }
 
@@ -1065,7 +1201,7 @@ mod tests {
             ip_allowlist: vec!["192.168.1.0/24".into()],
         })
         .unwrap();
-        assert!(s.apply_access(enabled).is_err());
+        assert!(s.update_access(AccessEdit::Replace(enabled, None)).is_err());
         assert!(!s.inner.lock().unwrap().access.config.enabled);
         assert!(s.ip_login(Some("192.168.1.20".parse().unwrap())).is_err());
         assert!(s.inner.lock().unwrap().sessions.is_empty());

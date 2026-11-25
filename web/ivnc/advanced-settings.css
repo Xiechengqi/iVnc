@@ -24,5 +24,5 @@
 .scroll-control input { flex: 1; min-width: 0; min-height: 44px; margin: 0; accent-color: #0984e3; cursor: pointer; }
 .scroll-control output { min-width: 4em; text-align: right; font-variant-numeric: tabular-nums; font-size: 16px; color: #253244; }
 .scroll-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #636e72; font-size: 13px; }
-#scroll-reset { min-height: 44px; padding: 8px 14px; border: 1px solid #cbd5df; border-radius: 6px; background: #fff; color: #253244; font: inherit; cursor: pointer; }
-#scroll-reset:hover:enabled { background: #f1f5f9; }
+#scroll-reset, #access-add-current { min-height: 44px; padding: 8px 14px; border: 1px solid #cbd5df; border-radius: 6px; background: #fff; color: #253244; font: inherit; cursor: pointer; }
+#scroll-reset:hover:enabled, #access-add-current:hover:enabled { background: #f1f5f9; }

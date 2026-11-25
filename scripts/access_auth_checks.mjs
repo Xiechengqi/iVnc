@@ -8,6 +8,9 @@ export async function runAccessChecks({ startServer, stopServer, launchServer, r
     const update = (server, headers, enabled, ip_allowlist) => request(server, '/api/settings/access', {
         method: 'PUT', headers, body: { enabled, ip_allowlist },
     });
+    const addCurrent = (server, headers) => request(server, '/api/settings/access/current-ip', {
+        method: 'POST', headers, body: {},
+    });
     const auto = (server, headers = {}, manual = false) => request(server, '/auth/auto-login', {
         method: 'POST', headers: { Origin: server.origin, ...headers }, body: { manual },
     });
@@ -23,6 +26,16 @@ export async function runAccessChecks({ startServer, stopServer, launchServer, r
         assert.equal(initial.json.enabled, false);
         assert.deepEqual(initial.json.ip_allowlist, []);
         assert.equal((await request(server, '/api/settings/access')).status, 401);
+        assert.equal((await addCurrent(server, {})).status, 401);
+        assert.equal((await addCurrent(server, { Cookie: admin.Cookie, Origin: server.origin })).status, 403);
+        assert.equal((await addCurrent(server, { ...admin, Origin: 'https://foreign.test' })).status, 403);
+        assert.equal((await request(server, '/api/settings/access/current-ip', {
+            method:'POST', headers:admin, body:{client_ip:'192.0.2.10'},
+        })).status, 422);
+        const added = await addCurrent(server, admin);
+        assert.equal(added.status,200); assert.equal(added.json.enabled,false); assert.equal(added.json.covered,true);
+        assert.deepEqual(added.json.ip_allowlist,[ip]); assert.equal((await addCurrent(server, admin)).json.changed,false);
+        assert.equal((await update(server, {...admin,'If-Match':initial.json.etag}, true,['192.0.2.3'])).status,412);
         assert.equal((await auto(server)).status, 403);
         assert.equal((await update(server, { Cookie: admin.Cookie, Origin: server.origin }, true, [ip])).status, 403);
         assert.equal((await update(server, { Cookie: admin.Cookie, Origin: server.origin, Referer: server.origin + '/proxy/' }, true, [ip])).status, 403, 'Miao referer cannot bypass settings CSRF');
@@ -64,9 +77,11 @@ export async function runAccessChecks({ startServer, stopServer, launchServer, r
     }
 
     const proxy = await startServer('access-proxy', { host: '127.0.0.1', trustedProxies: ['127.0.0.1', '10.0.0.0/24'] });
-    assert.equal((await update(proxy, basic(proxy), true, ['192.168.1.20'])).status, 200);
-    assert.equal((await auto(proxy)).status, 403);
     const forwarded = { 'X-Forwarded-For': '192.168.1.20, 10.0.0.2' };
+    assert.equal((await addCurrent(proxy,basic(proxy))).json.error,'access_source_unknown');
+    assert.equal((await update(proxy, basic(proxy), true, ['2001:db8::1'])).status, 200);
+    assert.equal((await auto(proxy)).status, 403);
+    assert.deepEqual((await addCurrent(proxy,{...basic(proxy),...forwarded})).json.ip_allowlist,['2001:db8::1','192.168.1.20']);
     const proxiedSession = credentials(proxy, await auto(proxy, forwarded));
     assert.equal((await request(proxy, '/api/apps', { headers: { ...proxiedSession, ...forwarded } })).status, 200);
     assert.equal((await request(proxy, '/api/apps', { headers: { ...proxiedSession, 'X-Forwarded-For': '192.168.1.21' } })).status, 401);
@@ -174,13 +189,26 @@ export async function runAccessChecks({ startServer, stopServer, launchServer, r
     const minimal = await startServer('access-minimal', { consoleEnabled: false });
     const minimalAdmin = await loginApi(minimal);
     const currentIp = (await request(minimal, '/api/settings/access', { headers: minimalAdmin })).json.client_ip;
-    assert.equal((await update(minimal, minimalAdmin, true, [currentIp])).status, 200);
     const browser = await engines.chromium.launch({ executablePath: process.env.CHROME_BIN || '/usr/bin/google-chrome', args: ['--no-sandbox', '--disable-dev-shm-usage'] });
     browsers.push(browser);
     const minimalPage = await browser.newPage();
+    const [name, value] = minimalAdmin.Cookie.split('=');
+    await minimalPage.context().addCookies([{name, value, url:minimal.origin}]);
     await minimalPage.goto(minimal.origin + '/settings.html');
     await minimalPage.locator('#nav-advanced').click();await minimalPage.locator('#access-rules:enabled').waitFor();
     assert.equal(await minimalPage.locator('#access-client-ip').textContent(), currentIp);
+    await minimalPage.locator('#access-add-current').click();
+    await minimalPage.waitForFunction(ip => document.querySelector('#access-rules').value === ip, currentIp);
+    assert(await minimalPage.locator('#access-add-current').isDisabled());
+    assert(!(await minimalPage.locator('#access-enabled').isChecked()));
+    await minimalPage.locator('#access-enabled').check();
+    await minimalPage.locator('#access-save').click();
+    await waitFor('minimal settings enables passwordless sign-in', async () => (await request(minimal, '/auth/session')).json.auto_login_available);
+    await minimalPage.context().clearCookies();
+    await minimalPage.reload();
+    await minimalPage.locator('#nav-advanced').click();
+    await minimalPage.locator('#access-rules:enabled').waitFor();
+    assert.equal(await minimalPage.locator('#access-rules').inputValue(), currentIp);
     await browser.close();
     pass('console-disabled settings exposes the same authenticated IP controls');
 

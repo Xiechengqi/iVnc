@@ -170,6 +170,7 @@ const cases = [
     }],
     ['a coarse touch screen gathers the tools into a draggable circle and leaves the network status in the bar', async page => {
         await page.addInitScript(() => {
+            Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5, configurable: true });
             const native = window.matchMedia.bind(window);
             window.matchMedia = (text) => text === '(hover: none) and (pointer: coarse)'
                 ? { matches: true, media: text, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }
@@ -517,7 +518,7 @@ const cases = [
         await page.mouse.click(p.x,p.y,{button:'right'});
         const menu = page.locator('.toolbar-app-menu');
         assert.equal(await menu.isVisible(), true);
-        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '日志', '编辑', '重命名']);
+        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '重启', '日志', '编辑', '重命名']);
         await menu.locator('[data-action="rename"]').click();
         assert.equal(await page.locator('.toolbar-rename').isVisible(), true);
         await page.keyboard.press('Escape'); await row(page).focus(); await page.keyboard.press('F2');
@@ -533,7 +534,7 @@ const cases = [
             await menu.waitFor({state:'visible'});
         };
         await open();
-        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '日志', '编辑', '重命名']);
+        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '重启', '日志', '编辑', '重命名']);
         await menu.locator('[data-action="logs"]').click();
         assert.deepEqual(await page.evaluate(() => fixture.actions), [{action:'logs', id:'shared', name:'共享应用'}]);
         assert.equal(await menu.isVisible(), false);
@@ -549,7 +550,7 @@ const cases = [
         assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['重启', '日志', '编辑', '重命名']);
         const remote = await point(row(page, 'remote').locator('.toolbar-label'));
         await page.mouse.click(remote.x, remote.y, {button:'right'});
-        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '编辑', '重命名']);
+        assert.deepEqual(await menu.locator('button:visible').allTextContents(), ['停止', '重新连接', '编辑', '重命名']);
         await page.keyboard.press('Escape');
         await open();
         await menu.locator('[data-action="edit"]').click();
@@ -557,8 +558,101 @@ const cases = [
         await row(page, 'beta').click({button:'right'});
         await menu.locator('[data-action="stop"]').click();
         await page.waitForFunction(() => document.querySelector('.toolbar-app-menu').hidden);
+        await page.waitForFunction(() => document.querySelector('.toolbar-notice').textContent.includes('已停止'));
         assert.deepEqual(api.actions, [{action:'stop', id:'beta'}]);
         assert.deepEqual(await calls(page), []);
+    }],
+    ['outside clicks over an application iframe dismiss once without forwarding input', async page => {
+        await click(page, 'shared');
+        const frame = page.frameLocator('.app-stream.active iframe');
+        const surface = frame.locator('#app');
+        await surface.evaluate(el => {
+            el.dataset.events = '';
+            for (const type of ['pointerdown','pointerup','click']) el.addEventListener(type, () => { el.dataset.events += type + ' '; });
+        });
+        const p = await point(surface);
+        await row(page).click({button:'right'});
+        await page.mouse.click(p.x,p.y);
+        assert(await page.locator('.toolbar-app-menu').isHidden());
+        assert.equal(await surface.getAttribute('data-events'), '');
+        await page.mouse.click(p.x,p.y);
+        assert.equal(await surface.getAttribute('data-events'), 'pointerdown pointerup click ');
+        await row(page).click({button:'right'});
+        await click(page,'alpha');
+        assert(await page.locator('.toolbar-app-menu').isHidden());
+        assert.deepEqual(await calls(page), [1]);
+    }],
+    ['a pending app restart stays bound to its target across menu changes', async page => {
+        let complete, posts = 0;
+        await page.clock.install();
+        await page.route('**/api/apps/beta/restart', route => {
+            posts++;
+            return new Promise(resolve => { complete = async () => { await route.fulfill({json:{ok:true}}); resolve(); }; });
+        });
+        const menu = page.locator('.toolbar-app-menu');
+        await row(page).click({button:'right'});
+        await menu.locator('[data-action="restart"]').click();
+        await page.clock.fastForward(11000);
+        await row(page).click({button:'right'});
+        assert(await menu.locator('[data-action="restart"]').isDisabled());
+        await row(page,'alpha').click({button:'right'});
+        assert(await menu.locator('[data-action="restart"]').isEnabled());
+        await complete();
+        await page.locator('.toolbar-notice').filter({hasText:'已重启'}).waitFor();
+        assert.match(await page.locator('.toolbar-notice').textContent(), /Beta/);
+        assert.equal(posts,1);
+        assert.deepEqual(await calls(page),[]);
+        assert(await menu.isVisible());
+    }],
+    ['a lost restart response reads the target status without retrying the operation', async page => {
+        const requested = [];
+        await page.route('**/api/apps/beta/restart', route => {
+            requested.push(route.request().method());
+            return route.abort('failed');
+        });
+        await page.route('**/api/apps/beta', route => {
+            requested.push(route.request().method());
+            return route.fulfill({json:{status:'running'}});
+        });
+        await row(page).click({button:'right'});
+        await page.locator('.toolbar-app-menu [data-action="restart"]').click();
+        await page.locator('.toolbar-notice').filter({hasText:/Beta.*未收到操作结果.*运行中/}).waitFor();
+        assert.deepEqual(requested, ['POST', 'GET']);
+        assert.deepEqual(await calls(page), []);
+    }],
+    ['restart restores a selected stream across missing snapshots and respects a newer tab choice', async page => {
+        const snapshot = present => page.evaluate(includeShared => {
+            const remote = {id:'remote', name:'Remote', can_rename:true, kind:'remote', status:'connected'};
+            const shared = {id:'shared', name:'Shared', can_rename:true, kind:'shared', status:'running'};
+            fixture.streams.update(includeShared ? [shared, remote] : [remote]);
+            fixture.render();
+        }, present);
+        const restart = async () => {
+            await row(page, 'shared').click({button:'right'});
+            await page.locator('.toolbar-app-menu [data-action="restart"]').click();
+        };
+        for (const switchAway of [false, true]) {
+            await click(page, 'shared');
+            await page.locator('.app-stream.active iframe').waitFor();
+            let hold;
+            const pending = new Promise(resolve => { hold = resolve; });
+            await page.route('**/api/apps/shared/restart', hold, {times:1});
+            await restart();
+            const route = await pending;
+            await snapshot(false);
+            await route.fulfill({json:{ok:true}});
+            await page.locator('.toolbar-notice').filter({hasText:'已重启'}).waitFor();
+            if (switchAway) await click(page, 'alpha');
+            await snapshot(true);
+            assert.equal(await page.evaluate(() => fixture.streams.activeId()), switchAway ? null : 'shared');
+        }
+        // The server can also coalesce the snapshots so the tab never disappears.
+        await click(page, 'shared');
+        await page.locator('.app-stream.active iframe').waitFor();
+        await page.evaluate(() => { window.oldView = document.querySelector('.app-stream.active iframe'); });
+        await restart();
+        await page.waitForFunction(() => !oldView.isConnected && !!document.querySelector('.app-stream.active iframe'));
+        assert.equal(await page.evaluate(() => fixture.streams.activeId()), 'shared');
     }],
     ['touch tap activates once without initiating sorting', async (page, api) => {
         const p = await point(row(page).locator('.toolbar-label')); await page.touchscreen.tap(p.x,p.y);

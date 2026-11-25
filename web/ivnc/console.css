@@ -483,6 +483,8 @@ tr:hover { background-color: #f8f9fa; }
   justify-content: center;
 }
 .modal-bg.show { display: flex; }
+body.app-dialog-only { background: transparent; }
+body.app-dialog-only > .console-shell { display: none; }
 .modal-bg.loading .app-modal > :not(.modal-header):not(.modal-actions) { visibility: hidden; }
 .modal-bg.loading .app-modal { cursor: progress; }
 

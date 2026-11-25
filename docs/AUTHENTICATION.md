@@ -29,6 +29,8 @@ auth_session_max_seconds = 604800
 
 保存会规范化网段、去重并立即生效，持久化到 `$IVNC_HOME/access.json`（默认 `$HOME/.ivnc/access.json`）。最多 256 条不同规则；无效规则使整次保存失败，并标明输入行。文件以 0600 权限原子写入，失败时保留当前策略；启动时文件损坏或无法读取会关闭免密能力，密码认证继续可用。
 
+“加入当前 IP”沿用免密登录的来源识别规则，每次只追加一个 IPv4 或 IPv6 主机地址。已有单 IP 或 CIDR 覆盖当前地址时，重复操作无需写盘。其他设备经同一 NAT 或代理出口访问时，可能被识别为同一个 IP。
+
 登录页先检查现有会话，再通过同源 `POST /auth/auto-login` 建立 IP 会话，成功后恢复原访问地址。检查期间不显示密码表单。状态查询不创建会话，有效会话不会重复签发 Cookie。IP 会话继续使用原有 Cookie、CSRF、Origin、空闲／绝对超时及实例隔离机制，`kind` 仍为 `session`，`method` 为 `ip_whitelist`。
 
 IP 会话在每次 HTTP 请求和 WebSocket 握手时核验绑定 IP。来源变化后，仍在名单内可重新自动建立会话，否则要求密码。关闭免密或删除规则会撤销不再匹配的 IP 会话，并终止其信令、实际媒体／输入、应用视图、终端和代理 WebSocket；仍匹配的 IP 会话及密码会话保留。重启会结束内存会话，但保留白名单并允许重新自动登录。
@@ -77,8 +79,9 @@ Cookie 写请求要求同源 Origin 和 `X-IVNC-CSRF`。浏览器模块自动附
 | `GET /auth/session` | 返回 `enabled`、`authenticated`、`kind` 和当前会话的 `csrf`；不创建会话 |
 | `POST /auth/auto-login` | JSON `{manual:false}`；同源 Origin、匹配来源 IP；创建或复用会话。退出标记要求显式 `{manual:true}` |
 | `POST /auth/logout` | 同源 Origin、有效会话的 CSRF；撤销当前会话并设置退出标记 |
-| `GET /api/settings/access` | 认证后读取免密配置、当前客户端 IP 和匹配结果 |
-| `PUT /api/settings/access` | JSON `{enabled,ip_allowlist}`；认证和会话 CSRF 后校验、持久化并应用 |
+| `GET /api/settings/access` | 返回配置、当前客户端 IP、规则覆盖状态 `covered`、免密开关与规则均匹配的状态 `matches`，以及配置版本 `etag` |
+| `PUT /api/settings/access` | 校验并保存 JSON `{enabled,ip_allowlist}`。可把上次响应中的 `etag` 传入 `If-Match`，版本冲突返回 412 和最新配置 |
+| `POST /api/settings/access/current-ip` | 接收空 JSON 对象 `{}`。服务端解析并追加当前来源 IP，保留免密开关，返回最新配置及是否发生写入的 `changed` 字段。来源不明时返回 400 |
 
 状态接口另返回 `method`（`password` 或 `ip_whitelist`）、`auto_login_available` 和 `auto_login_suppressed`；未认证时不返回白名单内容。
 
