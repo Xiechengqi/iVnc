@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, openSync, closeSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { createRequire } from 'node:module';
@@ -74,7 +74,8 @@ const diagnostics = `(() => {
         output:window.__terminalOutput?.slice(-5),
         background:document.querySelector('[data-terminal-background]')?.dataset.terminalBackground,
         backgroundButton:document.getElementById('web-terminal-background')?.outerHTML,
-        composition:document.querySelector('.composition-view')?.outerHTML};
+        composition:document.querySelector('.composition-view')?.outerHTML,
+        status:document.querySelector('.web-terminal-status')?.textContent};
 })()`;
 async function assertLayout() {
     return waitFor('terminal fits with hidden but measurable helpers', async () => {
@@ -149,6 +150,31 @@ async function shortcut(letter, shift = false) {
     const modifiers = 2 | (shift ? 8 : 0);
     await key(shift ? letter.toUpperCase() : letter, 'Key' + letter.toUpperCase(), letter.toUpperCase().charCodeAt(0), modifiers);
 }
+async function selectTerminalRows(first, last = first, clickCount = 1) {
+    const [start, end] = await evaluate(`[${JSON.stringify(first)},${JSON.stringify(last)}].map(text => {
+        const row = [...document.querySelectorAll('.xterm-rows > div')].find(n => n.textContent.trimEnd() === text);
+        const r = row.getBoundingClientRect();
+        return {left:r.left+1, right:r.right-2, y:r.top+r.height/2};
+    })`);
+    const mouse = (type, x, y, buttons) => call('Input.dispatchMouseEvent', {type, x, y, button:'left', buttons, clickCount});
+    await mouse('mousePressed', start.left, start.y, 1);
+    if (clickCount === 1) await mouse('mouseMoved', end.right, end.y, 1);
+    await mouse('mouseReleased', clickCount === 1 ? end.right : start.left, end.y, 0);
+}
+async function pasteIntoLocalField() {
+    await evaluate(`(() => {
+        const field = document.createElement('textarea');
+        field.id = 'local-paste-check'; field.className = 'allow-native-input';
+        document.body.appendChild(field); field.focus();
+    })()`);
+    try {
+        await shortcut('v');
+        return await evaluate("document.getElementById('local-paste-check').value");
+    } finally {
+        await evaluate("document.getElementById('local-paste-check').remove()");
+        await focus();
+    }
+}
 async function wheel(deltaY) {
     const p = await evaluate(`(() => {const r=document.querySelector('.xterm-screen').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
     await call('Input.dispatchMouseEvent', {type:'mouseWheel', ...p, deltaX:0, deltaY});
@@ -167,7 +193,8 @@ try {
     await waitFor('server', async () => (await fetch(base + '/ui-config')).ok);
     launch(process.env.CHROME_BIN || 'google-chrome', ['--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',
         '--no-first-run','--no-default-browser-check','--disable-background-networking','--autoplay-policy=no-user-gesture-required',
-        `--user-data-dir=${path.join(work,'browser')}`,`--remote-debugging-port=${debugPort}`,'--window-size=1280,800',base], 'browser');
+        '--no-proxy-server','--host-resolver-rules=MAP ivnc-terminal.test 127.0.0.1',
+        `--user-data-dir=${path.join(work,'browser')}`,`--remote-debugging-port=${debugPort}`,'--window-size=1280,800','about:blank'], 'browser');
     const page = await waitFor('CDP target', async () => (await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json()).find(t => t.type === 'page'));
     socket = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((resolve,reject) => {socket.once('open',resolve);socket.once('error',reject);});
@@ -179,15 +206,15 @@ try {
     });
     socket.on('close', () => {for (const p of pending.values()) {clearTimeout(p.timer);p.reject(Error('CDP closed'));} pending.clear();});
     call = (method,params={}) => new Promise((resolve,reject) => {
-        const id=++sequence, timer=setTimeout(()=>{pending.delete(id);reject(Error(`CDP timeout: ${method}`));},20000);
+        const timeout = method === 'Page.navigate' ? 60000 : 20000;
+        const id=++sequence, timer=setTimeout(()=>{pending.delete(id);reject(Error(`CDP timeout: ${method}`));},timeout);
         pending.set(id,{resolve,reject,timer}); socket.send(JSON.stringify({id,method,params}));
     });
     evaluate = async expression => {
-        const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true,userGesture:true});
+        const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true,userGesture:false});
         if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result.value;
     };
     await call('Page.enable');
-    await call('Browser.grantPermissions',{origin:base,permissions:['clipboardReadWrite','clipboardSanitizedWrite']});
     const captureTerminal = `(() => {
         if (window.__terminalSockets) return;
         window.__terminalSockets=[];window.__terminalSent=[];window.__terminalOutput=[];
@@ -204,8 +231,44 @@ try {
         };
     })()`;
     await call('Page.addScriptToEvaluateOnNewDocument',{source:captureTerminal});
+    const lanAddress = Object.values(networkInterfaces()).flat().find(address => address.family === 'IPv4' && !address.internal);
+    // A loopback-only machine still gets an insecure origin through the test hostname.
+    const httpOrigin = `http://${lanAddress?.address || 'ivnc-terminal.test'}:${port}`;
+    await call('Page.navigate', {url:httpOrigin});
+    await waitFor('ordinary HTTP desktop', () => evaluate(`location.origin === ${JSON.stringify(httpOrigin)} && !!document.getElementById('terminal-btn')`));
+    assert.deepEqual(await evaluate('[isSecureContext, typeof navigator.clipboard]'), [false, 'undefined']);
+    await evaluate("document.getElementById('terminal-btn').click()");
+    await expectLine('IVNC_START_B');
+    await evaluate("window.__copies = 0; window.addEventListener('copy', () => ++window.__copies, true)");
+    await selectTerminalRows('IVNC_START_A', 'IVNC_START_B');
+    assert.equal(await evaluate("document.activeElement.classList.contains('xterm-helper-textarea')"), true);
+    assert.equal(await pasteIntoLocalField(), 'IVNC_START_A\nIVNC_START_B');
+    const highlight = "document.querySelector('.xterm-selection').childElementCount";
+    await waitFor('HTTP copy clears the highlight', () => evaluate(highlight + ' === 0'));
+    pass('ordinary HTTP copies a multiline selection into a local field without clipboard permissions');
+
+    await selectTerminalRows('IVNC_START_B', 'IVNC_START_B', 2);
+    assert.equal(await pasteIntoLocalField(), 'IVNC_START_B');
+    await waitFor('double-click clears the highlight', () => evaluate(highlight + ' === 0'));
+    await selectTerminalRows('IVNC_START_B', 'IVNC_START_B', 2);
+    await waitFor('selecting the same word twice clears the highlight again', () => evaluate(highlight + ' === 0'));
+    assert.equal(await evaluate('window.__copies'), 3, 'each released selection must copy exactly once');
+    assert.deepEqual(await evaluate("window.__terminalSent.filter(m => m.type === 'input')"), []);
+    pass('reselecting the same terminal word copies again without sending PTY input');
+
+    await evaluate("window.__originalExec = document.execCommand; document.execCommand = () => false");
+    await selectTerminalRows('IVNC_START_A', 'IVNC_START_A', 3);
+    await waitFor('blocked HTTP copy keeps the selection', () => evaluate(`document.querySelector('.web-terminal-status').classList.contains('error') && ${highlight} > 0`));
+    assert.equal(await pasteIntoLocalField(), 'IVNC_START_B');
+    await evaluate('document.execCommand = window.__originalExec');
+    await shortcut('c', true);
+    assert.equal(await pasteIntoLocalField(), 'IVNC_START_A');
+    assert.deepEqual(await evaluate("window.__terminalSent.filter(m => m.type === 'input')"), []);
+    pass('a refused HTTP copy keeps the clipboard and selection; Ctrl+Shift+C retries the selected line');
+
+    await call('Browser.grantPermissions',{origin:base,permissions:['clipboardReadWrite','clipboardSanitizedWrite']});
+    await call('Page.navigate', {url:base});
     await waitFor('desktop',()=>evaluate(`!!document.getElementById('terminal-btn') && window.__ivncWebRTC?._send_channel?.readyState==='open'`),60000);
-    await evaluate(captureTerminal);
     await evaluate(`(() => {window.__remoteInput=[];const rtc=window.__ivncWebRTC,send=rtc.sendDataChannelMessage.bind(rtc);
         rtc.sendDataChannelMessage=m=>{if(/^(kd|ku|u),/.test(m))window.__remoteInput.push(m);return send(m)};document.getElementById('terminal-btn').click();})()`);
     await expectLine('IVNC_START_B');
@@ -320,33 +383,29 @@ try {
 
     const copyText='COPY_FROM_TERMINAL';
     await command(`printf '${copyText}\\n'`); await expectLine(copyText);
-    const selection = await evaluate(`(() => {
-        const row=[...document.querySelectorAll('.xterm-rows > div')].find(n=>n.textContent.trimEnd()===${JSON.stringify(copyText)});
-        const r=row.getBoundingClientRect(),cols=window.__terminalSent.filter(m=>m.type==='resize').at(-1).cols;
-        return {x:r.left+1,y:r.top+r.height/2,end:r.left+r.width/cols*${copyText.length}+1};
-    })()`);
-    await evaluate(`navigator.clipboard.writeText('before-copy')`);
-    await call('Input.dispatchMouseEvent',{type:'mousePressed',x:selection.x,y:selection.y,button:'left',buttons:1,clickCount:1});
-    await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:selection.end,y:selection.y,button:'left',buttons:1});
-    await call('Input.dispatchMouseEvent',{type:'mouseReleased',x:selection.end,y:selection.y,button:'left',buttons:0,clickCount:1});
-    await waitFor('mouse selection copied automatically',async()=>await evaluate('navigator.clipboard.readText()')===copyText);
-    await waitFor('successful copy clears the selection',()=>evaluate(`document.querySelector('.xterm-selection')?.childElementCount===0`));
-    assert.deepEqual(await evaluate('window.__remoteInput'),[]);
+    await evaluate("navigator.clipboard.writeText('before-copy')");
+    await call('Browser.resetPermissions');
+    await selectTerminalRows(copyText);
+    await waitFor('automatic copy with default permissions', () => evaluate("['Copied','已复制'].includes(document.querySelector('.web-terminal-status').textContent)"));
+    await waitFor('successful copy clears the selection', () => evaluate(highlight + ' === 0'));
+    assert.equal(await pasteIntoLocalField(), copyText);
+    assert.deepEqual(await evaluate('window.__remoteInput'), []);
+
     const shortcutText='COPY_BY_SHORTCUT';
     await command(`printf '${shortcutText}\\n'`); await expectLine(shortcutText);
-    const shortcutSelection = await evaluate(`(() => {
-        const row=[...document.querySelectorAll('.xterm-rows > div')].find(n=>n.textContent.trimEnd()===${JSON.stringify(shortcutText)});
-        const r=row.getBoundingClientRect(),cols=window.__terminalSent.filter(m=>m.type==='resize').at(-1).cols;
-        return {x:r.left+1,y:r.top+r.height/2,end:r.left+r.width/cols*${shortcutText.length}+1};
-    })()`);
-    await call('Input.dispatchMouseEvent',{type:'mousePressed',x:shortcutSelection.x,y:shortcutSelection.y,button:'left',buttons:1,clickCount:1});
-    await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:shortcutSelection.end,y:shortcutSelection.y,button:'left',buttons:1});
-    await call('Input.dispatchMouseEvent',{type:'mouseReleased',x:shortcutSelection.end,y:shortcutSelection.y,button:'left',buttons:0,clickCount:1});
-    await waitFor('second selection copied',async()=>await evaluate('navigator.clipboard.readText()')===shortcutText);
-    await evaluate(`navigator.clipboard.writeText('before-shortcut')`);
-    await shortcut('c',true);
-    assert.equal(await evaluate('navigator.clipboard.readText()'),'before-shortcut');
-    pass('releasing a mouse selection copies it and clears the highlight; Ctrl+Shift+C remains available');
+    await call('Browser.grantPermissions', {origin:base, permissions:[]});
+    await selectTerminalRows(shortcutText);
+    await waitFor('denied secure write keeps the selection', () => evaluate(`document.querySelector('.web-terminal-status').classList.contains('error') && ${highlight} > 0`));
+    assert.equal(await pasteIntoLocalField(), copyText);
+    // Ctrl+Insert invokes Chromium's native Copy command on Linux.
+    await key('Insert', 'Insert', 45, 2);
+    assert.equal(await pasteIntoLocalField(), shortcutText);
+    await call('Browser.grantPermissions', {origin:base, permissions:['clipboardReadWrite','clipboardSanitizedWrite']});
+    await evaluate("navigator.clipboard.writeText('before-shortcut')");
+    await shortcut('c', true);
+    await waitFor('secure copy shortcut retries the selection', async () => await evaluate('navigator.clipboard.readText()') === shortcutText);
+    assert.deepEqual(await evaluate('window.__remoteInput'), []);
+    pass('secure selection copies automatically; a denied write preserves native Copy and shortcut retry');
 
     await command('for i in {1..40}; do printf "TOUCH_%03d\\n" "$i"; done');
     await expectLine('TOUCH_040');

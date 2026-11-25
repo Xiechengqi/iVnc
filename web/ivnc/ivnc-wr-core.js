@@ -37,7 +37,7 @@ import { t, onLangChange, getLang } from "./lib/i18n.js?v=1";
 import { createAppStreams } from "./app-streams.js";
 import { createToolbar } from "./toolbar.js";
 import { createGestureNavigation } from "./gesture-navigation.mjs";
-import { createClipboard } from "./clipboard.js";
+import { createClipboard, writeLocalClipboardText } from "./clipboard.js";
 import { createClipboardUI } from "./clipboard-ui.js";
 import { createViewport, normalizeDisplayMode } from "./viewport.js";
 import { createToolbarVisibility } from "./toolbar-visibility.js";
@@ -81,6 +81,8 @@ const MAIN_I18N = {
 		terminalUnpin: '取消终端置顶',
 		terminalPinned: '终端置顶',
 		terminalRestore: '还原窗口位置和大小',
+		terminalCopied: '已复制',
+		terminalCopyManually: '已保留选区，请使用浏览器菜单中的“复制”',
 		consoleTitle: '设置',
 		proxyTitle: '代理',
 		consoleFrameTitle: 'iVnc 设置',
@@ -158,6 +160,8 @@ const MAIN_I18N = {
 		terminalUnpin: 'Unpin terminal',
 		terminalPinned: 'Terminal always on top',
 		terminalRestore: 'Restore window position and size',
+		terminalCopied: 'Copied',
+		terminalCopyManually: 'Selection kept. Use Copy in the browser menu.',
 		consoleTitle: 'Settings',
 		proxyTitle: 'Proxy',
 		consoleFrameTitle: 'iVnc Settings',
@@ -1043,6 +1047,7 @@ function createWebTerminalController() {
 	const backgroundStorageKey = 'ivnc.terminal.background';
 	let backgroundMode = readBackgroundMode();
 	let selectionCopy = 0;
+	let copyStatusTimer = null;
 	const unsubscribeTerminalLanguage = onLangChange(renderTerminalActions);
 	window.addEventListener('storage', handleBackgroundStorage);
 
@@ -1093,6 +1098,7 @@ function createWebTerminalController() {
 	}
 
 	function setStatus(text, isError = false) {
+		clearTimeout(copyStatusTimer);
 		const status = modal?.querySelector('.web-terminal-status');
 		if (!status) return;
 		status.textContent = text;
@@ -1187,7 +1193,8 @@ function createWebTerminalController() {
 		});
 		fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
-		terminal.open(modal.querySelector('#web-terminal-body'));
+		const body = modal.querySelector('#web-terminal-body');
+		terminal.open(body);
 		installTerminalTouchScroll(terminal, modal.querySelector('.xterm-screen'));
 		floating = createFloatingWindow({
 			modal,
@@ -1209,25 +1216,24 @@ function createWebTerminalController() {
 		renderTerminalActions();
 		modal.addEventListener('pointerdown', (event) => {
 			if (!event.target.closest('.web-terminal-actions')) terminal?.focus();
+			if (event.isPrimary && event.button === 0 && event.pointerType !== 'touch' && event.target.closest('.xterm-screen')) {
+				++selectionCopy;
+				// xterm can omit onSelectionChange when the same range is selected
+				// again after clearSelection(). Finish on release in that case too.
+				window.addEventListener('mouseup', copyCompletedSelection);
+			}
 		});
-		modal.addEventListener('keydown', handleTerminalShortcut);
-		modal.addEventListener('paste', handleTerminalPaste);
+		modal.addEventListener('pointercancel', cancelSelectionCopy);
+		window.addEventListener('blur', cancelSelectionCopy);
+		body.addEventListener('keydown', handleTerminalShortcut);
+		body.addEventListener('paste', handleTerminalPaste);
 		terminal.onData((data) => {
 			send({ type: 'input', data });
 		});
-		// xterm reports a mouse selection only after the button is released,
-		// including a drag, double-click word, and triple-click line.
-		terminal.onSelectionChange(() => {
-			const generation = ++selectionCopy;
-			const selection = terminal.getSelection();
-			if (!selection) return;
-			copySelectionToClipboard(selection).then(copied => {
-				if (copied && generation === selectionCopy) terminal.clearSelection();
-			});
-		});
+		terminal.onSelectionChange(copyCompletedSelection);
 
 		resizeObserver = new ResizeObserver(() => queueResize());
-		resizeObserver.observe(modal.querySelector('#web-terminal-body'));
+		resizeObserver.observe(body);
 		connect();
 	}
 
@@ -1285,18 +1291,35 @@ function createWebTerminalController() {
 		screen.addEventListener('pointercancel', endTouch, true);
 	}
 
-	async function copySelectionToClipboard(selection = terminal?.getSelection()) {
-		if (!selection) return false;
+	function cancelSelectionCopy() {
+		++selectionCopy;
+		window.removeEventListener('mouseup', copyCompletedSelection);
+	}
+
+	function copyCompletedSelection(event) {
+		if (event && event.button !== 0) return;
+		window.removeEventListener('mouseup', copyCompletedSelection);
+		copySelectionToClipboard(true);
+	}
+
+	async function copySelectionToClipboard(clearAfterCopy = false) {
+		const generation = ++selectionCopy;
+		if (destroyed || !isOpen()) return;
+		const selection = terminal.getSelection();
+		if (!selection) return;
 		try {
-			await navigator.clipboard.writeText(selection);
-			setStatus('copied');
-			setTimeout(() => setStatus(socket?.readyState === WebSocket.OPEN ? 'ready' : 'disconnected', socket?.readyState !== WebSocket.OPEN), 900);
-			return true;
+			await writeLocalClipboardText(selection);
 		} catch (err) {
-			setStatus('copy failed', true);
-			console.warn('Terminal copy failed:', err);
-			return false;
+			if (generation === selectionCopy) {
+				setStatus(tt('terminalCopyManually'), true);
+				console.warn('Terminal clipboard write:', err?.name);
+			}
+			return;
 		}
+		if (generation !== selectionCopy) return;
+		if (clearAfterCopy) terminal.clearSelection();
+		setStatus(tt('terminalCopied'));
+		copyStatusTimer = setTimeout(() => setStatus(socket?.readyState === WebSocket.OPEN ? 'ready' : 'disconnected', socket?.readyState !== WebSocket.OPEN), 900);
 	}
 
 	async function pasteClipboardToTerminal() {
@@ -1354,6 +1377,7 @@ function createWebTerminalController() {
 	function minimize(reason = 'manual') {
 		if (reason === 'auto' && floating?.isPinned()) return;
 		if (!modal) return;
+		cancelSelectionCopy();
 		floating?.cancel();
 		modal.classList.add('minimized');
 		terminalBtn?.classList.remove('active');
@@ -1504,6 +1528,9 @@ function createWebTerminalController() {
 	function destroy() {
 		if (destroyed) return;
 		destroyed = true;
+		cancelSelectionCopy();
+		clearTimeout(copyStatusTimer);
+		window.removeEventListener('blur', cancelSelectionCopy);
 		clearTimeout(resizeTimer);
 		clearReconnectTimer();
 		resizeObserver?.disconnect();

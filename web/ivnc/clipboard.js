@@ -12,6 +12,41 @@ export function pasteShortcut(event) {
     return event.code === 'Insert' && event.shiftKey && !event.ctrlKey && !event.metaKey ? 'shift-insert' : null;
 }
 
+function clipboardWriteBlockedByPolicy() {
+    const policy = document.permissionsPolicy || document.featurePolicy;
+    try {
+        return policy?.features?.().includes('clipboard-write') && !policy.allowsFeature('clipboard-write');
+    } catch (_) { return false; }
+}
+
+function copyTextWithCommand(text) {
+    let handled = false, failure = null;
+    const copy = event => {
+        event.preventDefault();
+        // Only the copy event dispatched by this synchronous command belongs to us.
+        event.stopImmediatePropagation();
+        if (!event.clipboardData) return;
+        try { event.clipboardData.setData('text/plain', text); handled = true; }
+        catch (error) { failure = error; }
+    };
+    document.addEventListener('copy', copy, true);
+    try {
+        const copied = document.execCommand?.('copy');
+        if (failure) throw failure;
+        if (!copied || !handled) throw new DOMException('Clipboard copy was not completed', 'NotAllowedError');
+    } finally { document.removeEventListener('copy', copy, true); }
+}
+
+// Local UI text is already available during the selecting gesture. Start the
+// write before yielding and leave both the focus and the xterm selection intact.
+export function writeLocalClipboardText(text) {
+    if (clipboardWriteBlockedByPolicy()) throw new DOMException('Clipboard write blocked by policy', 'NotAllowedError');
+    if (globalThis.isSecureContext && typeof navigator.clipboard?.writeText === 'function') {
+        return navigator.clipboard.writeText(text);
+    }
+    copyTextWithCommand(text);
+}
+
 // A clipboard operation may contain several MIME representations of the same
 // selection. Sizes refer to the concatenated, bounded transfer body.
 function packFormats(records, limit = MAX_BYTES) {
@@ -63,10 +98,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
     function capability(ignorePermission = false) {
         // Apply a recognized policy to both modern and legacy writes, including
         // HTTP pages and browsers without the modern API.
-        const policy = document.permissionsPolicy || document.featurePolicy;
-        try {
-            if (policy?.features?.().includes('clipboard-write') && !policy.allowsFeature('clipboard-write')) return 'copy_policy';
-        } catch (_) {}
+        if (clipboardWriteBlockedByPolicy()) return 'copy_policy';
         if (globalThis.isSecureContext === false) return 'copy_insecure';
         if (typeof navigator.clipboard?.writeText !== 'function' && !(offer?.formats && navigator.clipboard?.write && globalThis.ClipboardItem)) return 'copy_unsupported';
         if (offer?.text === null && !supportsImage()) return 'copy_unsupported';
@@ -173,27 +205,6 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         drainWrite();
     }
 
-    function legacyCopy(text) {
-        let handled = false, failure = null;
-        const copy = event => {
-            event.preventDefault();
-            // This event belongs to our synchronous command. Keep local UI copy
-            // handlers from replacing its data or cancelling remote paste intent.
-            event.stopImmediatePropagation();
-            if (!event.clipboardData) return;
-            try { event.clipboardData.setData('text/plain', text); handled = true; }
-            catch (error) { failure = error; }
-        };
-        document.addEventListener('copy', copy, true);
-        try {
-            // No selection/focus changes, cached content or asynchronous event
-            // handler: even an empty string replaces the previous clipboard.
-            const copied = document.execCommand('copy');
-            if (failure) throw failure;
-            if (!copied || !handled) throw new DOMException('Copy requires a user gesture', 'NotAllowedError');
-        } finally { document.removeEventListener('copy', copy, true); }
-    }
-
     function write(snapshot, manual, legacy = false) {
         const job = { offer: snapshot, generation: writeGeneration, manual };
         writing = job;
@@ -204,7 +215,7 @@ export function createClipboard({ webrtc, overlay, imeTarget, isActive, getTarge
         let result;
         try {
             if (legacy) {
-                legacyCopy(snapshot.text);
+                copyTextWithCommand(snapshot.text);
                 job.partial = snapshot.records.some(r => r.mime === 'image/png');
             }
             else if (snapshot.formats && navigator.clipboard?.write && globalThis.ClipboardItem) {
